@@ -665,7 +665,7 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
             shutil.rmtree(entry)             # a partial fetch: start over
         entry.mkdir(parents=True)
         if progress:
-            progress(f"fetching {kind}:{ident}")
+            progress(f"fetching {ident if kind == 'http' else f'{kind}:{ident}'}")
         src.fetch(ident, entry, credentials=credentials)
         done.write_text(f"{kind}:{ident}\n")
     content = entry / "series"
