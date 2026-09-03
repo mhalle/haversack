@@ -111,7 +111,8 @@ them.
 haversack segment scan.nii.gz --task total_fast -o labels.nii.gz
 ```
 
-Input: NIfTI, NRRD, MetaImage, or a DICOM series directory - local, or remote:
+The input is a NIfTI, NRRD, or MetaImage file, or a DICOM series directory - local, or a
+remote source fetched on demand (see [Remote inputs](#remote-inputs)):
 
 ```bash
 haversack segment idc:<crdc_series_uuid> --task total_fast -o labels.seg.nrrd
@@ -119,13 +120,17 @@ haversack segment "zenodo:<recid>/amos22.zip!amos22/imagesVa/amos_0575.nii.gz" -
 haversack segment https://example.org/scan.nii.gz --task total -o labels.nii.gz
 ```
 
-Several inputs run as a **batch**: the output is a directory (`-o`, default the current one)
-and `--format` names the type each is written as (`out/<name>.<ext>` for `get`,
-`out/<name>_<task>.<ext>` for `segment`). Remote inputs are fetched once into
-`~/.cache/haversack/inputs` and reused. `!member` pulls
-one file out of a remote zip without downloading the archive. The hosted sources (`idc:`,
-`zenodo:`, `tcia:`, `openneuro:`, `hf:`) are the same ones a server accepts; bare URLs work
-on the command line only.
+**Batch** - pass several inputs to segment them all into one output directory:
+
+```bash
+haversack segment a.nii.gz b.nii.gz dicom_dir/ --task total_fast --format seg.nrrd -o out/
+```
+
+With more than one input, `-o` is a directory (default: the current directory) and `--format`
+names the output type; each result is written as `<name>_<task>.<ext>`, where `<name>` is the
+input's filename stem (or the identifier for a remote source), so an output never overwrites
+its input. If one input fails it is reported and the run exits non-zero, but the others still
+complete. A single input keeps the plain form (`-o` the file, its extension picking the format).
 
 Output format follows the extension
 (`.nii.gz`, `.nrrd`, `.seg.nrrd`, `.mha`); labels come back on the input grid, in the input's
@@ -182,36 +187,94 @@ works as a task: `segment("scan.nii.gz", "/path/to/Dataset123_x/nnUNetTrainer__n
 Errors are one family, `haversack.HaversackError` (`InputError`, `ModelNotFound`,
 `UnsupportedModel`, `ResourceError`, `Cancelled`).
 
-## Getting the data (and cleaning up)
+## Remote inputs
 
-`haversack get` fetches a remote source without segmenting it - useful when you want the
-images themselves, not only the labels.
+Both `segment` and `get` accept remote sources anywhere a path would go. A source is fetched
+once into the input cache (`~/.cache/haversack/inputs`) and reused, so segmenting and getting
+the same identifier - or the same identifier twice - downloads it only once.
+
+| Prefix | Identifier | Example |
+|---|---|---|
+| `idc:` | an NCI Imaging Data Commons `crdc_series_uuid` (a DICOM series) | `idc:4682f41a-65d7-4a7b-8050-952f73abb746` |
+| `zenodo:` | `<record id>/<filename>` on a Zenodo record | `zenodo:7262581/amos22.zip` |
+| `tcia:` | a TCIA series | `tcia:<series-uid>` |
+| `openneuro:` | an OpenNeuro dataset file | `openneuro:ds000114/.../sub-01_T1w.nii.gz` |
+| `hf:` | a file in a Hugging Face repo | `hf:<org>/<repo>/<path>` |
+| `http://`, `https://` | any URL (command line only, never a server) | `https://example.org/scan.nii.gz` |
+
+Add `!member` to read one file out of a remote **zip** by HTTP range, without downloading the
+archive - `zenodo:7262581/amos22.zip!amos22/imagesVa/amos_0575.nii.gz`. The trailing-slash
+form (`...zip!amos22/imagesVa/`) extracts every member under a prefix.
+
+`idc:` needs the `idc` extra's runtime (`obstore`), which is part of the normal install; the
+others use the standard library. The hosted prefixes are exactly the sources a `haversack
+serve` accepts; bare URLs are local-only, because a server must not be pointed at arbitrary
+hosts.
+
+## Getting data with `get`
+
+`haversack get` acquires a source without segmenting it - when you want the images themselves,
+not only the labels.
 
 ```bash
-haversack get idc:<crdc_series_uuid>                        # into the cache; prints the path
-haversack get idc:<crdc_series_uuid> -o case1/scan.nii.gz    # the DICOM series as one NIfTI
-haversack get idc:<crdc_series_uuid> --format nrrd -o out/   # converted, auto-named <uuid>.nrrd
-haversack get idc:<crdc_series_uuid> -o raw_dicom/          # the raw DICOM series directory
+haversack get idc:<crdc_series_uuid>                          # into the cache; prints the path
+haversack get idc:<crdc_series_uuid> -o case1/scan.nii.gz     # the DICOM series as one NIfTI
+haversack get idc:<crdc_series_uuid> --format nrrd -o out/    # converted, auto-named <id>.nrrd
+haversack get idc:<crdc_series_uuid> -o raw_dicom/            # the raw DICOM series directory
 ```
 
-With no `-o` it lands in `~/.cache/haversack/inputs` and the path is printed; a later
-`segment` of the same id reuses it (no re-download). With `-o`: a **directory** gets the raw
-fetched content, an **image-extension file** (or `--format`) is read and written as one
-volume - geometry preserved, a DICOM series collapsed to a single NIfTI/NRRD. The raw data
-stays cached unless `--no-cache`.
+What `-o` and `--format` do, in order:
 
-`haversack cache` shows and clears what is on disk:
+| Given | Result |
+|---|---|
+| no `-o` | fetched into the cache; the cache path is printed (a later `segment` of the same id reuses it) |
+| `-o` a **directory** (or a path ending `/`) | the raw fetched content copied in - a DICOM series stays a directory of files, named by the source |
+| `-o` a **file** with an image extension | read and written as that one volume (a DICOM series collapses to a single NIfTI/NRRD), geometry preserved |
+| `--format <type>` | convert to that type (`nifti`, `nrrd`, `seg.nrrd`, `mha`); with `-o` a directory the file is auto-named `<source>.<ext>` |
+| `--no-cache` | fetch straight to `-o` and leave nothing in the cache (for a large one-off); requires `-o` |
+
+**Batch** - pass several sources at once:
 
 ```bash
-haversack cache list                     # inputs, results, engine checkpoints, weights root + sizes
-haversack cache clean inputs             # a dry run; add --yes to delete
-haversack cache clean all --older-than 30d --yes
-haversack weights list                   # installed models, versions, sizes
-haversack weights remove 297             # delete one dataset (never swept by `cache clean`)
+haversack get idc:<uuid-a> idc:<uuid-b> --format nrrd -o out/   # convert each -> out/<id>.nrrd
+haversack get idc:<uuid-a> idc:<uuid-b>                         # cache each, print the paths
+haversack get idc:<uuid-a> idc:<uuid-b> -o raw/                 # raw-copy each into raw/
 ```
 
-Weights are never removed by `cache clean` - models are slow to re-download and license-gated
-ones you installed by hand are not re-fetchable - so `weights remove` deletes them one at a time.
+With more than one source, `-o` is a directory (default: the current directory); `--format`
+converts each into it, and without `--format` each is raw-copied. As with `segment`, a failing
+source is reported and the run exits non-zero without stopping the rest.
+
+## Managing the cache and weights
+
+`haversack cache` shows and clears what haversack keeps on disk; `haversack weights` handles
+the models.
+
+```bash
+haversack cache list                       # every store, its location and size
+haversack cache path                       # just the locations, one per line
+haversack cache clean inputs               # a dry run (prints what would go)
+haversack cache clean inputs --yes         # actually delete the fetched inputs
+haversack cache clean inputs idc:<uuid>    # drop one cached input by its spec
+haversack cache clean all --older-than 30d --yes   # inputs + results + checkpoints, aged out
+haversack weights list                     # installed models, versions, sizes
+haversack weights remove 297               # delete one dataset's weights
+```
+
+The stores:
+
+| Store | Location | Swept by `cache clean` |
+|---|---|---|
+| `inputs` | `~/.cache/haversack/inputs` (fetched sources) | yes |
+| `results` | `~/.cache/haversack/results` (server result cache) | yes |
+| `checkpoints` | `~/.cache/haversack/fastsurfer-checkpoints` | yes |
+| `weights` | `~/.totalsegmentator/nnunet/results` (models) | **no** - use `weights remove` |
+
+`cache clean` is a dry run unless you pass `--yes`, takes `--older-than <n>d|h|w` to keep
+recent entries, and never touches model weights - those are slow to re-download and
+license-gated ones you installed by hand are not re-fetchable, so `weights remove` deletes
+them one dataset at a time. `HAVERSACK_CACHE_DIR` moves the `~/.cache/haversack` root;
+`--model-root` (or `TOTALSEG_WEIGHTS_PATH`) sets the weights location.
 
 ## When a run adapts to the machine
 
