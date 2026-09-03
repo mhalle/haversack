@@ -113,14 +113,13 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
 # Base image (the ASGI api container + the nnU-Net GPU Worker). uv-NATIVE: the nnU-Net
 # worker's deps come from pyproject extras - `torch` (torch/nnunetv2/scipy/scikit-image),
 # `serve` (fastapi/uvicorn/python-multipart/matplotlib), `idc` (obstore), `cuda` (triton,
-# the CUDA restore backend). nnunetv2 resolves from PyPI via --no-sources-package (the
-# local ../upstream/nnUNet path source is dev-only and absent in the build). apt git: uv
-# sync resolves the whole project's lock, which touches the engine git sources.
+# the CUDA restore backend). The inference stack itself is core (torch, nnunetv2, scipy,
+# scikit-image, all from PyPI). apt git: uv sync resolves the whole project's lock, which
+# touches the engine git sources.
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
-    .uv_sync(extras=["torch", "serve", "idc", "cuda"], frozen=False,
-             extra_options="--no-sources-package nnunetv2")
+    .uv_sync(extras=["torch", "serve", "idc", "cuda"], frozen=False)
     .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
     .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
 )
@@ -136,13 +135,7 @@ image = (
 fs_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")                       # uv needs git for the git source in pyproject
-    # --no-sources-package nnunetv2: uv sync resolves the WHOLE project (every extra, to build
-    # the lock) before installing the selected ones, so it would hit the local nnunetv2 path
-    # source (file:///upstream/nnUNet, absent in the build) even though fastsurfer/idc don't
-    # install nnunetv2. Ignoring just that one source resolves it from PyPI; the fastsurfer-lean
-    # git source stays active.
-    .uv_sync(extras=["fastsurfer", "idc"], frozen=False,
-             extra_options="--no-sources-package nnunetv2")
+    .uv_sync(extras=["fastsurfer", "idc"], frozen=False)
     # Bake the ~67 MB VINN checkpoints into the image at BUILD (via FastSurfer's own
     # get_checkpoints, to the package-default paths) so cold containers never re-download
     # them from Zenodo/b2share - a reliability win (no runtime dependency on those hosts)
@@ -171,8 +164,7 @@ fs_image = (
 synthstrip_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")                       # uv needs git for the git source in pyproject
-    .uv_sync(extras=["synthstrip", "idc", "preview"], frozen=False,
-             extra_options="--no-sources-package nnunetv2")
+    .uv_sync(extras=["synthstrip", "idc", "preview"], frozen=False)
     # Bake the 29 MB weights into the image at BUILD (to synthstrip-torch's default cache)
     # so cold containers don't re-download from MGH. Same rationale as FastSurfer above.
     .run_commands("python -c 'import synthstrip_torch; synthstrip_torch.fetch_weights()'")
@@ -194,8 +186,7 @@ synthstrip_image = (
 voxtell_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
-    .uv_sync(extras=["voxtell", "idc", "preview"], frozen=False,
-             extra_options="--no-sources-package nnunetv2")
+    .uv_sync(extras=["voxtell", "idc", "preview"], frozen=False)
     # Bake the checkpoint into the image at a FIXED path (it is small) and address it by
     # VOXTELL_MODEL, so it stays findable after HF_HOME moves to the volume below.
     .run_commands(
@@ -221,8 +212,7 @@ voxtell_image = (
 monai_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
-    .uv_sync(extras=["monai", "idc", "preview"], frozen=False,
-             extra_options="--no-sources-package nnunetv2")
+    .uv_sync(extras=["monai", "idc", "preview"], frozen=False)
     .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
     .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
 )
@@ -237,8 +227,7 @@ monai_image = (
 api_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")                       # uv sync resolves the whole lock (engine git sources)
-    .uv_sync(extras=["serve", "idc"], frozen=False,
-             extra_options="--no-sources-package nnunetv2")
+    .uv_sync(extras=["serve", "idc"], frozen=False)
     .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
     .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
 )
