@@ -630,6 +630,19 @@ def default_input_cache() -> Path:
     return root / "inputs"
 
 
+def source_stem(spec) -> str:
+    """A filename stem for a source, for naming a converted output into a directory: the
+    member/file basename for zenodo/http/etc. (minus any image extension), or the bare
+    identifier for IDC (only a UUID exists). Falls back to the whole spec for a local path."""
+    from .io import image_suffix
+    parsed = parse_input(spec)
+    text = parsed[1] if parsed else str(spec)
+    text = text.split("!")[-1] if "!" in text else text
+    name = Path(text).name or text
+    suf = image_suffix(name)
+    return name[: -len(suf)] if suf else name
+
+
 def materialize(spec, *, cache_dir=None, sources=None, progress=None, credentials=None) -> Path:
     """Turn a remote input spec into a local path, fetching once.
 

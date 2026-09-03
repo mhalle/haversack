@@ -20,6 +20,16 @@
 
 ## [Unreleased]
 
+- **`haversack get` fetches source data; `cache` and `weights list`/`remove` manage the disk.**
+  `get idc:<uuid>` (or any `zenodo:`/`http` source) lands the data in the input cache and
+  prints the path, so a later `segment` of the same id reuses it; with `-o` it also writes
+  there - a directory takes the raw fetched files, an image-extension file (or `--format`)
+  is converted to one volume (a DICOM series -> a single NIfTI/NRRD, geometry preserved),
+  and `--no-cache` skips leaving a cached copy. `cache list`/`clean`/`path` show and sweep
+  the transient stores (inputs, results, engine checkpoints); `weights list`/`remove` handle
+  models. `cache clean` needs `--yes` (a dry run otherwise), takes `--older-than 30d`, and
+  never touches weights - those are removed one dataset at a time by `weights remove`.
+
 - **Users refresh their own weights manifest.** `haversack weights refresh` from an installed
   package writes `~/.config/haversack/ts_weights.json` (`HAVERSACK_TS_MANIFEST` moves it),
   laid over the packaged manifest on every read - a user's entry for a dataset replaces the

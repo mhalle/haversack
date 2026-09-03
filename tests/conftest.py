@@ -60,3 +60,17 @@ def assert_agree_up_to_ties(got, want, values, *, tol=1e-4, max_fraction=2e-3, w
                            f"(largest margin {m[mism].max():.3g})")
     assert mism.mean() <= max_fraction, f"{what}: {n} tie mismatches = {mism.mean():.2e} > {max_fraction}"
     return n
+
+
+@pytest.fixture(autouse=True)
+def _engines_off_by_default(monkeypatch):
+    """Pin every engine's enable flag OFF unless a test opts in (2026-09-03).
+
+    Engines now enable on an installed runtime when their flag is unset, so a dev environment
+    with `--extra fastsurfer` synced would silently flip the default ecosystem/registry/version
+    that many tests assert on. Setting each flag to "0" gives every test a deterministic
+    nnU-Net-only baseline; a test that wants an engine sets its flag (or, for the local-runner
+    tests, deletes it to exercise the runtime-based path)."""
+    from haversack.engines.registry import engine_env_vars
+    for var in engine_env_vars():
+        monkeypatch.setenv(var, "0")

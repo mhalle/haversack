@@ -323,6 +323,50 @@ def reorient(array_zyx, geometry: "Geometry", target: str):
     return out, geo
 
 
+IMAGE_SUFFIXES = (".nii.gz", ".nii", ".seg.nrrd", ".nrrd", ".mha", ".mhd", ".nia", ".img")
+_FORMAT_EXT = {"nifti": ".nii.gz", "nii": ".nii.gz", "niigz": ".nii.gz", "nrrd": ".nrrd",
+               "seg.nrrd": ".seg.nrrd", "segnrrd": ".seg.nrrd", "mha": ".mha", "mhd": ".mhd"}
+
+
+def format_extension(fmt: str) -> str:
+    """The file extension for a ``--format`` name (e.g. ``nrrd`` -> ``.nrrd``)."""
+    key = fmt.lower().lstrip(".")
+    if key in _FORMAT_EXT:
+        return _FORMAT_EXT[key]
+    from .errors import InputError
+    raise InputError(f"unknown format {fmt!r}; known: {', '.join(sorted(set(_FORMAT_EXT)))}")
+
+
+def image_suffix(name) -> str | None:
+    """The medical-image extension of ``name`` (``.nii.gz`` before ``.nii``), or None."""
+    n = str(name).lower()
+    for suf in IMAGE_SUFFIXES:                        # longest compound suffixes first
+        if n.endswith(suf):
+            return suf
+    return None
+
+
+def convert(src, dst, *, compress: bool = True) -> Path:
+    """Read ``src`` (an image file or a DICOM series directory) and write it to ``dst`` as one
+    volume, its format taken from ``dst``'s extension. Geometry (spacing, direction, origin) is
+    preserved - a plain SimpleITK read/write, not the model-side canonicalization ``read_image``
+    does for the pipeline. Returns ``dst``."""
+    sitk = _sitk()
+    src = Path(src)
+    if src.is_dir():
+        reader = sitk.ImageSeriesReader()
+        ids = reader.GetGDCMSeriesIDs(str(src))
+        files = reader.GetGDCMSeriesFileNames(str(src), ids[0]) if ids else \
+            [str(f) for f in sorted(src.iterdir()) if f.is_file()]
+        reader.SetFileNames(files)
+        img = reader.Execute()
+    else:
+        img = sitk.ReadImage(str(src))
+    Path(dst).parent.mkdir(parents=True, exist_ok=True)
+    sitk.WriteImage(img, str(dst), compress)
+    return Path(dst)
+
+
 def write(image, path, *, compress: bool = True) -> None:
     _sitk().WriteImage(image, str(path), compress)
 

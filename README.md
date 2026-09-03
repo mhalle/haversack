@@ -179,6 +179,37 @@ works as a task: `segment("scan.nii.gz", "/path/to/Dataset123_x/nnUNetTrainer__n
 Errors are one family, `haversack.HaversackError` (`InputError`, `ModelNotFound`,
 `UnsupportedModel`, `ResourceError`, `Cancelled`).
 
+## Getting the data (and cleaning up)
+
+`haversack get` fetches a remote source without segmenting it - useful when you want the
+images themselves, not only the labels.
+
+```bash
+haversack get idc:<crdc_series_uuid>                        # into the cache; prints the path
+haversack get idc:<crdc_series_uuid> -o case1/scan.nii.gz    # the DICOM series as one NIfTI
+haversack get idc:<crdc_series_uuid> --format nrrd -o out/   # converted, auto-named <uuid>.nrrd
+haversack get idc:<crdc_series_uuid> -o raw_dicom/          # the raw DICOM series directory
+```
+
+With no `-o` it lands in `~/.cache/haversack/inputs` and the path is printed; a later
+`segment` of the same id reuses it (no re-download). With `-o`: a **directory** gets the raw
+fetched content, an **image-extension file** (or `--format`) is read and written as one
+volume - geometry preserved, a DICOM series collapsed to a single NIfTI/NRRD. The raw data
+stays cached unless `--no-cache`.
+
+`haversack cache` shows and clears what is on disk:
+
+```bash
+haversack cache list                     # inputs, results, engine checkpoints, weights root + sizes
+haversack cache clean inputs             # a dry run; add --yes to delete
+haversack cache clean all --older-than 30d --yes
+haversack weights list                   # installed models, versions, sizes
+haversack weights remove 297             # delete one dataset (never swept by `cache clean`)
+```
+
+Weights are never removed by `cache clean` - models are slow to re-download and license-gated
+ones you installed by hand are not re-fetchable - so `weights remove` deletes them one at a time.
+
 ## When a run adapts to the machine
 
 haversack chooses placements and precisions from the machine's memory, but never silently.
@@ -220,20 +251,28 @@ server produced labels voxel-identical to the command line's.
 
 Not everything is an nnU-Net checkpoint. FastSurfer (whole-brain parcellation from a T1),
 SynthStrip, VoxTell and the MONAI bundles are *engines*: other networks behind the same
-tasks, API, CLI and server. Each engine owns its own Python environment, because their
-dependency pins conflict with the nnU-Net path's (FastSurfer pins torch 2.7.1). Build one
-beside the main environment and run haversack from it:
+tasks, API, CLI and server. An installed runtime is the switch: `haversack tasks` shows an
+engine's task as installed when its package is importable, and refuses it otherwise with
+the install line.
+
+Each engine owns its own Python environment, because their dependency pins conflict with the
+nnU-Net path's (FastSurfer pins torch 2.7.1). Build one beside the main environment and run
+haversack from it:
 
 ```bash
 UV_PROJECT_ENVIRONMENT=.venvs/fastsurfer uv sync --extra fastsurfer --extra serve
 .venvs/fastsurfer/bin/haversack segment t1.nii.gz --task fastsurfer:brain -o brain.seg.nrrd
-.venvs/fastsurfer/bin/haversack serve --port 8791
 ```
 
-An installed runtime is the switch: `haversack tasks` shows `fastsurfer:brain` as installed
-from that environment, and a plain environment refuses the task with the line above.
-FastSurfer and SynthStrip (`synthstrip:mask`, a brain mask from any T1-like image, from
-`--extra synthstrip`) have in-process runners; VoxTell and the MONAI bundles run on Modal. FastSurfer's
+SynthStrip's dependencies pin numpy below 2, so it owns a separate environment:
+
+```bash
+UV_PROJECT_ENVIRONMENT=.venvs/synthstrip uv sync --extra synthstrip --extra serve
+.venvs/synthstrip/bin/haversack segment t1.nii.gz --task synthstrip:mask -o mask.seg.nrrd
+```
+
+FastSurfer and SynthStrip have in-process runners; VoxTell and the MONAI bundles run on
+Modal. FastSurfer's
 view-aggregation field is large (2.6 GB in half precision at 1 mm), so on Apple Silicon it
 stays in CPU memory unless the machine has 32 GB or more; 16 GB is tight for it. On Apple
 Silicon haversack caps PyTorch's MPS allocator at the device's recommended working set,

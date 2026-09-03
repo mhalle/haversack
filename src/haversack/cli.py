@@ -149,6 +149,23 @@ def _run(argv=None) -> int:
                         "or ~/.totalsegmentator/nnunet/results)")
     s.add_argument("--quiet", action="store_true", help="no progress or timings on stderr")
 
+    g = sub.add_parser("get", formatter_class=Fmt, help="fetch source data (idc:/zenodo:/http...) into the cache, or out to a file",
+                       description="Acquire a remote input without segmenting it. With no -o, it lands in the cache "
+                                   "(~/.cache/haversack/inputs) and the path is printed; a later `segment <same id>` "
+                                   "reuses it. With -o, it is also written there: a directory gets the raw fetched "
+                                   "content (a DICOM series stays a directory), an image-extension file (or --format) "
+                                   "is converted to that one volume (a DICOM series -> one NIfTI/NRRD), geometry "
+                                   "preserved. The raw data stays cached unless --no-cache.",
+                       epilog="""examples:
+  haversack get idc:<crdc_series_uuid>                     into cache; prints the path
+  haversack get idc:<crdc_series_uuid> -o case1/scan.nii.gz  the series as one NIfTI
+  haversack get idc:<crdc_series_uuid> --format nrrd -o out/  converted, auto-named <uuid>.nrrd
+  haversack get idc:<crdc_series_uuid> -o raw_dicom/         the raw DICOM series directory""")
+    g.add_argument("source", help="a remote input: idc:<uuid>, zenodo:<recid>/<file>[!member], tcia:, openneuro:, hf:, or an http(s) URL")
+    g.add_argument("-o", "--output", default=None, help="where to put it: a directory (raw copy) or a file (converted by extension)")
+    g.add_argument("--format", default=None, help="output format (nifti, nrrd, seg.nrrd, mha): convert, and name by it into a directory")
+    g.add_argument("--no-cache", action="store_true", help="do not keep the raw data in the cache (only with -o)")
+
     tl = sub.add_parser("tasks", formatter_class=Fmt, help="list every task the catalog can segment, or one task's structures",
                         description="One line per task: name, engine, modality, and whether its weights are on disk "
                                     "(or, for an engine task, whether the engine's runtime is installed here). "
@@ -173,6 +190,12 @@ def _run(argv=None) -> int:
     wf.add_argument("task", help="a task name from `haversack tasks`; every model it needs is fetched")
     wf.add_argument("--root", default=None, help="weights root (default: the ecosystem's location)")
     wsub.add_parser("coverage", help="which catalog tasks the manifest can provision")
+    wl = wsub.add_parser("list", help="installed model weights on disk, with sizes")
+    wl.add_argument("--root", default=None, help="weights root (default: the ecosystem's location)")
+    wrm = wsub.add_parser("remove", help="delete one dataset's installed weights")
+    wrm.add_argument("weights_id", help="a dataset id, e.g. 297 (see `weights list`)")
+    wrm.add_argument("--root", default=None, help="weights root (default: the ecosystem location)")
+    wrm.add_argument("--yes", action="store_true", help="do not prompt")
     wr = wsub.add_parser("refresh", formatter_class=Fmt, help="merge newly published weights into the manifest",
                          description="Reads TotalSegmentator's GitHub releases and records new datasets and versions. "
                                      "From an installed package this writes YOUR manifest "
@@ -255,6 +278,21 @@ def _run(argv=None) -> int:
   haversack docs --sections         the section headings""")
     dc.add_argument("topic", nargs="?", default=None, help="print only the section whose heading contains this (case-insensitive)")
     dc.add_argument("--sections", action="store_true", help="list the section headings and exit")
+
+    ca = sub.add_parser("cache", formatter_class=Fmt, help="show and clean haversack's on-disk stores",
+                        description="Lists every store haversack keeps (fetched inputs, server results, engine "
+                                    "checkpoints, and the model-weights root) with sizes, and cleans the transient "
+                                    "ones. Weights are never swept here - remove a model with `weights remove`.")
+    casub = ca.add_subparsers(dest="ccmd", required=True, metavar="action", help="what to do")
+    casub.add_parser("list", help="every store, its location and size")
+    casub.add_parser("path", help="print the store locations, one per line")
+    cc = casub.add_parser("clean", formatter_class=Fmt, help="remove cached inputs / results / checkpoints",
+                          description="Sweeps a transient cache. Shows what would go and needs --yes to act.")
+    cc.add_argument("category", choices=("inputs", "results", "checkpoints", "all"), help="which cache to sweep")
+    cc.add_argument("item", nargs="?", default=None, help="one input to drop, by its spec (only with `inputs`)")
+    cc.add_argument("--older-than", default=None, help="keep entries touched within this window, e.g. 30d, 12h")
+    cc.add_argument("--dry-run", action="store_true", help="report what would be removed, delete nothing")
+    cc.add_argument("--yes", action="store_true", help="actually delete (without this, it is a dry run)")
 
     args = ap.parse_args(argv)
     if args.cmd == "docs":
@@ -380,6 +418,82 @@ def _run(argv=None) -> int:
                 print(f"{i['name']:44s} {i.get('engine', ''):12s} {i.get('modality') or '':4s} "
                       f"{'installed' if i['installed'] else ''}".rstrip())
         return 0
+    if args.cmd == "get":
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from . import io, sources
+        from .errors import InputError
+        say = lambda m: print(f"  {m}", file=sys.stderr, flush=True)
+        if sources.parse_input(args.source) is None:
+            p = Path(args.source)
+            if not p.exists():
+                raise InputError(f"not a remote source and not a local path: {args.source}")
+            print(p)                                    # a local path: nothing to fetch
+            return 0
+        if args.no_cache and not args.output:
+            raise InputError("--no-cache needs -o (there would be nowhere to put the data)")
+        want_convert = bool(args.format) or (args.output and io.image_suffix(args.output))
+        tmp = tempfile.mkdtemp(prefix="haversack-get-") if args.no_cache else None
+        try:
+            src = sources.materialize(args.source, cache_dir=tmp, progress=say)
+            if not args.output:
+                print(src)                              # cached; the path is the product
+                return 0
+            out = Path(args.output)
+            if want_convert:
+                ext = io.format_extension(args.format) if args.format else io.image_suffix(out.name)
+                if out.is_dir() or str(args.output).endswith("/") or not io.image_suffix(out.name):
+                    out = out / (sources.source_stem(args.source) + ext)
+                io.convert(src, out)
+            elif out.is_dir() or str(args.output).endswith("/"):
+                # name the copy after the source (the cache inner dir is just "series")
+                name = sources.source_stem(args.source) if Path(src).is_dir() else Path(src).name
+                dest = out / name
+                if Path(src).is_dir():
+                    shutil.copytree(src, dest, dirs_exist_ok=True)
+                else:
+                    out.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest)
+                out = dest
+            else:                                       # a file target, no conversion: copy the bytes
+                if Path(src).is_dir():
+                    raise InputError(f"{args.source} is a DICOM series (a directory); give a directory -o, "
+                                     "or a file with an image extension (or --format) to convert it")
+                out.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, out)
+            print(out)
+        finally:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+        return 0
+    if args.cmd == "cache":
+        import json
+        from . import cache_admin as ca
+        if args.ccmd == "path":
+            for st in ca.stores():
+                print(st["path"])
+            return 0
+        if args.ccmd == "list":
+            for r in ca.usage():
+                tag = "" if r["sweepable"] else "  (weights - not swept by clean)"
+                print(f"{r['name']:12s} {r['human']:>10s}  {r['items']:>4d} items  {r['path']}{tag}")
+            return 0
+        if args.ccmd == "clean":
+            days = None
+            if args.older_than:
+                m = {"d": 1, "h": 1 / 24, "w": 7, "m": 30}.get(args.older_than[-1].lower())
+                if m is None:
+                    from .errors import InputError
+                    raise InputError(f"--older-than {args.older_than!r}: use a number then d/h/w/m, e.g. 30d")
+                days = float(args.older_than[:-1]) * m
+            r = ca.clean(args.category, older_than_days=days, item=args.item, dry_run=not args.yes)
+            verb = "would remove" if not args.yes else "removed"
+            print(f"{verb} {len(r['removed'])} entr{'y' if len(r['removed']) == 1 else 'ies'}, {r['human']}",
+                  file=sys.stderr)
+            for pth in r["removed"]:
+                print(f"  {pth}", file=sys.stderr)
+            if not args.yes and r["removed"]:
+                print("  (dry run - pass --yes to delete)", file=sys.stderr)
+            return 0
     if args.cmd == "segment":
         from pathlib import Path
         from .errors import InputError
@@ -416,6 +530,7 @@ def _run(argv=None) -> int:
             print(f"wrote {args.output}: {tuple(r.grid.shape)}, "
                   f"{len(r.present())}/{len(r.schema.names)} structures present", file=sys.stderr)
     if args.cmd == "weights":
+        from pathlib import Path
         from . import weights_fetch as wfm
         say = lambda m: print(m, file=sys.stderr, flush=True)
         if args.wcmd == "fetch":
@@ -423,6 +538,38 @@ def _run(argv=None) -> int:
             root = args.root or weights_root("ts")
             paths = wfm.ensure_task_weights(args.task, root, progress=lambda m: say(f"  {m}"))
             print(f"{len(paths)} model(s) under {root}")
+        elif args.wcmd == "list":
+            from .tasks import weights_root, _dataset_dirs
+            from .cache_admin import _du, _human
+            root = Path(args.root or weights_root("ts"))
+            if not root.exists():
+                print(f"no weights installed under {root}"); return 0
+            import re as _re
+            datasets = sorted((d for d in root.iterdir() if d.is_dir() and _re.match(r"Dataset\d+", d.name)),
+                              key=lambda d: d.name)
+            total = 0
+            for d in datasets:
+                _, b = _du(d); total += b
+                ver = (wfm.installed_version(d) or {}).get("tag", "")
+                print(f"  {d.name:52s} {_human(b):>10s}  {ver}")
+            print(f"{len(datasets)} dataset(s), {_human(total)} under {root}")
+            return 0
+        elif args.wcmd == "remove":
+            import shutil
+            from .tasks import weights_root, _dataset_dirs
+            from .errors import InputError
+            root = Path(args.root or weights_root("ts"))
+            dirs = _dataset_dirs(root, args.weights_id)
+            if not dirs:
+                raise InputError(f"no installed weights match {args.weights_id!r} under {root}")
+            for d in dirs:
+                print(f"  {d}", file=sys.stderr)
+            if not args.yes:
+                print(f"pass --yes to delete the above", file=sys.stderr); return 1
+            for d in dirs:
+                shutil.rmtree(d, ignore_errors=True)
+            print(f"removed {len(dirs)} folder(s) for dataset {args.weights_id}", file=sys.stderr)
+            return 0
         elif args.wcmd == "coverage":
             c = wfm.coverage()
             src = c["sources"]
