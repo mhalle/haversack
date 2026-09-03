@@ -18,6 +18,15 @@
   wrong the day that landed. Entries below this line say "nnseg"; they are history and were
   not rewritten. Test files lost their `test_nnseg_` prefix; the tests themselves are unchanged.
 
+## [Unreleased]
+
+- **A bare install says which extra it needs.** `uvx git+https://github.com/mhalle/haversack
+  segment ...` installed the package without torch and died in a traceback from
+  `pipeline.py` (2026-09-03). `segment` and the local `serve` now check for torch, nnunetv2
+  and scipy before importing anything and end as one line naming `haversack[torch]` and the
+  two install forms. A bare install stays torch-free on purpose: the client (`haversack
+  remote`) and a describe-only front end never pay for it.
+
 ## [Unreleased before the rename]
 
 - **The distribution is nnseg only (2026-09-02).** The wheel ships `src/nnseg` and one

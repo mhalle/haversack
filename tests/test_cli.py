@@ -79,3 +79,21 @@ def test_tasks_lists_the_catalog_without_torch(tmp_path):
                         capture_output=True, text=True, timeout=120)
     assert r2.returncode == 0, r2.stderr
     assert not [line for line in r2.stdout.splitlines() if line.startswith("ts:")]
+
+
+def test_bare_install_says_which_extra_it_needs(monkeypatch, tmp_path, capsys):
+    """`uvx git+https://github.com/mhalle/haversack segment ...` on 2026-09-03 died with a raw
+    `ModuleNotFoundError: torch` from pipeline.py. A bare install is torch-free on purpose;
+    the CLI now names the extra before importing anything."""
+    import importlib.util
+    real = importlib.util.find_spec
+
+    def no_torch(name, *a, **k):
+        return None if name == "torch" else real(name, *a, **k)
+
+    monkeypatch.setattr(importlib.util, "find_spec", no_torch)
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
+                   "-o", str(tmp_path / "out.nii.gz")])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "haversack[torch]" in err and "torch not installed" in err and "Traceback" not in err

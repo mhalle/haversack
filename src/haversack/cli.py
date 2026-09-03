@@ -16,6 +16,23 @@ def main(argv=None) -> int:
         return 2
 
 
+INSTALL_HINT = ('uv tool install "haversack[torch] @ git+https://github.com/mhalle/haversack" '
+                'or uvx --from "haversack[torch] @ git+https://github.com/mhalle/haversack" haversack ...')
+
+
+def _need_inference_stack() -> None:
+    """Segmenting needs the torch extra. A bare install is deliberate (the client and a
+    describe-only front end never pay for torch), but `uvx git+.../haversack segment` is the
+    first thing a new user types, and it must say what to do rather than trace back from
+    `import torch` (2026-09-03)."""
+    import importlib.util
+    from .errors import InputError
+    missing = [m for m in ("torch", "nnunetv2", "scipy") if importlib.util.find_spec(m) is None]
+    if missing:
+        raise InputError(f"segmenting needs the torch extra ({', '.join(missing)} not installed): "
+                         f"install haversack[torch] - {INSTALL_HINT}")
+
+
 def _run(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="haversack", description="nnU-Net-family segmentation on torch: fused logit restore onto any grid")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -129,6 +146,7 @@ def _run(argv=None) -> int:
             env["HAVERSACK_PROXY_AUTH"] = "0"
         return subprocess.call([sys.executable, "-m", "modal", "deploy", apppath], env=env)
     if args.cmd == "serve":
+        _need_inference_stack()          # the local server runs models in-process
         from .serve import main_serve
         return main_serve(args)
     if args.cmd == "remote":
@@ -209,6 +227,7 @@ def _run(argv=None) -> int:
                       f"{'installed' if i['installed'] else ''}".rstrip())
         return 0
     if args.cmd == "segment":
+        _need_inference_stack()
         from .pipeline import segment
         r = segment(args.input, args.task, weights=args.model_root, device=args.device, dtype=args.dtype,
                     grid=args.spacing if args.spacing else "input", interp=args.interp, accumulate=args.accumulate,
