@@ -306,6 +306,10 @@ class TorchModel:
         import io
         with contextlib.redirect_stdout(io.StringIO()), warnings.catch_warnings():
             warnings.filterwarnings("ignore", message="Detected old nnU-Net plans format")
+            # nnunetv2 imports every trainer module while looking for the checkpoint's, and
+            # the Primus/EVA ones import timm, whose hrnet decorates with the deprecated
+            # torch.jit.interface (torch >= 2.14 warns once). Not our code, not our model.
+            warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.jit.interface.*")
             p = nnUNetPredictor(tile_step_size=step_size, use_gaussian=True, use_mirroring=False,
                                 perform_everything_on_device=False, device=self.device, verbose=False,
                                 allow_tqdm=False)
