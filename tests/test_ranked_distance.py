@@ -1,4 +1,4 @@
-"""Correctness of the distance planes in tools/ranked_build_store.py.
+"""Correctness of the distance planes in haversack.ranked_build.
 
 These exist because the propagation was wrong once and two earlier tests failed to see it:
 
@@ -12,22 +12,19 @@ So the discriminating test is a sphere, measured against its analytic distance, 
 wide enough that propagation actually runs.
 """
 
-import importlib.util
-from pathlib import Path
 
 import numpy as np
 import pytest
 
-TOOLS = Path(__file__).resolve().parent.parent / "tools" / "ranked_build_store.py"
 SP = [1.5, 1.5, 1.5]
 CLIP = 8.0
 
 
 def _load_tools():
+    """The numpy reference implementations, now in the package (tools/ranked_build_store.py
+    is only the command line over it)."""
     pytest.importorskip("zarr")
-    spec = importlib.util.spec_from_file_location("ranked_build_store", TOOLS)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    import haversack.ranked_build as mod
     return mod
 
 

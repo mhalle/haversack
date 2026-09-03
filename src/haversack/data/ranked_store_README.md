@@ -343,8 +343,11 @@ story (for example, when a downstream step splits a channel spatially, so latera
 similar attribute is *not* recoverable from the LUT alone).
 
 Human-readable names, when present, are in the root group's
-`attributes.duckn.extensions.seg.segments`, each with `label_value` and `name`. An entry whose
-`label_value` is a **list** is a group (a union of other segments), not a class.
+`attributes.duckn.extensions.seg.segments` (duckn seg extension 0.7). A **leaf** has one
+`label_value` and a `name`; a **group** has `members` (segment ids) instead and is their
+union - it may claim `disjoint` (members share no voxel) and `exhaustive` (members exhaust
+what the group names); both together make a partition. Each part has a background leaf
+(class 0, `background: true`) and a `classes_<i>` group that is the softmax's own partition.
 
 A segment may also carry:
 

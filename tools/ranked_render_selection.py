@@ -26,7 +26,8 @@ from pathlib import Path
 import matplotlib
 import numpy as np
 import torch
-import zarr
+
+from haversack.ranked_store import open_store
 
 matplotlib.use("Agg")
 import matplotlib.image as mpimg
@@ -44,10 +45,10 @@ VIEWS = {"anterior": (0, 0), "right_oblique": (10, -45), "left_oblique": (10, 45
 
 
 def load(store, device):
-    r = zarr.open_group(str(store), mode="r")
+    r = open_store(store, "r").root       # a directory, or a zarr zip
     names = {s["name"]: int(s["label_value"])
              for s in r.attrs.asdict()["duckn"]["extensions"]["seg"]["segments"]
-             if not isinstance(s["label_value"], list)}
+             if "label_value" in s}                # leaves; groups carry `members`
     g = r["parts/0"]                                            # organs
     b = g.attrs.asdict()["duckn"]["extensions"]["ranked"]
     T = float(b["distance_truncation"])
@@ -88,11 +89,7 @@ def load(store, device):
     # membership flips for the outer field, any-class flips touching the selection for the
     # all-surfaces field - gives fields that are zero exactly on the wanted surfaces, with
     # sub-voxel crossings from the deficits, and no gate anywhere downstream.
-    import importlib.util
-    tools = Path(__file__).resolve().parent / "ranked_build_store.py"
-    spec = importlib.util.spec_from_file_location("rbs", tools)
-    rbs = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(rbs)
+    import haversack.ranked_build as rbs
     clip = float(b["clip"])
 
     dmm = np.where(dist > 0, (1.0 - dist.astype(np.float32) / 255.0) * T, T)

@@ -124,7 +124,10 @@ def read_image(path):
     orientation itself, exactly as it does for any caller-held image."""
     sitk = _sitk()
     p = Path(path)
-    if p.is_dir():
+    from .duckn_io import is_duckn_store, read_duckn_image
+    if is_duckn_store(p):                 # a duckn/zarr volume (directory or zarr zip)
+        image = read_duckn_image(p)
+    elif p.is_dir():
         reader = sitk.ImageSeriesReader()
         files = reader.GetGDCMSeriesFileNames(str(p))
         if not files:

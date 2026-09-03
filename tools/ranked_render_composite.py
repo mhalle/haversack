@@ -34,7 +34,8 @@ from pathlib import Path
 import matplotlib
 import numpy as np
 import torch
-import zarr
+
+from haversack.ranked_store import open_store
 
 matplotlib.use("Agg")
 import matplotlib.image as mpimg
@@ -52,10 +53,10 @@ VIEWS = {"anterior": (0, 0), "right_oblique": (10, -45), "left_oblique": (10, 45
 
 
 def load(store, device):
-    r = zarr.open_group(str(store), mode="r")
+    r = open_store(store, "r").root       # a directory, or a zarr zip
     names = {s["name"]: int(s["label_value"])
              for s in r.attrs.asdict()["duckn"]["extensions"]["seg"]["segments"]
-             if not isinstance(s["label_value"], list)}
+             if "label_value" in s}                # leaves; groups carry `members`
     g = r["parts/0"]                                            # organs
     b = g.attrs.asdict()["duckn"]["extensions"]["ranked"]
     T = float(b["distance_truncation"])
@@ -96,11 +97,7 @@ def load(store, device):
     # membership flips for the outer field, any-class flips touching the selection for the
     # all-surfaces field - gives fields that are zero exactly on the wanted surfaces, with
     # sub-voxel crossings from the deficits, and no gate anywhere downstream.
-    import importlib.util
-    tools = Path(__file__).resolve().parent / "ranked_build_store.py"
-    spec = importlib.util.spec_from_file_location("rbs", tools)
-    rbs = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(rbs)
+    import haversack.ranked_build as rbs
     clip = float(b["clip"])
 
     dmm = np.where(dist > 0, (1.0 - dist.astype(np.float32) / 255.0) * T, T)
@@ -183,10 +180,10 @@ def crop_world_origin(meta, start):
 
 
 def load_vessels(store, device):
-    r = zarr.open_group(str(store), mode="r")
+    r = open_store(store, "r").root
     names = {s_["name"]: int(s_["label_value"])
              for s_ in r.attrs.asdict()["duckn"]["extensions"]["seg"]["segments"]
-             if not isinstance(s_["label_value"], list)}
+             if "label_value" in s_}
     g = r["parts/0"]
     b = g.attrs.asdict()["duckn"]["extensions"]["ranked"]
     T = float(b["distance_truncation"])
@@ -233,10 +230,7 @@ def load_vessels(store, device):
         t = np.divide(a_, den, out=np.full_like(a_, 0.5), where=den > 1e-9)
         np.minimum.at(d, at, t * step)
         np.minimum.at(d, bt, (1.0 - t) * step)
-    import importlib.util as _il
-    tools = Path(__file__).resolve().parent / "ranked_build_store.py"
-    spec_ = _il.spec_from_file_location("rbs2", tools)
-    rbs2 = _il.module_from_spec(spec_); spec_.loader.exec_module(rbs2)
+    import haversack.ranked_build as rbs2
     d = rbs2._eikonal(d, list(map(float, sp)), T)
     sv = np.where(inside, d, -d).astype(np.float32)
 

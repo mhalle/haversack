@@ -30,6 +30,8 @@ sys.path.insert(0, str(Path(__file__).parent))   # sibling tools
 import numpy as np
 import zarr
 
+from haversack.ranked_store import open_store, part_attrs
+
 
 def ranked_of(group):
     return group.attrs.asdict()["duckn"]["extensions"]["ranked"]
@@ -101,10 +103,9 @@ def frame_origin(s, order):
 
 def align(src, dst):
     src, dst = Path(src), Path(dst)
-    s = zarr.open_group(str(src), mode="r")
-    import shutil
-    shutil.rmtree(dst, ignore_errors=True)
-    d = zarr.create_group(store=str(dst))
+    s = open_store(src, "r").root
+    dst_store = open_store(dst, "w")     # a directory, or a zarr zip when DST ends in .zip
+    d = dst_store.root
     d.attrs.update(s.attrs.asdict())                  # root metadata carries over unchanged
 
     order = s.attrs.asdict()["duckn"]["extensions"]["haversack"]["part_order"]
@@ -121,7 +122,7 @@ def align(src, dst):
     out_segs = []
     for seg in seg_["segments"]:
         seg = dict(seg)
-        if "extent" in seg and not isinstance(seg["label_value"], list):
+        if "extent" in seg and "label_value" in seg:          # a leaf; groups carry members
             off = starts.get(seg.get("layer", 0), [0, 0, 0])
             if any(off):
                 e = seg["extent"]
@@ -160,7 +161,7 @@ def align(src, dst):
             at["duckn"] = duckn
             origin = shared
 
-            from ranked_build_store import layout            # one shard per array - see there
+            from haversack.ranked_build import layout        # one shard per array - see there
             chunks, shards = layout(full.shape)
             z = dp.create_array(name, shape=full.shape, dtype=full.dtype,
                                 chunks=chunks, shards=shards,
@@ -172,7 +173,7 @@ def align(src, dst):
         # the occupancy index must be REBUILT, not copied: padding changes which classes can
         # be found in the edge bricks (background now wins there), so a copied index would
         # under-report background and over-report nothing - conservative in the wrong direction
-        from ranked_build_store import BRICK, brick_geometry, occupancy
+        from haversack.ranked_build import BRICK, brick_geometry, occupancy
         rk_p, su_p = np.asarray(dp["ranks"]), np.asarray(dp["support"])
         occ, nb = occupancy(rk_p, su_p, len(r["labels"]), r["support_max"])
         oz = dp.create_array("occupancy", shape=occ.shape, dtype=occ.dtype,
@@ -191,14 +192,14 @@ def align(src, dst):
         # the array is no longer purely network output - say so
         meta["padded_from"] = {"start": [int(v) for v in start],
                                "fill": "background (ranks[0]=1, ranks[1:]=0, support=0, tail=0)"}
-        dp.attrs.update({"duckn": {"version": "1.0", "extensions": {"ranked": meta}}})
+        dp.attrs.update(part_attrs(meta))
         print(f"  parts/{i} {meta['part']:<12} {tuple(start)} -> (0,0,0)   grid {tuple(grid)}"
               f"   origin {origin}", flush=True)
 
-    from ranked_build_store import write_readme
-    write_readme(dst)                        # the padded copy needs the reference too
-    mb = sum(f.stat().st_size for f in dst.rglob("*") if f.is_file()) / 1e6
-    print(f"{dst.name}: {mb:.2f} MB")
+    from haversack.ranked_build import write_readme
+    write_readme(dst_store)                  # the padded copy needs the reference too
+    dst_store.close()
+    print(f"{dst.name}: {dst_store.size_bytes() / 1e6:.2f} MB")
 
 
 if __name__ == "__main__":

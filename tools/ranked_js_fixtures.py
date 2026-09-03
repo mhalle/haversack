@@ -37,6 +37,7 @@ import torch
 import zarr
 
 from haversack.ranked import CLIP, RankedCode, decode_groups, encode
+from haversack.ranked_store import open_store
 
 ZSTD = None  # zarr.codecs is import-time heavy; resolved in main()
 
@@ -48,20 +49,19 @@ ZSTD = None  # zarr.codecs is import-time heavy; resolved in main()
 def _channels(segments, labels, want):
     """Resolve segment names to channel-index lists via the label LUT.
 
-    A group segment's label_value is a list of segment IDS (strings like
-    "c10"), each naming a segment whose own label_value is the shared label
-    id; `labels[channel]` maps channel -> label id. Names are never matched
-    by prefix - membership comes from the store's own tables.
+    A group segment's `members` is a list of segment IDS (strings like "c10"),
+    each naming a leaf whose own label_value is the shared label id;
+    `labels[channel]` maps channel -> label id. Names are never matched by
+    prefix - membership comes from the store's own tables.
     """
     by_id = {s["id"]: s for s in segments}
     by_name = {s["name"]: s for s in segments}
     chan_of_label = {int(lab): c for c, lab in enumerate(labels)}
 
     def one(seg):
-        v = seg["label_value"]
-        if isinstance(v, list):
-            return [chan_of_label[int(by_id[ref]["label_value"])] for ref in v]
-        return [chan_of_label[int(v)]]
+        if "members" in seg:
+            return [chan_of_label[int(by_id[ref]["label_value"])] for ref in seg["members"]]
+        return [chan_of_label[int(seg["label_value"])]]
 
     out = {}
     for name in want:
@@ -125,7 +125,7 @@ def _geometry_checkpoints(origin, directions, shape_zyx):
 # ---------------------------------------------------------------------------
 
 def _decode(store_dir, groups):
-    g = zarr.open_group(str(store_dir), mode="r")["parts/0"]
+    g = open_store(store_dir, "r").root["parts/0"]
     meta = dict(g.attrs["duckn"]["extensions"]["ranked"])
     ranks = np.asarray(g["ranks"])
     support = np.asarray(g["support"])
@@ -190,11 +190,12 @@ def _write_ranked_store(out, code, directions, origin):
     names = ["background", "sphere_a", "sphere_b", "blob", "nowhere"]
     segments = [{"id": f"c{i}", "name": n, "label_value": i, "layer": 0}
                 for i, n in enumerate(names)]
-    segments.append({"id": "g1", "name": "spheres",
-                     "label_value": ["c1", "c2"], "layer": 0})
+    segments[0]["background"] = True                     # class 0 is the layer's background
+    segments.append({"id": "g1", "name": "spheres", "members": ["c1", "c2"],
+                     "disjoint": True})
     root = zarr.create_group(store=str(out))
     root.attrs.update({"duckn": {"version": "1.0", "extensions": {
-        "seg": {"version": "0.6", "segments": segments}}}})
+        "seg": {"version": "0.7", "segments": segments}}}})
     part = root.create_group("parts/0")
     meta = dict(code.meta)
     meta.update({"labels": list(range(5)), "part": "phantom"})
@@ -226,7 +227,7 @@ def main(store_dir, out_dir):
     store_dir, out = Path(store_dir), Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    root = zarr.open_group(str(store_dir), mode="r")
+    root = open_store(store_dir, "r").root
     segments = root.attrs["duckn"]["extensions"]["seg"]["segments"]
     part_meta = root["parts/0"].attrs["duckn"]["extensions"]["ranked"]
     groups = _channels(segments, part_meta["labels"],

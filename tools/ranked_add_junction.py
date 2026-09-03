@@ -20,11 +20,10 @@ import time
 from pathlib import Path
 
 import numpy as np
-import zarr
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ranked_build_store import (JUNCTION_SPAN, JUNCTION_ZERO, junction_sparse,  # noqa: E402
-                                write_junction, write_readme)
+from haversack.ranked_build import (JUNCTION_SPAN, JUNCTION_ZERO, junction_sparse,
+                                    write_junction, write_readme)
+from haversack.ranked_store import open_store
 
 
 def _spacing(arr):
@@ -67,7 +66,8 @@ def _record(root, trunc, n, shape):
 
 
 def add(store: Path, force=False):
-    root = zarr.open_group(str(store), mode="r+")
+    st = open_store(store, "a")          # a directory, or a zarr zip (staged, repacked)
+    root = st.root
     parts = root["parts"]
     names = sorted((k for k in parts.keys()), key=lambda k: int(k))
     for name in names:
@@ -94,7 +94,8 @@ def add(store: Path, force=False):
         frac = 100.0 * n / float(np.prod(shape))
         print(f"  parts/{name}: junction {frac:.2f} % of {np.prod(shape) / 1e6:.1f} M voxels, "
               f"T = {trunc:.3f} mm, {time.perf_counter() - t0:.1f} s", flush=True)
-    write_readme(store)
+    write_readme(st)
+    st.close()                           # a zip is repacked here
 
 
 if __name__ == "__main__":

@@ -598,9 +598,25 @@ def _run(argv=None) -> int:
         if not batch:
             if not args.output:
                 raise InputError("segment needs -o (the output file), or --format with -o a directory for batch")
-            r = run_one(inputs[0])
-            r.save(args.output)
-            report(r, args.output)
+            from .ranked_output import is_store_output
+            if is_store_output(args.output):
+                # undocumented: a `.duckn` / `.duckn.zip` output is a ranked store - the whole
+                # output distribution, not the labels (see haversack.ranked_output)
+                if engine_task:
+                    raise InputError("a ranked store output is available for nnU-Net tasks only")
+                from .ranked_output import segment_to_store
+                img = resolve(inputs[0])
+                r, out = segment_to_store(
+                    img, args.task, args.output, case=source_stem(inputs[0]),
+                    weights=args.model_root, device=args.device, dtype=args.dtype,
+                    grid=args.spacing if args.spacing else "input", interp=args.interp,
+                    accumulate=args.accumulate, batch_size=bs,
+                    envelope_mm=args.envelope if args.envelope > 0 else None, progress=progress)
+                report(r, out)
+            else:
+                r = run_one(inputs[0])
+                r.save(args.output)
+                report(r, args.output)
         else:
             if args.format is None:
                 raise InputError("segmenting several inputs needs --format (the output type, e.g. seg.nrrd)")

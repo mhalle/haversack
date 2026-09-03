@@ -24,7 +24,7 @@ import os
 import sys
 from pathlib import Path
 
-import zarr
+from haversack.ranked_store import open_store
 
 # The file renames below already ran once and are idempotent; DATA only matters if they have
 # not. DEMO is where the stores live and is the argument that actually gets used day to day.
@@ -231,7 +231,8 @@ def stamp(store_name, prov, new_name=None):
     if new_name:
         d.rename(DEMO / new_name)
         d = DEMO / new_name
-    root = zarr.open_group(str(d), mode="r+")
+    st = open_store(d, "a")                # a directory, or a zarr zip (staged, repacked)
+    root = st.root
     a = dict(root.attrs.asdict()["duckn"])
     ext = dict(a["extensions"])
     ext["haversack"] = dict(ext["haversack"]) | {"case": prov["case"],
@@ -248,6 +249,7 @@ def stamp(store_name, prov, new_name=None):
     ext["provenance"] = pv
     a["extensions"] = ext
     root.attrs["duckn"] = a
+    st.close()
     steps = len(pv.get("processing", []))
     print(f"  {d.name:<26} case={prov['case']:<18} sources=1 processing={steps} "
           f"archive={prov['archive']}")
@@ -266,7 +268,7 @@ for _d in sorted(DEMO.glob("*/*.duckn")):
 
 print("\nverify")
 for n in sorted(str(p.relative_to(DEMO)) for p in DEMO.glob("*/*.duckn")):
-    r = zarr.open_group(str(DEMO / n), mode="r")
+    r = open_store(DEMO / n, "r").root
     e = r.attrs.asdict()["duckn"]["extensions"]
     print(f"  {n}")
     print(f"    haversack.case      {e['haversack']['case']}")

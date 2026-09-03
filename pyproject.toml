@@ -99,6 +99,13 @@ voxtell = ["voxtell"]
 # chain and therefore its own deps. Conflicting with the other engines below, as ever.
 monai = ["monai>=1.4", "torch>=2.7", "nibabel", "itk", "pytorch-ignite", "einops",
          "timm", "scikit-learn", "tensorboard", "fire", "PyYAML"]
+# INTERNAL, undocumented: duckn volumes as input and ranked stores (zarr, duckn metadata) as
+# output - haversack.duckn_io, haversack.ranked_store, haversack.ranked_output. duckn is not
+# on PyPI; it installs from its GitHub tag (git source below). Not a conflict group: it sits
+# beside the torch extra. The dev env adds it: `uv sync --extra torch ... --extra duckn`.
+# Both need Python 3.12 (zarr 3.3 and duckn set that floor); below it the extra is empty
+# rather than pulling haversack's own floor up for an internal feature.
+duckn = ["duckn; python_version >= '3.12'", "zarr>=3.3; python_version >= '3.12'"]
 
 [build-system]
 requires = ["hatchling"]
@@ -111,7 +118,7 @@ packages = ["src/haversack"]
 # the pushed branch had no catalog, and every `haversack segment` died on a missing
 # ts_tasks.json (2026-09-02). `artifacts` (not force-include, which would add the files a
 # second time now that they are tracked) makes them part of the normal selection.
-artifacts = ["src/haversack/data/*.json"]
+artifacts = ["src/haversack/data/*.json", "src/haversack/data/*.md"]
 
 [tool.hatch.build.targets.wheel.force-include]
 # The README is the user guide, and `haversack docs` prints it from inside the wheel; an
@@ -132,6 +139,12 @@ conflicts = [
       { extra = "voxtell" },
       { extra = "monai" },
     ],
+    # duckn's zarr needs numpy>=2; synthstrip's surfa needs numpy<2. Everything else in the
+    # main environment already sits on numpy 2, so this only says what was already true.
+    [
+      { extra = "duckn" },
+      { extra = "synthstrip" },
+    ],
 ]
 
 [tool.uv.sources]
@@ -147,6 +160,10 @@ fastsurfer-lean = { git = "https://github.com/mhalle/fastsurfer-lean.git", rev =
 # PyPI release: 0.1.0 on PyPI predates helpers this engine uses (download_voxtell_model),
 # and pinning the rev means the source we integrated against is the source that runs.
 voxtell = { git = "https://github.com/MIC-DKFZ/VoxTell.git", rev = "8ef0332aec5d5dff925d6f6370386c00334b57ab" }
+# duckn = the metadata standard the ranked stores are written in (seg extension 0.7 as of
+# 0.3.0). A release tag, not a branch, so a sync is reproducible; to work on duckn itself,
+# `uv pip install -e ../duckn` after the sync puts the sibling checkout in front of it.
+duckn = { git = "https://github.com/mhalle/duckn.git", tag = "v0.3.0" }
 # synthstrip-torch = our standalone SynthStrip inference package (StripModel + surfa conform
 # + SDT; weights fetched from MGH at runtime). Import namespace: synthstrip_torch.
 synthstrip-torch = { git = "https://github.com/mhalle/synthstrip-torch.git", rev = "1b871fb1f98fbe60ed1efe87de34a8703a106b44" }

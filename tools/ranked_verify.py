@@ -23,7 +23,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import zarr
+
+from duckn import validate_seg_data
+
+from haversack.ranked_store import open_store, read_segmentation, validate_array
 
 REQUIRED_RANKED = ("version", "mode", "classes", "depth", "clip", "support_max",
                    "rank_sentinel", "labels", "part", "task", "model_grid", "envelope")
@@ -54,12 +57,21 @@ class Report:
 
 
 def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
-    r = zarr.open_group(str(path), mode="r")
+    st = open_store(path, "r")           # a directory, or a zarr zip
+    r = st.root
     root = r.attrs.asdict().get("duckn", {})
     ext = root.get("extensions", {})
     rep = Report(f"{path.parent.name}/{path.name}", quiet)
 
-    rep.check((path / "README.md").exists(), "no README.md - the format reference is missing")
+    rep.check(st.exists("README.md"), "no README.md - the format reference is missing")
+    # The standard's own reading of the metadata, before any of ours: duckn's models parse
+    # the root and every array, and its validators check the seg extension's consistency
+    # rules and each array's geometry against its shape.
+    seg_model = None
+    try:
+        seg_model = read_segmentation(r)
+    except Exception as e:                     # noqa: BLE001 - the rejection is the finding
+        rep.check(False, f"duckn rejects the seg extension: {e}")
     rep.check("seg" in ext, "no seg extension on the root group")
     rep.check("haversack" in ext, "no haversack block on the root group")
     pv = ext.get("provenance") or {}
@@ -77,12 +89,20 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
                            "be recorded")
 
     segs = ext.get("seg", {}).get("segments", [])
-    leaves = [s for s in segs if not isinstance(s["label_value"], list)]
+    leaves = [s for s in segs if "label_value" in s]          # groups carry `members`
     rep.check(all("name" in s and not str(s["name"]).startswith("label_") for s in leaves),
               f"{sum(1 for s in leaves if str(s.get('name','')).startswith('label_'))} of "
               f"{len(leaves)} segments are unnamed (label_<id>) - the name lookup degraded")
     rep.check(all(0 <= s.get("layer", 0) < max(len(order), 1) for s in leaves),
               "a segment's layer is not a valid part index")
+    rep.check(all(any(s.get("background") and s.get("layer", 0) == i for s in leaves)
+                  for i in range(len(order))),
+              "a part has no background leaf - its partition cannot include class 0")
+    rep.check(all(any(s.get("members") and s.get("exhaustive") and s.get("disjoint")
+                      and s["id"] == f"classes_{i}" for s in segs)
+                  for i in range(len(order))),
+              "a part has no partition group (classes_<i>) - the softmax's own partition "
+              "goes unstated")
 
     origins, directions = set(), set()
     for i, _p in enumerate(order):
@@ -194,8 +214,13 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
         # shift now that it honors it. Restated here rather than imported: a verifier that
         # imports the builder inherits the builder's mistakes.
         want_data = {"corner": "node", "center": "cell"}.get(m.get("resample_alignment"))
-        for nm in ("ranks", "support", "tail", "occupancy"):
+        for nm in ("ranks", "support", "tail", "occupancy", "distance", "junction",
+                   "junction_pair"):
             if nm not in g:
+                continue
+            err = _rejects(lambda: validate_array(g[nm]))
+            rep.check(err is None, f"parts/{i}/{nm}: duckn rejects the geometry: {err}")
+            if nm in ("distance", "junction", "junction_pair"):
                 continue
             ax = g[nm].attrs.asdict().get("duckn", {}).get("axes", [])
             cen = {a.get("centering") for a in ax if a.get("space_direction")}
@@ -241,6 +266,11 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
                       f"{int((rk0 == 0).sum())} voxels - every voxel must have a winner")
             lut = np.asarray(m["labels"])
             glob = lut[rk0.astype(np.int64) - 1]
+            # seg spec 0.7 rule 9, duckn's own check: every value present in this layer's
+            # labels, other than its background, has a leaf
+            if seg_model is not None:
+                err = _rejects(lambda: validate_seg_data(seg_model, glob, layer=i))
+                rep.check(err is None, f"parts/{i}: {err}")
             if "occupancy" in g and "brick" in m:
                 occ, b = np.asarray(g["occupancy"]), m["brick"][0]
                 missed = 0
@@ -285,7 +315,17 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
                   "then carry per-part offsets", warn_only=True)
         rep.check(len(directions) == 1,
                   f"parts do not share one orientation ({len(directions)} distinct)")
+    st.close()
     return rep.emit()
+
+
+def _rejects(fn):
+    """The error a validator raises, or None when it accepts."""
+    try:
+        fn()
+    except Exception as e:                     # noqa: BLE001 - any rejection is the finding
+        return e
+    return None
 
 
 def main():
