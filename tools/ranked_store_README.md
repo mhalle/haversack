@@ -248,7 +248,7 @@ competed in:
 Two parts share a softmax **only if this matches**. Do not infer it from the task name — a task
 can be five models — nor from the folder name, which does not identify the weights version
 (`Dataset297` ships as both v2.0.0 and v2.0.4 and unpacks to the same folder). `version` may be
-`"unknown"` when the weights were installed by something other than nnseg and left no version
+`"unknown"` when the weights were installed by something other than haversack and left no version
 sidecar; that is reported rather than guessed, because guessing is wrong in exactly the case
 versioning exists for.
 
@@ -468,7 +468,7 @@ marks the result as derived, references the source instances through DICOM's own
 and carries forward Patient and Study — *from the source*, which it must have access to anyway,
 not from a stale copy of a header kept here (`dicom` extension §10.4).
 
-`nnseg.case_detail` therefore holds only what is not an inherited tag: the case name, and any
+`haversack.case_detail` therefore holds only what is not an inherited tag: the case name, and any
 cross-reference to an independent artifact — for example an existing published segmentation of
 the same source, which nobody could reconstruct from the source header and which a later
 comparison needs.

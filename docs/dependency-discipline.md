@@ -1,8 +1,8 @@
 # Keeping the images lean — dependency & import discipline
 
 **Requirements for preventing heavy dependencies (torch, CUDA, nnunetv2, surfa, …) from
-weighing down `import nnseg` and the Modal images.** These are enforced by
-`tests/test_nnseg_layering.py`; this document is the *why* and the *how*, so the rules are
+weighing down `import haversack` and the Modal images.** These are enforced by
+`tests/test_layering.py`; this document is the *why* and the *how*, so the rules are
 maintained on purpose rather than rediscovered.
 
 ## Why it matters
@@ -14,21 +14,21 @@ snapshot gave 17.6 s restore ≈ 16.1 s creation, because the cost was the pull)
 a **small image**. Concretely, dropping torch/CUDA/nnunetv2 from the api image took its cold
 start from **16.1 s → 6.3 s**.
 
-There's a second reason: nnseg is a **toolkit**. A lean consumer — a describe-only front-end,
+There's a second reason: haversack is a **toolkit**. A lean consumer — a describe-only front-end,
 a notebook that lists tasks, the serve API — should not pay for a multi-GB CUDA torch just to
-`import nnseg`.
+`import haversack`.
 
-## Rule 1 — `import nnseg` must be torch-free
+## Rule 1 — `import haversack` must be torch-free
 
 Importing the package, constructing a `Segmenter`, listing tasks, and describing a task must
 pull **no torch**. Torch (and the rest of the inference stack) loads only when you actually
 run inference.
 
-- **Enforced by** `tests/test_nnseg_layering.py::test_importing_nnseg_is_torch_free` — a
-  subprocess asserts `import nnseg` + the front-end surface (`Segmenter`, `ModelCache`,
+- **Enforced by** `tests/test_layering.py::test_importing_haversack_is_torch_free` — a
+  subprocess asserts `import haversack` + the front-end surface (`Segmenter`, `ModelCache`,
   `TaskCatalog`, `io`) + `Segmenter(cpu).tasks()` + `describe()` leave `torch` out of
-  `sys.modules`, and that `nnseg.segment` then *does* load torch.
-- **Mechanism** (`src/nnseg/__init__.py`): the eager top-level surface is torch-free; the
+  `sys.modules`, and that `haversack.segment` then *does* load torch.
+- **Mechanism** (`src/haversack/__init__.py`): the eager top-level surface is torch-free; the
   torch-pulling exports are loaded on first *attribute access* via a module `__getattr__`
   (PEP 562), listed in `_LAZY` (+ `_LAZY_SUBMODULES` for `backends`).
   - **Eager (torch-free):** `errors`, `io`, `job`, `progress`, `frame`, `grid`, `mapping`,
@@ -42,7 +42,7 @@ name in `_LAZY` — do **not** add an eager `from .<module> import …` for it.
 
 ## Rule 2 — heavy imports are call-time, never module top-level (on the light path)
 
-In any module reachable by `import nnseg` without touching an inference symbol, heavy
+In any module reachable by `import haversack` without touching an inference symbol, heavy
 dependencies must be imported **inside the function/method that uses them**, not at module
 top level. This is already how `cache.py` (torch in `empty_cache`), `network.py` (nnunetv2 in
 the predict methods), and `segmenter.py` (pipeline in `segment()`) are written.
@@ -67,11 +67,11 @@ torch-free modules (`tasks`, `weights`, `values`, `errors`).
 
 The leak that broke Rule 1 the first time was the **`backends` subpackage**: its
 `__init__.py` did a top-level `import torch` and eagerly imported the backend submodules
-(each of which imports torch). A `grep 'import torch' src/nnseg/*.py` **misses subpackages**.
+(each of which imports torch). A `grep 'import torch' src/haversack/*.py` **misses subpackages**.
 The only reliable check is at runtime:
 
 ```bash
-uv run --no-project python -c "import sys, nnseg; print('torch loaded:', 'torch' in sys.modules)"
+uv run --no-project python -c "import sys, haversack; print('torch loaded:', 'torch' in sys.modules)"
 # must print: torch loaded: False
 ```
 
@@ -109,7 +109,7 @@ Consequences to respect:
   `--no-sources` (that kills the engine git sources too).
 - `apt_install("git")` — every `uv_sync` image needs it, because resolving the full lock
   touches the engine packages' git sources.
-- `--no-install-project` (implicit in Modal's `uv_sync`) — nnseg is **mounted**
+- `--no-install-project` (implicit in Modal's `uv_sync`) — haversack is **mounted**
   (`add_local_dir` + the `_pkg_dir()` `sys.path` shim), not installed, so a code edit does not
   rebuild the dependency layer.
 
@@ -118,7 +118,7 @@ Consequences to respect:
 Core gained one dependency since this document was written, and the reasoning is
 the standard to hold the next one to.
 
-`nnseg.schemas` declares each task's parameters as pydantic models, and one
+`haversack.schemas` declares each task's parameters as pydantic models, and one
 declaration then produces three things: the JSON Schema `describe()` publishes,
 the validation `POST /v1/jobs` enforces, and (through FastAPI response models)
 the OpenAPI document. The alternative — a hand-written schema dict beside a
@@ -143,10 +143,10 @@ Two conditions came with it, and both still hold:
 1. **It stops at the wire.** `schemas.py` and `serve.py` only. It must not reach
    the value types (`Segmentation`, `Grid`, `LabelSchema`) or the kernel layer —
    those are frozen dataclasses on a hot path with no untrusted input, where
-   validation is a cost with no reader. `tests/test_nnseg_layering.py` keeps the
+   validation is a cost with no reader. `tests/test_layering.py` keeps the
    kernel torch+numpy-only, which also keeps pydantic out of it.
-2. **It does not join the eager import path.** `import nnseg` still pulls neither
-   torch nor pydantic (`test_importing_nnseg_is_torch_free` checks the first;
+2. **It does not join the eager import path.** `import haversack` still pulls neither
+   torch nor pydantic (`test_importing_haversack_is_torch_free` checks the first;
    the registry is imported lazily, which keeps the second).
 
 The honest cost recorded for later: pydantic's v1→v2 migration was disruptive,
@@ -156,18 +156,18 @@ blast radius without adding a new exposure — but it did widen it.
 
 ## Rule 6 — engine dependencies are self-describing
 
-An engine's dependency tree comes from **its own package**, never re-listed in nnseg:
+An engine's dependency tree comes from **its own package**, never re-listed in haversack:
 - `fastsurfer-lean` and `synthstrip-torch` (git sources in `[tool.uv.sources]`) declare their
   own deps; `uv` pulls them transitively.
 - Adding an engine is: **one extra** (`fastsurfer = ["fastsurfer-lean"]`) + **one
-  `[tool.uv.sources]` entry** (git + rev) + **the image's `extras` list**. The only nnseg-side
+  `[tool.uv.sources]` entry** (git + rev) + **the image's `extras` list**. The only haversack-side
   deps you add are the serve-worker concerns the algorithm doesn't own (`scipy` cleanup via
   the extra, `obstore` via `idc`, `matplotlib` via `preview`).
 
 ## Rule 7 — weights are baked or volume-backed, never bundled
 
 Model weights must not bloat the package or be committed to a repo:
-- **nnU-Net / TS weights** live in the persistent `nnseg-weights` Modal Volume, provisioned
+- **nnU-Net / TS weights** live in the persistent `haversack-weights` Modal Volume, provisioned
   once ever, then read locally.
 - **FastSurfer / SynthStrip weights** are **baked at image build** (a `run_commands` step:
   `get_checkpoints` / `synthstrip_torch.fetch_weights()`), so cold containers never
@@ -184,13 +184,13 @@ conflicting in `[tool.uv] conflicts`, so uv forks them into one universal lock. 
 
 ```bash
 # Rule 1 — the definitive runtime check
-uv run --no-project python -c "import sys, nnseg; assert 'torch' not in sys.modules"
+uv run --no-project python -c "import sys, haversack; assert 'torch' not in sys.modules"
 
 # All import-discipline rules (guard + AST layering + scipy call-time)
-uv run --no-project pytest tests/test_nnseg_layering.py -q
+uv run --no-project pytest tests/test_layering.py -q
 
 # What an image actually installs (resolve the extras it uses)
-uv run --no-project python -c "import sys, nnseg; nnseg.Segmenter(device='cpu').describe(nnseg.Segmenter(device='cpu').tasks()[0]); print('describe torch-free:', 'torch' not in sys.modules)"
+uv run --no-project python -c "import sys, haversack; haversack.Segmenter(device='cpu').describe(haversack.Segmenter(device='cpu').tasks()[0]); print('describe torch-free:', 'torch' not in sys.modules)"
 ```
 
 ## Checklist — before adding a dependency
@@ -203,6 +203,6 @@ uv run --no-project python -c "import sys, nnseg; nnseg.Segmenter(device='cpu').
    `__init__.py`; do not import it eagerly.
 4. **New engine?** Its own package + extra + `[tool.uv.sources]` + the image's `extras` list.
    Weights baked or volume-backed.
-5. **Run the guard:** `pytest tests/test_nnseg_layering.py`. If it needs a real `import nnseg`
+5. **Run the guard:** `pytest tests/test_layering.py`. If it needs a real `import haversack`
    check for a new subpackage, the subprocess guard already covers it — add the new
    torch-free expectation there if you introduce a new front-end surface.

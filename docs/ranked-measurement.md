@@ -1,14 +1,14 @@
 # Measuring from a ranked store — volume, area, and what counting gets wrong
 
 **Volume and surface area as integrals of the margin field rather than properties of a
-mask.** The fourth of the `nnseg.ranked` documents, after
+mask.** The fourth of the `haversack.ranked` documents, after
 [ranked-probabilities.md](ranked-probabilities.md) (what is stored),
 [ranked-reconstruction.md](ranked-reconstruction.md) (getting one store back out) and
 [ranked-composition.md](ranked-composition.md) (combining several). This one is about not
 getting it out at all — reading a number off the field directly.
 
 Written 2026-08-31. Phantom numbers are against closed-form or spectrally-converged truth
-(`nnseg.phantoms`); real numbers are the 1.5 mm `total` organs part of **`idc-torso1`**
+(`haversack.phantoms`); real numbers are the 1.5 mm `total` organs part of **`idc-torso1`**
 (52 M voxels, K = 25), the case described in
 [ranked-reconstruction.md §0](ranked-reconstruction.md#0-the-two-cases).
 
@@ -20,7 +20,7 @@ Both quantities are integrals:
 
     V = ∫ H(m) dx                A = ∫ δ(m) |∇m| dx
 
-so nothing requires a raster. `nnseg.statistics` counts voxels because that is what a
+so nothing requires a raster. `haversack.statistics` counts voxels because that is what a
 labelmap offers, and counting volume is defensible. Counting **area** is not:
 
 | body (1.5 mm) | counted volume | field volume | counted area | field area |
@@ -227,7 +227,7 @@ by 14 % on autochthon and 36 % on gallbladder. Nothing here bounds that.
 
 ## 6. Status
 
-`nnseg.measure` is the primitive. `nnseg.statistics.compute_statistics(..., ranked_code=)`
+`haversack.measure` is the primitive. `haversack.statistics.compute_statistics(..., ranked_code=)`
 reports `volume_ml_field` and `area_cm2_field` **beside** `volume_ml`, never instead of it,
 and passes the clip. Without a code the output is byte-identical to before — asserted,
 because that is what makes shipping both safe. The field numbers carry their own

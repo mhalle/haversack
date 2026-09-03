@@ -3,7 +3,7 @@
 The claim under test is that a structure's volume and area are integrals of the ranked
 field - ``V = int H(m)`` and ``A = int delta(m) |grad m|`` - and can therefore be
 evaluated on the interpolant directly, without ever rasterizing it to a mask. The
-baseline is what `nnseg.statistics` does today: count voxels whose winner is `c`, and
+baseline is what `haversack.statistics` does today: count voxels whose winner is `c`, and
 (for area) count the faces between them and everything else.
 
 The integrator here is a single sweep over the cells BETWEEN voxel centers. A cell whose
@@ -35,10 +35,10 @@ import sys
 import numpy as np
 import torch
 
-from nnseg import measure
-from nnseg import phantoms as ph
-from nnseg import ranked
-from nnseg.grid import Grid
+from haversack import measure
+from haversack import phantoms as ph
+from haversack import ranked
+from haversack.grid import Grid
 
 CORNERS = [(i, j, k) for i in (0, 1) for j in (0, 1) for k in (0, 1)]
 
@@ -158,7 +158,7 @@ def measure_crofton(margin, spacing):
 def measure_counting(margin, spacing):
     """``(volume_mm3, area_mm2)`` the way a rasterized labelmap gives them up: count the
     voxels, then count the faces between inside and outside. The volume is what
-    `nnseg.statistics` computes today; the area is the usual companion, and is the one
+    `haversack.statistics` computes today; the area is the usual companion, and is the one
     that does not converge - a staircase has more surface than the surface it stands for,
     by a factor that depends on how the body happens to sit against the axes."""
     sp = np.asarray(spacing, dtype=np.float64)

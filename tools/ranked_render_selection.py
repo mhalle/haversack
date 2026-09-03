@@ -32,7 +32,7 @@ matplotlib.use("Agg")
 import matplotlib.image as mpimg
 
 SEED_FROM = "deficit"
-DEMO = Path.home() / "Dropbox/development/medseg/nnunet-inference-mlx/data/duckn_demo"
+DEMO = Path(__file__).resolve().parents[1] / "data" / "duckn_demo"   # untracked build products
 LOBES = {
     "lung_upper_lobe_right":  (0.36, 0.62, 0.86),
     "lung_middle_lobe_right": (0.30, 0.78, 0.72),
@@ -89,8 +89,7 @@ def load(store, device):
     # all-surfaces field - gives fields that are zero exactly on the wanted surfaces, with
     # sub-voxel crossings from the deficits, and no gate anywhere downstream.
     import importlib.util
-    tools = (Path.home() / "Dropbox/development/medseg/nnunet-inference-mlx"
-             / "tools" / "ranked_build_store.py")
+    tools = Path(__file__).resolve().parent / "ranked_build_store.py"
     spec = importlib.util.spec_from_file_location("rbs", tools)
     rbs = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rbs)

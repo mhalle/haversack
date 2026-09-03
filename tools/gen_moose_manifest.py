@@ -1,4 +1,4 @@
-"""Regenerate src/nnseg/data/moose_weights.json from a moosez checkout.
+"""Regenerate src/haversack/data/moose_weights.json from a moosez checkout.
 
 The checkpoint is the spec (labels come from each model's own dataset.json at
 install time); this manifest holds only what the checkpoint cannot know -
@@ -26,7 +26,7 @@ def parse(models_py: Path) -> dict:
 if __name__ == "__main__":
     moose = Path(sys.argv[1] if len(sys.argv) > 1 else
                  "../../upstream/MOOSE") / "moosez/models.py"
-    dest = Path(__file__).parent.parent / "src/nnseg/data/moose_weights.json"
+    dest = Path(__file__).parent.parent / "src/haversack/data/moose_weights.json"
     entries = parse(moose)
     dest.write_text(json.dumps({"source": "moosez/models.py", "tasks": entries},
                                indent=1) + "\n")

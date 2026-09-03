@@ -31,11 +31,11 @@ from pathlib import Path
 
 import modal
 
-PKG = Path(__file__).resolve().parent.parent / "src" / "nnseg"
+PKG = Path(__file__).resolve().parent.parent / "src" / "haversack"
 TOOLS = Path(__file__).resolve().parent
 WEIGHTS_ROOT = "/weights"
 
-# Same recipe as src/nnseg/modal_app.py's base image: deps from pyproject extras, nnseg MOUNTED
+# Same recipe as src/haversack/modal_app.py's base image: deps from pyproject extras, haversack MOUNTED
 # rather than installed so the running checkout is what executes. `idc` brings obstore for the
 # fetch; `cuda` brings the Triton restore backend.
 image = (
@@ -43,13 +43,13 @@ image = (
     .apt_install("git")
     .uv_sync(extras=["torch", "idc", "cuda"], frozen=False,
              extra_options="--no-sources-package nnunetv2")
-    .add_local_dir(str(PKG), remote_path="/root/pkg/nnseg")
+    .add_local_dir(str(PKG), remote_path="/root/pkg/haversack")
     .add_local_file(str(TOOLS / "ranked_emit.py"), remote_path="/root/ranked_emit.py")
 )
 
 # FastSurfer needs its own image: it pins numpy/torch ranges that conflict with the torch
 # extra, which is why engines get separate environments here at all. Recipe mirrors
-# src/nnseg/modal_app.py's fs_image, INCLUDING baking the ~67 MB VINN checkpoints at build so
+# src/haversack/modal_app.py's fs_image, INCLUDING baking the ~67 MB VINN checkpoints at build so
 # cold containers never depend on Zenodo being up. Kept as a copy rather than an import,
 # because importing modal_app would construct its App, Volumes and Dict as a side effect.
 fs_image = (
@@ -67,17 +67,17 @@ fs_image = (
         "urls=L('url',filename=get_config_file('FastSurferCNN')))"
         "\""
     )
-    .add_local_dir(str(PKG), remote_path="/root/pkg/nnseg")
+    .add_local_dir(str(PKG), remote_path="/root/pkg/haversack")
     .add_local_file(str(TOOLS / "ranked_emit_fastsurfer.py"),
                     remote_path="/root/ranked_emit_fastsurfer.py")
 )
 
-app = modal.App("nnseg-ranked-emit", image=image)
-weights_vol = modal.Volume.from_name("nnseg-weights", create_if_missing=True)
+app = modal.App("haversack-ranked-emit", image=image)
+weights_vol = modal.Volume.from_name("haversack-weights", create_if_missing=True)
 
 
 def _fetch(source: str, identifier: str, dest):
-    """Pull one input on the worker, by whichever nnseg source door names it.
+    """Pull one input on the worker, by whichever haversack source door names it.
 
     `idc` takes a crdc_series_uuid and yields a DICOM series directory; `openneuro` takes
     `ds<number>/<path>` off the public S3 bucket and yields a single file; `zenodo` takes
@@ -85,7 +85,7 @@ def _fetch(source: str, identifier: str, dest):
     cloud-to-cloud transfers, which is the whole reason the input is never uploaded from here.
     """
     from pathlib import Path as _P
-    from nnseg import sources as _s
+    from haversack import sources as _s
     dest = _P(dest)
     dest.mkdir(parents=True, exist_ok=True)      # IDCSource makes <dest>/series without parents
     door = {"idc": _s.IDCSource(), "openneuro": _s.openneuro_source(),
@@ -122,7 +122,7 @@ def emit(identifier: str, tasks: list[str], depth: int = 6, clip: float = 8.0,
     import torch
     print(f"{torch.cuda.get_device_name(0)}  torch {torch.__version__}", flush=True)
 
-    from nnseg.ecosystems import EcosystemCatalog
+    from haversack.ecosystems import EcosystemCatalog
 
     work = Path(tempfile.mkdtemp())
     t = time.perf_counter()

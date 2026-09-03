@@ -45,12 +45,12 @@ def main():
                     help="report structures where b/a falls under this")
     args = ap.parse_args()
 
-    import nnseg
+    import haversack
 
     vols = {}
     for tag, task in (("a", args.a), ("b", args.b)):
         t = time.perf_counter()
-        seg = nnseg.segment(args.image, task, folds=tuple(args.folds))
+        seg = haversack.segment(args.image, task, folds=tuple(args.folds))
         vols[tag] = seg.volumes_ml()
         print(f"  {task:12} {time.perf_counter() - t:6.1f} s   "
               f"{sum(1 for v in vols[tag].values() if v > 0)} structures present", flush=True)

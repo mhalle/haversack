@@ -6,7 +6,7 @@ import pytest
 import torch
 from scipy.ndimage import uniform_filter
 
-from nnseg import reference
+from haversack import reference
 
 
 def device_names():

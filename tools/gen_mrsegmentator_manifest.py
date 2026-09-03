@@ -1,9 +1,9 @@
-"""Regenerate src/nnseg/data/mrsegmentator_weights.json from upstream MRSegmentator.
+"""Regenerate src/haversack/data/mrsegmentator_weights.json from upstream MRSegmentator.
 
 The checkpoint is the spec (labels come from each model's own dataset.json at
 install time); this manifest holds only what the checkpoint cannot know - the
 task name, where to download it, its digest and version - plus the folder the
-flat zip must be installed under, which nnseg needs *before* it can read the
+flat zip must be installed under, which haversack needs *before* it can read the
 checkpoint. That folder is read FROM the zip without downloading it: two Range
 requests fetch the central directory and the small members (plans.json for the
 dataset name, version.json for the version, the head of fold_0's checkpoint for
@@ -23,7 +23,7 @@ from pathlib import Path
 
 UPSTREAM_CONFIG = ("https://raw.githubusercontent.com/hhaentze/MRSegmentator/master/"
                    "src/mrsegmentator/config.py")
-DEST = Path(__file__).parent.parent / "src/nnseg/data/mrsegmentator_weights.json"
+DEST = Path(__file__).parent.parent / "src/haversack/data/mrsegmentator_weights.json"
 
 
 def parse_registry(config_py: str) -> dict:

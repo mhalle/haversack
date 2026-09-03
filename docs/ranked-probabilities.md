@@ -1,6 +1,6 @@
 # Ranked probabilities — keeping what the labelmap throws away
 
-**The format and algorithm behind `nnseg.ranked` and `segment(..., probabilities=...)`.**
+**The format and algorithm behind `haversack.ranked` and `segment(..., probabilities=...)`.**
 A labelmap answers *which class won*. This keeps the second answer — *by how much* — for
 about a third of a byte per voxel, computed from the logits at the one moment they exist.
 
@@ -221,12 +221,12 @@ deficit  d_c =  0        where c wins      ( = m_c with the lead removed )
 [ranked-reconstruction.md](ranked-reconstruction.md) §1.) It is `l_c - max_j l_j`, which differs
 from the logits by a per-voxel constant *shared by every channel* — a gauge transformation —
 so interpolating it and taking the argmax is exactly interpolating the logits and taking the
-argmax. `nnseg.ranked.deficit(code, channel)`.
+argmax. `haversack.ranked.deficit(code, channel)`.
 
 **`margin` is the field a renderer or mesher wants.** It is `l_c - max_{j != c} l_j`: positive
 inside by however much `c` leads, zero *on* `c`'s surface, negative outside. It has an
 interior gradient to shade with and a non-degenerate zero level set, which `deficit` (flat
-zero throughout the interior) does not. `nnseg.ranked.margin(code, channel)`.
+zero throughout the interior) does not. `haversack.ranked.margin(code, channel)`.
 
 The trap is that `margin` is **not** gauge-equivalent: it adds the lead to one channel only,
 which is channel-dependent. At a voxel center the winner still wins, so an argmax over
@@ -236,7 +236,7 @@ not. Measured on a real K=118 case, restoring through `margin` agrees with the l
 through `deficit`. Nearest-neighbor restore cannot see the difference at all, because it
 never mixes voxels — which is precisely how such a bug survives.
 
-`nnseg.ranked.probabilities(code)` is the head-specific decode: `p_j = exp(-g_j) / Z` with
+`haversack.ranked.probabilities(code)` is the head-specific decode: `p_j = exp(-g_j) / Z` with
 `Z = Z_top / (1 - tail)`, exact when exhaustive. Where a rank holds the sentinel the class is
 absent, its id is `-1`, **and its probability is reported as 0** — both halves matter, because
 `-1` under `np.take_along_axis` indexes the *last* class and would silently attribute the
@@ -394,16 +394,16 @@ copy per slab is well overlapped — slab size does not move the number.
 
 ## Where it lives
 
-`src/nnseg/ranked.py` is **kernel layer**: torch and numpy only, no knowledge of tasks, plans,
-weights or files, enforced by `tests/test_nnseg_layering.py`. That is what let the whole module
+`src/haversack/ranked.py` is **kernel layer**: torch and numpy only, no knowledge of tasks, plans,
+weights or files, enforced by `tests/test_layering.py`. That is what let the whole module
 be shipped to a bare Modal image as a single file for the CUDA check.
 
 The pipeline hook is in `segment()`, between the network and the restore — the only moment the
 logits exist, so it costs one pass and no recomputation:
 
 ```python
-from nnseg import ranked
-seg = nnseg.segment(image, "total",
+from haversack import ranked
+seg = haversack.segment(image, "total",
                     probabilities=ranked.RankedSpec(sink=my_writer, depth=6))
 ```
 
@@ -422,7 +422,7 @@ The encoder is settled; the container is not. Zarr v3 with 64³ chunks and `fill
 the natural fit — chunk skipping is exactly the sparsity this format creates, and 64³ is a GPU
 brick — but two things are open:
 
-- **`zarr` is in no nnseg extra**, and the Modal nnU-Net worker syncs `["torch", "serve",
+- **`zarr` is in no haversack extra**, and the Modal nnU-Net worker syncs `["torch", "serve",
   "idc", "cuda"]`. Adding it is an image change.
 - **Artifact shape.** Every serve artifact today is a single file returned by `FileResponse`;
   a zarr store is a directory (893 files for a five-layer store). Either ship `.zarr.zip` —

@@ -1,6 +1,6 @@
 # The distance field on a GPU — plan (2026-09-01), built, and measured (2026-09-02)
 
-> **Status.** Built as `nnseg.ranked.distance_field` (torch), byte-exact against the numpy
+> **Status.** Built as `haversack.ranked.distance_field` (torch), byte-exact against the numpy
 > reference on real stores, and computed at emit time on the CUDA worker. **The dense premise
 > holds where it was aimed and nowhere else.** On an L40S a 52 Mvoxel part takes **0.5–0.6 s**,
 > five times the banded numpy reference on an M2 (2.7–2.8 s); on Apple hardware the same

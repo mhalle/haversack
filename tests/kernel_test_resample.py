@@ -1,6 +1,6 @@
 """The forward resampler must reproduce its CPU references exactly, not approximately.
 
-Absorbed from the nnU-Net fork (tag resample-gpu-v1) so nnseg does not pin a fork; these are
+Absorbed from the nnU-Net fork (tag resample-gpu-v1) so haversack does not pin a fork; these are
 the checks that make that safe to rely on.
 """
 import numpy as np
@@ -8,7 +8,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 ndimage = pytest.importorskip("scipy.ndimage")
-from nnseg.resample import resample_data, scipy_axis_matrix, target_shape
+from haversack.resample import resample_data, scipy_axis_matrix, target_shape
 
 try:
     from skimage.transform import resize as sk_resize

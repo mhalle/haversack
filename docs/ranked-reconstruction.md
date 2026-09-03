@@ -1,6 +1,6 @@
 # Reconstruction from a ranked store — the algorithm, and what it costs
 
-**How to get a segmentation back out of `nnseg.ranked`, at any grid.** The companion to
+**How to get a segmentation back out of `haversack.ranked`, at any grid.** The companion to
 [ranked-probabilities.md](ranked-probabilities.md), which covers what is stored and why.
 This document covers what a *reader* does with it. When the reader only wants a *number* —
 a volume or a surface area — it should not reconstruct at all; see
@@ -629,7 +629,7 @@ Four rules for building it:
 
 ### 8.5 The decode reduces to one operation
 
-Built, as `nnseg.ranked`:
+Built, as `haversack.ranked`:
 
 ```python
 resident = ranked.to_device(code, "cuda")            # upload the planes once

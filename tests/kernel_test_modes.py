@@ -3,15 +3,15 @@ import numpy as np
 import pytest
 import torch
 
-import nnseg as lg
-from nnseg import Mapping, build_tables, reference
-from nnseg.backends import metal
+import haversack as lg
+from haversack import Mapping, build_tables, reference
+from haversack.backends import metal
 
 from conftest import voronoi_logits
 
 
 def _backends_for(device):
-    from nnseg.backends import triton_gpu
+    from haversack.backends import triton_gpu
     return (["torch"]
             + (["metal"] if device.type == "mps" and metal.available() else [])
             + (["triton"] if device.type == "cuda" and triton_gpu.available() else []))

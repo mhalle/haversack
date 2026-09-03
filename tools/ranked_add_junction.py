@@ -58,7 +58,7 @@ def _record(root, trunc, n, shape):
                        "from their logits, written in tubes around the lines where such an "
                        "interface meets a third label; added to an existing store in place",
         "software": {"name": "ranked_add_junction.py",
-                     "url": "https://github.com/mhalle/nnunet-inference-mlx"},
+                     "url": "https://github.com/mhalle/haversack"},
         "parameters": {"junction_truncation": round(float(trunc), 6),
                        "junction_zero": JUNCTION_ZERO, "junction_span": JUNCTION_SPAN,
                        "voxels_written": int(n), "grid": [int(v) for v in shape]}})

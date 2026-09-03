@@ -5,7 +5,7 @@ The emit step records `frame.to_meta()` (nnU-Net path) or the conformed `source_
 there is nothing here that could disagree with the run.
 
 What still has to be computed, for the nnU-Net path only, is the model grid's TRUE spacing.
-`frame.model_spacing` is the nominal request and nnseg documents it as informational; under the
+`frame.model_spacing` is the nominal request and haversack documents it as informational; under the
 corner rule the grid actually lands at (n_src-1)*s_src/(n_model-1) - 1.504063 where 1.5 was
 asked for, in one measured case. Using the nominal value misplaces the far edge by over a
 millimeter.
@@ -36,9 +36,9 @@ def _ts_names(task):
     that goes stale silently when the catalog moves, and a wrong name on a segment is the kind
     of error nothing downstream catches.
     """
-    from nnseg.ecosystems import EcosystemCatalog
-    from nnseg.tasks import _resolve_spec
-    from nnseg.weights import as_store
+    from haversack.ecosystems import EcosystemCatalog
+    from haversack.tasks import _resolve_spec
+    from haversack.weights import as_store
     store = as_store(None, layout="ts")
     return dict(_resolve_spec(task, EcosystemCatalog(root=store.root)).label_map)
 
@@ -103,9 +103,9 @@ def names_for(engine, task, allow_unnamed=False):
     return names
 
 
-# nnseg names the forward resample by where it aligns samples; duckn names the same fact by
+# haversack names the forward resample by where it aligns samples; duckn names the same fact by
 # what a sample represents. They are one decision under two vocabularies, so the store derives
-# duckn's word from nnseg's rather than stating it twice and letting the two drift.
+# duckn's word from haversack's rather than stating it twice and letting the two drift.
 CENTERING = {"corner": "node", "center": "cell"}
 
 
@@ -441,7 +441,7 @@ def junction_field(ranks, support, clip, spacing, truncation, reach=None):
     are gathered per slab with a halo of one, and nothing full-volume is ever allocated but
     the dense outputs this wrapper returns. On a 52 Mvoxel part that is 0.8 s. The builder
     and the in-place tool skip even the dense outputs: they take the sparse result and write
-    it slab-wise (see `write_junction`). The torch twin in nnseg.ranked is byte-identical and
+    it slab-wise (see `write_junction`). The torch twin in haversack.ranked is byte-identical and
     takes 1.4 s on MPS; it is for the CUDA worker, where the arrays already live.
     """
     shape = tuple(ranks.shape[1:])
@@ -778,13 +778,13 @@ def generator_steps(meta, items, engine):
     store needs to know which of those to doubt.
     """
     first = dict(items)[next(iter(dict(items)))]
-    nnseg_v = first.get("nnseg")
+    haversack_v = first.get("haversack")
     models = [p.get("softmax", {}) for _n, p in items if p.get("softmax")]
     seg = {"name": "Segmentation",
            "description": f"{meta.get('task')} via the {engine} engine; the pre-argmax logit "
                           "field was captured between the network and the restore",
-           "software": {"name": "nnseg", "version": nnseg_v,
-                        "url": "https://github.com/mhalle/nnunet-inference-mlx"},
+           "software": {"name": "haversack", "version": haversack_v,
+                        "url": "https://github.com/mhalle/haversack"},
            "parameters": {"task": meta.get("task"), "engine": engine,
                           "depth": meta.get("depth"), "clip": meta.get("clip"),
                           "envelope_mm": meta.get("envelope_mm"),
@@ -798,7 +798,7 @@ def generator_steps(meta, items, engine):
              "description": "top-N ranks with quantized gaps, packed as zarr v3 with one shard "
                             "per array, plus the derived layers: a per-brick occupancy index, the "
                             "nearest-surface distance field and the triple-line junction layer",
-             "software": {"name": "ranked_build_store.py", "version": nnseg_v},
+             "software": {"name": "ranked_build_store.py", "version": haversack_v},
              "parameters": {"depth": meta.get("depth"), "clip": meta.get("clip"),
                             "brick": [BRICK, BRICK, BRICK], "parts_kept": "all",
                             "derived_layers": ["occupancy", "distance", "junction"],
@@ -993,7 +993,7 @@ def build(src, out, case, parts="all", allow_unnamed=False,
             "name": "SNOMED CT", "url": "http://snomed.info/sct",
             "url_template": "http://snomed.info/id/{code}"}},
             "segments": segs + groups},
-        "nnseg": {"nnseg_version": dict(items)[order[0]["name"]].get("nnseg"),
+        "haversack": {"haversack_version": dict(items)[order[0]["name"]].get("haversack"),
                   "engine": engine, "task": meta["task"], "case": case,
                   "source_file": Path(meta["image"]).name, "part_order": order},
         # duckn specifies where "what produced this" goes: provenance.processing, each step

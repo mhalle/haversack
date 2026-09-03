@@ -1,7 +1,7 @@
 [project]
-name = "nnunet-inference-mlx"
-version = "0.10.0"
-description = "nnseg: nnU-Net-family segmentation on torch (MPS, CUDA, CPU) with a CLI and a local REST server"
+name = "haversack"
+version = "0.3.0"
+description = "Medical-image segmentation models, many families behind one door: TotalSegmentator, MOOSE, MRSegmentator, stock nnU-Net and more, on MPS, CUDA or CPU, with a CLI and a local REST server"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -9,7 +9,7 @@ dependencies = [
     "numpy",
     "tqdm",
     "typer>=0.12",
-    # the wire's typed vocabulary (nnseg.schemas): one declaration generates the
+    # the wire's typed vocabulary (haversack.schemas): one declaration generates the
     # published JSON Schema, the submit-time validation and the OpenAPI document.
     # 27 ms to import, 7.8 MB on disk - noise next to SimpleITK's 183 MB, and it
     # is already present wherever `serve` is installed (FastAPI depends on it).
@@ -19,29 +19,28 @@ dependencies = [
     "SimpleITK",
 ]
 # NOTE: mlx is NOT a core dependency (moved to the `mlx` extra below, 2026-08-26).
-# The product is torch/MPS-first (nnseg); MLX is the oracle-only path. Keeping mlx
+# The product is torch/MPS-first (haversack); MLX is the oracle-only path. Keeping mlx
 # in core made the whole package uninstallable where mlx has no wheels (Linux/CUDA/
 # Modal) - CI had to avoid `uv sync` and hand-list deps for exactly this reason, and
-# the per-engine images mount the package + hand-list rather than `pip install nnseg[...]`.
+# the per-engine images mount the package + hand-list rather than `pip install haversack[...]`.
 # With mlx optional, core installs anywhere and uv-native `uv sync --extra <x>` works.
 
 [project.scripts]
-# nnseg is the only executable. The MLX-era commands (nnmlx, TotalSegmentator, totalseg-mlx)
+# haversack is the only executable. The MLX-era commands (nnmlx, TotalSegmentator, totalseg-mlx)
 # are gone (2026-09-02): `uv tool install` put all four on PATH, three of them crashing
 # without mlx and one shadowing a real TotalSegmentator.
-nnseg = "nnseg.cli:main"
+haversack = "haversack.cli:main"
 
 [project.optional-dependencies]
-# There is no mlx extra: the distribution ships nnseg only (2026-09-02). The MLX oracle
-# source stays in src/nnunet_inference_mlx for its tests and fixtures but is not packaged;
-# running it in the dev env is `uv pip install mlx`.
+# There is no mlx extra. The MLX oracle haversack is checked against lives in its own
+# repository, nnunet-inference-mlx; this package never imports it (tests/test_layering.py).
 # Remote weight download (store.download / download_archive).
 remote = ["httpx"]
-# The REST job server (nnseg serve).
+# The REST job server (haversack serve).
 serve = ["matplotlib", "fastapi", "uvicorn", "python-multipart"]
 # Server-side fetch of IDC series by UUID (source kind "idc").
 idc = ["obstore"]
-# Deploying the server to Modal (nnseg modal deploy).
+# Deploying the server to Modal (haversack modal deploy).
 modal = ["modal"]
 # Multi-label connected-component cleanup (segment --remove-small-components-mm3).
 postprocessing = ["connected-components-3d"]
@@ -52,19 +51,19 @@ postprocessing = ["connected-components-3d"]
 preview = ["matplotlib"]
 # CUDA-only acceleration for the nnU-Net worker: the Triton restore backend (picked
 # automatically on CUDA). No macOS/Linux-CPU wheels, so it is opt-in - only the GPU base
-# image syncs it. nnseg falls back to the numpy/torch restore without it.
+# image syncs it. haversack falls back to the numpy/torch restore without it.
 cuda = ["triton"]
 test = ["pytest", "pydicom", "fastapi", "httpx", "python-multipart"]
-# The torch path (nnseg): torch >= 2.7 for torch.mps.compile_shader; nnunetv2 for the network
+# The torch path (haversack): torch >= 2.7 for torch.mps.compile_shader; nnunetv2 for the network
 # architecture, weights and sliding-window slicers (stock APIs only - the GPU resampler now
-# lives in nnseg.resample, so no fork is pinned); scipy builds the resampler's exact operators;
+# lives in haversack.resample, so no fork is pinned); scipy builds the resampler's exact operators;
 # scikit-image is test-only reference. SimpleITK is already a core dependency and does the IO.
 # numpy>=2 anchors the "numpy-2 world" (the GPU/nnU-Net path, tested on 2.x) so it forks
 # cleanly from the synthstrip engine's numpy<2 - see [tool.uv] conflicts below.
 torch = ["torch>=2.7", "nnunetv2", "scipy", "scikit-image", "numpy>=2"]
 # The SynthStrip engine: the model + conform live in the standalone `synthstrip-torch`
 # package (like fastsurfer-lean; git rev in [tool.uv.sources]), which brings torch + surfa +
-# numpy<2 + SimpleITK. scipy is nnseg's (the post-restore mask cleanup). surfa's reorient
+# numpy<2 + SimpleITK. scipy is haversack's (the post-restore mask cleanup). surfa's reorient
 # needs numpy<2 - genuinely incompatible with the torch extra's numpy>=2, so this extra is
 # declared conflicting below and uv forks them into ONE universal lock; materialize this engine
 # on its own: `UV_PROJECT_ENVIRONMENT=.venvs/synthstrip uv sync --extra synthstrip`.
@@ -77,7 +76,7 @@ synthstrip = ["synthstrip-torch", "scipy"]
 # subpackages, so a plain `pip install git+.../FastSurfer` is import-broken - hence
 # the fork. Heavy tree dropped in the fork; conflicts with the other engines below.
 fastsurfer = ["fastsurfer-lean"]
-# The VoxTell engine (nnseg.engines.voxtell): free-text promptable segmentation from
+# The VoxTell engine (haversack.engines.voxtell): free-text promptable segmentation from
 # MIC-DKFZ. Its own environment because it pins `torch>=2.0,<2.9` while the torch extra
 # is unbounded (and resolves well past that) - declared conflicting below. The package
 # brings its own tree (nnunetv2, dynamic-network-architectures, transformers,
@@ -95,13 +94,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/nnseg"]
+packages = ["src/haversack"]
 # The task catalogs ship whatever .gitignore says: hatch skips VCS-ignored files, and a
-# `data/` rule in the workspace .gitignore once swallowed src/nnseg/data - a wheel built from
-# the pushed branch had no catalog, and every `nnseg segment` died on a missing
+# `data/` rule in the workspace .gitignore once swallowed src/haversack/data - a wheel built from
+# the pushed branch had no catalog, and every `haversack segment` died on a missing
 # ts_tasks.json (2026-09-02). `artifacts` (not force-include, which would add the files a
 # second time now that they are tracked) makes them part of the normal selection.
-artifacts = ["src/nnseg/data/*.json"]
+artifacts = ["src/haversack/data/*.json"]
 
 [tool.uv]
 # Engines own their environments (docs: "one environment per engine"). An engine whose
@@ -120,7 +119,7 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-# nnunetv2 comes from PyPI: nnseg uses only stock nnunetv2 APIs (verified against 2.8.1). It
+# nnunetv2 comes from PyPI: haversack uses only stock nnunetv2 APIs (verified against 2.8.1). It
 # used to be a `path = "../upstream/nnUNet"` source here, but uv applies these sources to a
 # `git+https://...` install too, and that relative path exists only in the dev workspace - so
 # every outside install failed before downloading anything (2026-09-02). For upstream work

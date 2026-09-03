@@ -28,7 +28,7 @@ import zarr
 
 # The file renames below already ran once and are idempotent; DATA only matters if they have
 # not. DEMO is where the stores live and is the argument that actually gets used day to day.
-DATA = Path(os.environ.get("NNSEG_DEMO_DATA", "~/tmp/data")).expanduser()
+DATA = Path(os.environ.get("HAVERSACK_DEMO_DATA", "~/tmp/data")).expanduser()
 DEMO = (Path(sys.argv[1]) if len(sys.argv) > 1
         else Path(__file__).resolve().parent.parent / "data" / "duckn_demo")
 
@@ -131,7 +131,7 @@ OPENNEURO = {
 
 RENAMES = [("chest.nii", "idc-torso1.nii"),
            ("chest.zarr.zip", "idc-torso1.zarr.zip"),
-           ("chest_nnseg_1.5mm.zarr.zip", "idc-torso1_nnseg_1.5mm.zarr.zip"),
+           ("chest_haversack_1.5mm.zarr.zip", "idc-torso1_haversack_1.5mm.zarr.zip"),
            ("chest_dicom", "idc-torso1_dicom"),
            ("chest.zmp", "idc-torso1.zmp")]
 
@@ -152,7 +152,7 @@ for old, new in RENAMES:
 # duckn's `sources` schema is deliberately compact - type, format, path, url, doi, identifier,
 # description, created, note - with no slot for a study UID or a scanner model. So the standard
 # fields go there, where any duckn reader finds them, and the rest stays namespaced under
-# `nnseg.case` rather than being crammed into `note` or silently extending someone else's schema.
+# `haversack.case` rather than being crammed into `note` or silently extending someone else's schema.
 DUCKN_SOURCE_KEYS = ("type", "format", "path", "url", "doi", "identifier", "description",
                      "created", "note")
 
@@ -234,7 +234,7 @@ def stamp(store_name, prov, new_name=None):
     root = zarr.open_group(str(d), mode="r+")
     a = dict(root.attrs.asdict()["duckn"])
     ext = dict(a["extensions"])
-    ext["nnseg"] = dict(ext["nnseg"]) | {"case": prov["case"],
+    ext["haversack"] = dict(ext["haversack"]) | {"case": prov["case"],
                                         "case_detail": keep_for_store(prov)}
     # the builder wrote `processing`; add the source and the licence without discarding it
     pv = dict(ext.get("provenance") or {"version": "1.0"})
@@ -269,7 +269,7 @@ for n in sorted(str(p.relative_to(DEMO)) for p in DEMO.glob("*/*.duckn")):
     r = zarr.open_group(str(DEMO / n), mode="r")
     e = r.attrs.asdict()["duckn"]["extensions"]
     print(f"  {n}")
-    print(f"    nnseg.case      {e['nnseg']['case']}")
+    print(f"    haversack.case      {e['haversack']['case']}")
     print(f"    provenance keys {sorted(e['provenance'])}")
     print(f"    parts           {sorted(k for k, _ in r['parts'].groups())}")
 print(f"\n  {DATA/'chest.nii'} -> {os.readlink(DATA/'chest.nii')}")

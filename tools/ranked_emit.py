@@ -2,7 +2,7 @@
 
 Supersedes `encode_inline.py`, which hand-rolled the codec in this script. That copy predates
 the tie-breaking rule, so its ranks can differ from the shipped encoder wherever two logits are
-exactly equal - and fp16 logits tie often. A demo store that disagrees with `nnseg.ranked` at
+exactly equal - and fp16 logits tie often. A demo store that disagrees with `haversack.ranked` at
 ties is a store nothing else reproduces, so this drives `segment(probabilities=RankedSpec(...))`
 instead and touches no codec of its own.
 
@@ -23,8 +23,8 @@ from pathlib import Path
 
 import numpy as np
 
-from nnseg.pipeline import segment
-from nnseg.ranked import RankedSpec
+from haversack.pipeline import segment
+from haversack.ranked import RankedSpec
 
 DISTANCE_VOXELS = 2.0            # truncation of the emitted distance field, in voxels
 
@@ -56,7 +56,7 @@ def _emit_distance(part, code, out):
     import torch
     if not torch.cuda.is_available() or "frame" not in code.meta:
         return {}
-    from nnseg.ranked import distance_field
+    from haversack.ranked import distance_field
     t = time.perf_counter()
     eff = _true_spacing(code.meta)
     truncation = DISTANCE_VOXELS * min(eff)
@@ -80,7 +80,7 @@ def _emit_junction(part, code, out, dist_meta):
     import torch
     if not dist_meta or not torch.cuda.is_available():
         return {}
-    from nnseg.ranked import junction_field
+    from haversack.ranked import junction_field
     t = time.perf_counter()
     eff = _true_spacing(code.meta)
     truncation = float(dist_meta["distance_truncation"])

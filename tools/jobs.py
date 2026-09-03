@@ -16,9 +16,9 @@ reads the content store - that readability is why the caches use percent-encoded
 readable names rather than hashes, and a database should not quietly give it up.
 
 Dependency-free on purpose (sqlite3 is stdlib) so it runs against a store on a
-machine that has no nnseg checkout - a mounted Modal volume, a copied workdir, a
+machine that has no haversack checkout - a mounted Modal volume, a copied workdir, a
 laptop being debugged over ssh. It duplicates no logic: it reads the same rows
-`nnseg.jobstore` writes, and `reap` applies the same TTL the server does.
+`haversack.jobstore` writes, and `reap` applies the same TTL the server does.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ import sys
 import time
 from pathlib import Path
 
-DEFAULT = Path("/tmp/nnseg-serve/jobs.db")
+DEFAULT = Path("/tmp/haversack-serve/jobs.db")
 TERMINAL = ("done", "failed", "cancelled")
 
 

@@ -1,6 +1,6 @@
-# nnseg
+# haversack
 
-`nnseg` runs nnU-Net-family segmentation models on PyTorch - TotalSegmentator, MOOSE,
+`haversack` runs nnU-Net-family segmentation models on PyTorch - TotalSegmentator, MOOSE,
 MRSegmentator, and any stock nnU-Net v2 model folder - on an Apple Silicon GPU (MPS), a CUDA
 card, or the CPU. It is a library with a command line and a small REST server on top.
 
@@ -23,36 +23,34 @@ workspace it lives in; the API is documented in the docstrings.
 
 ```bash
 uv venv --python 3.12 && source .venv/bin/activate
-uv pip install "nnunet-inference-mlx[torch] @ git+https://github.com/mhalle/nnunet-inference-mlx@feature/nnseg"
+uv pip install "haversack[torch] @ git+https://github.com/mhalle/haversack"
 ```
 
-`pip install` of the same URL works too. The distribution is still named `nnunet-inference-mlx`
-for historical reasons (the repository began as an MLX port, whose source remains as the
-reference nnseg is checked against); what it installs is the `nnseg` package and the `nnseg`
-command, nothing else. Add `serve` to the extras for the local server, `remote` for the client:
+`pip install` of the same URL works too. Add `serve` to the extras for the local server,
+`remote` for the client:
 
 ```bash
-uv pip install "nnunet-inference-mlx[torch,serve,remote] @ git+https://github.com/mhalle/nnunet-inference-mlx@feature/nnseg"
+uv pip install "haversack[torch,serve,remote] @ git+https://github.com/mhalle/haversack"
 ```
 
-For a command-line user, a tool install puts `nnseg` on PATH in its own environment, away
+For a command-line user, a tool install puts `haversack` on PATH in its own environment, away
 from any project:
 
 ```bash
-uv tool install --python 3.12 "nnunet-inference-mlx[torch,serve,remote] @ git+https://github.com/mhalle/nnunet-inference-mlx@feature/nnseg"
+uv tool install --python 3.12 "haversack[torch,serve,remote] @ git+https://github.com/mhalle/haversack"
 ```
 
-and `uvx --from "nnunet-inference-mlx[torch] @ git+https://github.com/mhalle/nnunet-inference-mlx@feature/nnseg" nnseg ...`
+and `uvx --from "haversack[torch] @ git+https://github.com/mhalle/haversack" haversack ...`
 runs it without installing anything.
 
 Check it:
 
 ```bash
-nnseg tasks
+haversack tasks
 ```
 
 lists every task the catalog knows, with the engine, modality, and whether its weights are
-already on disk. `nnseg tasks --installed` shows what will run without a download.
+already on disk. `haversack tasks --installed` shows what will run without a download.
 
 ## Weights
 
@@ -70,20 +68,20 @@ They download on first use: TotalSegmentator models from the TotalSegmentator Gi
 provision ahead of time:
 
 ```bash
-nnseg weights fetch total          # every part the task needs
-nnseg weights coverage             # what the manifest can provision, and what it cannot
+haversack weights fetch total          # every part the task needs
+haversack weights coverage             # what the manifest can provision, and what it cannot
 ```
 
 `coverage` marks the TotalSegmentator tasks whose weights are behind TotalSegmentator's
 commercial license (`appendicular_bones`, `brain_structures`, `coronary_arteries`,
-`heartchambers_highres`, `tissue_types`, ...). nnseg does not handle that license: install those
-with TotalSegmentator's own `totalseg_set_license` flow into the same root and nnseg will find
+`heartchambers_highres`, `tissue_types`, ...). haversack does not handle that license: install those
+with TotalSegmentator's own `totalseg_set_license` flow into the same root and haversack will find
 them.
 
 ## Segment from the command line
 
 ```bash
-nnseg segment scan.nii.gz --task total_fast -o labels.nii.gz
+haversack segment scan.nii.gz --task total_fast -o labels.nii.gz
 ```
 
 Input: NIfTI, NRRD, MetaImage, or a DICOM series directory. Output format follows the extension
@@ -119,7 +117,7 @@ read and the network.
 ## Python API
 
 ```python
-from nnseg import segment, Segmenter
+from haversack import segment, Segmenter
 
 r = segment("scan.nii.gz", "total_fast")        # a Segmentation
 r.save("labels.nii.gz")
@@ -136,26 +134,26 @@ job = seg.submit("scan.nii.gz", "total", on_progress=print)   # off-thread, canc
 `segment()` takes the same options as the command line as keyword arguments (`grid=1.0`,
 `interp="nearest"`, `device="mps"`, `envelope_mm=20`, ...). A stock nnU-Net model folder
 works as a task: `segment("scan.nii.gz", "/path/to/Dataset123_x/nnUNetTrainer__nnUNetPlans__3d_fullres")`.
-Errors are one family, `nnseg.NnsegError` (`InputError`, `ModelNotFound`,
+Errors are one family, `haversack.HaversackError` (`InputError`, `ModelNotFound`,
 `UnsupportedModel`, `ResourceError`, `Cancelled`).
 
 ## Local server
 
-The server is the same job protocol nnseg deploys on Modal, run on the machine itself:
+The server is the same job protocol haversack deploys on Modal, run on the machine itself:
 
 ```bash
-nnseg serve --port 8790 --token choose-a-secret
+haversack serve --port 8790 --token choose-a-secret
 ```
 
 It builds a `Segmenter` with warm models (`--cache-models 5` by default, enough for a whole
 `total` union), queues jobs, streams progress, and keeps a durable result cache under
-`~/.cache/nnseg/results`. Without `--token` a request can read health, the task list, and
+`~/.cache/haversack/results`. Without `--token` a request can read health, the task list, and
 cached results, but never compute. The client:
 
 ```bash
-export NNSEG_SERVER=http://127.0.0.1:8790
-nnseg remote --token choose-a-secret tasks
-nnseg remote --token choose-a-secret submit scan.nii.gz --task total_fast -o labels.seg.nrrd
+export HAVERSACK_SERVER=http://127.0.0.1:8790
+haversack remote --token choose-a-secret tasks
+haversack remote --token choose-a-secret submit scan.nii.gz --task total_fast -o labels.seg.nrrd
 ```
 
 `submit` uploads, shows progress, and downloads the labels; `--no-wait` returns a job id for
@@ -163,12 +161,12 @@ nnseg remote --token choose-a-secret submit scan.nii.gz --task total_fast -o lab
 `/v1/jobs`); the OpenAPI document is at `/docs`. On this M2 a `total_fast` job through the
 server produced labels voxel-identical to the command line's.
 
-## What nnseg does not do yet
+## What haversack does not do yet
 
 - Multi-channel nnU-Net inputs, region (sigmoid) heads, and the `3d_lowres`, cascade and `2d`
   configurations are not on the nnU-Net path.
 - The FastSurfer, SynthStrip, VoxTell and MONAI engines each need their own environment
   (their dependency pins conflict with the torch path) and are run as separate server
   processes; locally they are not part of the default install.
-- Versioning: `nnseg.__version__` is nnseg's own number and is what the server reports; the
+- Versioning: `haversack.__version__` is haversack's own number and is what the server reports; the
   distribution's version belongs to the repository as a whole.

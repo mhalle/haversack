@@ -61,7 +61,7 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
 
     rep.check((path / "README.md").exists(), "no README.md - the format reference is missing")
     rep.check("seg" in ext, "no seg extension on the root group")
-    rep.check("nnseg" in ext, "no nnseg block on the root group")
+    rep.check("haversack" in ext, "no haversack block on the root group")
     pv = ext.get("provenance") or {}
     rep.check(bool(pv), "no duckn provenance extension - nothing says where this came from")
     rep.check(bool(pv.get("sources")), "provenance has no sources - the case is unidentifiable",
@@ -72,7 +72,7 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
               "a processing step names no software")
     rep.check(all(s.get("name") for s in steps),
               "a processing step has no name (required by the extension)")
-    order = ext.get("nnseg", {}).get("part_order", [])
+    order = ext.get("haversack", {}).get("part_order", [])
     rep.check(bool(order), "empty part_order - paint order is external knowledge and must "
                            "be recorded")
 

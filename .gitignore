@@ -14,5 +14,5 @@ uv.lock
 data/
 
 # the package manifests are code, not data: the data/ rule above must not swallow them
-!src/nnseg/data/
-!src/nnseg/data/*.json
+!src/haversack/data/
+!src/haversack/data/*.json

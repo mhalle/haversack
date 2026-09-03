@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 import torch
 
-import nnseg as lg
-from nnseg import Mapping
-from nnseg.backends import metal
+import haversack as lg
+from haversack import Mapping
+from haversack.backends import metal
 
 E3_DIR = os.path.join(os.environ.get(
     "MEDSEG_SCRATCH",

@@ -3,15 +3,15 @@ import numpy as np
 import pytest
 import torch
 
-import nnseg as lg
-from nnseg import Mapping, build_tables, reference
-from nnseg.backends import metal
+import haversack as lg
+from haversack import Mapping, build_tables, reference
+from haversack.backends import metal
 
 from conftest import assert_agree_up_to_ties, voronoi_logits
 
 
 def _backends_for(device):
-    from nnseg.backends import triton_gpu
+    from haversack.backends import triton_gpu
     names = ["torch"]
     if device.type == "mps" and metal.available():
         names.append("metal")
@@ -92,7 +92,7 @@ def test_metal_fp_contract_state():
 
 def test_available_backends():
     """torch is always there; the fused backends appear exactly where their hardware does."""
-    from nnseg.backends import triton_gpu
+    from haversack.backends import triton_gpu
     names = lg.available_backends()
     assert "torch" in names
     assert ("metal" in names) == (metal.available())

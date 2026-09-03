@@ -34,7 +34,7 @@ jobs:
         run: |
           uv run python - <<'PY'
           import os, sys
-          from nnseg import weights_fetch as wf
+          from haversack import weights_fetch as wf
           r = wf.refresh_manifest(progress=lambda m: print(m, flush=True))
           c = wf.coverage()
           print(f"\ncoverage: {len(c['covered'])}/{c['n_tasks']} provisionable, "
@@ -61,8 +61,8 @@ jobs:
           title: "chore: refresh the weights manifest"
           commit-message: "chore: refresh the weights manifest from TotalSegmentator releases"
           body: |
-            Automated `nnseg weights refresh`. Only records what upstream published -
+            Automated `haversack weights refresh`. Only records what upstream published -
             `default` is never repointed by this job.
 
             Check whether any newly added dataset also needs a `ts_tasks.json` task entry.
-          add-paths: src/nnseg/data/ts_weights.json
+          add-paths: src/haversack/data/ts_weights.json

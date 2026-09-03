@@ -27,10 +27,10 @@ import SimpleITK as sitk
 
 
 def main(t1, outdir, depth=6, clip=8.0, device="mps"):
-    from nnseg import io
-    from nnseg.engines import fastsurfer as fs
-    from nnseg.engines.geometry import grid_record
-    from nnseg.ranked import RankedSpec
+    from haversack import io
+    from haversack.engines import fastsurfer as fs
+    from haversack.engines.geometry import grid_record
+    from haversack.ranked import RankedSpec
 
     depth, clip = int(depth), float(clip)
     out = Path(outdir)

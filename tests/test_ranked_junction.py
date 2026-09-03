@@ -8,7 +8,7 @@ field must STILL be the signed distance to the A|B plane there: that continuatio
 a reader interpolate it at the surface, where half of every stencil is background.
 
 Two implementations answer one contract - the numpy reference in tools/ and the torch version
-in nnseg.ranked - and every test runs against each, the way the distance tests do. Resolution
+in haversack.ranked - and every test runs against each, the way the distance tests do. Resolution
 is lazy so that a missing dependency skips one parameter, not the suite.
 """
 
@@ -53,7 +53,7 @@ def _resolve(name):
         ref = _load_tools().junction_field
         return lambda ranks, support, clip, sp, T: ref(ranks, support, clip, sp, T)
     dev = name.split("-", 1)[1]
-    torch_field = pytest.importorskip("nnseg.ranked").junction_field
+    torch_field = pytest.importorskip("haversack.ranked").junction_field
 
     def call(ranks, support, clip, sp, T, _dev=dev):
         return torch_field(ranks, support, clip=clip, spacing_zyx=sp, truncation=T, device=_dev)

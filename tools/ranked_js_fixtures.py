@@ -1,6 +1,6 @@
 """Golden fixtures for a JavaScript ranked-store decoder.
 
-A JS port of `nnseg.ranked.decode_groups` cannot be trusted by inspection - the
+A JS port of `haversack.ranked.decode_groups` cannot be trusted by inspection - the
 project rule is that geometry and decode changes get a bit-exactness check
 against a known-good reference before they are believed. This tool produces that
 reference, from the decoder that is already validated:
@@ -36,7 +36,7 @@ import numpy as np
 import torch
 import zarr
 
-from nnseg.ranked import CLIP, RankedCode, decode_groups, encode
+from haversack.ranked import CLIP, RankedCode, decode_groups, encode
 
 ZSTD = None  # zarr.codecs is import-time heavy; resolved in main()
 
@@ -89,7 +89,7 @@ def _margin_attrs(spatial_axes, origin, space, clip, groups):
         "space_origin": list(origin),
         "value_transforms": _lut_transform(clip),
         "axes": [{"kind": "list"}] + [dict(ax) for ax in spatial_axes],
-        "extensions": {"nnseg_fixture": {
+        "extensions": {"haversack_fixture": {
             "clip": clip,
             "byte_for_boundary": 128,
             "byte_for_absent": 0,

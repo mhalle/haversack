@@ -45,7 +45,7 @@ def _torch_devices():
 
 
 # Every implementation answers the same contract, so every test runs against each. The numpy
-# band version in tools/ is the reference; the torch version in nnseg.ranked is the product
+# band version in tools/ is the reference; the torch version in haversack.ranked is the product
 # path (CUDA on the Modal worker, MPS locally). Parametrizing the suite is the point - two of
 # three implementations of this algorithm were wrong in ways that rendered plausibly, and a
 # test that runs against only one would certify the other by association. Resolution is LAZY:
@@ -58,7 +58,7 @@ def _resolve(name):
     if name == "numpy":
         return _load_tools().distance_field
     dev = name.split("-", 1)[1]
-    torch_field = pytest.importorskip("nnseg.ranked").distance_field
+    torch_field = pytest.importorskip("haversack.ranked").distance_field
 
     def call(ranks, support, clip, sp, T, _dev=dev):
         return torch_field(ranks, support, clip=clip, spacing_zyx=sp,

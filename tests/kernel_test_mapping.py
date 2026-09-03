@@ -4,7 +4,7 @@ import pytest
 from scipy.ndimage import map_coordinates, zoom
 from skimage.transform import resize
 
-from nnseg import Mapping, build_tables, reference
+from haversack import Mapping, build_tables, reference
 
 
 def _vol(shape, seed=0):

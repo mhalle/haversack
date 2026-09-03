@@ -1,6 +1,24 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-09-02
+
+- **nnseg is now haversack, in its own repository.** The package, the distribution, the
+  command, the environment variables (`HAVERSACK_*`), the results cache
+  (`~/.cache/haversack`), the Modal app and volumes (`haversack-serve`, `haversack-weights`,
+  ...) and the error class (`HaversackError`) all carry the new name; nothing external keeps
+  the old one except the weights sidecar, where `.nnseg-version.json` is still read so an
+  installed model folder is not re-fetched. Wire: the progress and credential headers are
+  `Haversack-Stage`, `Haversack-Fraction` and `Haversack-Source-Token` (were `NNSeg-*`); a
+  client written against nnseg must follow. History came along: this repository is
+  `nnunet-inference-mlx` filtered to nnseg's paths (275 commits), so `git log` and `git blame`
+  reach back to the 2026-08-22 "increment 1" commit and beyond into the packaging files' MLX
+  past; the MLX package itself stays behind in `nnunet-inference-mlx` as the oracle. The name
+  is scope-neutral on purpose - the same kernel (restore any field onto any grid) and the same
+  job protocol are meant to carry registration models next, and a `-seg` name would have been
+  wrong the day that landed. Entries below this line say "nnseg"; they are history and were
+  not rewritten. Test files lost their `test_nnseg_` prefix; the tests themselves are unchanged.
+
+## [Unreleased before the rename]
 
 - **The distribution is nnseg only (2026-09-02).** The wheel ships `src/nnseg` and one
   executable, `nnseg`. The MLX-era package and its three commands (`nnmlx`,

@@ -107,7 +107,7 @@ def align(src, dst):
     d = zarr.create_group(store=str(dst))
     d.attrs.update(s.attrs.asdict())                  # root metadata carries over unchanged
 
-    order = s.attrs.asdict()["duckn"]["extensions"]["nnseg"]["part_order"]
+    order = s.attrs.asdict()["duckn"]["extensions"]["haversack"]["part_order"]
     shared = frame_origin(s, order)
 
     # Segment extents are in the CROPPED array's coordinates. Padding moves every voxel by that

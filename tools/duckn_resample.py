@@ -21,13 +21,13 @@ produced, and records the centering it applied.
 Target grid
 -----------
 `--spacing/--shape/--factor` are duckn's own, and `--like` matches another array's sample
-counts, which is how you land on a model's grid (nnseg/TotalSegmentator resample by
+counts, which is how you land on a model's grid (haversack/TotalSegmentator resample by
 `round(n * s / target)`, so ask for that shape rather than that spacing).
 
 Centering is the sample-count-to-extent relationship and it decides where the grid lands:
 `cell` holds the field of view and shifts sample centres by half the spacing change; `node`
 holds the first and last sample centres. It is read from the source unless `--centering`
-overrides it. nnseg's pipeline is node/corner, so that is what matching its grid wants.
+overrides it. haversack's pipeline is node/corner, so that is what matching its grid wants.
 
 `--no-anti-alias` turns off the downsampling pre-blur, which is what a consumer validated on
 unfiltered resampling needs: see docs/resampler-parity-finding.md, where the blur costs
@@ -82,7 +82,7 @@ def main(argv=None) -> int:
     g.add_argument("--factor", type=float, nargs="+", help="relative zoom, scalar or per-axis")
     g.add_argument("--like", type=Path, help="match this array's sample counts")
     g.add_argument("--model-spacing", type=float,
-                   help="nnseg/TotalSegmentator's rule: shape = round(n * s / this)")
+                   help="haversack/TotalSegmentator's rule: shape = round(n * s / this)")
     ap.add_argument("--centering", choices=["cell", "node"],
                     help="override the source's declared convention")
     ap.add_argument("--order", type=int, default=1, choices=[0, 1, 3],

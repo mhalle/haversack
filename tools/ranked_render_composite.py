@@ -40,7 +40,7 @@ matplotlib.use("Agg")
 import matplotlib.image as mpimg
 
 SEED_FROM = "deficit"
-DEMO = Path.home() / "Dropbox/development/medseg/nnunet-inference-mlx/data/duckn_demo"
+DEMO = Path(__file__).resolve().parents[1] / "data" / "duckn_demo"   # untracked build products
 LOBES = {
     "lung_upper_lobe_right":  (0.36, 0.62, 0.86),
     "lung_middle_lobe_right": (0.30, 0.78, 0.72),
@@ -97,8 +97,7 @@ def load(store, device):
     # all-surfaces field - gives fields that are zero exactly on the wanted surfaces, with
     # sub-voxel crossings from the deficits, and no gate anywhere downstream.
     import importlib.util
-    tools = (Path.home() / "Dropbox/development/medseg/nnunet-inference-mlx"
-             / "tools" / "ranked_build_store.py")
+    tools = Path(__file__).resolve().parent / "ranked_build_store.py"
     spec = importlib.util.spec_from_file_location("rbs", tools)
     rbs = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rbs)
@@ -235,8 +234,7 @@ def load_vessels(store, device):
         np.minimum.at(d, at, t * step)
         np.minimum.at(d, bt, (1.0 - t) * step)
     import importlib.util as _il
-    tools = (Path.home() / "Dropbox/development/medseg/nnunet-inference-mlx"
-             / "tools" / "ranked_build_store.py")
+    tools = Path(__file__).resolve().parent / "ranked_build_store.py"
     spec_ = _il.spec_from_file_location("rbs2", tools)
     rbs2 = _il.module_from_spec(spec_); spec_.loader.exec_module(rbs2)
     d = rbs2._eikonal(d, list(map(float, sp)), T)

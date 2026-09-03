@@ -1,4 +1,4 @@
-"""Regenerate src/nnseg/data/monai_bundles.json from the MONAI model zoo.
+"""Regenerate src/haversack/data/monai_bundles.json from the MONAI model zoo.
 
 The bundle is the spec - labels come from each installed bundle's own
 ``configs/metadata.json`` (``network_data_format.outputs.pred.channel_def``) at
@@ -50,7 +50,7 @@ CURATED = (
 # brats_mri_segmentation is the first multi-input task the wire can carry: it
 # declares its four channels (T1c/T1/T2/FLAIR) in its own metadata, the wire
 # binds sources to those names, and the engine stacks them in the bundle's
-# order. Its inputs must already be co-registered onto one grid - nnseg does not
+# order. Its inputs must already be co-registered onto one grid - haversack does not
 # register images, and says so in the task's `behavior.alignment`.
 
 
@@ -144,7 +144,7 @@ def build(keep_all: bool = False) -> dict:
 
 if __name__ == "__main__":
     data = build(keep_all="--all" in sys.argv)
-    dest = Path(__file__).parent.parent / "src/nnseg/data/monai_bundles.json"
+    dest = Path(__file__).parent.parent / "src/haversack/data/monai_bundles.json"
     dest.write_text(json.dumps(data, indent=1, sort_keys=False) + "\n")
     print(f"wrote {dest} with {len(data['bundles'])} bundles")
     for line in data["skipped"]:

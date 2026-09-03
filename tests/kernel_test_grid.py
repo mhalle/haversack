@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from nnseg import Grid, Mapping
+from haversack import Grid, Mapping
 
 
 def test_like_and_duck_typing():
