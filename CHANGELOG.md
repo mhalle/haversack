@@ -20,6 +20,15 @@
 
 ## [Unreleased]
 
+- **`haversack segment` takes remote inputs.** `idc:<crdc_series_uuid>`,
+  `zenodo:<recid>/<file>[!member]`, `tcia:`, `openneuro:`, `hf:` - the server's five sources,
+  same grammar - and a bare `http(s)://` URL, with `!member` reading one file out of a remote
+  zip by Range. `sources.materialize()` fetches once into `~/.cache/haversack/inputs`
+  (`HAVERSACK_CACHE_DIR` moves it) and hands back the file, or the directory for a DICOM
+  series. IDC needs the `idc` extra (obstore) and says so. The http(s) source is local only,
+  deliberately: it is never in a server's registry, because a server fetching client-chosen
+  URLs could be steered at anything it can reach and a URL is not a cache-grade identity.
+
 - **Progress fractions move with the work.** A one-patch volume read `5 % loading`, `5 %
   preprocess`, `5 % predict`, `95 % restore`: every stage but restore started at the same
   number and only patch ticks moved it. Each stage now starts where the previous one's

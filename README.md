@@ -84,7 +84,20 @@ them.
 haversack segment scan.nii.gz --task total_fast -o labels.nii.gz
 ```
 
-Input: NIfTI, NRRD, MetaImage, or a DICOM series directory. Output format follows the extension
+Input: NIfTI, NRRD, MetaImage, or a DICOM series directory - local, or remote:
+
+```bash
+haversack segment idc:1.2.3-style-crdc-series-uuid --task total_fast -o labels.seg.nrrd     # needs the idc extra
+haversack segment "zenodo:<recid>/amos22.zip!amos22/imagesVa/amos_0575.nii.gz" --task mrsegmentator:base -o amos.seg.nrrd
+haversack segment https://example.org/scan.nii.gz --task total -o labels.nii.gz
+```
+
+Remote inputs are fetched once into `~/.cache/haversack/inputs` and reused. `!member` pulls
+one file out of a remote zip without downloading the archive. The hosted sources (`idc:`,
+`zenodo:`, `tcia:`, `openneuro:`, `hf:`) are the same ones a server accepts; bare URLs work
+on the command line only.
+
+Output format follows the extension
 (`.nii.gz`, `.nrrd`, `.seg.nrrd`, `.mha`); labels come back on the input grid, in the input's
 orientation. Task names are `ecosystem:task`, and a bare name is looked up across ecosystems
 (`total_fast` is `ts:total_fast`).

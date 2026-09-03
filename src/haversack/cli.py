@@ -54,7 +54,9 @@ def _run(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="haversack", description="nnU-Net-family segmentation on torch: fused logit restore onto any grid")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("segment", help="segment one image: NIfTI, NRRD, MetaImage, or a DICOM series directory")
-    s.add_argument("input", help="NIfTI / NRRD / MetaImage file, or a DICOM series directory")
+    s.add_argument("input", help="NIfTI / NRRD / MetaImage file, a DICOM series directory, an http(s) URL "
+                   "(!member reads one file out of a remote zip), or a hosted identifier: idc:<crdc_series_uuid>, "
+                   "zenodo:<recid>/<file>[!member], tcia:..., openneuro:..., hf:... (fetched once to ~/.cache/haversack/inputs)")
     s.add_argument("--task", required=True, help="task name from the catalog, e.g. total_fast, total")
     s.add_argument("-o", "--output", required=True)
     s.add_argument("--spacing", type=float, default=None, help="isotropic output spacing in mm (default: the input grid)")
@@ -247,11 +249,16 @@ def _run(argv=None) -> int:
     if args.cmd == "segment":
         from pathlib import Path
         from .errors import InputError
-        if not Path(args.input).exists():
+        from .sources import materialize, parse_input
+        progress = None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
+        if parse_input(args.input) is not None:
+            # idc: / zenodo: / tcia: / openneuro: / hf: identifiers and http(s) URLs: fetched
+            # once into ~/.cache/haversack/inputs, then segmented like any local path
+            args.input = str(materialize(args.input, progress=progress))
+        elif not Path(args.input).exists():
             raise InputError(f"input not found: {args.input}")
         _need_inference_stack(args.task)
         from .engines import registry
-        progress = None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
         batch = args.batch_size if args.batch_size == "auto" else int(args.batch_size)
         if registry.engine_for_task(args.task).name != registry.NNUNETV2:
             # an engine task: its runtime is in this environment (checked above); the

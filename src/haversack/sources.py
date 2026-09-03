@@ -569,3 +569,107 @@ def registry(sources=None) -> dict:
         # address them in ordinary URLs - so no pattern restriction is needed.
         out[s.prefix] = s
     return out
+
+
+class HttpSource(ArchiveReadingSource):
+    """A bare ``http://`` / ``https://`` URL, with the same ``!member`` zip-member
+    reading as the hosted sources. **Local only**: it is never in
+    :func:`default_sources`, so no server carries it - a server fetching from
+    client-chosen URLs could be steered at anything it can reach, and a URL is not
+    a cache-grade identity (the bytes behind it can change). On the user's own
+    machine both objections vanish: it is their URL and their cache."""
+
+    prefix = "http"
+    id_pattern = r"(?:s?://)?[^\s!]+(?:![A-Za-z0-9._ /-]+)?"
+    description = "any http(s) URL (local CLI only; !member for zip contents)"
+
+    def resolve(self, outer: str, credentials=None) -> tuple:
+        """``(url, size)`` from a HEAD request; a host that will not say its size
+        still works for whole-file downloads (size 0 means unknown), but a zip
+        member needs the size for Range reads and fails clearly without it."""
+        import urllib.request
+        url = outer if "://" in outer else f"http://{outer}"
+        req = urllib.request.Request(url, method="HEAD", headers=self._headers(credentials))
+        try:
+            with _OPENER.open(req, timeout=60) as r:
+                size = int(r.headers.get("Content-Length") or 0)
+                url = r.url or url                  # follow the redirect once here
+        except Exception as e:
+            raise InputError(f"{url}: HEAD failed: {e}") from e
+        return url, size
+
+    def _zip(self, outer: str, credentials=None):
+        url, size = self.resolve(outer, credentials)
+        if not size:
+            raise InputError(f"{url}: the host gives no Content-Length, so a zip "
+                             "member cannot be read by Range; download the archive instead")
+        return super()._zip(outer, credentials)
+
+
+def parse_input(spec) -> tuple:
+    """``(kind, identifier)`` when ``spec`` names a remote input, else ``None``.
+
+    Remote inputs are ``<kind>:<identifier>`` for a registered source (``idc:``,
+    ``zenodo:``, ...) or a bare ``http(s)://`` URL. A local path is never a remote
+    input, whatever it contains: Windows drive letters and paths with colons in
+    their names are one or two characters before the colon, and every source
+    prefix is longer."""
+    text = str(spec)
+    if text.startswith(("http://", "https://")):
+        return "http", text
+    kind, sep, ident = text.partition(":")
+    if sep and len(kind) >= 3 and kind.isalpha() and kind.islower() and ident and "/" not in kind:
+        return kind, ident
+    return None
+
+
+def default_input_cache() -> Path:
+    import os as _os
+    base = _os.environ.get("HAVERSACK_CACHE_DIR")
+    root = Path(base) if base else Path(_os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "haversack"
+    return root / "inputs"
+
+
+def materialize(spec, *, cache_dir=None, sources=None, progress=None, credentials=None) -> Path:
+    """Turn a remote input spec into a local path, fetching once.
+
+    The local counterpart of the server's series cache: one directory per
+    ``(kind, identifier)`` under ``cache_dir`` (default
+    ``~/.cache/haversack/inputs``), fetched by the source and marked complete, so
+    a second task on the same series does not download it again. Returns the
+    fetched file when the fetch produced exactly one, else the directory (a DICOM
+    series). A local path passes through untouched. ``sources`` defaults to the
+    server's registry plus :class:`HttpSource`; a source whose runtime is missing
+    (IDC without obstore) refuses with the extra to install.
+    """
+    import hashlib
+    parsed = parse_input(spec)
+    if parsed is None:
+        return Path(spec)
+    kind, ident = parsed
+    reg = registry(sources) if sources is not None else registry(default_sources() + [HttpSource()])
+    src = reg.get("http" if kind == "https" else kind)
+    if src is None:
+        raise InputError(f"unknown input source {kind!r}; known: {', '.join(sorted(reg))} and http(s) URLs")
+    if hasattr(src, "enabled") and not src.enabled():
+        raise InputError(f"the {kind} source needs the {kind} extra in this environment "
+                         f"(uv pip install 'haversack[{kind}]', or uv tool install with [torch,{kind}])")
+    if src.id_pattern and not re.fullmatch(src.id_pattern, ident):
+        raise InputError(f"{kind}:{ident} is not a valid {kind} identifier")
+    root = Path(cache_dir) if cache_dir else default_input_cache()
+    entry = root / kind / hashlib.sha1(ident.encode()).hexdigest()[:20]
+    done = entry / ".done"
+    if not done.exists():
+        import shutil
+        if entry.exists():
+            shutil.rmtree(entry)             # a partial fetch: start over
+        entry.mkdir(parents=True)
+        if progress:
+            progress(f"fetching {kind}:{ident}")
+        src.fetch(ident, entry, credentials=credentials)
+        done.write_text(f"{kind}:{ident}\n")
+    content = entry / "series"
+    if not content.is_dir():
+        content = entry                      # a source that wrote directly under the entry
+    files = [f for f in content.iterdir() if f.is_file() and not f.name.startswith(".")]
+    return files[0] if len(files) == 1 else content
