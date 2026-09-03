@@ -125,14 +125,20 @@ def _run(argv=None) -> int:
   haversack segment ct.nii.gz --task total_fast -o labels.seg.nrrd
   haversack segment dicom_dir/ --task total --spacing 1 -o labels.nii.gz
   haversack segment t1.nii.gz --task fastsurfer:brain -o brain.seg.nrrd      (from the fastsurfer venv)
-  haversack segment "zenodo:<recid>/amos22.zip!amos22/imagesVa/amos_0575.nii.gz" --task mrsegmentator:base -o amos.seg.nrrd""")
-    s.add_argument("input", help="NIfTI / NRRD / MetaImage file, a DICOM series directory, an http(s) URL "
-                   "(!member reads one file out of a remote zip), or a hosted identifier: idc:<crdc_series_uuid>, "
-                   "zenodo:<recid>/<file>[!member], tcia:..., openneuro:..., hf:... (fetched once to ~/.cache/haversack/inputs)")
+  haversack segment "zenodo:<recid>/amos22.zip!amos22/imagesVa/amos_0575.nii.gz" --task mrsegmentator:base -o amos.seg.nrrd
+  haversack segment a.nii.gz b.nii.gz dicom_dir/ --task total_fast --format seg.nrrd -o out/   (batch: out/<name>_total_fast.seg.nrrd)""")
+    s.add_argument("input", nargs="+",
+                   help="one or more inputs; several = batch mode. Each is a NIfTI / NRRD / MetaImage file, a DICOM "
+                   "series directory, an http(s) URL (!member reads one file out of a remote zip), or a hosted "
+                   "identifier: idc:<crdc_series_uuid>, zenodo:<recid>/<file>[!member], tcia:..., openneuro:..., hf:...")
     s.add_argument("--task", required=True,
                    help="what to segment: a name from `haversack tasks` (total_fast, total, fastsurfer:brain, ...), "
                         "or a path to a stock nnU-Net model folder")
-    s.add_argument("-o", "--output", required=True, help="where to write the labels; the extension picks the format")
+    s.add_argument("-o", "--output", default=None,
+                   help="one input: the output file (its extension picks the format). Several inputs: an output "
+                   "directory (default: the current directory), each written as <input>_<task> in --format")
+    s.add_argument("--format", default=None,
+                   help="output type for batch mode (nifti, nrrd, seg.nrrd, mha) - required when segmenting several inputs")
     s.add_argument("--spacing", type=float, default=None, help="isotropic output spacing in mm (default: the input grid)")
     s.add_argument("--interp", choices=("linear", "nearest"), default="linear",
                    help="logit interpolation for the restore: linear = sub-voxel boundaries; nearest = TotalSegmentator semantics")
@@ -161,10 +167,13 @@ def _run(argv=None) -> int:
   haversack get idc:<crdc_series_uuid> -o case1/scan.nii.gz  the series as one NIfTI
   haversack get idc:<crdc_series_uuid> --format nrrd -o out/  converted, auto-named <uuid>.nrrd
   haversack get idc:<crdc_series_uuid> -o raw_dicom/         the raw DICOM series directory""")
-    g.add_argument("source", help="a remote input: idc:<uuid>, zenodo:<recid>/<file>[!member], tcia:, openneuro:, hf:, or an http(s) URL")
+    g.add_argument("source", nargs="+",
+                   help="one or more remote inputs (several = batch): idc:<uuid>, zenodo:<recid>/<file>[!member], "
+                   "tcia:, openneuro:, hf:, or an http(s) URL")
     g.add_argument("-o", "--output", default=None, help="where to put it: a directory (raw copy) or a file (converted by extension)")
     g.add_argument("--format", default=None, help="output format (nifti, nrrd, seg.nrrd, mha): convert, and name by it into a directory")
     g.add_argument("--no-cache", action="store_true", help="do not keep the raw data in the cache (only with -o)")
+    # (batch: -o is an output directory, default the current one; --format names each converted file)
 
     tl = sub.add_parser("tasks", formatter_class=Fmt, help="list every task the catalog can segment, or one task's structures",
                         description="One line per task: name, engine, modality, and whether its weights are on disk "
@@ -425,45 +434,94 @@ def _run(argv=None) -> int:
         from . import io, sources
         from .errors import InputError
         say = lambda m: print(f"  {m}", file=sys.stderr, flush=True)
-        if sources.parse_input(args.source) is None:
-            p = Path(args.source)
-            if not p.exists():
-                raise InputError(f"not a remote source and not a local path: {args.source}")
-            print(p)                                    # a local path: nothing to fetch
-            return 0
+        srcs = args.source
+        if len(srcs) > 1 and args.output and not args.format and not str(args.output).rstrip("/").endswith(tuple(io.IMAGE_SUFFIXES)):
+            pass  # multiple raw-copies into a directory is allowed; --format only needed to convert
+
+        def get_one(src_spec, out_target):
+            """Fetch one source; write per out_target (None=cache only). Returns the path produced."""
+            if sources.parse_input(src_spec) is None:
+                p = Path(src_spec)
+                if not p.exists():
+                    raise InputError(f"not a remote source and not a local path: {src_spec}")
+                return p
+            tmp = tempfile.mkdtemp(prefix="haversack-get-") if args.no_cache else None
+            try:
+                src = sources.materialize(src_spec, cache_dir=tmp, progress=say)
+                if out_target is None:
+                    return src
+                out, want_convert = out_target
+                if want_convert:
+                    io.convert(src, out)
+                elif Path(src).is_dir():
+                    shutil.copytree(src, out, dirs_exist_ok=True)
+                else:
+                    out.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, out)
+                return out
+            finally:
+                if tmp:
+                    shutil.rmtree(tmp, ignore_errors=True)
+
+        batch = len(srcs) > 1
         if args.no_cache and not args.output:
             raise InputError("--no-cache needs -o (there would be nowhere to put the data)")
-        want_convert = bool(args.format) or (args.output and io.image_suffix(args.output))
-        tmp = tempfile.mkdtemp(prefix="haversack-get-") if args.no_cache else None
-        try:
-            src = sources.materialize(args.source, cache_dir=tmp, progress=say)
+        if not batch:
+            src_spec = srcs[0]
+            if sources.parse_input(src_spec) is None:
+                p = Path(src_spec)
+                if not p.exists():
+                    raise InputError(f"not a remote source and not a local path: {src_spec}")
+                print(p); return 0
             if not args.output:
-                print(src)                              # cached; the path is the product
-                return 0
+                print(get_one(src_spec, None)); return 0
             out = Path(args.output)
+            want_convert = bool(args.format) or bool(io.image_suffix(out.name))
             if want_convert:
                 ext = io.format_extension(args.format) if args.format else io.image_suffix(out.name)
                 if out.is_dir() or str(args.output).endswith("/") or not io.image_suffix(out.name):
-                    out = out / (sources.source_stem(args.source) + ext)
-                io.convert(src, out)
-            elif out.is_dir() or str(args.output).endswith("/"):
-                # name the copy after the source (the cache inner dir is just "series")
-                name = sources.source_stem(args.source) if Path(src).is_dir() else Path(src).name
-                dest = out / name
+                    out = out / (sources.source_stem(src_spec) + ext)
+                print(get_one(src_spec, (out, True))); return 0
+            if out.is_dir() or str(args.output).endswith("/"):
+                name = sources.source_stem(src_spec)
+                src = sources.materialize(src_spec, progress=say)
+                dest = out / (name if Path(src).is_dir() else Path(src).name)
                 if Path(src).is_dir():
                     shutil.copytree(src, dest, dirs_exist_ok=True)
                 else:
                     out.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest)
-                out = dest
-            else:                                       # a file target, no conversion: copy the bytes
-                if Path(src).is_dir():
-                    raise InputError(f"{args.source} is a DICOM series (a directory); give a directory -o, "
-                                     "or a file with an image extension (or --format) to convert it")
-                out.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, out)
-            print(out)
-        finally:
-            if tmp:
-                shutil.rmtree(tmp, ignore_errors=True)
+                print(dest); return 0
+            src = sources.materialize(src_spec, progress=say)
+            if Path(src).is_dir():
+                raise InputError(f"{src_spec} is a DICOM series (a directory); give a directory -o, "
+                                 "or a file with an image extension (or --format) to convert it")
+            out.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, out); print(out); return 0
+
+        # batch: several sources
+        if not args.output and not args.format:          # no destination: cache each, print paths
+            for src_spec in srcs:
+                print(get_one(src_spec, None))
+            return 0
+        outdir = Path(args.output or ".")                # default the output directory to the cwd
+        outdir.mkdir(parents=True, exist_ok=True)
+        ext = io.format_extension(args.format) if args.format else None
+        failures = 0
+        for src_spec in srcs:
+            try:
+                if ext:                                   # convert each into the directory
+                    out = get_one(src_spec, (outdir / (sources.source_stem(src_spec) + ext), True))
+                else:                                     # raw copy each into the directory
+                    src = sources.materialize(src_spec, progress=say)
+                    dest = outdir / (sources.source_stem(src_spec) if Path(src).is_dir() else Path(src).name)
+                    if Path(src).is_dir():
+                        shutil.copytree(src, dest, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(src, dest)
+                    out = dest
+                print(out)
+            except Exception as e:
+                failures += 1; print(f"  FAILED {src_spec}: {e}", file=sys.stderr)
+        if failures:
+            print(f"{failures} of {len(srcs)} sources failed", file=sys.stderr); return 1
         return 0
     if args.cmd == "cache":
         import json
@@ -495,40 +553,75 @@ def _run(argv=None) -> int:
                 print("  (dry run - pass --yes to delete)", file=sys.stderr)
             return 0
     if args.cmd == "segment":
+        import json as _json
         from pathlib import Path
+        from . import io
         from .errors import InputError
-        from .sources import materialize, parse_input
-        progress = None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
-        if parse_input(args.input) is not None:
-            # idc: / zenodo: / tcia: / openneuro: / hf: identifiers and http(s) URLs: fetched
-            # once into ~/.cache/haversack/inputs, then segmented like any local path
-            args.input = str(materialize(args.input, progress=progress))
-        elif not Path(args.input).exists():
-            raise InputError(f"input not found: {args.input}")
-        _need_inference_stack(args.task)
         from .engines import registry
-        batch = args.batch_size if args.batch_size == "auto" else int(args.batch_size)
-        if registry.engine_for_task(args.task).name != registry.NNUNETV2:
-            # an engine task: its runtime is in this environment (checked above); the
-            # Segmenter routes it to the engine's in-process compute
-            from .segmenter import Segmenter
-            r = Segmenter(device=args.device, weights=args.model_root, batch_size=batch).segment(
-                args.input, args.task, progress=progress)
-        else:
+        from .sources import materialize, parse_input, source_stem
+        progress = None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
+        inputs = args.input
+        batch = len(inputs) > 1 or args.format is not None
+        _need_inference_stack(args.task)
+        bs = args.batch_size if args.batch_size == "auto" else int(args.batch_size)
+        engine_task = registry.engine_for_task(args.task).name != registry.NNUNETV2
+
+        def resolve(spec):
+            if parse_input(spec) is not None:
+                return str(materialize(spec, progress=progress))
+            if not Path(spec).exists():
+                raise InputError(f"input not found: {spec}")
+            return spec
+
+        def run_one(spec):
+            img = resolve(spec)
+            if engine_task:
+                from .segmenter import Segmenter
+                return Segmenter(device=args.device, weights=args.model_root, batch_size=bs).segment(
+                    img, args.task, progress=progress)
             from .pipeline import segment
-            r = segment(args.input, args.task, weights=args.model_root, device=args.device, dtype=args.dtype,
-                        grid=args.spacing if args.spacing else "input", interp=args.interp,
-                        accumulate=args.accumulate, batch_size=batch,
-                        envelope_mm=args.envelope if args.envelope > 0 else None, progress=progress)
-        r.save(args.output)
-        if not args.quiet:
+            return segment(img, args.task, weights=args.model_root, device=args.device, dtype=args.dtype,
+                           grid=args.spacing if args.spacing else "input", interp=args.interp,
+                           accumulate=args.accumulate, batch_size=bs,
+                           envelope_mm=args.envelope if args.envelope > 0 else None, progress=progress)
+
+        def report(r, where):
+            if args.quiet:
+                return
             for k, v in r.timings.items():
                 print(f"  {v:7.2f} s  {k}", file=sys.stderr)
             for d in (r.provenance or {}).get("deviations", ()):
-                print(f"  note: {d['what']}: asked {d['requested']}, ran {d['effective']} - {d['why']}",
-                      file=sys.stderr)
-            print(f"wrote {args.output}: {tuple(r.grid.shape)}, "
-                  f"{len(r.present())}/{len(r.schema.names)} structures present", file=sys.stderr)
+                print(f"  note: {d['what']}: asked {d['requested']}, ran {d['effective']} - {d['why']}", file=sys.stderr)
+            print(f"wrote {where}: {tuple(r.grid.shape)}, {len(r.present())}/{len(r.schema.names)} structures present",
+                  file=sys.stderr)
+
+        if not batch:
+            if not args.output:
+                raise InputError("segment needs -o (the output file), or --format with -o a directory for batch")
+            r = run_one(inputs[0])
+            r.save(args.output)
+            report(r, args.output)
+        else:
+            if args.format is None:
+                raise InputError("segmenting several inputs needs --format (the output type, e.g. seg.nrrd)")
+            ext = io.format_extension(args.format)
+            outdir = Path(args.output or "."); outdir.mkdir(parents=True, exist_ok=True)
+            task_tag = str(args.task).replace(":", "-")
+            failures = 0
+            for spec in inputs:
+                out = outdir / f"{source_stem(spec)}_{task_tag}{ext}"
+                if not args.quiet:
+                    print(f"[{spec}] -> {out}", file=sys.stderr)
+                try:
+                    r = run_one(spec)
+                    r.save(out)
+                    report(r, out)
+                except Exception as e:                    # one bad input must not sink the batch
+                    failures += 1
+                    print(f"  FAILED {spec}: {e}", file=sys.stderr)
+            if failures:
+                print(f"{failures} of {len(inputs)} inputs failed", file=sys.stderr)
+                return 1
     if args.cmd == "weights":
         from pathlib import Path
         from . import weights_fetch as wfm

@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+- **`get` and `segment` take several inputs (batch mode).** With more than one input the
+  output is a directory (`-o`, default the current directory) and `--format` names the type:
+  `segment` writes `<dir>/<name>_<task>.<ext>` for each, `get` writes `<dir>/<name>.<ext>`
+  (converted) or copies each raw when `--format` is omitted. A single input is unchanged
+  (`-o` the file, extension picks the format). One input failing does not sink the batch -
+  it is reported and the run exits non-zero.
+
 - **Modal workers fail fast when a volume was deleted under a snapshot.** A memory snapshot
   (on by default) captures the container with its volume handles; deleting one of the per-app
   `scratch`/`cache`/`inputs` volumes and redeploying left a restored worker holding a dead

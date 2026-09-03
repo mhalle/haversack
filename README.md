@@ -119,7 +119,10 @@ haversack segment "zenodo:<recid>/amos22.zip!amos22/imagesVa/amos_0575.nii.gz" -
 haversack segment https://example.org/scan.nii.gz --task total -o labels.nii.gz
 ```
 
-Remote inputs are fetched once into `~/.cache/haversack/inputs` and reused. `!member` pulls
+Several inputs run as a **batch**: the output is a directory (`-o`, default the current one)
+and `--format` names the type each is written as (`out/<name>.<ext>` for `get`,
+`out/<name>_<task>.<ext>` for `segment`). Remote inputs are fetched once into
+`~/.cache/haversack/inputs` and reused. `!member` pulls
 one file out of a remote zip without downloading the archive. The hosted sources (`idc:`,
 `zenodo:`, `tcia:`, `openneuro:`, `hf:`) are the same ones a server accepts; bare URLs work
 on the command line only.
