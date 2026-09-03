@@ -161,6 +161,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     reorient = canonical is not None
     schema = LabelSchema(names={int(k): str(v) for k, v in spec.label_map.items()})
     prov = {"task": spec.name, "lineage": spec.lineage, "device": device, "dtype": dtype,
+            "accumulate": accumulate, "deviations": [],
             "convention": convention, "reoriented_to_ras": canonical == nio.CANONICAL,
             "canonical_orientation": canonical, "interp": interp,
             "envelope_mm": envelope_mm, "resampling_order": resampling_order, "models": [],
@@ -350,7 +351,15 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             report.stage("predict", pname)
             predict_into(model, x, fr, og, env, lut=_lut(model.K, remap), paint=len(parts) > 1,
                          out=out, part=pname, weights=wid)
-            report.stage("restore", f"{'device' if model.accumulate_choice['on_device'] else 'host'} accumulator")
+            where = "device" if model.accumulate_choice["on_device"] else "host"
+            report.stage("restore", f"{where} accumulator")
+            for m in prov["models"]:                 # the effective placement, per model
+                if m["weights"] == str(wid):
+                    m["accumulate"] = where
+            if accumulate == "device" and where == "host":
+                from .result import deviation
+                prov["deviations"].append(deviation("accumulator placement", "device", "host",
+                                                    model.accumulate_choice.get("reason", "")))
             T[f"network:{key}"] = time.perf_counter() - t
             models.release(model)
         return out, fr, og

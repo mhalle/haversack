@@ -142,3 +142,13 @@ class Segmentation:
         task = getattr(self.spec, "name", "?")
         return (f"Segmentation(task={task!r}, {n}/{len(self.schema.names)} structures present, "
                 f"grid={tuple(self.grid.shape)}, {self.seconds:.1f}s)")
+
+
+def deviation(what: str, requested, effective, why: str) -> dict:
+    """One record of a run departing from what was asked - precision, device, placement.
+
+    Lives in ``provenance["deviations"]`` (a list), and therefore in the seg.nrrd header,
+    the server's result payload, and the CLI's closing lines. The rule (2026-09-03): a run
+    may adapt to the machine, but never silently - a user who chose fp32 and got fp16, or
+    chose the GPU and had part of the work moved to the CPU, must be able to see it."""
+    return {"what": what, "requested": str(requested), "effective": str(effective), "why": why}

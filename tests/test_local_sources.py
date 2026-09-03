@@ -143,6 +143,7 @@ def test_cli_segment_takes_a_remote_input(monkeypatch, tmp_path, capsys):
 
 class _Saved:
     timings = {}
+    provenance = {}
     grid = type("G", (), {"shape": (1, 1, 1)})()
     schema = type("S", (), {"names": []})()
 

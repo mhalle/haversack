@@ -166,6 +166,17 @@ works as a task: `segment("scan.nii.gz", "/path/to/Dataset123_x/nnUNetTrainer__n
 Errors are one family, `haversack.HaversackError` (`InputError`, `ModelNotFound`,
 `UnsupportedModel`, `ResourceError`, `Cancelled`).
 
+## When a run adapts to the machine
+
+haversack chooses placements and precisions from the machine's memory, but never silently.
+Anything that ran differently from what you asked - the SynthStrip net rerun in fp16 after
+a real out-of-memory on MPS, FastSurfer's aggregation field kept in CPU memory, the nnU-Net
+accumulator on the host when you asked for the device - is a `note:` line at the end of a
+command-line run, a progress stage on the server, and a record in the result's provenance
+(`deviations`, in the seg.nrrd header and the job's result payload), each with what was
+asked, what ran, and why. Explicit choices are explicit: `--device cpu` is never overridden,
+and `--dtype fp32` on the nnU-Net path is never lowered.
+
 ## Local server
 
 The server is the same job protocol haversack deploys on Modal, run on the machine itself:

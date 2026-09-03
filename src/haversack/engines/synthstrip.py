@@ -133,7 +133,8 @@ def _capture_sdt(t1_img, device: str):
 
     model = _get_model(device)
     try:
-        return synthstrip_torch.predict_sdt(t1_img, model=model, device=device)
+        sdt, geom = synthstrip_torch.predict_sdt(t1_img, model=model, device=device)
+        return sdt, geom, {"precision": "fp32", "deviations": []}
     except RuntimeError as e:
         if device != "mps" or "out of memory" not in str(e).lower():
             raise
@@ -144,7 +145,12 @@ def _capture_sdt(t1_img, device: str):
     torch.mps.empty_cache()
     half = _HALF.get(id(model)) or _HALF.setdefault(id(model), _HalfNet(model))
     try:
-        return synthstrip_torch.predict_sdt(t1_img, model=half, device=device)
+        sdt, geom = synthstrip_torch.predict_sdt(t1_img, model=half, device=device)
+        from ..result import deviation
+        return sdt, geom, {"precision": "fp16", "deviations": [deviation(
+            "precision", "fp32", "fp16",
+            f"MPS out of memory at fp32 on {device}; the net was rerun in fp16 "
+            "(0.015 mm worst case on the distance field)")]}
     except RuntimeError as e:
         if "out of memory" not in str(e).lower():
             raise
@@ -196,7 +202,7 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", restore: str = "aut
     use_gpu = restore == "gpu" or (restore == "auto" and str(device).startswith("cuda"))
     timings: dict[str, float] = {}
     _t = time.perf_counter()
-    sdt_zyx, conf_orig = _capture_sdt(t1_img, device)     # surfa conform + net (1-channel SDT)
+    sdt_zyx, conf_orig, run = _capture_sdt(t1_img, device)   # surfa conform + net (1-channel SDT)
     _refuse_constant_field(sdt_zyx, device)
     timings["capture"] = time.perf_counter() - _t
 
@@ -232,7 +238,8 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", restore: str = "aut
     prov = {"engine": "synthstrip", "synthstrip_version": WEIGHTS_VERSION,
             "network": "SynthStrip UNet (SDT)",
             "restore": f"sdt-graded ({'gpu' if use_gpu else 'cpu'})",
-            "border_mm": border, "device": device}
+            "border_mm": border, "device": device,
+            "precision": run["precision"], "deviations": run["deviations"]}
     return Segmentation(labels=out_img, schema=LabelSchema(names={BRAIN_LABEL: "Brain"}),
                         grid=grid, spec=None, timings=timings, provenance=prov)
 
@@ -249,5 +256,7 @@ def run_local(image, *, device="auto", progress=None, cancel=None, **_policy):
     report.check()
     report.stage("predict", f"synthstrip:mask on {dev}")
     seg = segment(image, device=dev)
+    for d in seg.provenance.get("deviations", ()):
+        report.stage("note", f"{d['what']}: asked {d['requested']}, ran {d['effective']} - {d['why']}")
     report.check()
     return seg

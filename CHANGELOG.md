@@ -20,6 +20,17 @@
 
 ## [Unreleased]
 
+- **A run that departs from what was asked says so.** `provenance["deviations"]` is a list
+  of `{what, requested, effective, why}` records (`result.deviation()`), and it travels
+  everywhere provenance does: the seg.nrrd header, the server's result payload, and the
+  CLI's closing `note:` lines; the engines also report each one as a progress stage.
+  Recorded today: SynthStrip's fp16 rerun after a real MPS out-of-memory (`precision`, and
+  `precision` itself is now in provenance); FastSurfer's view-aggregation field moving to
+  the CPU on a small unified-memory machine (`device (view-aggregation field)`); and the
+  nnU-Net accumulator's effective placement per model (`accumulate` on each `models[]`
+  entry, a deviation when `device` was asked and `host` ran). The rule: a run may adapt
+  to the machine, never silently.
+
 - **Apple Silicon: the MPS allocator is capped, because past the cap Metal fails silently.**
   SynthStrip's first local run masked 94 % of the image. The cause, isolated with identity
   convolutions in pure torch: PyTorch's MPS allocator lets a process grow to 1.7x the

@@ -491,7 +491,13 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", batch_size: int = 8
             "restore": (f"logit-grade (physical-space, {'gpu' if use_gpu else 'cpu'})"
                         if logit_grade else "label-nn"),
             "self_check": "reproduces FastSurfer labels at conformed grid" if self_check else "skipped",
-            "device": device}
+            "device": device, "view_aggregation_device": viewagg_device, "deviations": []}
+    if viewagg_device == "cpu" and not str(device).startswith("cpu"):
+        from ..result import deviation
+        prov["deviations"].append(deviation(
+            "device (view-aggregation field)", device, "cpu",
+            "the 79-class aggregation field would not fit the GPU's memory pool; the three "
+            "view networks still ran on the requested device"))
     seg = Segmentation(labels=out_img, schema=LabelSchema(names=names),
                        grid=grid, spec=None, timings=timings, provenance=prov)
     return seg
@@ -514,5 +520,7 @@ def run_local(image, *, device="auto", batch_size="auto", progress=None, cancel=
     report.stage("predict", f"fastsurfer:brain on {dev} (view aggregation on {viewagg})")
     seg = segment(image, device=dev, batch_size=bs, viewagg_device=viewagg,
                   probabilities=probabilities)
+    for d in seg.provenance.get("deviations", ()):
+        report.stage("note", f"{d['what']}: asked {d['requested']}, ran {d['effective']} - {d['why']}")
     report.check()
     return seg

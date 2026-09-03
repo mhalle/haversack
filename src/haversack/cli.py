@@ -276,6 +276,9 @@ def _run(argv=None) -> int:
         if not args.quiet:
             for k, v in r.timings.items():
                 print(f"  {v:7.2f} s  {k}", file=sys.stderr)
+            for d in (r.provenance or {}).get("deviations", ()):
+                print(f"  note: {d['what']}: asked {d['requested']}, ran {d['effective']} - {d['why']}",
+                      file=sys.stderr)
             print(f"wrote {args.output}: {tuple(r.grid.shape)}, "
                   f"{len(r.present())}/{len(r.schema.names)} structures present", file=sys.stderr)
     if args.cmd == "weights":

@@ -11,6 +11,10 @@ import importlib.util
 
 import pytest
 
+
+class _Seg:
+    provenance: dict = {}
+
 from haversack.engines import registry
 from haversack.errors import UnsupportedModel
 
@@ -114,7 +118,7 @@ def test_run_local_resolves_device_and_reports(monkeypatch):
         seen.update(kw, image=image)
         return "SEG"
 
-    monkeypatch.setattr(fs, "segment", fake_segment)
+    monkeypatch.setattr(fs, "segment", lambda image, **kw: (fake_segment(image, **kw), _Seg())[1])
     monkeypatch.setattr(fs, "_host_memory_gb", lambda: 16.0)
     stages = []
 
@@ -122,8 +126,8 @@ def test_run_local_resolves_device_and_reports(monkeypatch):
         def __call__(self, p):
             stages.append((p.stage, p.detail))
 
-    assert fs.run_local("t1.nii.gz", device="cpu", batch_size="auto", progress=Rep(),
-                        grid="input", interp="linear") == "SEG"          # nnU-Net keys ignored
+    assert isinstance(fs.run_local("t1.nii.gz", device="cpu", batch_size="auto", progress=Rep(),
+                                   grid="input", interp="linear"), _Seg)  # nnU-Net keys ignored
     assert seen["device"] == "cpu" and seen["batch_size"] == 8 and seen["viewagg_device"] == "cpu"
     assert stages and stages[0][0] == "predict" and "fastsurfer:brain" in stages[0][1]
 
@@ -147,8 +151,8 @@ def test_synthstrip_has_a_local_runner_too(monkeypatch, tmp_path):
 def test_synthstrip_run_local_resolves_device(monkeypatch):
     from haversack.engines import synthstrip as ss
     seen = {}
-    monkeypatch.setattr(ss, "segment", lambda image, **kw: seen.update(kw, image=image) or "MASK")
-    assert ss.run_local("t1.nii.gz", device="cpu", grid="input") == "MASK"
+    monkeypatch.setattr(ss, "segment", lambda image, **kw: seen.update(kw, image=image) or _Seg())
+    assert isinstance(ss.run_local("t1.nii.gz", device="cpu", grid="input"), _Seg)
     assert seen == {"image": "t1.nii.gz", "device": "cpu"}
 
 
@@ -183,8 +187,11 @@ def test_synthstrip_falls_back_to_fp16_on_a_real_mps_oom(monkeypatch):
 
     monkeypatch.setitem(__import__("sys").modules, "synthstrip_torch", types.SimpleNamespace(predict_sdt=predict_sdt))
     ss._HALF.clear()
-    assert ss._capture_sdt("img", "mps") == ("SDT", "GEOM")
-    assert calls == ["Conv3d", "_HalfNet"]
+    sdt, geom, run = ss._capture_sdt("img", "mps")
+    assert (sdt, geom) == ("SDT", "GEOM") and calls == ["Conv3d", "_HalfNet"]
+    assert run["precision"] == "fp16"
+    (d,) = run["deviations"]
+    assert d["what"] == "precision" and d["requested"] == "fp32" and d["effective"] == "fp16" and "out of memory" in d["why"]
     calls.clear()
 
     def always_oom(img, *, model, device):
@@ -229,3 +236,34 @@ def test_synthstrip_half_net_keeps_the_fp32_interface():
     y = half(x)
     assert y.dtype == torch.float32 and (y - net(x)).abs().max() < 1e-2
     assert next(net.parameters()).dtype == torch.float32          # the original is untouched
+
+
+def test_a_deviation_reaches_the_cli_and_the_provenance(monkeypatch, tmp_path, capsys):
+    """A user who asked for one thing and got another must be told: in the provenance
+    (and so the seg.nrrd header and the server payload) and on the CLI's closing lines."""
+    from haversack import cli, pipeline
+    from haversack.result import deviation
+
+    class R:
+        timings = {}
+        grid = type("G", (), {"shape": (1, 1, 1)})()
+        schema = type("S", (), {"names": []})()
+        provenance = {"deviations": [deviation("precision", "fp32", "fp16", "MPS out of memory")]}
+
+        def save(self, path):
+            return path
+
+        def present(self):
+            return {}
+
+    (tmp_path / "in.nii.gz").touch()
+    monkeypatch.setattr(pipeline, "segment", lambda image, task, **kw: R())
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast", "-o", str(tmp_path / "o.nii.gz")])
+    err = capsys.readouterr().err
+    assert rc == 0 and "note: precision: asked fp32, ran fp16 - MPS out of memory" in err
+
+
+def test_fastsurfer_records_the_field_moving_to_cpu():
+    from haversack.result import deviation
+    d = deviation("device (view-aggregation field)", "mps", "cpu", "would not fit")
+    assert d == {"what": "device (view-aggregation field)", "requested": "mps", "effective": "cpu", "why": "would not fit"}
