@@ -21,6 +21,7 @@ import os
 import numpy as np
 
 from . import registry as _registry
+from ..errors import ResourceError
 from .geometry import resample_affine as _resample_affine
 
 ENGINE = "synthstrip"
@@ -97,13 +98,85 @@ def restore_sdt_cpu(sdt_zyx, source_ref, target_ref, outside=100.0):
     return sitk.GetArrayFromImage(out)
 
 
+# Measured 2026-09-03 on an M2 (torch 2.14): the net's working set at the conformed 256^3
+# is 14.5 GiB in fp32 and 8.0 GiB in fp16 - about 930 and 510 bytes per input voxel.
+# Above MPS's recommended ceiling (torch.mps.recommended_max_memory(), 10.7 GiB on a
+# 16 GB machine) the torch 2.14 backend returns an all-zero field instead of raising
+# (2.7 cannot run the net on MPS at all: no max_pool3d). fp16 costs 0.015 mm worst case
+# on the SDT (3 mask voxels in 100,000).
+_MPS_BYTES_PER_VOXEL = {"fp32": 930, "fp16": 510}
+
+
+def mps_plan(n_voxels: int, budget_bytes: float) -> str:
+    """How to run the net on MPS for a conformed volume of ``n_voxels``: ``"fp32"`` when
+    that fits the budget, ``"fp16"`` when only that does, ``"cpu"`` when neither will -
+    memory is a policy read from the machine, never a hardcoded size."""
+    for dtype in ("fp32", "fp16"):
+        if n_voxels * _MPS_BYTES_PER_VOXEL[dtype] <= budget_bytes:
+            return dtype
+    return "cpu"
+
+
+class _HalfNet:
+    """Runs a copy of the net in fp16 behind the fp32 interface predict_sdt expects."""
+
+    def __init__(self, model):
+        import copy
+        import torch
+        self.net = copy.deepcopy(model).to(torch.float16).eval()
+
+    def __call__(self, x):
+        import torch
+        return self.net(x.to(torch.float16)).to(torch.float32)
+
+    def eval(self):
+        return self
+
+
+_HALF: dict = {}
+
+
+def _conformed_voxels(t1_img) -> int:
+    """The conformed size SynthStrip will run at (1 mm, cropped, padded to a multiple of
+    64 in [192, 320]), without conforming: the physical extent tells."""
+    import numpy as np
+    ext = np.asarray(t1_img.GetSize(), float) * np.asarray(t1_img.GetSpacing(), float)
+    side = np.clip(np.ceil(ext / 64) * 64, 192, 320)
+    return int(np.prod(side))
+
+
 def _capture_sdt(t1_img, device: str):
     """SynthStrip's conform + net via ``synthstrip_torch`` -> ``(sdt_zyx, sdt_sitk)``:
     the SDT array ``(z,y,x)`` and its geometry as a SimpleITK image (so the restore
     needs no manual axis conversion)."""
     import synthstrip_torch
 
-    return synthstrip_torch.predict_sdt(t1_img, model=_get_model(device), device=device)
+    model = _get_model(device)
+    if device == "mps":
+        import torch
+        plan = mps_plan(_conformed_voxels(t1_img), torch.mps.recommended_max_memory())
+        if plan == "cpu":
+            raise ResourceError(
+                "synthstrip: this volume's conformed size does not fit MPS memory even in "
+                "fp16 (the backend would return zeros, not an error); run with device='cpu'")
+        if plan == "fp16":
+            model = _HALF.get(id(model)) or _HALF.setdefault(id(model), _HalfNet(model))
+    return synthstrip_torch.predict_sdt(t1_img, model=model, device=device)
+
+
+def _refuse_constant_field(sdt, device) -> None:
+    """A signed distance field that is the same number everywhere is not a prediction.
+    Seen 2026-09-03: torch 2.14 on MPS returned exactly zero for the full 256^3 conform
+    while a 64^3 crop matched the CPU to 1e-5 - and "everything is below 1 mm" then masks
+    the whole image. Silent garbage is the one thing this engine must not produce."""
+    import numpy as np
+    a = np.asarray(sdt.detach().cpu().numpy() if hasattr(sdt, "detach") else sdt, dtype=np.float32)
+    if not np.isfinite(a).all() or float(a.max() - a.min()) < 1e-6:
+        from ..errors import ResourceError
+        raise ResourceError(
+            f"synthstrip: the net returned a constant field on {device!r} (min {a.min():.3g}, "
+            f"max {a.max():.3g}); that is a backend fault, not a brain. Known on MPS with torch "
+            "2.14 at the full conformed size - run with device='cpu' (or on CUDA).")
 
 
 def segment(t1_input, *, out_dir=None, device: str = "cuda", restore: str = "auto",
@@ -135,6 +208,7 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", restore: str = "aut
     timings: dict[str, float] = {}
     _t = time.perf_counter()
     sdt_zyx, conf_orig = _capture_sdt(t1_img, device)     # surfa conform + net (1-channel SDT)
+    _refuse_constant_field(sdt_zyx, device)
     timings["capture"] = time.perf_counter() - _t
 
     _t = time.perf_counter()
@@ -172,3 +246,19 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", restore: str = "aut
             "border_mm": border, "device": device}
     return Segmentation(labels=out_img, schema=LabelSchema(names={BRAIN_LABEL: "Brain"}),
                         grid=grid, spec=None, timings=timings, provenance=prov)
+
+
+def run_local(image, *, device="auto", progress=None, cancel=None, **_policy):
+    """The in-process entry point (:attr:`Engine.compute`), as for FastSurfer: resolve
+    ``device`` the way the nnU-Net path does, report one stage, honor the cancel token
+    before the net is built. The SDT restore falls to the CPU path off CUDA by
+    ``segment``'s own ``restore="auto"``. nnU-Net policy keys are accepted and ignored."""
+    from ..progress import Reporter
+    from ..resample import resolve_device
+    report = Reporter.of(progress, cancel=cancel)
+    dev = resolve_device(device).type
+    report.check()
+    report.stage("predict", f"synthstrip:mask on {dev}")
+    seg = segment(image, device=dev)
+    report.check()
+    return seg

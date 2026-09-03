@@ -205,16 +205,20 @@ UV_PROJECT_ENVIRONMENT=.venvs/fastsurfer uv sync --extra fastsurfer --extra serv
 ```
 
 An installed runtime is the switch: `haversack tasks` shows `fastsurfer:brain` as installed
-from that environment, and a plain environment refuses the task with the line above. Today
-FastSurfer is the engine with an in-process runner; the others run on Modal. FastSurfer's
+from that environment, and a plain environment refuses the task with the line above.
+FastSurfer and SynthStrip (`synthstrip:mask`, a brain mask from any T1-like image, from
+`--extra synthstrip`) have in-process runners; VoxTell and the MONAI bundles run on Modal. FastSurfer's
 view-aggregation field is large (2.6 GB in half precision at 1 mm), so on Apple Silicon it
-stays in CPU memory unless the machine has 32 GB or more; 16 GB is tight for it.
+stays in CPU memory unless the machine has 32 GB or more; 16 GB is tight for it. SynthStrip
+on Apple Silicon runs the net in fp16 when fp32 would not fit MPS memory (a 16 GB machine),
+which costs 0.015 mm on the distance field; it never trusts a field MPS returned silently
+wrong.
 
 ## What haversack does not do yet
 
 - Multi-channel nnU-Net inputs, region (sigmoid) heads, and the `3d_lowres`, cascade and `2d`
   configurations are not on the nnU-Net path.
-- SynthStrip, VoxTell and the MONAI bundles have no in-process runner yet; they run on
-  Modal. FastSurfer runs locally from its own environment (above).
+- VoxTell and the MONAI bundles have no in-process runner yet; they run on Modal.
+  FastSurfer and SynthStrip run locally from their own environments (above).
 - Versioning: `haversack.__version__` is haversack's own number and is what the server reports; the
   distribution's version belongs to the repository as a whole.

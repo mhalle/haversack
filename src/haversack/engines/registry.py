@@ -117,6 +117,11 @@ def _synthstrip_identity() -> list[dict]:
     return [{"id": "synthstrip", "version": "v1"}]
 
 
+def _synthstrip_compute(image, **kw):
+    from .synthstrip import run_local
+    return run_local(image, **kw)
+
+
 def _voxtell_identity() -> list[dict]:
     return [{"id": "voxtell", "version": "v1.1"}]
 
@@ -150,6 +155,7 @@ ENGINES: dict[str, Engine] = {
         enabled_env="HAVERSACK_SYNTHSTRIP",
         runtime_module="synthstrip_torch", extra="synthstrip",
         weights_identity=_synthstrip_identity,
+        compute=_synthstrip_compute,
         behavior=GRADED_RESTORE,
         processing_knobs=False,
         description="SynthStrip brain extraction (signed distance transform)",

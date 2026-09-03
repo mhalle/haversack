@@ -20,6 +20,26 @@
 
 ## [Unreleased]
 
+- **SynthStrip on Apple Silicon: a memory policy, because MPS fails silently.** The first
+  local run masked 94 % of the image: the net's working set at the conformed 256^3 is
+  14.5 GiB in fp32, above MPS's recommended ceiling (10.7 GiB on a 16 GB machine), and
+  torch 2.14's MPS backend returns an all-zero distance field there instead of raising -
+  with or without its high-watermark limit. Below the ceiling MPS is exact (192^3, and a
+  128^3 crop to 3e-5 of the CPU). The same lock on Modal (CUDA) gives the sane 1282 mL
+  mask, so the dependency change was not the cause. Now `mps_plan()` reads
+  `torch.mps.recommended_max_memory()` against the conformed size (computed from the
+  physical extent before conforming): fp32 when it fits, fp16 when only that does (8.0 GiB;
+  0.015 mm worst case on the SDT, 3 mask voxels in 100,000), and a refusal naming
+  `device='cpu'` when neither will. `segment()` also refuses any constant field outright.
+  torch 2.7 cannot run the net on MPS at all (no max_pool3d), so 2.14 is not a regression
+  but the first version that can.
+
+- **SynthStrip runs in-process too.** The second engine on the local seam: `synthstrip:mask`
+  routes to `synthstrip.run_local` when `synthstrip_torch` is installed
+  (`UV_PROJECT_ENVIRONMENT=.venvs/synthstrip uv sync --extra synthstrip --extra serve`; the
+  fork needs numpy<2, which is why it has its own environment). The SDT restore takes the
+  CPU path off CUDA, as before.
+
 - **The inference stack is core.** torch, nnunetv2, scipy and scikit-image are plain
   dependencies, so `uvx git+https://github.com/mhalle/haversack segment ...` works with no
   extra - a segmentation tool that could not segment after `pip install` was a trap, and it

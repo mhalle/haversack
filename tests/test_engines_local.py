@@ -126,3 +126,69 @@ def test_run_local_resolves_device_and_reports(monkeypatch):
                         grid="input", interp="linear") == "SEG"          # nnU-Net keys ignored
     assert seen["device"] == "cpu" and seen["batch_size"] == 8 and seen["viewagg_device"] == "cpu"
     assert stages and stages[0][0] == "predict" and "fastsurfer:brain" in stages[0][1]
+
+
+def test_synthstrip_has_a_local_runner_too(monkeypatch, tmp_path):
+    """Same seam, second engine (2026-09-03): synthstrip:mask routes to Engine.compute."""
+    monkeypatch.delenv("HAVERSACK_SYNTHSTRIP", raising=False)
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda n, *a, **k: object() if n == "synthstrip_torch" else real(n, *a, **k))
+    assert registry.enabled("synthstrip")
+    calls = {}
+    monkeypatch.setitem(registry.ENGINES, "synthstrip",
+                        dataclasses.replace(registry.ENGINES["synthstrip"],
+                                            compute=lambda image, **kw: calls.update(kw, image=image) or "MASK"))
+    from haversack.segmenter import Segmenter
+    assert Segmenter(weights=tmp_path, device="cpu").segment("t1.nii.gz", "synthstrip:mask") == "MASK"
+    assert calls["device"] == "cpu"
+
+
+def test_synthstrip_run_local_resolves_device(monkeypatch):
+    from haversack.engines import synthstrip as ss
+    seen = {}
+    monkeypatch.setattr(ss, "segment", lambda image, **kw: seen.update(kw, image=image) or "MASK")
+    assert ss.run_local("t1.nii.gz", device="cpu", grid="input") == "MASK"
+    assert seen == {"image": "t1.nii.gz", "device": "cpu"}
+
+
+def test_synthstrip_refuses_a_constant_field():
+    """MPS + torch 2.14 returned an all-zero SDT for the full conform (2026-09-03); the
+    engine must refuse rather than mask the whole image."""
+    import numpy as np
+    from haversack.engines import synthstrip as ss
+    from haversack.errors import ResourceError
+    with pytest.raises(ResourceError, match="constant field"):
+        ss._refuse_constant_field(np.zeros((4, 4, 4), np.float32), "mps")
+    ss._refuse_constant_field(np.linspace(-5, 5, 64, dtype=np.float32).reshape(4, 4, 4), "cpu")
+
+
+def test_synthstrip_mps_plan_reads_the_budget():
+    """256^3 fp32 needs ~14.5 GiB and MPS returned zeros above its 10.7 GiB ceiling
+    (2026-09-03); fp16 halves it and fits. The plan is a function of size and budget."""
+    from haversack.engines import synthstrip as ss
+    n256, n320 = 256 ** 3, 320 ** 3
+    assert ss.mps_plan(n256, 10.7 * 2 ** 30) == "fp16"
+    assert ss.mps_plan(n256, 40 * 2 ** 30) == "fp32"
+    assert ss.mps_plan(n320, 10.7 * 2 ** 30) == "cpu"          # 15.6 GiB even in fp16
+    assert ss.mps_plan(192 ** 3, 10.7 * 2 ** 30) == "fp32"
+
+
+def test_synthstrip_half_net_keeps_the_fp32_interface():
+    import torch
+    from haversack.engines import synthstrip as ss
+    net = torch.nn.Conv3d(1, 1, 3, padding=1)
+    half = ss._HalfNet(net)
+    x = torch.rand(1, 1, 8, 8, 8)
+    y = half(x)
+    assert y.dtype == torch.float32 and (y - net(x)).abs().max() < 1e-2
+    assert next(net.parameters()).dtype == torch.float32          # the original is untouched
+
+
+def test_conformed_voxels_from_physical_extent():
+    import SimpleITK as sitk
+    from haversack.engines import synthstrip as ss
+    im = sitk.Image(256, 156, 256, sitk.sitkFloat32); im.SetSpacing((1.0, 1.3, 1.0))
+    assert ss._conformed_voxels(im) == 256 * 256 * 256           # 203 mm -> 256; 256 -> 256
+    small = sitk.Image(100, 100, 100, sitk.sitkFloat32); small.SetSpacing((1.0, 1.0, 1.0))
+    assert ss._conformed_voxels(small) == 192 ** 3               # the floor
