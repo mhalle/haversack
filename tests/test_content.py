@@ -206,7 +206,10 @@ def test_the_encoding_is_injective_including_a_literal_percent(tmp_path):
     sharing a cache slot."""
     from haversack.serve import safe_path_component
     assert safe_path_component("a:b") != safe_path_component("a%3Ab")
-    assert safe_path_component("a%3Ab") == "a%253Ab"
+    # the literal `A` is escaped as well: uppercase letters are, so two keys that differ
+    # only in case never share an entry on a case-insensitive filesystem (2026-09-03)
+    assert safe_path_component("a%3Ab") == "a%253%41b"
+    assert safe_path_component("a:b") == "a%3Ab"
 
 
 def test_names_are_readable_because_finding_a_bad_entry_by_eye_is_real(tmp_path):

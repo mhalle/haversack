@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.4.1] - 2026-09-03
+
+Two adversarial review rounds over 0.4.0 (four reviewers each), every agreed finding fixed.
+
+- **Server.** `--no-token` is open, full stop: no origin or proxy heuristics; a machine you
+  trust end to end. Every other server has a token, generated after the socket is bound and
+  written with the server's pid to `~/.cache/haversack/serve/<port>.token`; the client uses
+  that file only for a loopback address whose port has a live server behind it, and a server
+  refuses to start when a live one already owns the port's file. `Cache-Control: no-cache`
+  reaches the executor on the path surface and the artifacts. Cache entry names are injective
+  under case folding. After a restart the single-flight marker is restored, terminal records
+  keep answering from the job store (marked `evicted`, with their options and no result link
+  once the bytes are gone), DELETE drops the record, and a cancel that lands during the save
+  is still honored. A submit whose key is in flight joins that job; joiners must share the
+  flight's source credentials, and a joiner's DELETE releases its seat rather than cancelling
+  for the others. Failures are recorded with their cause. Describe never echoes the resolver.
+  The 401 names where the token it sent came from; an unreachable server is one line.
+- **`HAVERSACK_CACHE_DIR` is the cache root everywhere:** results, FastSurfer checkpoints,
+  the input cache and the trainer shims all sit under it, `cache list` shows them all, and a
+  root that is not a directory is refused up front.
+- **Command line.** Output names are validated before the inference stack is demanded and
+  before any input is downloaded; a name haversack cannot write (a directory, a bare name,
+  `.zarr`) is refused at once. Unknown tasks, unreadable or absent inputs and half-built
+  model folders are one-line errors, not tracebacks.
+- **Ranked stores (internal, undocumented).** Writers build in a staging directory beside the
+  target, hold a lock, and replace the target only after a complete build; anything at the
+  path that is not a store is never replaced; symlinks are written through. Leaves are unique
+  per (layer, value) - a cascade built with every stage used to lose the final stage's
+  classes to a value-only dedupe - single-part stores omit `layer`, and the lungs claim is
+  made only over the exact lobe set. duckn pinned at 0.3.2.
+
 ## [0.4.0] - 2026-09-03
 
 - **Internal, undocumented, unstable: ranked stores and duckn.** The ranked-store tooling

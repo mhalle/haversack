@@ -14,6 +14,13 @@ def main(argv=None) -> int:
     except HaversackError as e:
         print(f"haversack: {e}", file=sys.stderr)
         return 2
+    except LookupError as e:
+        # the catalogs answer an unknown or ambiguous task name with a bare LookupError
+        # (never a KeyError - those are bugs and keep their traceback)
+        if type(e) is not LookupError:
+            raise
+        print(f"haversack: {e}", file=sys.stderr)
+        return 2
 
 
 INSTALL_HINT = ('this is a lean install (--no-deps); a normal install has them: '
@@ -50,18 +57,27 @@ def _need_inference_stack(task=None) -> None:
     raise InputError(f"segmenting needs {', '.join(missing)}, not installed here: {INSTALL_HINT}")
 
 
-def user_guide() -> str:
-    """The user guide's Markdown: the README shipped inside the wheel, or, in a checkout
-    (editable install), the repository's README itself - one source of truth."""
+GUIDES = {"user": ("data/GUIDE.md", "README.md"), "server": ("data/SERVER.md", "SERVER.md")}
+
+
+def guide_text(which: str = "user") -> str:
+    """A guide's Markdown: the file shipped inside the wheel, or, in a checkout (editable
+    install), the repository's own file - one source of truth. ``which`` is ``user`` (the
+    README) or ``server`` (SERVER.md, the job server and its deployment)."""
     from importlib.resources import files
-    shipped = files("haversack").joinpath("data/GUIDE.md")
+    shipped_name, local_name = GUIDES[which]
+    shipped = files("haversack").joinpath(shipped_name)
     if shipped.is_file():
         return shipped.read_text()
     from pathlib import Path
-    local = Path(__file__).resolve().parents[2] / "README.md"
+    local = Path(__file__).resolve().parents[2] / local_name
     if local.is_file():
         return local.read_text()
-    raise RuntimeError("the user guide is missing from this installation")
+    raise RuntimeError(f"the {which} guide is missing from this installation")
+
+
+def user_guide() -> str:
+    return guide_text("user")
 
 
 def guide_sections(text: str) -> list:
@@ -79,8 +95,8 @@ def guide_sections(text: str) -> list:
     return out
 
 
-def _docs(topic, list_sections: bool) -> int:
-    text = user_guide()
+def _docs(topic, list_sections: bool, which: str = "user") -> int:
+    text = guide_text(which)
     if list_sections:
         for head, _ in guide_sections(text):
             print(head)
@@ -113,12 +129,13 @@ def _run(argv=None) -> int:
   haversack tasks                                          what can be segmented
   haversack segment scan.nii.gz --task total_fast -o labels.seg.nrrd
   haversack segment idc:<crdc_series_uuid> --task total -o labels.seg.nrrd
-  haversack serve --port 8790 --token secret               then: haversack remote submit ...
+  haversack serve --port 8790                              a local server (it generates a token); then: haversack remote submit ...
   haversack docs                                           the user guide; `haversack docs weights` for one section""")
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="command", help="what to do")
     s = sub.add_parser("segment", formatter_class=Fmt,
-                       help="segment one image: NIfTI, NRRD, MetaImage, a DICOM series directory, a URL or a hosted id",
-                       description="Segment one image and write the labels. Weights download on first use. "
+                       help="segment one or more images: NIfTI, NRRD, MetaImage, a DICOM series directory, a URL or a hosted id",
+                       description="Segment one image and write the labels, or several into a directory (batch). "
+                                   "Weights download on first use. "
                                    "The output format follows the extension (.nii.gz, .nrrd, .seg.nrrd, .mha); "
                                    "labels come back on the input grid, in the input's orientation.",
                        epilog="""examples:
@@ -219,11 +236,16 @@ def _run(argv=None) -> int:
 
     sv = sub.add_parser("serve", formatter_class=Fmt, help="run the REST job server on this machine (needs the serve extra)",
                         description="A job server with warm models, progress streaming and a durable result cache; "
-                                    "the same protocol haversack deploys on Modal. Without --token, requests can read "
-                                    "health, the task list and cached results but never compute.",
-                        epilog="""example:
-  haversack serve --port 8790 --token secret
-  HAVERSACK_SERVER=http://127.0.0.1:8790 haversack remote --token secret submit scan.nii.gz --task total_fast""")
+                                    "the same protocol haversack deploys on Modal. Computation needs a bearer "
+                                    "token; reads never do. Without --token the server generates one, prints it, "
+                                    "and leaves it in a file only you can read, which `haversack remote` on this "
+                                    "machine picks up by itself - so personal use has no ceremony, and a proxy or "
+                                    "tunnel in front of the server still faces a token. --no-token runs open, with "
+                                    "no protection of any kind.",
+                        epilog="""examples:
+  haversack serve                                                   (a token is generated for you)
+  HAVERSACK_SERVER=http://127.0.0.1:8790 haversack remote submit scan.nii.gz --task total_fast
+  haversack serve --host 0.0.0.0 --token secret                      (other machines pass --token secret)""")
     sv.add_argument("--host", default="127.0.0.1", help="interface to listen on (0.0.0.0 for the whole network)")
     sv.add_argument("--port", type=int, default=8790, help="port to listen on")
     sv.add_argument("--device", default="auto", help="cuda, mps, cpu, or auto")
@@ -241,7 +263,10 @@ def _run(argv=None) -> int:
                     help="result cache (default: ~/.cache/haversack/results; durable, unlike the workdir)")
     sv.add_argument("--no-result-cache", action="store_true", help="compute every request; keep nothing durable")
     sv.add_argument("--token", default=None,
-                    help="bearer token; without it a request gets health/tasks/cached reads only")
+                    help="the bearer token that gates computation (reads stay open); generated when omitted")
+    sv.add_argument("--no-token", action="store_true",
+                    help="run WITHOUT a token: anything that can reach the port can compute, a proxy or "
+                         "tunnel in front included. No guards of any kind - a machine you trust end to end")
 
     mo = sub.add_parser("modal", formatter_class=Fmt, help="deploy the server to your Modal account (needs the modal extra)",
                         description="Deploys the same server to Modal, one GPU worker per engine. Images build in Modal's "
@@ -262,7 +287,9 @@ def _run(argv=None) -> int:
                                     "download the labels. The server is --server or HAVERSACK_SERVER.")
     rc.add_argument("--server", default=None,
                     help="server URL, e.g. http://gpu-box:8790 (or set HAVERSACK_SERVER)")
-    rc.add_argument("--token", default=None, help="bearer token, if the server wants one")
+    rc.add_argument("--token", default=None,
+                    help="bearer token (or HAVERSACK_TOKEN); a server on this machine that generated its own "
+                         "token needs neither - the client reads it from the file the server left")
     rsub = rc.add_subparsers(dest="rcmd", required=True, metavar="action", help="what to ask the server")
     rs = rsub.add_parser("submit", help="upload, wait with progress, download the labels")
     rs.add_argument("input", help="a local image file, or idc:<crdc_series_uuid> to segment straight from the Imaging Data Commons")
@@ -278,15 +305,21 @@ def _run(argv=None) -> int:
     rx.add_argument("job_id", help="the id `submit --no-wait` printed")
     rsub.add_parser("tasks", help="what the server can segment")
 
-    dc = sub.add_parser("docs", formatter_class=Fmt, help="print the user guide (Markdown), whole or one section",
-                        description="The guide that ships with the package: requirements, install, weights, the command "
-                                    "line, the Python API, the local server, engines. Pipe it to a pager or a Markdown viewer.",
+    dc = sub.add_parser("docs", formatter_class=Fmt, help="print a guide (Markdown), whole or one section",
+                        description="The guides that ship with the package. The user guide: requirements, install, "
+                                    "weights, the command line, the Python API, engines. The server guide (--server): "
+                                    "the job protocol, its rules, results by path, sources, caches, deploying to Modal. "
+                                    "Pipe either to a pager or a Markdown viewer; a running server's /docs has the "
+                                    "route-by-route OpenAPI reference.",
                         epilog="""examples:
   haversack docs | less
   haversack docs weights            just the section whose heading contains 'weights'
-  haversack docs --sections         the section headings""")
+  haversack docs --sections         the section headings
+  haversack docs --server           the server guide
+  haversack docs --server jobs      one section of it""")
     dc.add_argument("topic", nargs="?", default=None, help="print only the section whose heading contains this (case-insensitive)")
     dc.add_argument("--sections", action="store_true", help="list the section headings and exit")
+    dc.add_argument("--server", action="store_true", help="the server guide instead of the user guide")
 
     ca = sub.add_parser("cache", formatter_class=Fmt, help="show and clean haversack's on-disk stores",
                         description="Lists every store haversack keeps (fetched inputs, server results, engine "
@@ -305,7 +338,7 @@ def _run(argv=None) -> int:
 
     args = ap.parse_args(argv)
     if args.cmd == "docs":
-        return _docs(args.topic, args.sections)
+        return _docs(args.topic, args.sections, "server" if args.server else "user")
     if args.cmd == "modal":
         from importlib.resources import files
         apppath = str(files("haversack").joinpath("modal_app.py"))
@@ -331,6 +364,9 @@ def _run(argv=None) -> int:
             env["HAVERSACK_PROXY_AUTH"] = "0"
         return subprocess.call([sys.executable, "-m", "modal", "deploy", apppath], env=env)
     if args.cmd == "serve":
+        if args.token and args.no_token:
+            from .errors import InputError
+            raise InputError("--token and --no-token contradict each other")
         _need_inference_stack()          # the local server runs models in-process
         from .serve import main_serve
         return main_serve(args)
@@ -342,7 +378,16 @@ def _run(argv=None) -> int:
         if not server:
             print("no server: pass --server or set HAVERSACK_SERVER", file=sys.stderr)
             return 2
-        c = RemoteClient(server, token=args.token)
+        from .cache_admin import local_token_for, serve_token_path
+        from urllib.parse import urlsplit
+        token, token_source = args.token, "--token"
+        if not token and os.environ.get("HAVERSACK_TOKEN"):
+            token, token_source = os.environ["HAVERSACK_TOKEN"], "HAVERSACK_TOKEN"
+        if not token:
+            token = local_token_for(server)
+            port = urlsplit(server if "://" in server else f"http://{server}").port or 80
+            token_source = f"the local server's file {serve_token_path(port)}"
+        c = RemoteClient(server, token=token, token_source=token_source if token else None)
         if args.rcmd == "tasks":
             for t in c.tasks():
                 print(t)
@@ -524,6 +569,8 @@ def _run(argv=None) -> int:
             print(f"{failures} of {len(srcs)} sources failed", file=sys.stderr); return 1
         return 0
     if args.cmd == "cache":
+        from .cache_admin import check_cache_root
+        check_cache_root()
         import json
         from . import cache_admin as ca
         if args.ccmd == "path":
@@ -532,7 +579,8 @@ def _run(argv=None) -> int:
             return 0
         if args.ccmd == "list":
             for r in ca.usage():
-                tag = "" if r["sweepable"] else "  (weights - not swept by clean)"
+                tag = ("" if r["sweepable"] else "  (weights - use `weights remove`)"
+                       if r["name"] == "weights" else "  (not swept by clean)")
                 print(f"{r['name']:12s} {r['human']:>10s}  {r['items']:>4d} items  {r['path']}{tag}")
             return 0
         if args.ccmd == "clean":
@@ -562,8 +610,28 @@ def _run(argv=None) -> int:
         progress = None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
         inputs = args.input
         batch = len(inputs) > 1 or args.format is not None
-        _need_inference_stack(args.task)
+        # The cheap mistakes first - before the inference stack is demanded (a lean
+        # install should hear about its typo, not about torch) and before any input is
+        # downloaded or a minute of inference is spent on an output the writer cannot name.
+        from .ranked_output import is_store_output
+        if not batch:
+            if not args.output:
+                raise InputError("segment needs -o (the output file), or --format with -o a directory for batch")
+            if not is_store_output(args.output) and io.image_suffix(args.output) is None:
+                raise InputError(f"{args.output}: not an output haversack writes; labels take "
+                                 ".seg.nrrd, .nrrd, .nii.gz, .nii or .mha (a directory or a bare "
+                                 "name is not a file), and a ranked store is named .duckn or "
+                                 ".duckn.zip")
+        else:
+            if is_store_output(args.output or "."):
+                raise InputError("a ranked store output takes exactly one input and no --format")
+            if str(args.output or "").lower().endswith((".zarr", ".zip", ".duckn")):
+                raise InputError(f"{args.output}: a batch output is a directory of labels; that "
+                                 "name says something else")
+            if args.format is None:
+                raise InputError("segmenting several inputs needs --format (the output type, e.g. seg.nrrd)")
         bs = args.batch_size if args.batch_size == "auto" else int(args.batch_size)
+        _need_inference_stack(args.task)
         engine_task = registry.engine_for_task(args.task).name != registry.NNUNETV2
 
         def resolve(spec):
@@ -596,9 +664,6 @@ def _run(argv=None) -> int:
                   file=sys.stderr)
 
         if not batch:
-            if not args.output:
-                raise InputError("segment needs -o (the output file), or --format with -o a directory for batch")
-            from .ranked_output import is_store_output
             if is_store_output(args.output):
                 # undocumented: a `.duckn` / `.duckn.zip` output is a ranked store - the whole
                 # output distribution, not the labels (see haversack.ranked_output)
@@ -618,8 +683,6 @@ def _run(argv=None) -> int:
                 r.save(args.output)
                 report(r, args.output)
         else:
-            if args.format is None:
-                raise InputError("segmenting several inputs needs --format (the output type, e.g. seg.nrrd)")
             ext = io.format_extension(args.format)
             outdir = Path(args.output or "."); outdir.mkdir(parents=True, exist_ok=True)
             task_tag = str(args.task).replace(":", "-")

@@ -9,6 +9,8 @@ import inspect
 import subprocess
 import sys
 
+import pytest
+
 from haversack import cli, pipeline
 
 
@@ -120,3 +122,120 @@ def test_tasks_with_a_name_prints_its_structures(tmp_path):
     assert r.returncode == 0, r.stderr
     names = r.stdout.split()
     assert len(names) == 117 and "liver" in names and names[0] != "ts:total_fast"
+
+
+def test_serve_refuses_contradictory_token_flags(capsys):
+    assert cli.main(["serve", "--token", "x", "--no-token"]) == 2
+    assert "contradict" in capsys.readouterr().err
+
+
+def test_the_client_finds_a_local_servers_generated_token(tmp_path, monkeypatch):
+    """A server without --token leaves its token in a file only this user can read; the
+    client on the same machine reads it for a loopback URL on that port, and for nothing
+    else - another host, or a port with no server file, gets no token."""
+    import json
+    import os
+    from haversack.cache_admin import local_token_for, serve_token_path, write_serve_token
+    monkeypatch.setenv("HAVERSACK_CACHE_DIR", str(tmp_path))
+    p = serve_token_path(8790)
+    assert p == tmp_path / "serve" / "8790.token"
+    assert local_token_for("http://127.0.0.1:8790") is None            # no server yet
+    write_serve_token(p, "s3cret", host="127.0.0.1", port=8790)
+    assert oct(p.stat().st_mode & 0o777) == "0o600"
+    assert json.loads(p.read_text())["pid"] == os.getpid()             # this process "serves"
+    assert local_token_for("http://127.0.0.1:8790") == "s3cret"
+    assert local_token_for("http://localhost:8790") == "s3cret"
+    assert local_token_for("127.0.0.1:8790") == "s3cret"
+    assert local_token_for("http://[::1]:8790") == "s3cret"
+    assert local_token_for("http://127.0.0.1:9000") is None            # another port
+    assert local_token_for("http://gpu-box:8790") is None              # another machine
+    assert local_token_for("http://127.0.0.1.evil.example:8790") is None   # a NAME, not local
+    from haversack.cache_admin import server_address
+    assert server_address("https://127.0.0.1")[1] == 443 and server_address("127.0.0.1:8790")[1] == 8790
+    p.unlink()                                                          # a server bound elsewhere
+    write_serve_token(p, "lan", host="192.168.1.5", port=8790)
+    assert local_token_for("http://127.0.0.1:8790") is None            # is not the one on loopback
+    p.unlink()
+    write_serve_token(p, "any", host="0.0.0.0", port=8790)
+    assert local_token_for("http://127.0.0.1:8790") == "any"
+    p.unlink()
+    write_serve_token(p, "s3cret", host="127.0.0.1", port=8790)
+    assert local_token_for("http://127.0.0.1.evil.example.:8790") is None
+    # a file left by a dead server is ignored: the token is never handed to whatever
+    # answers on that port next
+    p.write_text(json.dumps({"token": "stale", "pid": 2 ** 22 + 12345}))
+    assert local_token_for("http://127.0.0.1:8790") is None
+    p.write_text("old-plain-text-token\n")                             # the pre-review format
+    assert local_token_for("http://127.0.0.1:8790") is None
+    with pytest.raises(FileExistsError):                                # never overwrite silently
+        write_serve_token(p, "x", host="127.0.0.1", port=8790)
+
+
+def test_the_cli_refuses_output_names_it_does_not_write_and_store_batches(tmp_path, capsys):
+    (tmp_path / "in.nii.gz").write_bytes(b"x")
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
+                   "-o", str(tmp_path / "out.zarr")])
+    assert rc == 2 and ".duckn" in capsys.readouterr().err
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
+                   "--format", "seg.nrrd", "-o", str(tmp_path / "out.duckn")])
+    assert rc == 2 and "exactly one input" in capsys.readouterr().err
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), str(tmp_path / "in.nii.gz"),
+                   "--task", "total_fast", "-o", str(tmp_path / "out.duckn.zip")])
+    assert rc == 2 and "exactly one input" in capsys.readouterr().err
+
+
+def test_an_unknown_task_an_unreadable_image_and_a_bad_cache_root_are_one_line_errors(tmp_path, capsys, monkeypatch):
+    (tmp_path / "in.nii.gz").write_bytes(b"x")
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "no_such_task",
+                   "-o", str(tmp_path / "o.seg.nrrd")])
+    err = capsys.readouterr().err
+    assert rc == 2 and "unknown task 'no_such_task'" in err and "Traceback" not in err
+    from haversack import io
+    from haversack.errors import InputError
+    with pytest.raises(InputError, match="cannot read .* as an image"):
+        io.read_image(tmp_path / "in.nii.gz")
+    monkeypatch.setenv("HAVERSACK_CACHE_DIR", str(tmp_path / "in.nii.gz"))
+    rc = cli.main(["cache", "list"])
+    assert rc == 2 and "not a directory" in capsys.readouterr().err
+
+
+def test_an_unreachable_server_is_one_line():
+    from haversack.client import RemoteClient, RemoteError
+    with pytest.raises(RemoteError, match="cannot reach http://127.0.0.1:1"):
+        RemoteClient("http://127.0.0.1:1", timeout=2).tasks()
+
+
+def test_bad_output_names_are_refused_before_anything_runs(tmp_path, capsys, monkeypatch):
+    (tmp_path / "in.nii.gz").write_bytes(b"x")
+    from haversack import cli as cli_mod
+    monkeypatch.setattr(cli_mod, "_need_inference_stack",
+                        lambda task=None: (_ for _ in ()).throw(AssertionError("stack demanded first")))
+    for out in ("outdir/", "out", "out.txt", "out.zarr"):
+        rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
+                       "-o", str(tmp_path / out)])
+        err = capsys.readouterr().err
+        assert rc == 2 and "not an output haversack writes" in err, (out, err)
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), str(tmp_path / "in.nii.gz"),
+                   "--task", "total_fast", "--format", "seg.nrrd", "-o", str(tmp_path / "o.zarr")])
+    assert rc == 2 and "directory of labels" in capsys.readouterr().err
+
+
+def test_a_half_built_model_folder_is_one_line(tmp_path):
+    from haversack.errors import ModelNotFound
+    from haversack.tasks import TaskSpec
+    mf = tmp_path / "mf" / "nnUNetTrainer__nnUNetPlans__3d_fullres" / "fold_0"
+    mf.mkdir(parents=True)
+    with pytest.raises(ModelNotFound, match="no dataset.json"):
+        TaskSpec.from_model_folder(tmp_path / "mf")
+
+
+def test_the_cache_root_is_one_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("HAVERSACK_CACHE_DIR", "~/hv-root-test")
+    from haversack.cache_admin import cache_root, stores, trainer_shim_dir
+    from haversack.sources import default_input_cache
+    root = cache_root()
+    assert "~" not in str(root)
+    assert default_input_cache() == root / "inputs"
+    assert trainer_shim_dir() == root / "trainer_shims"
+    assert {s["name"] for s in stores()} >= {"inputs", "results", "checkpoints", "trainer_shims", "serve"}
+    assert all(str(s["path"]).startswith(str(root)) for s in stores() if s["name"] != "weights")

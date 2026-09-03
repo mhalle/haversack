@@ -103,8 +103,14 @@ def frame_origin(s, order):
 
 def align(src, dst):
     src, dst = Path(src), Path(dst)
-    s = open_store(src, "r").root
-    dst_store = open_store(dst, "w")     # a directory, or a zarr zip when DST ends in .zip
+    # both handles closed whatever happens: a writer left open keeps the lock and its
+    # staging directory for the life of the process
+    with open_store(src, "r") as src_store, open_store(dst, "w") as dst_store:
+        _align(src_store.root, dst_store, dst)
+    print(f"{dst.name}: {dst_store.size_bytes() / 1e6:.2f} MB")
+
+
+def _align(s, dst_store, dst):
     d = dst_store.root
     d.attrs.update(s.attrs.asdict())                  # root metadata carries over unchanged
 
@@ -198,9 +204,16 @@ def align(src, dst):
 
     from haversack.ranked_build import write_readme
     write_readme(dst_store)                  # the padded copy needs the reference too
-    dst_store.close()
-    print(f"{dst.name}: {dst_store.size_bytes() / 1e6:.2f} MB")
+
+
+def main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("src", help="the store to read (a directory or a zarr zip)")
+    ap.add_argument("dst", help="where to write the aligned store")
+    a = ap.parse_args(argv)
+    align(a.src, a.dst)
 
 
 if __name__ == "__main__":
-    align(*sys.argv[1:3])
+    main()

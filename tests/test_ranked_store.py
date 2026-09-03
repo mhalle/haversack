@@ -112,16 +112,43 @@ def test_an_exception_while_amending_a_zip_leaves_the_archive_untouched(tmp_path
             st.write_text("README.md", "v2")
             raise RuntimeError("midway")
     assert p.read_bytes() == before
-    assert not (tmp_path / "s.zip.staging").exists()
+    assert not [q for q in tmp_path.iterdir() if ".staging" in q.name or q.suffix == ".lock"]
 
 
-def test_write_mode_replaces_whatever_was_there(tmp_path):
+def test_write_mode_replaces_a_store_and_nothing_else(tmp_path):
+    from haversack.errors import InputError
     p = tmp_path / "s.zip"
     p.write_bytes(b"not a zip")
+    with pytest.raises(InputError, match="not a ranked store"):
+        rs.open_store(p, "w")
+    assert p.read_bytes() == b"not a zip"
+    p.unlink()
     with rs.open_store(p, "w") as st:
         st.write_text("README.md", "x")
+    with rs.open_store(p, "w") as st:                          # a store may be replaced
+        st.write_text("README.md", "y")
     with rs.open_store(p, "r") as st:
-        assert st.exists("README.md")
+        assert st.read_text("README.md") == "y"
+
+
+def test_writing_through_a_symlink_updates_the_real_store(tmp_path):
+    real = tmp_path / "vol" / "real.duckn"
+    with rs.open_store(real, "w") as st:
+        st.write_text("README.md", "v1")
+    link = tmp_path / "link.duckn"
+    link.symlink_to(real)
+    with rs.open_store(link, "w") as st:
+        st.write_text("README.md", "v2")
+    assert link.is_symlink() and (real / "README.md").read_text() == "v2"
+    assert not [q for q in tmp_path.iterdir() if ".old-" in q.name or ".staging" in q.name]
+
+
+def test_a_failure_after_staging_is_created_leaves_nothing_behind(tmp_path, monkeypatch):
+    import zarr
+    monkeypatch.setattr(zarr, "create_group", lambda **k: (_ for _ in ()).throw(OSError("disk full")))
+    with pytest.raises(OSError):
+        rs.open_store(tmp_path / "s.duckn.zip", "w")
+    assert list(tmp_path.iterdir()) == []
 
 
 # ----------------------------------------------------------------------------------------
@@ -282,3 +309,134 @@ def test_the_junction_layer_can_be_appended_to_an_existing_zip(tmp_path):
         names = zf.namelist()
         assert len(names) == len(set(names))
     assert verify.verify(p, quiet=True)
+
+
+# ----------------------------------------------------------------------------------------
+# review fixes (2026-09-03): one writer, nothing replaced before it is complete
+# ----------------------------------------------------------------------------------------
+
+def test_a_directory_store_is_replaced_only_by_a_complete_build(tmp_path):
+    p = tmp_path / "s.duckn"
+    with rs.open_store(p, "w") as st:
+        st.write_text("README.md", "v1")
+    with pytest.raises(RuntimeError):
+        with rs.open_store(p, "w") as st:
+            st.write_text("README.md", "v2")
+            raise RuntimeError("midway")
+    with rs.open_store(p) as st:
+        assert st.read_text("README.md") == "v1"
+    assert not [q for q in tmp_path.iterdir() if ".staging" in q.name or ".old-" in q.name
+                or q.suffix == ".lock"]
+
+
+def test_a_directory_that_is_not_a_store_is_never_replaced(tmp_path):
+    from haversack.errors import InputError
+    p = tmp_path / "photos.duckn"
+    p.mkdir()
+    (p / "holiday.jpg").write_bytes(b"jpeg")
+    with pytest.raises(InputError, match="not a ranked store"):
+        rs.open_store(p, "w")
+    with pytest.raises(InputError, match="not a ranked store"):
+        rs.open_store(p, "a")
+    assert (p / "holiday.jpg").exists() and not (p.with_name("photos.duckn.lock")).exists()
+
+
+def test_two_writers_on_one_store_are_refused_at_open(tmp_path):
+    from haversack.errors import InputError
+    p = tmp_path / "s.duckn.zip"
+    with rs.open_store(p, "w") as st:
+        st.write_text("README.md", "v1")
+        with pytest.raises(InputError, match="another process"):
+            rs.open_store(p, "w")
+    with rs.open_store(p, "a") as st:          # released with the handle
+        st.write_text("README.md", "v2")
+    assert not list(tmp_path.glob("*.lock"))
+
+
+def _two_part_emit(tmp_path, names, part_names=("total_fast:s0", "total_fast:s1")):
+    """A cascade-shaped emit: two parts that both emit values 1 and 2."""
+    build = _tool("ranked_build_store")
+    labels = [0, 1, 2]
+    torch.manual_seed(1)
+    src = tmp_path / "emit2"
+    src.mkdir()
+    parts = {}
+    for pn in part_names:
+        code = encode(torch.randn(3, 8, 8, 8), depth=2, clip=8.0)
+        for nm, arr in (("ranks", code.ranks), ("support", code.support), ("tail", code.tail)):
+            if arr is not None:
+                np.save(src / f"{pn}_{nm}.npy", arr)      # the emit names files by the part
+        parts[pn] = {**code.meta, "engine": "nnunetv2", "task": "liver_segments", "part": pn,
+                     "labels": labels, "convention": "corner", "spacing_zyx": [3.0] * 3,
+                     "frame": {"canonical": {"shape_zyx": [16, 16, 16], "spacing_zyx": [1.5] * 3,
+                                             "origin_xyz": [0.0, 0.0, 0.0], "direction_xyz": D}},
+                     "model_grid": [8, 8, 8], "envelope": {"start": [0, 0, 0], "stop": [8, 8, 8]},
+                     "softmax": {"classes": 3, "weights": "synthetic", "version": "0"},
+                     "haversack": "test"}
+    (src / "meta.json").write_text(json.dumps(
+        {"image": "synthetic.nii", "task": "liver_segments", "depth": 2, "clip": 8.0,
+         "envelope_mm": None, "parts": parts}, default=str))
+    return build, src
+
+
+def test_leaves_are_unique_per_layer_and_value_so_a_cascade_keeps_every_class(tmp_path):
+    """Both stages of a cascade emit channel indices 1..K-1. A dedupe on the value alone gave
+    stage 1 no leaves while `classes_1` still claimed to be exhaustive."""
+    build, src = _two_part_emit(tmp_path, None)
+    out = build.build(src, tmp_path / "c.duckn", "c", names={1: "segment_1", 2: "segment_2"},
+                      quiet=True)
+    with rs.open_store(out) as st:
+        seg = rs.read_segmentation(st.root)
+    by = {s.id: s for s in seg.segments}
+    assert {"c1_l0", "c2_l0", "c1_l1", "c2_l1"} <= by.keys()
+    assert by["c1_l1"].name == "segment_1" and by["c1_l1"].layer == 1
+    assert by["c1_l0"].name == "label_1"                        # stage 0 has its own classes
+    assert set(by["classes_1"].members) == {"background_1", "c1_l1", "c2_l1"}
+    assert set(by["classes_0"].members) == {"background_0", "c1_l0", "c2_l0"}
+    verify = _tool("ranked_verify")
+    assert verify.verify(out, deep=True, quiet=True)
+
+
+def test_a_single_part_store_states_no_layer(tmp_path):
+    build = _tool("ranked_build_store")
+    out = build.build(_synthetic_emit(tmp_path), tmp_path / "one.duckn", "one", quiet=True)
+    with rs.open_store(out) as st:
+        seg = rs.read_segmentation(st.root)
+    assert all(s.layer is None for s in seg.segments)
+
+
+def test_the_lungs_claim_needs_the_lobes_not_the_prefix():
+    build = _tool("ranked_build_store")
+    def leaves(names):
+        return [rs.leaf(f"c{i + 1}", n, i + 1) for i, n in enumerate(names)]
+    vessels = build.named_groups("nnunetv2", leaves(["lung_vessels", "lung_trachea_bronchia"]))
+    assert not [g for g in vessels if g.id == "g_lungs"]
+    lobes = build.named_groups("nnunetv2", leaves([
+        "lung_upper_lobe_left", "lung_lower_lobe_left", "lung_upper_lobe_right",
+        "lung_middle_lobe_right", "lung_lower_lobe_right", "liver"]))
+    g = {x.id: x for x in lobes}["g_lungs"]
+    assert g.exhaustive and len(g.members) == 5
+    pair = build.named_groups("nnunetv2", leaves(["lung_left", "lung_right"]))
+    assert {x.id for x in pair} == {"g_lungs"}
+    four = build.named_groups("nnunetv2", leaves([
+        "lung_upper_lobe_left", "lung_lower_lobe_left", "lung_upper_lobe_right",
+        "lung_middle_lobe_right"]))
+    assert not [x for x in four if x.id == "g_lungs"]           # a lobe short of the concept
+
+
+def test_the_upgrade_tool_parses_arguments_and_names_a_store_that_is_not_one(tmp_path, capsys):
+    up, build = _tool("ranked_upgrade_seg"), _tool("ranked_build_store")
+    out = build.build(_synthetic_emit(tmp_path), tmp_path / "one.duckn.zip", "one", quiet=True)
+    with pytest.raises(SystemExit):
+        up.main(["--help"])
+    with pytest.raises(SystemExit):
+        up.main(["--no-such-flag", str(out)])
+    up.main([str(out)])
+    assert "seg 0.7 -> 0.7" in capsys.readouterr().out
+    with rs.open_store(out) as st:
+        assert all(s.layer is None for s in rs.read_segmentation(st.root).segments)
+    bare = tmp_path / "bare.duckn"
+    with rs.open_store(bare, "w") as st:
+        st.write_text("README.md", "not a haversack store")
+    with pytest.raises(SystemExit, match="no `haversack`"):
+        up.main([str(bare)])

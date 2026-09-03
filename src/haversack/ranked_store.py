@@ -39,10 +39,13 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 
 import numpy as np
+
+from .errors import InputError
 
 DUCKN_VERSION = "1.0"
 SPACE = "left-posterior-superior"
@@ -61,18 +64,21 @@ def is_zip(path) -> bool:
 class RankedStore:
     """An open store: ``root`` is the zarr group, ``store`` the zarr store behind it.
 
-    Use as a context manager, or call :meth:`close`. For a zip opened for writing or
-    amending, ``close`` packs the staging directory into the archive; leaving the ``with``
-    block on an exception discards the staging directory and leaves the target untouched.
+    Use as a context manager, or call :meth:`close`. A zip (any mode) and a directory
+    being created are built in a staging directory; ``close`` packs or moves it onto the
+    target, and leaving the ``with`` block on an exception discards the staging and leaves
+    the target untouched. A directory opened with ``"a"`` is the exception: it is amended
+    in place, and a failure part-way leaves what was written.
     """
 
-    def __init__(self, path, store, root, mode: str, staging: Path | None = None):
+    def __init__(self, path, store, root, mode: str, staging: Path | None = None, lock=None):
         self.path = Path(path)
         self.store = store
         self.root = root
         self.mode = mode
         self.is_zip = is_zip(path)
         self._staging = staging
+        self._lock = lock
         self._closed = False
 
     # -- arbitrary keys (the README travels as a key, never as a file beside the store) --
@@ -108,15 +114,25 @@ class RankedStore:
         if self._closed:
             return
         self._closed = True
-        if hasattr(self.store, "close"):
-            self.store.close()
-        if self._staging is not None:
+        try:
             try:
-                if not discard:
-                    _pack(self._staging, self.path)
+                if hasattr(self.store, "close"):
+                    self.store.close()
+                if self._staging is not None and not discard:
+                    # the target changes only here, after a complete build: a failure
+                    # anywhere above leaves whatever was at the path exactly as it was
+                    if self.is_zip:
+                        _pack(self._staging, self.path)
+                    else:
+                        _replace_dir(self._staging, self.path)
             finally:
-                shutil.rmtree(self._staging, ignore_errors=True)
-                self._staging = None
+                if self._staging is not None:
+                    shutil.rmtree(self._staging, ignore_errors=True)
+                    self._staging = None
+        finally:
+            if self._lock is not None:
+                self._lock.release()
+                self._lock = None
 
     def __enter__(self):
         return self
@@ -139,17 +155,112 @@ def _pack(src_dir: Path, archive: Path) -> None:
     os.replace(partial, archive)
 
 
+def _replace_dir(src: Path, dst: Path) -> None:
+    """Move a finished staging directory onto ``dst``; a previous ``dst`` goes away only
+    once the new one is in place."""
+    old = None
+    if dst.exists():
+        old = dst.with_name(f"{dst.name}.old-{os.getpid()}")
+        os.replace(dst, old)
+    try:
+        os.replace(src, dst)
+    except OSError:
+        if old is not None:
+            os.replace(old, dst)
+        raise
+    if old is not None:
+        if old.is_dir() and not old.is_symlink():
+            shutil.rmtree(old, ignore_errors=True)
+        else:
+            old.unlink(missing_ok=True)
+
+
+class _Lock:
+    """One writer per store: an advisory ``flock`` on a ``<store>.lock`` file beside the
+    target, held for the life of the handle. A second writer is refused at open, not
+    discovered as an interleaved archive at close."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.fd = None
+
+    @classmethod
+    def acquire(cls, target: Path) -> "_Lock":
+        lock = cls(target.with_name(target.name + ".lock"))
+        lock.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import fcntl
+        except ImportError:                       # no advisory locks on this platform
+            lock.fd = os.open(lock.path, os.O_CREAT | os.O_RDWR, 0o644)
+            return lock
+        for _ in range(20):
+            fd = os.open(lock.path, os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                raise InputError(f"{target}: another process is writing this store "
+                                 f"(lock {lock.path.name}); wait for it, or remove the lock "
+                                 "file if that process is gone") from None
+            # The releasing writer unlinks its lock file. A lock taken on an inode that
+            # was unlinked between our open and our flock guards nothing - a third
+            # writer creates a fresh file at the path and locks that - so the lock
+            # counts only when the path still names the inode we hold.
+            try:
+                same = os.stat(lock.path).st_ino == os.fstat(fd).st_ino
+            except FileNotFoundError:
+                same = False
+            if same:
+                lock.fd = fd
+                return lock
+            os.close(fd)
+        raise InputError(f"{target}: could not take the store lock ({lock.path.name})")
+
+    def release(self) -> None:
+        if self.fd is None:
+            return
+        try:
+            os.unlink(self.path)
+        except FileNotFoundError:
+            pass
+        os.close(self.fd)
+        self.fd = None
+
+
+def _looks_like_store(p: Path) -> bool:
+    """Whether what sits at ``p`` is a zarr group (a ranked store, or at least something
+    this module wrote); anything else is not ours to replace."""
+    if is_zip(p):
+        try:
+            with zipfile.ZipFile(p) as zf:
+                return "zarr.json" in zf.namelist()
+        except (zipfile.BadZipFile, OSError):
+            return False
+    return p.is_dir() and (p / "zarr.json").is_file()
+
+
 def open_store(path, mode: str = "r") -> RankedStore:
     """Open a ranked store at ``path``: a directory, or a zarr zip when it ends in ``.zip``.
 
-    ``mode``: ``"r"`` read; ``"w"`` create, replacing whatever is there; ``"a"`` open an
-    existing store to amend in place. A zip in ``"w"`` or ``"a"`` is worked on in a staging
-    directory beside it and packed when the handle closes.
+    ``mode``: ``"r"`` read; ``"w"`` create, replacing a store already there (never a
+    directory, archive or file that is not one); ``"a"`` open an existing store to amend. A zip, and
+    a directory being created, are worked on in a staging directory beside the target and
+    moved onto it when the handle closes without error; leaving the ``with`` block on an
+    exception discards the staging and the target is exactly what it was. A directory
+    opened with ``"a"`` is amended in place. Writers hold a lock on the target.
     """
-    import zarr
-    from zarr.storage import LocalStore, ZipStore
+    try:
+        import zarr
+        from zarr.storage import LocalStore, ZipStore
+    except ImportError as e:
+        raise InputError("ranked stores need zarr (the duckn extra): "
+                         "uv sync --extra duckn, or uv pip install zarr") from e
 
     p = Path(path)
+    if mode != "r" and p.is_symlink():
+        # write through the link: the staging must sit beside the REAL store, and the
+        # replace must land there rather than turn the link into a directory
+        p = Path(os.path.realpath(p))
     zipped = is_zip(p)
     if mode == "r":
         if not p.exists():
@@ -160,32 +271,32 @@ def open_store(path, mode: str = "r") -> RankedStore:
         raise ValueError(f"mode must be 'r', 'w' or 'a', not {mode!r}")
     if mode == "a" and not p.exists():
         raise FileNotFoundError(str(p))
-
+    if p.exists() and not _looks_like_store(p):
+        # a directory of photos, a stray archive, a text file: whatever it is, it is
+        # not ours to replace
+        raise InputError(f"{p}: exists and is not a ranked store; refusing to "
+                         f"{'replace' if mode == 'w' else 'amend'} it")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    lock = _Lock.acquire(p)
     staging = None
-    if zipped:
-        staging = p.with_name(p.name + ".staging")
-        if staging.exists():
-            shutil.rmtree(staging)
-        if mode == "a":
-            with zipfile.ZipFile(p) as zf:
-                zf.extractall(staging)
+    try:
+        if zipped or mode == "w":
+            staging = Path(tempfile.mkdtemp(prefix=p.name + ".staging-", dir=p.parent))
+            if zipped and mode == "a":
+                with zipfile.ZipFile(p) as zf:
+                    zf.extractall(staging)
+            where = staging
         else:
-            if p.exists():
-                p.unlink()
-            staging.mkdir(parents=True)
-        where = staging
-    else:
-        if mode == "w":
-            if p.is_dir():
-                shutil.rmtree(p)
-            elif p.exists():
-                p.unlink()
-            p.parent.mkdir(parents=True, exist_ok=True)
-        where = p
-    st = LocalStore(str(where))
-    root = (zarr.create_group(store=st) if mode == "w"
-            else zarr.open_group(store=st, mode="r+"))
-    return RankedStore(p, st, root, mode, staging=staging)
+            where = p
+        st = LocalStore(str(where))
+        root = (zarr.create_group(store=st) if mode == "w"
+                else zarr.open_group(store=st, mode="r+"))
+    except BaseException:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        lock.release()
+        raise
+    return RankedStore(p, st, root, mode, staging=staging, lock=lock)
 
 
 # ----------------------------------------------------------------------------------------

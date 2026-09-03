@@ -268,6 +268,7 @@ The stores:
 | `inputs` | `~/.cache/haversack/inputs` (fetched sources) | yes |
 | `results` | `~/.cache/haversack/results` (server result cache) | yes |
 | `checkpoints` | `~/.cache/haversack/fastsurfer-checkpoints` | yes |
+| `serve` | `~/.cache/haversack/serve` (generated server tokens) | **no** - a running server owns its file |
 | `weights` | `~/.totalsegmentator/nnunet/results` (models) | **no** - use `weights remove` |
 
 `cache clean` is a dry run unless you pass `--yes`, takes `--older-than <n>d|h|w` to keep
@@ -292,18 +293,24 @@ and `--dtype fp32` on the nnU-Net path is never lowered.
 The server is the same job protocol haversack deploys on Modal, run on the machine itself:
 
 ```bash
-haversack serve --port 8790 --token choose-a-secret
+haversack serve --port 8790
 ```
 
 It builds a `Segmenter` with warm models (`--cache-models 5` by default, enough for a whole
 `total` union), queues jobs, streams progress, and keeps a durable result cache under
-`~/.cache/haversack/results`. Without `--token` a request can read health, the task list, and
-cached results, but never compute. The client:
+`~/.cache/haversack/results`. Computation needs a bearer token and reads never do. Given
+none, the server generates one, prints it, and leaves it in a file only you can read, which
+`haversack remote` on the same machine picks up by itself when it talks to a loopback address
+(`127.0.0.1`, `localhost`) - so personal use has no ceremony,
+and a proxy or tunnel in front of the server still faces a token. (`--no-token` runs open,
+with no protection of any kind; it is for a machine you trust end to end.) To reach it from other
+machines, bind it to a network interface with a token of your choosing, `--host 0.0.0.0
+--token <secret>`, and pass that to `remote --token`. The client:
 
 ```bash
 export HAVERSACK_SERVER=http://127.0.0.1:8790
-haversack remote --token choose-a-secret tasks
-haversack remote --token choose-a-secret submit scan.nii.gz --task total_fast -o labels.seg.nrrd
+haversack remote tasks
+haversack remote submit scan.nii.gz --task total_fast -o labels.seg.nrrd
 ```
 
 `submit` uploads, shows progress, and downloads the labels; `--no-wait` returns a job id for
@@ -312,6 +319,10 @@ haversack remote --token choose-a-secret submit scan.nii.gz --task total_fast -o
 answers; stop it with Ctrl-C (or kill the process) - queued jobs are kept in its `jobs.db`
 and re-queued when it starts again. On this M2 a `total_fast` job through the
 server produced labels voxel-identical to the command line's.
+
+That is the whole of it for a single machine. The server has its own guide for the rest -
+the rules that decide reads and computes, results addressed by what was segmented, the
+hosted sources, the caches, and deploying to Modal: `haversack docs --server`.
 
 ## Engines: FastSurfer and friends
 

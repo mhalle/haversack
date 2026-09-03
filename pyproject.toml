@@ -1,6 +1,6 @@
 [project]
 name = "haversack"
-version = "0.4.0"
+version = "0.4.1"
 description = "Medical-image segmentation models, many families behind one door: TotalSegmentator, MOOSE, MRSegmentator, stock nnU-Net and more, on MPS, CUDA or CPU, with a CLI and a local REST server"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -124,6 +124,9 @@ artifacts = ["src/haversack/data/*.json", "src/haversack/data/*.md"]
 # The README is the user guide, and `haversack docs` prints it from inside the wheel; an
 # editable checkout reads the repository's README instead (cli.user_guide) - one source.
 "README.md" = "haversack/data/GUIDE.md"
+# The server guide, the same way: `haversack docs --server`, and the server's own OpenAPI
+# description is drawn from it.
+"SERVER.md" = "haversack/data/SERVER.md"
 
 [tool.uv]
 # Engines own their environments (docs: "one environment per engine") when their deps
@@ -163,7 +166,7 @@ voxtell = { git = "https://github.com/MIC-DKFZ/VoxTell.git", rev = "8ef0332aec5d
 # duckn = the metadata standard the ranked stores are written in (seg extension 0.7 as of
 # 0.3.0). A release tag, not a branch, so a sync is reproducible; to work on duckn itself,
 # `uv pip install -e ../duckn` after the sync puts the sibling checkout in front of it.
-duckn = { git = "https://github.com/mhalle/duckn.git", tag = "v0.3.0" }
+duckn = { git = "https://github.com/mhalle/duckn.git", tag = "v0.3.2" }
 # synthstrip-torch = our standalone SynthStrip inference package (StripModel + surfa conform
 # + SDT; weights fetched from MGH at runtime). Import namespace: synthstrip_torch.
 synthstrip-torch = { git = "https://github.com/mhalle/synthstrip-torch.git", rev = "1b871fb1f98fbe60ed1efe87de34a8703a106b44" }

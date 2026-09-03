@@ -78,12 +78,16 @@ the key a future result cache will use. IDC fetches happen at dispatch, as a vis
 "fetch" progress stage, so submits stay tiny and a 429 never wastes an upload.
 
 FastAPI and uvicorn live behind the ``serve`` extra; nothing here imports them until
-:func:`create_app` runs. No authentication: this server is for localhost and trusted
-LANs. The authenticated deployment is the Modal one, where the platform supplies
-both the queue (spawn + autoscaler) and the auth (proxy tokens).
+:func:`create_app` runs. Computation needs a bearer token; reads never do. The
+command line always has one - given, or generated and left in a file only that user
+can read - and ``--no-token`` runs open, on purpose, with no guards of any kind: an
+open server is open to whatever reaches the port, including through a proxy or tunnel
+in front of a loopback bind. The authenticated deployment is the Modal one, where the
+platform supplies both the queue (spawn + autoscaler) and the auth (proxy tokens).
 """
 import json
 import hashlib
+import sys
 import os
 import re
 import shutil
@@ -106,6 +110,9 @@ ARTIFACT_PENDING_TTL = 900.0   # a pending marker older than this is a dead
 TERMINAL = ("done", "failed", "cancelled")
 RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default artifact
 from .sources import CRDC_RE, IDC_BUCKETS, registry as _source_registry  # noqa: E402
+
+
+_ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack knows
 
 
 def result_key(identity, task, options, weights_versions, version=None) -> str:
@@ -266,6 +273,13 @@ def safe_path_component(key: str) -> str:
     escaped first, or a literal ``%3A`` and an encoded ``:`` would collide.
     """
     out = key.replace("%", "%25")
+    # Uppercase letters are escaped too, so two identifiers that differ only in case
+    # (hf, zenodo, openneuro and tcia identifiers are case-sensitive) cannot share an
+    # entry on a case-insensitive filesystem - macOS's default, where the two would
+    # otherwise map to one directory and the second job would get the first's bytes.
+    # ASCII only: a code point above 0xFF would need three hex digits and collide with a
+    # two-digit escape followed by a literal digit ("A3" vs "\u0413")
+    out = "".join("%%%02X" % ord(c) if (c.isupper() and c.isascii()) else c for c in out)
     for c in RESERVED_PATH_CHARS:
         out = out.replace(c, "%%%02X" % ord(c))
     return out
@@ -1011,6 +1025,7 @@ class LocalExecutor:
         self._artifacts_pending: dict = {}   # cache_key -> (owner jid, set at)
         self.cache = ResultCache(cache_dir, keep=keep_cached) if cache_dir else None
         self._inflight: dict[str, str] = {}      # cache key -> active job id
+        self._joiners: dict[str, int] = {}       # job id -> clients riding it besides the first
         self._cv = threading.Condition()
         self._pending: deque[str] = deque()
         self._jobs: dict[str, JobRecord] = {}
@@ -1091,6 +1106,10 @@ class LocalExecutor:
                             cache_key=r.get("cache_key"), created=r.get("created") or time.time())
             self._jobs[rec.id] = rec
             self._pending.append(rec.id)
+            # the single-flight marker, oldest first: without it a re-ask for the same
+            # key after a restart starts a second job, and a DELETE cancels the wrong one
+            if rec.cache_key and rec.cache_key not in self._inflight:
+                self._inflight[rec.cache_key] = rec.id
         # Positively identify a job directory before removing it, rather than
         # removing whatever is not recognized. The workdir legitimately holds
         # other things - the series cache, and a result cache when one is
@@ -1140,8 +1159,8 @@ class LocalExecutor:
                 if hit is not None:
                     rec.labels_path, rec.result = Path(hit[0]), hit[1]
                     rec.state, rec.cached = "done", True
-                    self._persist(rec)
                     rec.started = rec.finished = time.time()
+                    self._persist(rec)
                     with self._cv:
                         self._jobs[jid] = rec
                         self._done_order.append(jid)
@@ -1149,6 +1168,19 @@ class LocalExecutor:
                     self._evict()
                     return rec
         with self._cv:
+            # Ask twice, compute once - also when the asks overlap: an identical key
+            # already in flight is joined, not duplicated (the path surface does the
+            # same through find_inflight). The new job's directory is discarded.
+            if rec.cache_key and not no_cache:
+                other = self._jobs.get(self._inflight.get(rec.cache_key))
+                # ...but only a flight fetched with the SAME source credentials: a caller
+                # without them must not ride one that used somebody else's
+                if (other is not None and other.state in ACTIVE
+                        and (other.source_tokens or None) == (rec.source_tokens or None)):
+                    import shutil
+                    shutil.rmtree(jdir, ignore_errors=True)
+                    self._joiners[other.id] = self._joiners.get(other.id, 0) + 1
+                    return other
             if len(self._pending) >= self.max_pending:
                 raise QueueFull(f"queue is full ({self.max_pending} pending)")
             self._jobs[jid] = rec
@@ -1235,8 +1267,22 @@ class LocalExecutor:
         ``cancelled``. ``(None, False)`` for an unknown job."""
         with self._cv:
             rec = self._jobs.get(jid)
+            if rec is not None and rec.state in ACTIVE and self._joiners.get(jid, 0) > 0:
+                # several clients ride this flight; one leaving must not end it for the
+                # others - the last DELETE is the one that cancels
+                self._joiners[jid] -= 1
+                return "released", False
             if rec is None:
-                return None, False
+                stored = self._stored(jid)     # evicted from memory, still on record
+                if stored is None:
+                    return None, False
+                import shutil
+                shutil.rmtree(self.workdir / jid, ignore_errors=True)
+                try:
+                    self.jobs_db.drop(jid)
+                except Exception:
+                    pass
+                return stored.get("state"), True
             if rec.state == "queued":
                 self._pending.remove(jid)
                 rec.state, rec.finished = "cancelled", time.time()
@@ -1253,6 +1299,10 @@ class LocalExecutor:
             else:
                 self._jobs.pop(jid)
                 self._rm(rec)
+                try:
+                    self.jobs_db.drop(jid)     # deleted means deleted, durably too
+                except Exception:
+                    pass
                 return rec.state, True
         if state == "cancelled":
             self._emit(rec)
@@ -1448,6 +1498,11 @@ class LocalExecutor:
                                      args=(pair, key, rec.dir, rec.task, rec.id),
                                      name="haversack-artifacts", daemon=True).start()
 
+                if rec.cancel_token.cancelled:
+                    # cooperative cancellation is checked per patch; the restore and the
+                    # save are not interruptible, so a DELETE that landed during them
+                    # must still keep the entry from being (re)published
+                    raise Cancelled("cancelled before publication")
                 rec.cache_key, _ = publish_completion(
                     segmenter=self.segmenter, task=rec.task,
                     identity=rec.input_identity, options=rec.options,
@@ -1467,13 +1522,11 @@ class LocalExecutor:
                 pass
             except Cancelled:
                 rec.state = "cancelled"
-                self._persist(rec)
                 if (rec.cache_key and self._artifacts_pending.get(
                         rec.cache_key, (None,))[0] == rec.id):
                     self._artifacts_pending.pop(rec.cache_key, None)
             except Exception as e:             # noqa: BLE001 - reported to the client
                 rec.state = "failed"
-                self._persist(rec)
                 rec.error = f"{type(e).__name__}: {e}"
                 if (rec.cache_key and self._artifacts_pending.get(
                         rec.cache_key, (None,))[0] == rec.id):
@@ -1482,6 +1535,10 @@ class LocalExecutor:
                 for key in pinned:
                     self.series_cache.unpin(key)
                 rec.finished = time.time()
+                # the durable row is written once the outcome is complete - state, error
+                # and finished together; written earlier it recorded every failure as
+                # causeless and every job as unfinished, which is what a restart showed
+                self._persist(rec)
                 with self._cv:
                     self._done_order.append(rec.id)
                     # compare-and-pop: under duplicate flights for one key the
@@ -1597,9 +1654,36 @@ class LocalExecutor:
     # result_file, and supports_push=False for the SSE poll branch.)
     supports_push = True
 
+    def _stored(self, jid: str) -> dict | None:
+        """A terminal record from the store, for an id memory no longer holds."""
+        try:
+            r = self.jobs_db.get(jid)
+        except Exception:
+            return None
+        return r if r and r.get("state") in TERMINAL else None
+
     def status_of(self, jid: str) -> dict | None:
         rec = self.get(jid)
-        return None if rec is None else self.status(rec)
+        if rec is not None:
+            return self.status(rec)
+        r = self._stored(jid)
+        if r is None:
+            return None
+        # The durable record outlives the bytes: an evicted or pre-restart job keeps
+        # answering, its result reported as gone rather than the id 404ing.
+        gone = not (r.get("labels_path") and Path(r["labels_path"]).exists())
+        d = {"id": r["id"], "task": r.get("task"), "state": r.get("state"),
+             "created": r.get("created"), "started": r.get("started"),
+             "finished": r.get("finished"), "input_identity": r.get("input_identity") or [],
+             "options": r.get("options") or {}, "cached": bool(r.get("cached")),
+             "evicted": True, "result_available": not gone}
+        if r.get("error"):
+            d["error"] = r["error"]
+        if r.get("result"):
+            d["result"] = r["result"]
+        if r.get("cache_key"):
+            d["key"] = r["cache_key"]
+        return d
 
     def statuses(self) -> list[dict]:
         return [self.status(r, brief=True) for r in self.jobs()]
@@ -1610,7 +1694,11 @@ class LocalExecutor:
         record) - callers must not assume done implies readable."""
         rec = self.get(jid)
         if rec is None:
-            return None, None
+            r = self._stored(jid)
+            if r is None:
+                return None, None
+            p = r.get("labels_path")
+            return r.get("state"), (Path(p) if p and Path(p).exists() else None)
         p = rec.labels_path
         return rec.state, (p if p is not None and Path(p).exists() else None)
 
@@ -1827,6 +1915,19 @@ class CacheOnlyExecutor:
         return None, None
 
 
+def _openapi_description() -> str:
+    """The server guide's "What it is" and "Reads and computes" sections, verbatim, so the
+    OpenAPI document states the rules in the guide's words (see SERVER.md, "Reference")."""
+    try:
+        from .cli import guide_sections, guide_text
+        text = guide_text("server")
+    except Exception:                                   # noqa: BLE001 - docs are optional
+        return ""
+    wanted = ("What it is", "Reads and computes")
+    parts = [body for head, body in guide_sections(text) if head in wanted]
+    return "\n".join(parts)
+
+
 def create_app(executor: LocalExecutor, *, token: str | None = None,
                wait_default: float = 30.0, wait_max: float = 110.0,
                read_only: bool = False):
@@ -1893,14 +1994,24 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 return None
         return t if t in seg.tasks() else None
 
-    app = FastAPI(title="haversack", version=_version())
+    # The OpenAPI document carries the guide's rules, so /docs and `haversack docs --server`
+    # cannot say different things; the routes are grouped by the tags the guide names.
+    app = FastAPI(title="haversack", version=_version(), description=_openapi_description(),
+                  openapi_tags=[
+                      {"name": "service", "description": "readiness, what is deployed, the sources"},
+                      {"name": "tasks", "description": "the catalog: names, descriptions, weights"},
+                      {"name": "jobs", "description": "submit, watch, fetch, cancel"},
+                      {"name": "inputs", "description": "send content once, refer to it by digest"},
+                      {"name": "results", "description": "results addressed by source, identifier and task"}])
 
     def authed(request) -> bool:
         if read_only:
             return False               # the twin can never compute
-        if token is None:
-            return True
-        return request.headers.get("authorization", "") == f"Bearer {token}"
+        if token is None:              # --no-token: open to anything that reaches the
+            return True                # port. No heuristics: an open server is open.
+        import secrets
+        sent = request.headers.get("authorization", "")
+        return secrets.compare_digest(sent.encode(), f"Bearer {token}".encode())
 
     def require_auth(request) -> None:
         if not authed(request):
@@ -1921,7 +2032,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(404, "this server has no input store")
         return store
 
-    @app.get("/v1/inputs/{digest}")
+    @app.get("/v1/inputs/{digest}", tags=["inputs"])
     def input_status(digest: str, request: Request):
         """Whether this server already holds that content - the call a client
         makes before deciding whether an upload is needed at all.
@@ -1948,7 +2059,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 "members": len(files),
                 "bytes": sum(p.stat().st_size for p in files)}
 
-    @app.put("/v1/inputs/{digest}")
+    @app.put("/v1/inputs/{digest}", tags=["inputs"])
     async def put_input(digest: str, request: Request):
         """Store content under the digest of its own bytes - the preload call.
 
@@ -2003,7 +2114,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         finally:
             _discard(work)
 
-    @app.post("/v1/inputs")
+    @app.post("/v1/inputs", tags=["inputs"])
     async def post_input(request: Request, kind: str | None = None,
                          expect: str | None = None):
         """Store a multi-file input - a DICOM series - as one tree.
@@ -2042,7 +2153,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             if state is None:
                 raise HTTPException(404, {"code": "no_job",
                                           "message": f"no job {from_job!r}"})
-            if state != "done" or path is None:
+            if state == "done" and path is None:
+                raise HTTPException(410, {
+                    "code": "result_gone",
+                    "message": f"job {from_job!r} finished but its result bytes are gone"})
+            if state != "done":
                 raise HTTPException(409, {
                     "code": "not_done",
                     "message": f"job {from_job!r} is {state}; nothing to promote"})
@@ -2124,7 +2239,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         finally:
             _discard(work)
 
-    @app.get("/v1/health")
+    @app.get("/v1/health", tags=["service"])
     def health():
         policy = getattr(seg, "policy", {})
         return {"name": "haversack", "version": _version(),
@@ -2134,7 +2249,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 "sources": ["upload"] + [k for k, v in sources.items()
                                          if _source_enabled(v)]}
 
-    @app.get("/v1/version")
+    @app.get("/v1/version", tags=["service"])
     def version():
         """Self-report - what this deployment is running. Anonymous, no external
         calls: the wire contract version, the haversack version, when this instance
@@ -2168,7 +2283,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 "started_at": _started_at, "engines": engines,
                 "packages": pkgs, "weights": weights}
 
-    @app.get("/v1/tasks")
+    @app.get("/v1/tasks", tags=["tasks"])
     def tasks():
         out = {"tasks": seg.tasks()}
         cat = getattr(seg, "catalog", None)
@@ -2184,7 +2299,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             out["detail"] = detail
         return out
 
-    @app.post("/v1/tasks/{task}/prepare", status_code=202)
+    @app.post("/v1/tasks/{task}/prepare", status_code=202, tags=["tasks"])
     def prepare_task(request: Request, task: str):
         """Install a task's weights now (authorized): the deliberate form of
         what first use does implicitly. Returns a job to watch; its result is
@@ -2214,12 +2329,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 **({"version": requested.rpartition("@")[2]}
                    if requested != task else {})}
 
-    @app.get("/v1/sources")
+    @app.get("/v1/sources", tags=["service"])
     def list_sources():
         return {"sources": [dict(v.describe(), enabled=_source_enabled(v))
                             for v in sources.values()]}
 
-    @app.get("/v1/segmentations")
+    @app.get("/v1/segmentations", tags=["results"])
     def list_segmentations(request: Request):
         """Authorized only (review finding): the listing enumerates every
         cached result including sha256 identities of authenticated users'
@@ -2233,11 +2348,10 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         keep = []                          # advertise only links that resolve
         wv_memo: dict = {}                 # weights per task, once per request
         for e in entries:                  # on THIS app's mounted sources
-            p = e.get("path") or ""
-            parts = p.split("/", 3)
-            pfx = parts[2] if len(parts) > 2 else None
-            if pfx is not None and pfx not in sources:
-                continue
+            ident0 = str((e.get("identity") or [""])[0])
+            pfx = ident0.split(":", 1)[0] if ":" in ident0 else None
+            if pfx in _ALL_SOURCE_PREFIXES and pfx not in sources:
+                continue                   # a hosted source this app does not mount
             t = e.get("task")
             canonical = canon_task(str(t)) if t is not None else None
             if t is not None and canonical is None:
@@ -2265,14 +2379,17 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             keep.append(e)
         return {"segmentations": keep}
 
-    @app.get("/v1/tasks/{task}")
+    @app.get("/v1/tasks/{task}", tags=["tasks"])
     def describe(task: str):
+        canonical = canon_task(task)       # catalog names only, like every other route
+        if canonical is None:
+            raise HTTPException(404, f"unknown task {task!r}")
         try:
-            return seg.describe(task)
-        except Exception as e:
-            raise HTTPException(404, f"unknown task {task!r}: {e}") from e
+            return seg.describe(canonical)
+        except Exception as e:             # noqa: BLE001 - never echo the resolver's path
+            raise HTTPException(404, f"unknown task {task!r}") from e
 
-    @app.post("/v1/jobs", status_code=202)
+    @app.post("/v1/jobs", status_code=202, tags=["jobs"])
     async def submit(request: Request, file: UploadFile | None = File(None),
                      task: str = Form(...), options: str = Form("{}"),
                      source: str = Form(None)):
@@ -2489,7 +2606,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         identity = (tuple(sorted(f"{role}={i}" for (role, _), i in zip(staged, idents)))
                     if multi else (idents[0],))
         if True:
-            executor.submit(jid, jdir, staged[0][1], task, opts,
+            rec = executor.submit(jid, jdir, staged[0][1], task, opts,
                             # in the model's declared channel order, not the
                             # order the client happened to list them: both
                             # executors take "the first source" as the reference
@@ -2498,9 +2615,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                             identity=identity, no_cache=no_cache,
                             source_tokens=source_tokens_of(request),
                             inputs=tuple(staged) if multi else ())
-        return executor.status_of(jid)
+        # the executor may have joined this ask to an identical flight already
+        # running: the status it answers with is that job's, under its id
+        return executor.status_of(getattr(rec, "id", None) or jid)
 
-    @app.get("/v1/jobs")
+    @app.get("/v1/jobs", tags=["jobs"])
     def jobs(request: Request):
         require_auth(request)
         return {"jobs": executor.statuses()}
@@ -2528,7 +2647,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         jid = out.get("id")
         links = {"self": f"/v1/jobs/{jid}", "events": f"/v1/jobs/{jid}/events"}
         if out.get("state") == "done":
-            links["result"] = f"/v1/jobs/{jid}/result"
+            if out.get("result_available", True):   # an evicted record says when it is gone
+                links["result"] = f"/v1/jobs/{jid}/result"
             kinds = set(getattr(executor, "artifacts", ()) or ())
             links.update(resource_links(
                 out.get("task"), out.get("input_identity"), out.get("options"),
@@ -2538,12 +2658,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         out["links"] = links
         return out
 
-    @app.get("/v1/jobs/{jid}")
+    @app.get("/v1/jobs/{jid}", tags=["jobs"])
     def status(request: Request, jid: str):
         require_auth(request)
         return _with_links(_status_or_404(jid))
 
-    @app.get("/v1/jobs/{jid}/events")
+    @app.get("/v1/jobs/{jid}/events", tags=["jobs"])
     async def events(request: Request, jid: str):
         require_auth(request)
         first = _status_or_404(jid)
@@ -2592,7 +2712,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no"})
 
-    @app.get("/v1/jobs/{jid}/result")
+    @app.get("/v1/jobs/{jid}/result", tags=["jobs"])
     def result(request: Request, jid: str, format: str = None):
         require_auth(request)
         state, path = executor.result_file(jid)
@@ -2629,7 +2749,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                             filename=f"{stem}_{jid}.seg.nrrd",
                             headers={"ETag": etag})
 
-    @app.delete("/v1/jobs/{jid}")
+    @app.delete("/v1/jobs/{jid}", tags=["jobs"])
     def cancel(request: Request, jid: str):
         require_auth(request)
         state, deleted = executor.cancel(jid)
@@ -2637,6 +2757,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(404, f"no job {jid!r}")
         if deleted:
             return {"id": jid, "deleted": True, "state": state}
+        if state == "released":
+            # this caller had joined a flight others are still waiting on: it leaves,
+            # the computation goes on
+            now = (executor.status_of(jid) or {}).get("state")
+            return {"id": jid, "cancelling": False, "released": True, "state": now}
         return {"id": jid, "cancelling": state not in TERMINAL, "state": state}
 
 
@@ -2702,7 +2827,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 register("_" + tok, dict(opts))
 
         def _register_probe(tok: str, gopts: dict):
-            @app.head(base + f"/labels{tok}.seg.nrrd")
+            @app.head(base + f"/labels{tok}.seg.nrrd", tags=["results"])
             def probe(request: Request, ident: str, task: str):
                 from fastapi import Response
                 key = keyed(norm(ident), task, gopts)
@@ -2723,7 +2848,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         _grid_routes(_register_probe)
 
         def _register_resource(tok: str, gopts: dict):
-            @app.get(base + f"/labels{tok}.seg.nrrd")
+            @app.get(base + f"/labels{tok}.seg.nrrd", tags=["results"])
             async def resource(request: Request, ident: str, task: str):
                 ident = norm(ident)
                 if not re.fullmatch(pat, ident):
@@ -2780,6 +2905,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     jid, jdir = executor.new_job_dir()
                     try:
                         executor.submit(jid, jdir, None, task, dict(gopts),
+                                        no_cache=skip,      # the same skip the lookup used
                                         source=[srcdict],
                                         identity=(srcobj.identity(ident),),
                                         source_tokens=source_tokens_of(request))
@@ -2860,14 +2986,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 return out
 
             for pth in paths:
-                app.delete(pth)(evict)
+                app.delete(pth, tags=["results"])(evict)
 
         _grid_routes(_register_evict)
 
         # The bare-task DELETE alias registers LAST: its greedy ident would
         # otherwise swallow the variant URLs, capturing labels.1mm.seg.nrrd
         # as the task segment.
-        @app.delete(base)
+        @app.delete(base, tags=["results"])
         def evict_bare(request: Request, ident: str, task: str):
             require_auth(request)
             key = keyed(norm(ident), task, {})
@@ -2884,13 +3010,18 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 out["cancelled_job"] = jid
             return out
 
+        def _skip_cache(request: Request) -> bool:
+            # `Cache-Control: no-cache` from an authorized caller means "not the stored
+            # one" on every path-addressed artifact, not only the labels
+            return wants_no_cache(request) and authed(request)
+
         def _register_meta(tok: str, gopts: dict):
-            @app.get(base + f"/meta{tok}.json")
-            def meta(ident: str, task: str):
+            @app.get(base + f"/meta{tok}.json", tags=["results"])
+            def meta(request: Request, ident: str, task: str):
                 key = keyed(norm(ident), task, gopts)
                 if key is None:
                     raise HTTPException(404, "unknown resource")
-                hit = executor.cache_get(key)
+                hit = None if _skip_cache(request) else executor.cache_get(key)
                 if hit is None:
                     raise HTTPException(404, "not materialized")
                 return JSONResponse(hit[1], headers=_resource_headers(key))
@@ -2898,14 +3029,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         _grid_routes(_register_meta)
 
         def _register_preview(tok: str, gopts: dict):
-            @app.get(base + f"/preview{tok}.png")
+            @app.get(base + f"/preview{tok}.png", tags=["results"])
             async def preview(request: Request, ident: str, task: str):
                 key = keyed(norm(ident), task, gopts)
                 if key is None:
                     raise HTTPException(404, "unknown resource")
                 w = _prefer_wait_raw(request, wait_max)
                 deadline = None if w is None else time.time() + w
-                hit = executor.cache_get(key)
+                hit = None if _skip_cache(request) else executor.cache_get(key)
                 if hit is None:
                     hit = await _materialize_entry(request, norm(ident),
                                                    canon_task(task), gopts, key,
@@ -2953,6 +3084,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 jid, jdir = executor.new_job_dir()
                 try:
                     executor.submit(jid, jdir, None, task, dict(opts),
+                                    no_cache=((wants_no_cache(request) and authed(request))
+                                              or not engine_serves_from_cache(task)),
                                     source=[srcdict],
                                     identity=(srcobj.identity(ident),),
                                     source_tokens=source_tokens_of(request))
@@ -3026,14 +3159,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     raise HTTPException(404, "unknown resource")
                 w = _prefer_wait_raw(request, wait_max)
                 deadline = None if w is None else time.time() + w
-                hit = executor.cache_get(key)
+                hit = None if _skip_cache(request) else executor.cache_get(key)
                 if hit is None:
                     hit = await _materialize_entry(request, norm(ident),
                                                    canon_task(task), opts, key,
                                                    deadline)
                 return key, hit, deadline
 
-            @app.get(base + f"/statistics{tok}.json")
+            @app.get(base + f"/statistics{tok}.json", tags=["results"])
             async def statistics_json(request: Request, ident: str, task: str):
                 key, hit, deadline = await _stats_key(request, ident, task, gopts)
                 sj = await _await_artifact(request, key, hit,
@@ -3042,7 +3175,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 return JSONResponse(json.loads(sj.read_text()),
                                     headers=_pref_headers(request, key))
 
-            @app.get(base + f"/statistics{tok}.tsv")
+            @app.get(base + f"/statistics{tok}.tsv", tags=["results"])
             async def statistics_tsv_view(request: Request, ident: str, task: str):
                 from fastapi import Response
                 from .statistics import statistics_tsv
@@ -3119,21 +3252,80 @@ def main_serve(args) -> int:
 
     from .segmenter import Segmenter
 
-    import os
     seg = Segmenter(device=args.device, dtype=args.dtype, weights=args.model_root,
                     cache_models=args.cache_models)
+    from .cache_admin import check_cache_root
+    check_cache_root()                     # the token file lives under it whatever else does
     workdir = args.workdir or Path(tempfile.gettempdir()) / "haversack-serve"
     cache_dir = None
     if not getattr(args, "no_result_cache", False):
-        cache_dir = (getattr(args, "cache_dir", None)
-                     or os.environ.get("HAVERSACK_CACHE_DIR")
-                     or Path(os.environ.get("XDG_CACHE_HOME",
-                                            Path.home() / ".cache")) / "haversack" / "results")
+        from .cache_admin import results_dir
+        cache_dir = getattr(args, "cache_dir", None) or results_dir()
+    for flag, d in (("--workdir", workdir), ("--cache-dir", cache_dir)):
+        if d is None:
+            continue
+        try:
+            Path(d).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise InputError(f"{flag} {d}: {e.strerror or e}") from None
     ex = LocalExecutor(seg, workdir=workdir, max_pending=args.max_pending,
                        keep_finished=args.keep_finished, cache_dir=cache_dir,
                        jobs_ttl_h=getattr(args, "jobs_ttl_hours", 24.0))
-    app = create_app(ex, token=getattr(args, "token", None))
+    # The token: given, generated, or - only when asked for in so many words - none.
+    # A generated token goes to a file only this user can read, and the bundled client
+    # on this machine reads it back, so personal use needs no ceremony while a proxy or
+    # tunnel in front of the server exposes something that still demands a token.
+    from .cache_admin import (_alive, _is_loopback, serve_token_path,  # noqa: PLC2701
+                              write_serve_token)
+    token = getattr(args, "token", None)
+    generated = False
+    if getattr(args, "no_token", False):
+        token = None
+        print(f"warning: serving on {args.host}:{args.port} WITHOUT a token - this server is "
+              "open to anything that can reach the port, a proxy or tunnel included",
+              file=sys.stderr, flush=True)
+    elif not token:
+        import secrets
+        token, generated = secrets.token_urlsafe(24), True
+    app = create_app(ex, token=token)
+    # Bind BEFORE touching the token file: a second server on a busy port must fail
+    # here, without overwriting the running server's file and then deleting it on exit.
+    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
+    server = uvicorn.Server(config)
+    try:
+        sock = config.bind_socket()
+    except OSError as e:
+        raise InputError(f"cannot listen on {args.host}:{args.port}: {e}") from e
+    token_file = serve_token_path(args.port)
+    # A successful bind does not prove the port is ours alone (a wildcard bind beside a
+    # loopback one, or v4 beside v6, both succeed): a file whose server is still alive
+    # belongs to that server, and its clients - refuse rather than take its file away.
+    try:
+        import json as _json
+        owner = _json.loads(token_file.read_text()).get("pid")
+    except (OSError, ValueError, AttributeError):
+        owner = None
+    if owner and owner != os.getpid() and _alive(owner):
+        sock.close()
+        raise InputError(f"another haversack server (pid {owner}) already serves port "
+                         f"{args.port} on this machine; stop it, or pick another port")
+    try:                                   # what is left is stale whatever we do
+        token_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+    # The file is for the bundled client on THIS machine, which only ever reads it for a
+    # loopback address; a server bound to one interface's address is not reachable there
+    wildcard = args.host in ("0.0.0.0", "::", "")
+    if generated and (wildcard or _is_loopback(str(args.host).lower())):
+        try:
+            write_serve_token(token_file, token, host=args.host, port=args.port)
+        except OSError as e:
+            sock.close()
+            raise InputError(f"cannot write the token file {token_file}: {e}") from None
     print(f"haversack {_version()} serving on http://{args.host}:{args.port} "
           f"(device={args.device}, workdir={workdir})", flush=True)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    if generated:
+        print(f"token: {token}\n  written to {token_file} (this user only); `haversack remote` "
+              "on this machine uses it by itself, other machines pass --token", flush=True)
+    server.run(sockets=[sock])
     return 0

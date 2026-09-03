@@ -17,7 +17,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-_SHIM_DIR = Path(os.environ.get("HAVERSACK_TRAINER_SHIMS", Path.home() / ".cache" / "haversack" / "trainer_shims"))
+
+
+def _shim_dir() -> Path:
+    # resolved per call so HAVERSACK_CACHE_DIR / HAVERSACK_TRAINER_SHIMS set after import count
+    from .cache_admin import trainer_shim_dir
+    return trainer_shim_dir()
 
 
 def trainer_name_of(model_folder) -> str:
@@ -56,7 +61,7 @@ def ensure_trainer(model_folder, *, shim_dir: Path | None = None) -> str | None:
     name = trainer_name_of(model_folder)
     if _resolvable(name):
         return None
-    shim_dir = Path(shim_dir or _SHIM_DIR)
+    shim_dir = Path(shim_dir or _shim_dir())
     shim_dir.mkdir(parents=True, exist_ok=True)
     shim = shim_dir / f"{name}.py"
     if not shim.exists():

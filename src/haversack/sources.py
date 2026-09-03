@@ -624,10 +624,8 @@ def parse_input(spec) -> tuple:
 
 
 def default_input_cache() -> Path:
-    import os as _os
-    base = _os.environ.get("HAVERSACK_CACHE_DIR")
-    root = Path(base) if base else Path(_os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "haversack"
-    return root / "inputs"
+    from .cache_admin import cache_root      # ONE root: HAVERSACK_CACHE_DIR, expanded, else XDG
+    return cache_root() / "inputs"
 
 
 def source_stem(spec) -> str:

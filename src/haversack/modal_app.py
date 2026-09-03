@@ -443,8 +443,8 @@ def _bound_jobs_store(current_jid: str) -> None:
         purged = []
         for k in list(jobs_dict.keys()):
             k = str(k)
-            if k.startswith("inflight:"):
-                continue
+            if k.startswith(("inflight:", "artifacts:", "cancel:")):
+                continue                   # markers age out below, on their own rules
             m = jobs_dict.get(k)
             if k != current_jid and _purgeable(m, now, ttl_s):
                 purged.append(k)
@@ -1145,9 +1145,23 @@ class ModalExecutor:
         _spawn_worker(task, jid)
         return meta
 
+    artifacts = ARTIFACTS                  # advertised in job links, like the local executor
+
     def artifact_state(self, key: str) -> str:
         m = jobs_dict.get(f"artifacts:{key}")
-        return "pending" if isinstance(m, dict) and m.get("state") == "pending" else "absent"
+        if not (isinstance(m, dict) and m.get("state") == "pending"):
+            return "absent"
+        # the same 900 s rule the local executor applies on read: a marker a killed
+        # overlap thread left behind must not answer 202 forever
+        if time.time() - float(m.get("t") or 0) > 900:
+            # and the marker goes, as it does locally: left in place, the writer's
+            # refuse-if-present rule would decline to mark a genuinely new flight
+            try:
+                jobs_dict.pop(f"artifacts:{key}", None)
+            except Exception:                  # noqa: BLE001 - a read path must not fail on it
+                pass
+            return "absent"
+        return "pending"
 
     def cache_list(self):
         from haversack.serve import ResultCache

@@ -3421,3 +3421,201 @@ def test_a_corrupt_job_store_does_not_stop_the_server_starting(tmp_path):
     client = TestClient(create_app(ex))
     assert client.get("/v1/health").status_code == 200
     assert wait_state(client, submit(client), ("done",))["state"] == "done"
+
+
+def test_an_open_server_is_open_full_stop(tmp_path):
+    """--no-token: no token, no heuristics. Whatever reaches the port computes - a
+    cross-site page, a proxied request, a bare curl. Guards that only half work were
+    reviewed out (2026-09-03): they read as safety and were not."""
+    _, _, client = make(tmp_path)
+    for headers in ({}, {"Origin": "https://evil.example"}, {"Origin": "null"},
+                    {"X-Forwarded-For": "203.0.113.9"}, {"Forwarded": "for=203.0.113.9"},
+                    {"Host": "evil.example", "Origin": "http://evil.example"}):
+        upload = {"file": ("x.nii.gz", volume_bytes(), "application/octet-stream")}
+        r = client.post("/v1/jobs", data={"task": "total_fast"}, files=upload, headers=headers)
+        assert r.status_code == 202, (headers, r.text)         # computes, whoever asks
+        wait_state(client, r.json()["id"], ("done",))
+
+
+# --- review fixes (2026-09-03) ------------------------------------------------------------
+
+def test_no_cache_on_the_path_surface_recomputes(tmp_path, monkeypatch):
+    """The route skipped its own lookup but submitted without the flag, so the executor's
+    lookup served the stale entry as a finished job. Now the recompute happens."""
+    seg, ex, client = _idc_app(tmp_path, monkeypatch)
+    url = "/v1/idc/a05fb365-dfd2-4116-ab8e-a7262d2c169c/total_fast/labels.seg.nrrd"
+    r = client.get(url, headers={"Prefer": "wait=10"})
+    assert r.status_code == 200 and len(seg.calls) == 1
+    r = client.get(url, headers={"Prefer": "wait=10", "Cache-Control": "no-cache"})
+    assert r.status_code == 200 and len(seg.calls) == 2                 # ran again
+    r = client.get(url, headers={"Prefer": "wait=10"})
+    assert r.status_code == 200 and len(seg.calls) == 2                 # served from cache
+    meta = url.replace("labels.seg.nrrd", "meta.json")
+    assert client.get(meta).status_code == 200 and len(seg.calls) == 2
+    # the artifacts honor it too: meta has no compute path of its own, so "not the
+    # stored one" is a 404 there rather than the stale entry
+    r = client.get(meta, headers={"Cache-Control": "no-cache"})
+    assert r.status_code == 404 and len(seg.calls) == 2
+
+
+def test_path_components_differing_only_in_case_never_share_an_entry():
+    from haversack.serve import safe_path_component
+    a, b = safe_path_component("hf:Org/Repo@abc/x"), safe_path_component("hf:org/repo@abc/x")
+    assert a != b and a.lower() != b.lower()                            # injective under folding
+    assert safe_path_component("a%3A") != safe_path_component("a:")
+
+
+def test_restart_restores_the_single_flight_marker(tmp_path, monkeypatch):
+    """Without the marker a re-ask after a restart started a second job for the same key,
+    and a DELETE then cancelled the wrong one."""
+    from haversack import serve as serve_mod
+    monkeypatch.setattr(serve_mod, "_idc_enabled", lambda: True)
+    gate = threading.Event()
+    seg = FakeSegmenter(gate=gate)
+    fetch = lambda series, jobdir: (jobdir / "s").mkdir(parents=True, exist_ok=True) or (jobdir / "s")  # noqa: E731
+    ex = LocalExecutor(seg, workdir=tmp_path / "w", cache_dir=tmp_path / "rc", fetch_idc_fn=fetch)
+    client = TestClient(create_app(ex))
+    url = "/v1/idc/a05fb365-dfd2-4116-ab8e-a7262d2c169c/total_fast/labels.seg.nrrd"
+    assert client.get(url, headers={"Prefer": "wait=0"}).status_code == 202
+    jid = ex.jobs()[0].id
+    key = ex.jobs()[0].cache_key
+    ex.close()
+    ex2 = LocalExecutor(FakeSegmenter(gate=threading.Event()), workdir=tmp_path / "w",
+                        cache_dir=tmp_path / "rc", fetch_idc_fn=fetch)
+    try:
+        assert ex2.find_inflight(key) == jid
+    finally:
+        ex2.close()
+        gate.set()
+
+
+def test_a_terminal_record_keeps_answering_after_eviction_and_delete_drops_it(tmp_path):
+    """keep_finished bounds memory; the record outlives it and answers 200 with its
+    result marked gone (the result route says 410), until a DELETE removes the record."""
+    _, ex, client = make(tmp_path, keep_finished=1)
+    upload = lambda: {"file": ("x.nii.gz", volume_bytes(), "application/octet-stream")}  # noqa: E731
+    ids = []
+    for _ in range(3):
+        r = client.post("/v1/jobs", data={"task": "total_fast", "options": '{"interp": "nearest"}'},
+                        files=upload())
+        assert r.status_code == 202, r.text
+        ids.append(r.json()["id"])
+        wait_state(client, ids[-1], ("done",))
+    first = ids[0]
+    assert ex.get(first) is None                                        # evicted from memory
+    s = client.get(f"/v1/jobs/{first}")
+    assert s.status_code == 200 and s.json()["state"] == "done" and s.json()["evicted"] is True
+    assert s.json()["options"] == {"interp": "nearest"}          # links are built from these
+    assert "result" not in s.json()["links"]                      # gone, so not advertised
+    assert client.get(f"/v1/jobs/{first}/result").status_code == 410
+    r = client.post("/v1/inputs", data={"from_job": first})
+    assert r.status_code == 410, r.text
+    assert client.delete(f"/v1/jobs/{first}").json()["deleted"] is True
+    assert client.get(f"/v1/jobs/{first}").status_code == 404
+    assert ex.jobs_db.get(first) is None                                # dropped, durably
+    live = ids[-1]
+    assert client.delete(f"/v1/jobs/{live}").json()["deleted"] is True
+    assert ex.jobs_db.get(live) is None
+
+
+def test_a_cache_hit_record_carries_its_timestamps(tmp_path):
+    _, ex, client = make_cached(tmp_path)
+    upload = lambda: {"file": ("x.nii.gz", volume_bytes(), "application/octet-stream")}  # noqa: E731
+    a = client.post("/v1/jobs", data={"task": "total_fast"}, files=upload()).json()["id"]
+    wait_state(client, a, ("done",))
+    b = client.post("/v1/jobs", data={"task": "total_fast"}, files=upload()).json()["id"]
+    rec = ex.jobs_db.get(b)
+    assert rec["state"] == "done" and rec["started"] is not None and rec["finished"] is not None
+
+
+def test_concurrent_identical_submits_share_one_computation(tmp_path):
+    """Ask twice, compute once - also when the asks overlap."""
+    gate = threading.Event()
+    seg, ex, client = make_cached(tmp_path, gate=gate)
+    upload = lambda: {"file": ("x.nii.gz", volume_bytes(), "application/octet-stream")}  # noqa: E731
+    a = client.post("/v1/jobs", data={"task": "total_fast"}, files=upload()).json()["id"]
+    b = client.post("/v1/jobs", data={"task": "total_fast"}, files=upload()).json()["id"]
+    assert a == b                                                       # joined the flight
+    gate.set()
+    wait_state(client, a, ("done",))
+    assert len(seg.calls) == 1
+    work = tmp_path / "work"
+    jobdirs = [p.name for p in work.iterdir()
+               if p.is_dir() and len(p.name) == 12 and all(c in "0123456789abcdef" for c in p.name)]
+    assert jobdirs == [a], "the joined submit's job directory was not discarded"
+
+
+def test_a_joiner_leaving_does_not_cancel_the_flight_for_the_others(tmp_path):
+    gate = threading.Event()
+    seg, ex, client = make_cached(tmp_path, gate=gate)
+    upload = lambda: {"file": ("x.nii.gz", volume_bytes(), "application/octet-stream")}  # noqa: E731
+    a = client.post("/v1/jobs", data={"task": "total_fast"}, files=upload()).json()["id"]
+    b = client.post("/v1/jobs", data={"task": "total_fast"}, files=upload()).json()["id"]
+    assert a == b
+    r = client.delete(f"/v1/jobs/{a}")                      # the second client leaves
+    assert r.json()["state"] in ("queued", "running") and r.json().get("cancelling") is False
+    gate.set()
+    assert wait_state(client, a, ("done",))["state"] == "done"    # the first still gets it
+    assert len(seg.calls) == 1
+
+
+def test_a_flight_fetched_with_credentials_is_not_joined_by_a_caller_without_them(tmp_path):
+    gate = threading.Event()
+    seg, ex, client = make_cached(tmp_path, gate=gate)
+    upload = lambda: {"file": ("x.nii.gz", volume_bytes(), "application/octet-stream")}  # noqa: E731
+    a = client.post("/v1/jobs", data={"task": "total_fast"}, files=upload(),
+                    headers={"Haversack-Source-Token": "idc=secret"}).json()["id"]
+    b = client.post("/v1/jobs", data={"task": "total_fast"}, files=upload()).json()["id"]
+    assert a != b
+    gate.set()
+    wait_state(client, a, ("done",))
+
+
+def test_a_failed_job_keeps_its_cause_after_eviction(tmp_path):
+    _, ex, client = make(tmp_path, fail=True, keep_finished=1)
+    upload = lambda: {"file": ("x.nii.gz", volume_bytes(), "application/octet-stream")}  # noqa: E731
+    first = client.post("/v1/jobs", data={"task": "total_fast"}, files=upload()).json()["id"]
+    wait_state(client, first, ("failed",))
+    row = ex.jobs_db.get(first)
+    assert row["error"] and row["finished"] is not None       # written once the outcome is known
+
+
+def test_a_cancel_that_lands_after_the_last_patch_still_wins(tmp_path):
+    """Everything after the last patch is uninterruptible; the dispatcher re-checks the
+    token before publishing, so a DELETE during the save does not republish the entry."""
+    class _SlowSave(FakeSegmenter):
+        def segment(self, image, task, *, progress=None, cancel=None, **options):
+            out = super().segment(image, task, progress=progress, cancel=cancel, **options)
+            saving.set()
+            release.wait(timeout=5)
+            return out
+    saving, release = threading.Event(), threading.Event()
+    seg = _SlowSave()
+    ex = LocalExecutor(seg, workdir=tmp_path / "w", cache_dir=tmp_path / "rc", max_pending=4,
+                       keep_finished=50)
+    client = TestClient(create_app(ex))
+    r = client.post("/v1/jobs", data={"task": "total_fast"},
+                    files={"file": ("x.nii.gz", volume_bytes(), "application/octet-stream")})
+    jid = r.json()["id"]
+    assert saving.wait(timeout=5)
+    assert client.delete(f"/v1/jobs/{jid}").json()["cancelling"] is True
+    release.set()
+    final = wait_state(client, jid)
+    assert final["state"] == "cancelled"
+    assert ex.cache_list() == []                                        # nothing published
+    ex.close()
+
+
+def test_describe_takes_catalog_names_only_and_never_echoes_the_resolver(tmp_path):
+    seg, _, client = make(tmp_path)
+    seen = []
+
+    def describe(task):
+        seen.append(task)
+        raise RuntimeError(f"/secret/models/{task}/dataset.json is unreadable")
+    seg.describe = describe
+    r = client.get("/v1/tasks/%2e%2e")
+    assert r.status_code == 404 and seen == []                # never reaches the resolver
+    assert client.get("/v1/tasks/..%5c..%5cetc").status_code == 404 and seen == []
+    r = client.get("/v1/tasks/nope")
+    assert r.status_code == 404 and "/secret" not in r.text   # the resolver's words stay inside

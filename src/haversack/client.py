@@ -20,13 +20,16 @@ class RemoteError(HaversackError):
 
 
 class RemoteClient:
-    def __init__(self, server: str, *, token: str | None = None, timeout: float = 60.0):
+    def __init__(self, server: str, *, token: str | None = None, timeout: float = 60.0,
+                 token_source: str | None = None):
         try:
             import httpx
         except ImportError as e:
             raise InputError("the remote client needs httpx: uv sync --extra remote "
                              "(or pip install 'haversack[remote]')") from e
         headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self.token_source = token_source          # named in a 401, so a stale or wrong
+                                                  # token is traceable to where it came from
         self._httpx = httpx
         self._http = httpx.Client(base_url=server.rstrip("/"), headers=headers,
                                   timeout=timeout, follow_redirects=True)
@@ -41,9 +44,15 @@ class RemoteClient:
         self.close()
 
     # -- plumbing ------------------------------------------------------------
+    def _unreachable(self, e: Exception) -> "RemoteError":
+        return RemoteError(f"cannot reach {self._http.base_url}: {e.__class__.__name__}: {e}")
+
     def _json(self, method: str, path: str, *, _retries: int = 3, **kw) -> dict:
         for attempt in range(_retries + 1):
-            r = self._http.request(method, path, **kw)
+            try:
+                r = self._http.request(method, path, **kw)
+            except self._httpx.TransportError as e:    # refused, DNS, timeout: one line, no trace
+                raise self._unreachable(e) from None
             if r.status_code in (429, 503) and attempt < _retries:
                 try:
                     wait = float(r.headers.get("Retry-After", "5"))
@@ -57,6 +66,8 @@ class RemoteClient:
                 detail = r.json().get("detail", r.text)
             except Exception:
                 detail = r.text
+            if r.status_code == 401 and self.token_source:
+                detail = f"{detail} (the token sent came from {self.token_source})"
             raise RemoteError(f"{method} {path} -> {r.status_code}: {detail}")
         return r.json()
 
@@ -104,15 +115,19 @@ class RemoteClient:
         out.parent.mkdir(parents=True, exist_ok=True)
         part = out.with_name(out.name + ".part")
         n = 0
-        with self._http.stream("GET", f"/v1/jobs/{job_id}/result") as r:
-            if r.status_code >= 400:
-                r.read()
-                raise RemoteError(f"result -> {r.status_code}: {r.text}")
-            declared = r.headers.get("Content-Length")
-            with open(part, "wb") as f:
-                for chunk in r.iter_bytes():
-                    f.write(chunk)
-                    n += len(chunk)
+        try:
+            with self._http.stream("GET", f"/v1/jobs/{job_id}/result") as r:
+                if r.status_code >= 400:
+                    r.read()
+                    raise RemoteError(f"result -> {r.status_code}: {r.text}")
+                declared = r.headers.get("Content-Length")
+                with open(part, "wb") as f:
+                    for chunk in r.iter_bytes():
+                        f.write(chunk)
+                        n += len(chunk)
+        except self._httpx.TransportError as e:
+            part.unlink(missing_ok=True)
+            raise self._unreachable(e) from None
         if declared is not None and n != int(declared):
             part.unlink(missing_ok=True)   # truncated: leave no partial file
             raise RemoteError(f"result truncated: got {n} of {declared} bytes")
@@ -123,14 +138,17 @@ class RemoteClient:
     def events(self, job_id: str):
         """Status snapshots from the SSE stream; raises on transport failure -
         callers that need robustness use :meth:`wait`, which falls back to polling."""
-        with self._http.stream("GET", f"/v1/jobs/{job_id}/events",
-                               timeout=self._httpx.Timeout(None, read=45.0)) as r:
-            if r.status_code >= 400:
-                r.read()
-                raise RemoteError(f"events -> {r.status_code}")
-            for line in r.iter_lines():
-                if line.startswith("data:"):
-                    yield json.loads(line[5:].strip())
+        try:
+            with self._http.stream("GET", f"/v1/jobs/{job_id}/events",
+                                   timeout=self._httpx.Timeout(None, read=45.0)) as r:
+                if r.status_code >= 400:
+                    r.read()
+                    raise RemoteError(f"events -> {r.status_code}")
+                for line in r.iter_lines():
+                    if line.startswith("data:"):
+                        yield json.loads(line[5:].strip())
+        except self._httpx.TransportError as e:
+            raise self._unreachable(e) from None
 
     def wait(self, job_id: str, *, on_status=None, poll_interval: float = 0.5) -> dict:
         """Block until the job is terminal; returns the final status. Prefers SSE,

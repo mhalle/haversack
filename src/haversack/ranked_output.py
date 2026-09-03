@@ -155,8 +155,12 @@ def segment_to_store(image, task, out, *, case=None, depth=6, clip=8.0, parts="a
     import shutil
     import tempfile
 
+    from .errors import InputError
     from .ranked_build import build
     out = Path(out).expanduser()
+    src = Path(str(image)).expanduser() if isinstance(image, (str, Path)) else None
+    if src is not None and src.exists() and src.resolve() == out.resolve():
+        raise InputError(f"{out}: the store output is the input; name a different path")
     out.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=out.name + ".emit-", dir=out.parent))
     try:
@@ -166,7 +170,7 @@ def segment_to_store(image, task, out, *, case=None, depth=6, clip=8.0, parts="a
             names = {int(v): str(n) for v, n in seg.schema.names.items()}
         if case is None:
             case = Path(str(image)).name.split(".")[0] or "case"
-        build(staging, out, case, parts, allow_unnamed, distance_voxels, names=names)
+        build(staging, out, case, parts, allow_unnamed, distance_voxels, names=names, quiet=quiet)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return seg, out

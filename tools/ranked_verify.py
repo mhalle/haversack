@@ -90,9 +90,15 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
 
     segs = ext.get("seg", {}).get("segments", [])
     leaves = [s for s in segs if "label_value" in s]          # groups carry `members`
-    rep.check(all("name" in s and not str(s["name"]).startswith("label_") for s in leaves),
-              f"{sum(1 for s in leaves if str(s.get('name','')).startswith('label_'))} of "
-              f"{len(leaves)} segments are unnamed (label_<id>) - the name lookup degraded")
+    # a cascade's earlier stages have their own classes, which the task's label map does not
+    # name; numbered leaves there are honest, not a degraded lookup
+    from haversack.ranked_build import CASCADE_PART
+    cascade = bool(order) and len(order) > 1 and all(CASCADE_PART.search(str(o.get("name", "")))
+                                                      for o in order)
+    named = [s for s in leaves if not (cascade and (s.get("layer") or 0) != len(order) - 1)]
+    rep.check(all("name" in s and not str(s["name"]).startswith("label_") for s in named),
+              f"{sum(1 for s in named if str(s.get('name','')).startswith('label_'))} of "
+              f"{len(named)} segments are unnamed (label_<id>) - the name lookup degraded")
     rep.check(all(0 <= s.get("layer", 0) < max(len(order), 1) for s in leaves),
               "a segment's layer is not a valid part index")
     rep.check(all(any(s.get("background") and s.get("layer", 0) == i for s in leaves)

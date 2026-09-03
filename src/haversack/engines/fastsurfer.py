@@ -232,13 +232,14 @@ ZENODO_BASE = "https://zenodo.org/records/10390573/files"
 
 def checkpoint_dir() -> Path:
     """Where haversack keeps the FastSurfer checkpoints: ``HAVERSACK_FASTSURFER_CHECKPOINTS``,
-    else ``$XDG_CACHE_HOME/haversack/fastsurfer-checkpoints`` (``~/.cache/...``). Permanent,
+    else ``fastsurfer-checkpoints`` under the cache root (``HAVERSACK_CACHE_DIR``, else
+    ``$XDG_CACHE_HOME/haversack``, i.e. ``~/.cache/haversack``). Permanent,
     because the files are DOI-versioned - a download happens at most once per machine."""
     env = os.environ.get("HAVERSACK_FASTSURFER_CHECKPOINTS")
     if env:
         return Path(env).expanduser()
-    base = os.environ.get("XDG_CACHE_HOME")
-    return (Path(base) if base else Path.home() / ".cache") / "haversack" / "fastsurfer-checkpoints"
+    from ..cache_admin import cache_root       # HAVERSACK_CACHE_DIR, else XDG, else ~/.cache
+    return cache_root() / "fastsurfer-checkpoints"
 
 
 def ensure_checkpoints(directory=None, *, progress=None) -> Path:

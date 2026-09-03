@@ -22,6 +22,8 @@ unaffected: their parts are complementary, not sequential, so `last` would silen
 four fifths of the task.
 """
 import json
+import sys
+import re
 from pathlib import Path
 
 import numpy as np
@@ -56,7 +58,13 @@ GROUP_CLAIMS = {
          lambda n: "Ventricle" in n or n.endswith("-Vent"), True, False),
     ],
     "nnunetv2": [
-        ("g_lungs", "lungs", lambda n: n.startswith("lung_"), True, True),
+        # exhaustive ONLY when the members are exactly the five lobes (or a left/right pair):
+        # `lung_vessels` and `lung_trachea_bronchia` also start with `lung_`, and a task that
+        # has those and no lobes must not ship a "lungs" that is exhaustive of two vessels
+        ("g_lungs", "lungs", lambda n: n.startswith("lung_"), True, True,
+         ({"lung_upper_lobe_left", "lung_lower_lobe_left", "lung_upper_lobe_right",
+           "lung_middle_lobe_right", "lung_lower_lobe_right"},
+          {"lung_left", "lung_right"})),
         ("g_spine", "vertebral column", lambda n: n.startswith("vertebrae_"), True, False),
     ],
 }
@@ -67,11 +75,16 @@ def named_groups(engine, leaves):
     A group is written whenever it has a member, even one: the set of group ids in a
     store is a property of the task, not of how much anatomy the field of view held."""
     out = []
-    for gid, name, pred, disjoint, exhaustive in GROUP_CLAIMS.get(engine, GROUP_CLAIMS["nnunetv2"]):
-        members = [s.id for s in leaves if s.label_value is not None and not s.background
-                   and pred(s.name or "")]
-        if members:
-            out.append(group(gid, name, members, disjoint=disjoint, exhaustive=exhaustive))
+    for claim in GROUP_CLAIMS.get(engine, GROUP_CLAIMS["nnunetv2"]):
+        gid, name, pred, disjoint, exhaustive = claim[:5]
+        exact = claim[5] if len(claim) > 5 else None
+        hits = [s for s in leaves if s.label_value is not None and not s.background
+                and pred(s.name or "")]
+        if exact is not None and {s.name for s in hits} not in exact:
+            continue                    # the prefix matched, the concept did not
+        if hits:
+            out.append(group(gid, name, [s.id for s in hits], disjoint=disjoint,
+                             exhaustive=exhaustive))
     return out
 
 
@@ -128,7 +141,10 @@ def _fastsurfer_names():
     return out
 
 
-def names_for(engine, task, allow_unnamed=False):
+CASCADE_PART = re.compile(r":s\d+$")      # a cascade stage is named `<task>:s<i>`
+
+
+def names_for(engine, task, allow_unnamed=False, say=None):
     """Label id -> name. The engines do not share a label namespace: nnunetv2 parts carry the
     ecosystem's ids, FastSurfer carries FreeSurfer aparc+aseg ids.
 
@@ -137,6 +153,8 @@ def names_for(engine, task, allow_unnamed=False):
     and an unnamed store is not a smaller store, it is a wrong one that looks finished. Pass
     `allow_unnamed` to build anyway, deliberately.
     """
+    if say is None:
+        say = lambda *a, **k: print(*a, file=sys.stderr, flush=True)   # noqa: E731
     try:
         names = _fastsurfer_names() if engine == "fastsurfer" else _ts_names(task)
     except Exception as exc:                       # noqa: BLE001 - any import/catalog problem
@@ -147,13 +165,13 @@ def names_for(engine, task, allow_unnamed=False):
                 f"{msg}\n  The catalog or engine package is not importable from this "
                 f"environment.\n  Fix the environment, or pass --allow-unnamed to accept "
                 f"label_<id> segment names.") from exc
-        print(f"  ! {msg}; segments will be named label_<id>", flush=True)
+        say(f"  ! {msg}; segments will be named label_<id>")
         return {}
     if not names:
         if not allow_unnamed:
             raise SystemExit(f"label map for {task!r} is empty - refusing to build a store "
                              "whose segments would all be label_<id>")
-        print(f"  ! empty label map for {task!r}", flush=True)
+        say(f"  ! empty label map for {task!r}")
     return names
 
 
@@ -836,32 +854,60 @@ def generator_steps(meta, items, engine):
 
 
 def build(src, out, case, parts="all", allow_unnamed=False,
-          distance_voxels=DISTANCE_VOXELS, names=None):
+          distance_voxels=DISTANCE_VOXELS, names=None, quiet=False):
     """Build the store at ``out`` from an emit directory ``src``. ``names`` (label id -> name)
-    overrides the catalog lookup, for a caller that already holds the task's label map."""
+    overrides the catalog lookup, for a caller that already holds the task's label map.
+    Progress goes to stderr (``quiet`` silences it). The target is written only when the
+    build completes: a failure leaves the path as it was."""
+    import sys
+
+    def say(*a, **k):                    # progress: stderr, silenced by quiet
+        if not quiet:
+            k.pop("file", None)
+            k.pop("flush", None)
+            print(*a, file=sys.stderr, flush=True, **k)
     src, out = Path(src), Path(out)
     meta = json.loads((src / "meta.json").read_text())
-    st = open_store(out, "w")          # a directory, or a standard zarr zip when OUT ends in .zip
+    with open_store(out, "w") as st:   # a directory, or a standard zarr zip when OUT ends in .zip
+        _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say)
+    if not quiet:                        # sizing the store walks it: not for a dropped line
+        say(f"wrote {out} ({st.size_bytes() / 1e6:.2f} MB)")
+    return out
+
+
+def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say):
     root = st.root
     segs, order = [], []
 
     engine = next(iter(meta["parts"].values())).get("engine", "nnunetv2")
     NAMES = (dict(names) if names is not None
-             else names_for(engine, meta.get("task"), allow_unnamed))
+             else names_for(engine, meta.get("task"), allow_unnamed, say=say))
 
     items = list(meta["parts"].items())
     if parts == "last" and len(items) > 1:
         # only meaningful for a cascade, whose part names are `<task>:s<i>`; refuse to drop
         # parts of a multi-model task, where every part carries different structures
-        if all(":s" in n for n, _ in items):
+        if all(CASCADE_PART.search(n) for n, _ in items):
             dropped = [n for n, _ in items[:-1]]
-            print(f"  cascade: keeping {items[-1][0]} only, dropping {dropped}", flush=True)
+            say(f"  cascade: keeping {items[-1][0]} only, dropping {dropped}", flush=True)
             items = items[-1:]
         else:
-            print(f"  parts='last' ignored: {len(items)} complementary parts, not a cascade",
+            say(f"  parts='last' ignored: {len(items)} complementary parts, not a cascade",
                   flush=True)
 
+    multi = len(items) > 1
+    cascade = multi and all(CASCADE_PART.search(n) for n, _ in items)
+    # a value two parts both emit needs two leaves, and both get the layer in their id
+    counts = {}
+    for _n, part in items:
+        for v in {int(x) for x in part["labels"]} - {0}:
+            counts[v] = counts.get(v, 0) + 1
+    shared = {v for v, c in counts.items() if c > 1}
     for i, (name, part) in enumerate(items):
+        # a task's label map names the FINAL stage's classes; an earlier cascade stage has
+        # its own (the cropping model's), which the emit does not carry - leave them numbered
+        # rather than hand a liver-segments name to a stage-0 organ channel
+        part_names = NAMES if (not cascade or i == len(items) - 1) else {}
         eff, origin, direction, centering = geometry(part)
         grid, start, stop = extent(part)
         g = root.create_group(f"parts/{i}")
@@ -925,10 +971,10 @@ def build(src, out, case, parts="all", allow_unnamed=False,
             if pre.exists() and part.get("distance_voxels") == float(distance_voxels):
                 dist = np.load(pre)
                 trunc = float(part["distance_truncation"])
-                print(f"    distance: precomputed at emit (T={trunc:.3f} mm)", flush=True)
+                say(f"    distance: precomputed at emit (T={trunc:.3f} mm)", flush=True)
             else:
                 if pre.exists():
-                    print(f"    distance: emit used {part.get('distance_voxels')} voxels, "
+                    say(f"    distance: emit used {part.get('distance_voxels')} voxels, "
                           f"{distance_voxels} requested - recomputing", flush=True)
                 trunc = float(distance_voxels) * min(eff)
                 dist = distance_field(rk_all, su_all, part["clip"], eff, trunc)
@@ -958,7 +1004,7 @@ def build(src, out, case, parts="all", allow_unnamed=False,
                 jq = np.asarray(jn).reshape(-1)[jidx]
                 ja = np.asarray(jp[0]).reshape(-1)[jidx]
                 jb = np.asarray(jp[1]).reshape(-1)[jidx]
-                print("    junction: precomputed at emit", flush=True)
+                say("    junction: precomputed at emit", flush=True)
             else:
                 jidx, jq, ja, jb = junction_sparse(
                     lambda z0, z1: rk_all[0, z0:z1],
@@ -969,7 +1015,7 @@ def build(src, out, case, parts="all", allow_unnamed=False,
                 attrs(direction, eff, origin, list_axis=False, centering=centering),
                 attrs(direction, eff, origin, list_axis=True, centering=centering),
                 trunc, block)
-            print(f"    junction: {100.0 * n_written / rk_all[0].size:.2f} % of voxels in "
+            say(f"    junction: {100.0 * n_written / rk_all[0].size:.2f} % of voxels in "
                   "the triple-line tubes", flush=True)
             del jidx, jq, ja, jb
         g.attrs.update(part_attrs(block))
@@ -983,14 +1029,22 @@ def build(src, out, case, parts="all", allow_unnamed=False,
         boxes = segment_extents(np.asarray(lut)[wins - 1], {int(x) for x in lut} - {0})
         # The background is a leaf too (seg spec 0.7): the softmax's class 0, so the part's
         # partition can include it and every value in `ranks[0] - 1` resolves to a segment.
-        segs.append(leaf(f"background_{i}", "background", 0, layer=i, background=True))
+        # `layer` is a per-part fact in a multi-part store and says nothing in a single-part
+        # one. Leaves are unique per (layer, value): two parts that both emit value 1 are two
+        # leaves - a cascade's stages, whose channels are per-stage indices, collide on every
+        # value below the smaller K, and a dedupe on the value alone once gave stage 1's
+        # classes no leaves at all while its partition still claimed to be exhaustive.
+        lay = i if multi else None
+        segs.append(leaf(f"background_{i}", "background", 0, layer=lay, background=True))
         for v in sorted({int(x) for x in lut} - {0}):
-            if not any(s.label_value == v for s in segs):
-                segs.append(leaf(f"c{v}", NAMES.get(v, f"label_{v}"), v, layer=i,
-                                 extent=boxes.get(v)))
+            if any(s.label_value == v and (s.layer or 0) == i for s in segs):
+                continue
+            sid = f"c{v}_l{i}" if v in shared else f"c{v}"
+            segs.append(leaf(sid, part_names.get(v, f"label_{v}"), v, layer=lay,
+                             extent=boxes.get(v)))
         del wins
         order.append({"index": i, "name": name})
-        print(f"  parts/{i} {name:<12} grid {tuple(grid)} crop {tuple(start)} "
+        say(f"  parts/{i} {name:<12} grid {tuple(grid)} crop {tuple(start)} "
               f"eff {[round(v, 6) for v in eff]}", flush=True)
 
     # Groups (seg spec 0.7): one partition per part - the softmax's classes, background
@@ -1010,9 +1064,6 @@ def build(src, out, case, parts="all", allow_unnamed=False,
         # `attribution` are filled in per case by ranked_demo_provenance.py.
         provenance={"version": "1.0", "processing": generator_steps(meta, items, engine)}))
     write_readme(st)
-    st.close()                           # a zip is finalized here; its size is real only after
-    print(f"{out.name}: {st.size_bytes() / 1e6:.2f} MB\n")
-    return out
 
 
 def main(argv=None):

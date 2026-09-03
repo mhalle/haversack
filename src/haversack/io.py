@@ -113,6 +113,27 @@ def _series_geometry(files) -> tuple[tuple, tuple, tuple]:
             (float(ps[1]), float(ps[0]), dz))
 
 
+def _sitk_reason(e: Exception) -> str:
+    """The last line of a SimpleITK error: the reason, without the C++ source location and
+    without the quoted path (the caller names the file)."""
+    import re
+    lines = [ln.strip() for ln in str(e).splitlines() if ln.strip()]
+    reason = lines[-1] if lines else str(e)
+    reason = reason.removeprefix("sitk::ERROR:").strip()
+    return re.sub(r'"[^"]*"', "the file", reason)
+
+
+def _readable(p) -> None:
+    """Absent and unreadable are different mistakes; SimpleITK reports both as 'does not
+    exist', so they are told apart before it is asked."""
+    import os
+    p = Path(p)
+    if not p.exists():
+        raise InputError(f"input not found: {p}")
+    if not os.access(p, os.R_OK):
+        raise InputError(f"cannot read {p}: permission denied")
+
+
 def read_image(path):
     """Read any SimpleITK-supported image (or a DICOM series directory) into a
     3D SimpleITK image **in its stored orientation**, with the IPP-derived
@@ -148,11 +169,12 @@ def read_image(path):
         image.SetDirection(direction)
         image.SetSpacing(spacing)
     else:
+        _readable(p)
         try:
             image = sitk.ReadImage(str(p))
         except RuntimeError as e:
             if "orthonormal" not in str(e):
-                raise
+                raise InputError(f"cannot read {p} as an image: {_sitk_reason(e)}") from None
             image = _read_with_snapped_affine(p, e)
     if image.GetDimension() != 3:
         raise InputError(f"expected a 3D image; {p} has {image.GetDimension()} dimensions")
@@ -364,7 +386,11 @@ def convert(src, dst, *, compress: bool = True) -> Path:
         reader.SetFileNames(files)
         img = reader.Execute()
     else:
-        img = sitk.ReadImage(str(src))
+        _readable(src)
+        try:
+            img = sitk.ReadImage(str(src))
+        except RuntimeError as e:
+            raise InputError(f"cannot read {src} as an image: {_sitk_reason(e)}") from None
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(img, str(dst), compress)
     return Path(dst)

@@ -72,3 +72,11 @@ def test_segment_to_store_builds_a_verified_store_and_cleans_up(tmp_path, monkey
         assert "distance" in st.root["parts/0"]
         rk = np.asarray(st.root["parts/0/ranks"][0])
         assert set(np.unique(rk)) == {1, 2}                       # background and class 1
+
+
+def test_the_store_output_may_not_be_the_input(tmp_path):
+    from haversack.errors import InputError
+    src = tmp_path / "scan.duckn"
+    src.mkdir()
+    with pytest.raises(InputError, match="is the input"):
+        segment_to_store(str(src), "total_fast", src)

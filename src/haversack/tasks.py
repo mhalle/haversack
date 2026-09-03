@@ -88,6 +88,9 @@ class TaskSpec:
         haversack with their own nnU-Net model, with no catalog entry anywhere.
         """
         f = resolve_model_folder(folder)
+        if not (f / "dataset.json").is_file():
+            raise ModelNotFound(f"{f} has no dataset.json - not a trained nnU-Net model folder "
+                                "(expected .../Dataset<id>_<name>/<trainer>__<plans>__<config>/)")
         ds = json.loads((f / "dataset.json").read_text())
         labels = ds.get("labels") or {}
         if any(isinstance(v, (list, tuple)) for v in labels.values()):

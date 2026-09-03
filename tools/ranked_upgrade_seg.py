@@ -20,7 +20,6 @@ directory or a zarr zip (staged and repacked).
 usage: uv run python tools/ranked_upgrade_seg.py STORE.duckn [STORE.duckn ...]
 """
 import copy
-import sys
 from pathlib import Path
 
 from duckn import SegmentationExtension
@@ -32,10 +31,19 @@ STEP = "Segment metadata upgraded to seg 0.7"
 
 
 def upgrade(store: Path) -> None:
-    st = open_store(store, "a")
+    with open_store(store, "a") as st:
+        _upgrade(st, store)
+
+
+def _upgrade(st, store: Path) -> None:
     root = st.root
     attrs = root.attrs.asdict()
-    ext = copy.deepcopy(attrs["duckn"]["extensions"])
+    ext = copy.deepcopy((attrs.get("duckn") or {}).get("extensions") or {})
+    if "haversack" not in ext and "nnseg" not in ext:
+        raise SystemExit(f"{store}: no `haversack` (or legacy `nnseg`) extension block at the "
+                         "root - not a haversack ranked store")
+    if "seg" not in ext:
+        raise SystemExit(f"{store}: no `seg` extension block at the root; nothing to upgrade")
     # Stores built before the rename (2026-09-02) carry the block under its old name; the
     # verifier and every reader look for `haversack`, so the rename travels with the upgrade.
     if "haversack" not in ext and "nnseg" in ext:
@@ -44,15 +52,23 @@ def upgrade(store: Path) -> None:
             old["haversack_version"] = old.pop("nnseg_version")
         ext["haversack"] = old
     hv = ext["haversack"]
-    engine, order = hv.get("engine", "nnunetv2"), hv["part_order"]
+    engine, order = hv.get("engine", "nnunetv2"), hv.get("part_order")
+    if not order:
+        raise SystemExit(f"{store}: the haversack block has no `part_order`")
 
     # duckn migrates the 0.6 shape on read; from here on everything is 0.7 objects
     was = str(ext["seg"].get("version"))
     seg = SegmentationExtension.model_validate(ext["seg"])
     leaves = [s for s in seg.segments if s.label_value is not None]
+    multi = len(order) > 1
     for i, _o in enumerate(order):
         if not any(s.background and (s.layer or 0) == i for s in leaves):
-            leaves.append(leaf(f"background_{i}", "background", 0, layer=i, background=True))
+            leaves.append(leaf(f"background_{i}", "background", 0, layer=i if multi else None,
+                               background=True))
+    if not multi:
+        # `layer` states which part a leaf belongs to; a single-part store has nothing to say
+        leaves = [s.model_copy(update={"layer": None}) if s.layer is not None else s
+                  for s in leaves]
     # the named unions are re-derived (their claims are the builder's decision); any other
     # group the store had - none today - is kept as it was
     known = {gid for gid, *_ in GROUP_CLAIMS.get(engine, GROUP_CLAIMS["nnunetv2"])}
@@ -77,16 +93,21 @@ def upgrade(store: Path) -> None:
     others = {k: v for k, v in ext.items() if k not in ("seg", "provenance")}
     root.attrs.update(root_attrs(new_seg, provenance=pv, **others))
     write_readme(st)
-    st.close()
     n_leaf = sum(1 for s in new_seg.segments if s.label_value is not None)
     print(f"  {store.name}: seg {was} -> {new_seg.version}, {n_leaf} leaves, "
           f"{len(new_seg.segments) - n_leaf} groups", flush=True)
 
 
+def main(argv=None):
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
+                                 epilog="works on a directory or a zarr zip (staged and repacked)")
+    ap.add_argument("store", nargs="+", help="a ranked store: STORE.duckn or STORE.duckn.zip")
+    a = ap.parse_args(argv)
+    for s in a.store:
+        print(s, flush=True)
+        upgrade(Path(s))
+
+
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    if not args:
-        sys.exit(__doc__)
-    for a in args:
-        print(a, flush=True)
-        upgrade(Path(a))
+    main()

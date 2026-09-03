@@ -32,16 +32,43 @@ def _human(n: int) -> str:
         x /= 1024
 
 
+def cache_root() -> Path:
+    """The one cache root: ``HAVERSACK_CACHE_DIR``, else ``$XDG_CACHE_HOME/haversack``
+    (``~/.cache/haversack``). Every store below hangs off it - the server's results too."""
+    import os
+    base = os.environ.get("HAVERSACK_CACHE_DIR")
+    if base:
+        return Path(base).expanduser()
+    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "haversack"
+
+
+def check_cache_root() -> Path:
+    """The cache root, refused as an input error when something that is not a directory
+    sits at it (a `HAVERSACK_CACHE_DIR` pointing at a file listed four empty stores)."""
+    from .errors import InputError
+    root = cache_root()
+    if root.exists() and not root.is_dir():
+        raise InputError(f"cache root {root} is not a directory (HAVERSACK_CACHE_DIR)")
+    return root
+
+
+def trainer_shim_dir() -> Path:
+    """Where generated nnU-Net trainer shims go: ``HAVERSACK_TRAINER_SHIMS``, else under
+    the cache root."""
+    import os
+    env = os.environ.get("HAVERSACK_TRAINER_SHIMS")
+    return Path(env).expanduser() if env else cache_root() / "trainer_shims"
+
+
+def results_dir() -> Path:
+    """The server's durable result cache."""
+    return cache_root() / "results"
+
+
 def stores() -> list[dict]:
     """Every store haversack keeps on disk: name, path, whether `cache clean` may sweep it."""
     from .sources import default_input_cache
     from .tasks import weights_root
-
-    def results_dir() -> Path:
-        import os
-        base = os.environ.get("HAVERSACK_CACHE_DIR")
-        root = Path(base) if base else Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "haversack"
-        return root / "results"
 
     def checkpoint_dir() -> Path:
         # Computed here (not imported from the fastsurfer engine) so cache admin does not pull
@@ -50,8 +77,7 @@ def stores() -> list[dict]:
         env = os.environ.get("HAVERSACK_FASTSURFER_CHECKPOINTS")
         if env:
             return Path(env).expanduser()
-        base = os.environ.get("XDG_CACHE_HOME")
-        return (Path(base) if base else Path.home() / ".cache") / "haversack" / "fastsurfer-checkpoints"
+        return cache_root() / "fastsurfer-checkpoints"
 
     try:
         wroot = weights_root("ts")
@@ -61,6 +87,10 @@ def stores() -> list[dict]:
         {"name": "inputs", "path": default_input_cache(), "sweepable": True},
         {"name": "results", "path": results_dir(), "sweepable": True},
         {"name": "checkpoints", "path": checkpoint_dir(), "sweepable": True},
+        # a running server's generated token lives here; never swept, never a credential
+        # that `cache clean` could take away from under a server
+        {"name": "trainer_shims", "path": trainer_shim_dir(), "sweepable": True},
+        {"name": "serve", "path": cache_root() / "serve", "sweepable": False},
     ]
     if wroot is not None:
         out.append({"name": "weights", "path": Path(wroot), "sweepable": False})
@@ -116,7 +146,7 @@ def clean(category: str, *, older_than_days: float | None = None, item: str | No
     ``weights remove``.
     """
     cats = ["inputs", "results", "checkpoints"] if category == "all" else [category]
-    valid = {"inputs", "results", "checkpoints"}
+    valid = {"inputs", "results", "checkpoints", "trainer_shims"}
     bad = [c for c in cats if c not in valid]
     if bad:
         from .errors import InputError
@@ -151,3 +181,100 @@ def clean(category: str, *, older_than_days: float | None = None, item: str | No
                 continue
             gone(entry)
     return {"removed": removed, "bytes": freed, "human": _human(freed), "dry_run": dry_run}
+
+
+# -- the local server's generated token ------------------------------------------------
+#
+# `haversack serve` without --token generates one and writes it here, readable by this
+# user only; `haversack remote` on the same machine reads it back when the server it is
+# given is on this host and no token was passed. The Jupyter pattern: personal use needs
+# no ceremony, and a proxy or tunnel in front of the server exposes something that still
+# demands a token nobody outside holds. Keyed by port, since that is what a client knows.
+
+def serve_token_path(port: int) -> Path:
+    """Where the server on ``port`` leaves its generated token (0600, this user only)."""
+    return cache_root() / "serve" / f"{int(port)}.token"
+
+
+def write_serve_token(path: Path, token: str, *, host: str, port: int) -> None:
+    """Write the token file: JSON with the owning process, created exclusively (no
+    following of a pre-planted symlink), readable by this user only, and unlinked at
+    exit only if it is still ours."""
+    import atexit
+    import json
+    import os
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"token": token, "pid": os.getpid(), "host": host, "port": int(port),
+                   "started": time.time()}, f)
+        f.write("\n")
+
+    def _unlink_if_mine(p=path, pid=os.getpid()):
+        try:
+            if json.loads(p.read_text()).get("pid") == pid:
+                p.unlink()
+        except (OSError, ValueError):
+            pass
+    atexit.register(_unlink_if_mine)
+
+
+def _is_loopback(host: str) -> bool:
+    """A loopback ADDRESS, or the name localhost - never a string prefix: an attacker's
+    ``127.0.0.1.evil.example`` must not read as local."""
+    import ipaddress
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def _alive(pid) -> bool:
+    import os
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def server_address(server_url: str) -> tuple[str, int]:
+    """``(host, port)`` of a server URL, the port defaulted by scheme - the one place
+    the client and its error messages take it from."""
+    from urllib.parse import urlsplit
+    u = urlsplit(server_url if "://" in server_url else f"http://{server_url}")
+    return (u.hostname or "").lower(), u.port or (443 if u.scheme == "https" else 80)
+
+
+def local_token_for(server_url: str) -> str | None:
+    """The generated token of a server on THIS machine, or None.
+
+    Only for a URL whose host is a loopback address and whose port has a token file
+    written by a server process that is still alive - a file left by a crashed server
+    is ignored, so the token is never handed to whatever answers on that port next
+    (a tunnel, another user's process). Anything else - another host, an unknown
+    port - gets nothing and the caller passes a token itself."""
+    import json
+    host, port = server_address(server_url)
+    if not _is_loopback(host):
+        return None
+    try:
+        info = json.loads(serve_token_path(port).read_text())
+    except (OSError, ValueError):
+        return None
+    tok = info.get("token") if isinstance(info, dict) else None
+    if not tok or not _alive(info.get("pid")):
+        return None
+    # the server wrote where it listens: a token for a server bound to some other
+    # interface is not the token of whatever answers on the loopback port
+    bound = str(info.get("host") or "").lower()
+    if not (_is_loopback(bound) or bound in ("0.0.0.0", "::", "")):
+        return None
+    return str(tok)
