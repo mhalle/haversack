@@ -20,19 +20,23 @@
 
 ## [Unreleased]
 
-- **SynthStrip on Apple Silicon: a memory policy, because MPS fails silently.** The first
-  local run masked 94 % of the image: the net's working set at the conformed 256^3 is
-  14.5 GiB in fp32, above MPS's recommended ceiling (10.7 GiB on a 16 GB machine), and
-  torch 2.14's MPS backend returns an all-zero distance field there instead of raising -
-  with or without its high-watermark limit. Below the ceiling MPS is exact (192^3, and a
-  128^3 crop to 3e-5 of the CPU). The same lock on Modal (CUDA) gives the sane 1282 mL
-  mask, so the dependency change was not the cause. Now `mps_plan()` reads
-  `torch.mps.recommended_max_memory()` against the conformed size (computed from the
-  physical extent before conforming): fp32 when it fits, fp16 when only that does (8.0 GiB;
-  0.015 mm worst case on the SDT, 3 mask voxels in 100,000), and a refusal naming
-  `device='cpu'` when neither will. `segment()` also refuses any constant field outright.
-  torch 2.7 cannot run the net on MPS at all (no max_pool3d), so 2.14 is not a regression
-  but the first version that can.
+- **Apple Silicon: the MPS allocator is capped, because past the cap Metal fails silently.**
+  SynthStrip's first local run masked 94 % of the image. The cause, isolated with identity
+  convolutions in pure torch: PyTorch's MPS allocator lets a process grow to 1.7x the
+  device's recommended working set (`recommendedMaxWorkingSetSize`, 10.7 GiB on a 16 GB
+  machine) before raising, and past 1.0x Metal cannot back the buffers - a conv3d returns
+  all zeros, no exception (exact at 8 GiB of live activations, zeros at 11 GiB). The same
+  lock on Modal's CUDA gave the sane 1282 mL mask, so no dependency was at fault, and torch
+  2.7 cannot run the net on MPS at all (no max_pool3d), so nothing regressed. Fix:
+  resolving an MPS device now calls `torch.mps.set_per_process_memory_fraction(1.0)` once
+  (`HAVERSACK_MPS_MEMORY_FRACTION` overrides, `0` keeps PyTorch's default); under the cap
+  the allocator reclaims its cache and the same forward runs correctly in fp32 - SynthStrip
+  256^3 peaks at 6 GiB, Dice 0.999971 against the Modal CUDA fp32 mask (57 voxels) - and a
+  real shortfall raises. SynthStrip catches that: retries with the net in fp16 (0.015 mm
+  worst case on the SDT), then refuses naming `device='cpu'`; it also refuses any constant
+  field outright. This is a known class of PyTorch bug (silent-correctness MPS convolution
+  issues #96982, #142836, umbrella #149325), but the allocator-watermark form of it was not
+  on file; the identity-convolution repro is in the workspace scratch and worth filing.
 
 - **SynthStrip runs in-process too.** The second engine on the local seam: `synthstrip:mask`
   routes to `synthstrip.run_local` when `synthstrip_torch` is installed

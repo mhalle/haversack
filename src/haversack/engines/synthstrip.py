@@ -98,23 +98,12 @@ def restore_sdt_cpu(sdt_zyx, source_ref, target_ref, outside=100.0):
     return sitk.GetArrayFromImage(out)
 
 
-# Measured 2026-09-03 on an M2 (torch 2.14): the net's working set at the conformed 256^3
-# is 14.5 GiB in fp32 and 8.0 GiB in fp16 - about 930 and 510 bytes per input voxel.
-# Above MPS's recommended ceiling (torch.mps.recommended_max_memory(), 10.7 GiB on a
-# 16 GB machine) the torch 2.14 backend returns an all-zero field instead of raising
-# (2.7 cannot run the net on MPS at all: no max_pool3d). fp16 costs 0.015 mm worst case
-# on the SDT (3 mask voxels in 100,000).
-_MPS_BYTES_PER_VOXEL = {"fp32": 930, "fp16": 510}
-
-
-def mps_plan(n_voxels: int, budget_bytes: float) -> str:
-    """How to run the net on MPS for a conformed volume of ``n_voxels``: ``"fp32"`` when
-    that fits the budget, ``"fp16"`` when only that does, ``"cpu"`` when neither will -
-    memory is a policy read from the machine, never a hardcoded size."""
-    for dtype in ("fp32", "fp16"):
-        if n_voxels * _MPS_BYTES_PER_VOXEL[dtype] <= budget_bytes:
-            return dtype
-    return "cpu"
+# Apple Silicon (2026-09-03): the net's first local run masked the whole image because
+# PyTorch's MPS allocator let the process grow past the device's recommended working set
+# and Metal then returned an all-zero field with no error. haversack caps the allocator at
+# 1.0x when it resolves an MPS device (resample._arm_mps_memory_cap), after which the same
+# forward runs correctly in fp32 (256^3 peaks at 6 GiB; Dice 0.99997 against the Modal
+# CUDA result) and a real shortfall raises - which is what the fallback below catches.
 
 
 class _HalfNet:
@@ -136,15 +125,6 @@ class _HalfNet:
 _HALF: dict = {}
 
 
-def _conformed_voxels(t1_img) -> int:
-    """The conformed size SynthStrip will run at (1 mm, cropped, padded to a multiple of
-    64 in [192, 320]), without conforming: the physical extent tells."""
-    import numpy as np
-    ext = np.asarray(t1_img.GetSize(), float) * np.asarray(t1_img.GetSpacing(), float)
-    side = np.clip(np.ceil(ext / 64) * 64, 192, 320)
-    return int(np.prod(side))
-
-
 def _capture_sdt(t1_img, device: str):
     """SynthStrip's conform + net via ``synthstrip_torch`` -> ``(sdt_zyx, sdt_sitk)``:
     the SDT array ``(z,y,x)`` and its geometry as a SimpleITK image (so the restore
@@ -152,16 +132,25 @@ def _capture_sdt(t1_img, device: str):
     import synthstrip_torch
 
     model = _get_model(device)
-    if device == "mps":
-        import torch
-        plan = mps_plan(_conformed_voxels(t1_img), torch.mps.recommended_max_memory())
-        if plan == "cpu":
-            raise ResourceError(
-                "synthstrip: this volume's conformed size does not fit MPS memory even in "
-                "fp16 (the backend would return zeros, not an error); run with device='cpu'")
-        if plan == "fp16":
-            model = _HALF.get(id(model)) or _HALF.setdefault(id(model), _HalfNet(model))
-    return synthstrip_torch.predict_sdt(t1_img, model=model, device=device)
+    try:
+        return synthstrip_torch.predict_sdt(t1_img, model=model, device=device)
+    except RuntimeError as e:
+        if device != "mps" or "out of memory" not in str(e).lower():
+            raise
+    # A real MPS out-of-memory (the allocator is capped, so it is real): halve the
+    # working set with an fp16 copy of the net (0.015 mm worst case on the SDT), then
+    # refuse - never let Metal answer with zeros.
+    import torch
+    torch.mps.empty_cache()
+    half = _HALF.get(id(model)) or _HALF.setdefault(id(model), _HalfNet(model))
+    try:
+        return synthstrip_torch.predict_sdt(t1_img, model=half, device=device)
+    except RuntimeError as e:
+        if "out of memory" not in str(e).lower():
+            raise
+        raise ResourceError(
+            "synthstrip: this volume does not fit MPS memory even with the net in fp16; "
+            "run with device='cpu'") from e
 
 
 def _refuse_constant_field(sdt, device) -> None:

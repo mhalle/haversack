@@ -209,10 +209,10 @@ from that environment, and a plain environment refuses the task with the line ab
 FastSurfer and SynthStrip (`synthstrip:mask`, a brain mask from any T1-like image, from
 `--extra synthstrip`) have in-process runners; VoxTell and the MONAI bundles run on Modal. FastSurfer's
 view-aggregation field is large (2.6 GB in half precision at 1 mm), so on Apple Silicon it
-stays in CPU memory unless the machine has 32 GB or more; 16 GB is tight for it. SynthStrip
-on Apple Silicon runs the net in fp16 when fp32 would not fit MPS memory (a 16 GB machine),
-which costs 0.015 mm on the distance field; it never trusts a field MPS returned silently
-wrong.
+stays in CPU memory unless the machine has 32 GB or more; 16 GB is tight for it. On Apple
+Silicon haversack caps PyTorch's MPS allocator at the device's recommended working set,
+because past it Metal returns zeros instead of an error; a real shortfall then raises, and
+SynthStrip retries in fp16 before refusing.
 
 ## What haversack does not do yet
 

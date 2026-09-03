@@ -40,7 +40,7 @@ def best_device() -> torch.device:
     return torch.device("cpu")
 
 
-def resolve_device(spec="auto") -> torch.device:
+def _resolve_device_raw(spec="auto") -> torch.device:
     """``"auto"`` picks the best available accelerator; anything else is taken literally.
 
     The default must not name a vendor: haversack exists to be portable, and a hard-coded "mps"
@@ -128,3 +128,38 @@ def resample_data(data_zyx, new_shape=None, *, spacing_zyx=None, new_spacing_zyx
     out = t.cpu().numpy()
     del t
     return out.astype(out_dtype) if out_dtype is not None else out
+
+
+_MPS_CAP_ARMED = False
+
+
+def _arm_mps_memory_cap() -> None:
+    """Cap the MPS allocator at the device's recommended working set, once per process.
+
+    PyTorch's MPS allocator lets a process grow to 1.7x ``recommendedMaxWorkingSetSize``
+    before it raises out-of-memory. Past 1.0x, Metal cannot back the buffers and kernels
+    fail SILENTLY: a conv3d returns all zeros, no exception (reproduced 2026-09-03 with
+    identity convolutions - exact at 8 GiB of live activations, zeros at 11 GiB on a 10.7
+    GiB ceiling; SynthStrip masked the whole image that way). Capped at 1.0x the allocator
+    reclaims its cache under pressure and the same forward runs correctly - SynthStrip's
+    256^3 fp32 peaks at 6 GiB - and a real shortfall raises. ``HAVERSACK_MPS_MEMORY_FRACTION``
+    overrides (``0`` = leave PyTorch's default). Global by nature: the allocator is per process.
+    """
+    global _MPS_CAP_ARMED
+    if _MPS_CAP_ARMED:
+        return
+    _MPS_CAP_ARMED = True
+    import os
+    frac = float(os.environ.get("HAVERSACK_MPS_MEMORY_FRACTION", "1.0"))
+    if frac > 0 and hasattr(torch, "mps") and hasattr(torch.mps, "set_per_process_memory_fraction"):
+        torch.mps.set_per_process_memory_fraction(frac)
+
+
+def resolve_device(spec="auto") -> torch.device:
+    """``"auto"`` -> cuda / mps / cpu (or an explicit device). Resolving to MPS also arms
+    the allocator cap (:func:`_arm_mps_memory_cap`), so every haversack path that runs on
+    Apple Silicon fails loudly on memory rather than silently."""
+    dev = _resolve_device_raw(spec)
+    if dev.type == "mps":
+        _arm_mps_memory_cap()
+    return dev

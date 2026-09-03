@@ -163,15 +163,61 @@ def test_synthstrip_refuses_a_constant_field():
     ss._refuse_constant_field(np.linspace(-5, 5, 64, dtype=np.float32).reshape(4, 4, 4), "cpu")
 
 
-def test_synthstrip_mps_plan_reads_the_budget():
-    """256^3 fp32 needs ~14.5 GiB and MPS returned zeros above its 10.7 GiB ceiling
-    (2026-09-03); fp16 halves it and fits. The plan is a function of size and budget."""
+def test_synthstrip_falls_back_to_fp16_on_a_real_mps_oom(monkeypatch):
+    """With the allocator capped, an MPS shortfall raises instead of zeroing; the engine then
+    retries with the net in fp16, and refuses (naming the CPU) if that is short too."""
+    import types
+    import torch
     from haversack.engines import synthstrip as ss
-    n256, n320 = 256 ** 3, 320 ** 3
-    assert ss.mps_plan(n256, 10.7 * 2 ** 30) == "fp16"
-    assert ss.mps_plan(n256, 40 * 2 ** 30) == "fp32"
-    assert ss.mps_plan(n320, 10.7 * 2 ** 30) == "cpu"          # 15.6 GiB even in fp16
-    assert ss.mps_plan(192 ** 3, 10.7 * 2 ** 30) == "fp32"
+    from haversack.errors import ResourceError
+    net = torch.nn.Conv3d(1, 1, 3, padding=1)
+    monkeypatch.setattr(ss, "_get_model", lambda device: net)
+    monkeypatch.setattr(torch.mps, "empty_cache", lambda: None, raising=False)
+    calls = []
+
+    def predict_sdt(img, *, model, device):
+        calls.append(type(model).__name__)
+        if len(calls) == 1:
+            raise RuntimeError("MPS backend out of memory (MPS allocated: 10.01 GiB ...)")
+        return "SDT", "GEOM"
+
+    monkeypatch.setitem(__import__("sys").modules, "synthstrip_torch", types.SimpleNamespace(predict_sdt=predict_sdt))
+    ss._HALF.clear()
+    assert ss._capture_sdt("img", "mps") == ("SDT", "GEOM")
+    assert calls == ["Conv3d", "_HalfNet"]
+    calls.clear()
+
+    def always_oom(img, *, model, device):
+        calls.append(1); raise RuntimeError("MPS backend out of memory")
+
+    monkeypatch.setitem(__import__("sys").modules, "synthstrip_torch", types.SimpleNamespace(predict_sdt=always_oom))
+    with pytest.raises(ResourceError, match="device='cpu'"):
+        ss._capture_sdt("img", "mps")
+    assert len(calls) == 2                                     # fp32, then fp16, then refuse
+
+    def other_error(img, *, model, device):
+        raise RuntimeError("something else entirely")
+
+    monkeypatch.setitem(__import__("sys").modules, "synthstrip_torch", types.SimpleNamespace(predict_sdt=other_error))
+    with pytest.raises(RuntimeError, match="something else"):  # not an OOM: not ours to catch
+        ss._capture_sdt("img", "mps")
+
+
+def test_resolving_mps_arms_the_allocator_cap(monkeypatch):
+    """Past 1.0x the recommended working set Metal fails silently (zeros); PyTorch's default
+    lets a process grow to 1.7x. Resolving an MPS device caps it at 1.0x, once."""
+    import torch
+    from haversack import resample
+    seen = []
+    monkeypatch.setattr(torch.mps, "set_per_process_memory_fraction", lambda f: seen.append(f), raising=False)
+    monkeypatch.setattr(resample, "_MPS_CAP_ARMED", False)
+    monkeypatch.setattr(resample, "_resolve_device_raw", lambda spec="auto": torch.device("mps"))
+    resample.resolve_device("auto"); resample.resolve_device("mps")
+    assert seen == [1.0]                                       # once per process
+    monkeypatch.setattr(resample, "_MPS_CAP_ARMED", False)
+    monkeypatch.setenv("HAVERSACK_MPS_MEMORY_FRACTION", "0")
+    resample.resolve_device("mps")
+    assert seen == [1.0]                                       # 0 = leave PyTorch's default
 
 
 def test_synthstrip_half_net_keeps_the_fp32_interface():
@@ -183,12 +229,3 @@ def test_synthstrip_half_net_keeps_the_fp32_interface():
     y = half(x)
     assert y.dtype == torch.float32 and (y - net(x)).abs().max() < 1e-2
     assert next(net.parameters()).dtype == torch.float32          # the original is untouched
-
-
-def test_conformed_voxels_from_physical_extent():
-    import SimpleITK as sitk
-    from haversack.engines import synthstrip as ss
-    im = sitk.Image(256, 156, 256, sitk.sitkFloat32); im.SetSpacing((1.0, 1.3, 1.0))
-    assert ss._conformed_voxels(im) == 256 * 256 * 256           # 203 mm -> 256; 256 -> 256
-    small = sitk.Image(100, 100, 100, sitk.sitkFloat32); small.SetSpacing((1.0, 1.0, 1.0))
-    assert ss._conformed_voxels(small) == 192 ** 3               # the floor
