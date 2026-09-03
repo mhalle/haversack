@@ -20,17 +20,34 @@ INSTALL_HINT = ('uv tool install "haversack[torch] @ git+https://github.com/mhal
                 'or uvx --from "haversack[torch] @ git+https://github.com/mhalle/haversack" haversack ...')
 
 
-def _need_inference_stack() -> None:
-    """Segmenting needs the torch extra. A bare install is deliberate (the client and a
-    describe-only front end never pay for torch), but `uvx git+.../haversack segment` is the
-    first thing a new user types, and it must say what to do rather than trace back from
-    `import torch` (2026-09-03)."""
+def _need_inference_stack(task=None) -> None:
+    """Refuse early, with the install line, when this environment cannot run ``task``.
+
+    A bare install is deliberate (the client and a describe-only front end never pay for
+    torch), but `uvx git+.../haversack segment` is the first thing a new user types, and it
+    must say what to do rather than trace back from `import torch` (2026-09-03). An engine
+    task (``fastsurfer:brain``) needs that engine's runtime, which lives in its own
+    environment; ``task=None`` (the server) needs only torch - it checks per task at run time.
+    """
     import importlib.util
+    from .engines import registry
     from .errors import InputError
-    missing = [m for m in ("torch", "nnunetv2", "scipy") if importlib.util.find_spec(m) is None]
-    if missing:
-        raise InputError(f"segmenting needs the torch extra ({', '.join(missing)} not installed): "
-                         f"install haversack[torch] - {INSTALL_HINT}")
+    eng = registry.engine_for_task(str(task)) if task is not None else None
+    if eng is None:
+        need = ["torch"]
+    elif eng.name == registry.NNUNETV2:
+        need = ["torch", "nnunetv2", "scipy"]
+    else:
+        need = ["torch", eng.runtime_module]
+    missing = [m for m in need if importlib.util.find_spec(m) is None]
+    if not missing:
+        return
+    if eng is not None and eng.name != registry.NNUNETV2:
+        raise InputError(f"{task} runs on the {eng.name} engine ({', '.join(missing)} not installed), "
+                         f"which has its own environment: UV_PROJECT_ENVIRONMENT=.venvs/{eng.name} "
+                         f"uv sync --extra {eng.extra} --extra serve, then run haversack from it")
+    raise InputError(f"segmenting needs the torch extra ({', '.join(missing)} not installed): "
+                     f"install haversack[torch] - {INSTALL_HINT}")
 
 
 def _run(argv=None) -> int:
@@ -203,7 +220,8 @@ def _run(argv=None) -> int:
             if not info.get("materialized"):
                 return False
             if not info.get("task_spec", True):
-                return True                         # an engine: weights come with its runtime
+                from .engines import registry     # an engine: installed = its runtime is here
+                return registry.available(info.get("engine", ""))
             try:
                 return all(store.have(w) for w in cat.get(info["name"]).weights_ids)
             except Exception:
@@ -227,13 +245,26 @@ def _run(argv=None) -> int:
                       f"{'installed' if i['installed'] else ''}".rstrip())
         return 0
     if args.cmd == "segment":
-        _need_inference_stack()
-        from .pipeline import segment
-        r = segment(args.input, args.task, weights=args.model_root, device=args.device, dtype=args.dtype,
-                    grid=args.spacing if args.spacing else "input", interp=args.interp, accumulate=args.accumulate,
-                    batch_size=args.batch_size if args.batch_size == "auto" else int(args.batch_size),
-                    envelope_mm=args.envelope if args.envelope > 0 else None,
-                    progress=None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True)))
+        from pathlib import Path
+        from .errors import InputError
+        if not Path(args.input).exists():
+            raise InputError(f"input not found: {args.input}")
+        _need_inference_stack(args.task)
+        from .engines import registry
+        progress = None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
+        batch = args.batch_size if args.batch_size == "auto" else int(args.batch_size)
+        if registry.engine_for_task(args.task).name != registry.NNUNETV2:
+            # an engine task: its runtime is in this environment (checked above); the
+            # Segmenter routes it to the engine's in-process compute
+            from .segmenter import Segmenter
+            r = Segmenter(device=args.device, weights=args.model_root, batch_size=batch).segment(
+                args.input, args.task, progress=progress)
+        else:
+            from .pipeline import segment
+            r = segment(args.input, args.task, weights=args.model_root, device=args.device, dtype=args.dtype,
+                        grid=args.spacing if args.spacing else "input", interp=args.interp,
+                        accumulate=args.accumulate, batch_size=batch,
+                        envelope_mm=args.envelope if args.envelope > 0 else None, progress=progress)
         r.save(args.output)
         if not args.quiet:
             for k, v in r.timings.items():

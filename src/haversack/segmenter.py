@@ -72,13 +72,53 @@ class Segmenter:
             self.weights.ensure(task, catalog=self.catalog)
         return self.describe(task)
 
+    # -- engines: a task that is not an nnU-Net checkpoint runs on its own runtime --
+    def engine_for(self, task):
+        """The :class:`~haversack.engines.registry.Engine` that runs ``task``. Routes on
+        the ``eco:`` grammar when the name carries it (no catalog needed, so the answer
+        exists even when the engine is not installed here), else on the canonical name."""
+        from .engines import registry
+        name = str(task)
+        if ":" in name:
+            return registry.engine_for_task(name)
+        try:
+            canonical = self.resolve_task(name)
+        except LookupError:
+            return registry.ENGINES[registry.NNUNETV2]   # a spec, a folder, or a name the pipeline will judge
+        return registry.engine_for_task(canonical)
+
+    def _run_engine(self, eng, image, task, **overrides):
+        """In-process engine run, or the reason there cannot be one: an engine runs in
+        its own environment (pyproject's conflicts), so a plain haversack env refuses
+        with the install line rather than an ImportError from inside the engine."""
+        from .engines import registry
+        from .errors import UnsupportedModel
+        if eng.compute is None:
+            raise UnsupportedModel(
+                f"{task} runs on the {eng.name} engine, which has no in-process runner yet; "
+                f"deploy with {eng.enabled_env}=1 to run it on Modal.")
+        if not registry.available(eng.name):
+            raise UnsupportedModel(
+                f"{task} runs on the {eng.name} engine, which is not installed in this "
+                f"environment. It has its own: UV_PROJECT_ENVIRONMENT=.venvs/{eng.name} "
+                f"uv sync --extra {eng.extra} --extra serve, then run haversack from it "
+                f"(or deploy with {eng.enabled_env}=1 to run it on Modal).")
+        kw = {**self.policy, **overrides}
+        return eng.compute(image, device=kw["device"], batch_size=kw["batch_size"],
+                           progress=kw.get("progress"), cancel=kw.get("cancel"),
+                           probabilities=kw.get("probabilities"))
+
     # -- the operation ------------------------------------------------------
     def segment(self, image, task, **overrides):
         """Segment ``image`` with ``task``; any policy argument may be overridden for this call."""
-        from .pipeline import segment
+        from .engines.registry import NNUNETV2
         unknown = set(overrides) - set(POLICY) - {"progress", "outside", "cancel"}
         if unknown:
             raise TypeError(f"unknown argument(s) {sorted(unknown)}; policy is {sorted(POLICY)}")
+        eng = self.engine_for(task)
+        if eng.name != NNUNETV2:
+            return self._run_engine(eng, image, task, **overrides)
+        from .pipeline import segment
         kw = {**self.policy, **overrides}
         return segment(image, task, catalog=self.catalog, models=self.models, **kw)
 
@@ -97,7 +137,13 @@ class Segmenter:
             raise TypeError(f"unknown argument(s) {sorted(unknown)}; policy is {sorted(POLICY)}")
         kw = {**self.policy, **overrides}
 
+        from .engines.registry import NNUNETV2
+        eng = self.engine_for(task)
+
         def run(reporter):
+            if eng.name != NNUNETV2:
+                return self._run_engine(eng, image, task, cancel=reporter.cancel,
+                                        progress=reporter, **overrides)
             from .pipeline import segment
             return segment(image, task, catalog=self.catalog, models=self.models,
                            cancel=reporter.cancel, progress=reporter, **kw)

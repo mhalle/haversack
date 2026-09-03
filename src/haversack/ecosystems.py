@@ -145,12 +145,12 @@ class ModelEcosystem:
         looking like a bug, not like an unsupported model.
         """
         if not self.has_task_spec:
-            env = _registry.ENGINES[self.engine].enabled_env
+            eng = _registry.ENGINES[self.engine]
             raise UnsupportedModel(
                 f"{self.name} is an engine, not an nnU-Net task: it runs on the "
-                f"{self.engine} engine, which has no TaskSpec. This server runs "
-                f"nnU-Net models in-process; deploy with "
-                f"{env}=1 to serve it from an engine worker.")
+                f"{self.engine} engine, which has no TaskSpec. Run it from the engine's "
+                f"own environment (uv sync --extra {eng.extra}; Segmenter routes it there) "
+                f"or deploy with {eng.enabled_env}=1 to serve it from an engine worker.")
         raise NotImplementedError
 
     def info(self, task: str, root) -> dict:

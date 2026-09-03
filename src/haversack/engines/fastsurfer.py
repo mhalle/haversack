@@ -21,6 +21,7 @@ or this module, never requires FastSurfer to be installed. The restore geometry
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -187,7 +188,33 @@ def restore_logits_gpu(logits_in, source_ref, target_ref, device="cuda"):
 _RUNNERS: dict = {}          # (device, batch_size) -> RunModelOnData, cached across jobs
 
 
-def _get_runner(device: str, batch_size: int):
+def _host_memory_gb() -> float:
+    """Physical memory of this host, in GB (0 when it cannot be read)."""
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 1e9
+    except (ValueError, OSError, AttributeError):
+        return 0.0
+
+
+def local_viewagg(device: str, host_gb: float | None = None) -> str:
+    """Where FastSurfer's view-aggregation field lives on a local host.
+
+    The field is the whole 79-class probability volume, 2.6 GB fp16 at 256^3, and the
+    three view passes accumulate into it. On CUDA FastSurfer's own ``"auto"`` puts it on
+    the card when the card has 4 GB. MPS has no separate pool: the field would come out
+    of the same unified memory as everything else, and on a 16 GB machine that is the
+    difference between running and swapping - so it stays on the CPU unless the host
+    is large. Memory is a policy, not a constant: the threshold reads the host."""
+    dev = str(device)
+    if dev.startswith("cuda"):
+        return "auto"
+    if dev == "mps":
+        gb = _host_memory_gb() if host_gb is None else host_gb
+        return "mps" if gb >= 32 else "cpu"
+    return "cpu"
+
+
+def _get_runner(device: str, batch_size: int, viewagg_device: str = "auto"):
     """A FastSurfer ``RunModelOnData`` (the three view models + LUT), built ONCE
     per (device, batch_size) and reused across jobs. This is the expensive,
     input-independent setup - checkpoint load, arch build, device upload - so
@@ -195,7 +222,7 @@ def _get_runner(device: str, batch_size: int):
     one-time cost. Defaults (checkpoint/config/LUT paths, conform knobs) are
     taken from FastSurfer's own argument parser so we track upstream, not a
     hardcoded copy. FastSurfer is imported here and nowhere else."""
-    key = (device, int(batch_size))
+    key = (device, int(batch_size), viewagg_device)
     runner = _RUNNERS.get(key)
     if runner is not None:
         return runner
@@ -205,7 +232,7 @@ def _get_runner(device: str, batch_size: int):
 
     args = rp.make_parser().parse_args(
         ["--t1", "x", "--sd", "x", "--device", device,
-         "--batch_size", str(int(batch_size)), "--viewagg_device", "auto"])
+         "--batch_size", str(int(batch_size)), "--viewagg_device", viewagg_device])
     cfg_file = get_config_file("FastSurferCNN")
     get_checkpoints(args.ckpt_ax, args.ckpt_cor, args.ckpt_sag,   # no-op once downloaded
                     urls=load_checkpoint_config_defaults("url", filename=cfg_file))
@@ -223,7 +250,8 @@ def _get_runner(device: str, batch_size: int):
     return runner
 
 
-def _capture_logits(t1_sitk, device: str, batch_size: int = 8, on_gpu: bool = True):
+def _capture_logits(t1_sitk, device: str, batch_size: int = 8, on_gpu: bool = True,
+                    viewagg_device: str = "auto"):
     """Segment an in-memory SimpleITK image with a CACHED FastSurfer model,
     capturing the pre-argmax logit field in the conformed-orig frame. Drives
     conform + get_prediction directly (no ``rp.main``, no SubjectList): the input
@@ -243,7 +271,7 @@ def _capture_logits(t1_sitk, device: str, batch_size: int = 8, on_gpu: bool = Tr
     from FastSurferCNN.data_loader.conform import Reorientation, conform, is_conform
     import FastSurferCNN.data_loader.data_utils as du
 
-    r = _get_runner(device, batch_size)
+    r = _get_runner(device, batch_size, viewagg_device)
     orig = sitk_to_nibabel(t1_sitk)                   # the SITK -> nibabel bridge
     orig_data = np.asanyarray(orig.dataobj)
     # conform in memory, no file writes (conform_and_save_orig minus the IO);
@@ -339,7 +367,7 @@ def emit_probabilities(spec, logits, source_ref, target_ref, class_labels) -> No
 
 def segment(t1_input, *, out_dir=None, device: str = "cuda", batch_size: int = 8,
             logit_grade: bool = True, self_check: bool = True, restore: str = "auto",
-            probabilities=None):
+            probabilities=None, viewagg_device: str = "auto"):
     """Segment a T1 with FastSurfer and return an :class:`haversack.result.Segmentation`
     on the input's grid.
 
@@ -387,7 +415,7 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", batch_size: int = 8
     timings: dict[str, float] = {}
     _t = time.perf_counter()
     logits, conf_orig, fs_labels_zyx, class_labels = _capture_logits(
-        t1_img, device, batch_size, on_gpu=use_gpu)
+        t1_img, device, batch_size, on_gpu=use_gpu, viewagg_device=viewagg_device)
     timings["capture"] = time.perf_counter() - _t     # conform + VINN inference (model cached)
 
     def to_fs(idx_zyx):
@@ -466,4 +494,25 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", batch_size: int = 8
             "device": device}
     seg = Segmentation(labels=out_img, schema=LabelSchema(names=names),
                        grid=grid, spec=None, timings=timings, provenance=prov)
+    return seg
+
+
+def run_local(image, *, device="auto", batch_size="auto", progress=None, cancel=None,
+              probabilities=None, **_policy):
+    """The in-process entry point (:attr:`Engine.compute`): what ``haversack segment`` and a
+    local ``haversack serve`` call for ``fastsurfer:brain``. Resolves ``device`` the way the
+    nnU-Net path does, places the view-aggregation field by :func:`local_viewagg`, reports
+    one stage, and honors the cancel token before the model is built. nnU-Net policy keys
+    that mean nothing here (grid, interp, ...) are accepted and ignored."""
+    from ..progress import Reporter
+    from ..resample import resolve_device
+    report = Reporter.of(progress, cancel=cancel)
+    dev = resolve_device(device).type
+    bs = 8 if batch_size in (None, "auto") else int(batch_size)
+    viewagg = local_viewagg(dev)
+    report.check()
+    report.stage("predict", f"fastsurfer:brain on {dev} (view aggregation on {viewagg})")
+    seg = segment(image, device=dev, batch_size=bs, viewagg_device=viewagg,
+                  probabilities=probabilities)
+    report.check()
     return seg

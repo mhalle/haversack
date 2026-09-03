@@ -161,12 +161,31 @@ haversack remote --token choose-a-secret submit scan.nii.gz --task total_fast -o
 `/v1/jobs`); the OpenAPI document is at `/docs`. On this M2 a `total_fast` job through the
 server produced labels voxel-identical to the command line's.
 
+## Engines: FastSurfer and friends
+
+Not everything is an nnU-Net checkpoint. FastSurfer (whole-brain parcellation from a T1),
+SynthStrip, VoxTell and the MONAI bundles are *engines*: other networks behind the same
+tasks, API, CLI and server. Each engine owns its own Python environment, because their
+dependency pins conflict with the nnU-Net path's (FastSurfer pins torch 2.7.1). Build one
+beside the main environment and run haversack from it:
+
+```bash
+UV_PROJECT_ENVIRONMENT=.venvs/fastsurfer uv sync --extra fastsurfer --extra serve
+.venvs/fastsurfer/bin/haversack segment t1.nii.gz --task fastsurfer:brain -o brain.seg.nrrd
+.venvs/fastsurfer/bin/haversack serve --port 8791
+```
+
+An installed runtime is the switch: `haversack tasks` shows `fastsurfer:brain` as installed
+from that environment, and a plain environment refuses the task with the line above. Today
+FastSurfer is the engine with an in-process runner; the others run on Modal. FastSurfer's
+view-aggregation field is large (2.6 GB in half precision at 1 mm), so on Apple Silicon it
+stays in CPU memory unless the machine has 32 GB or more; 16 GB is tight for it.
+
 ## What haversack does not do yet
 
 - Multi-channel nnU-Net inputs, region (sigmoid) heads, and the `3d_lowres`, cascade and `2d`
   configurations are not on the nnU-Net path.
-- The FastSurfer, SynthStrip, VoxTell and MONAI engines each need their own environment
-  (their dependency pins conflict with the torch path) and are run as separate server
-  processes; locally they are not part of the default install.
+- SynthStrip, VoxTell and the MONAI bundles have no in-process runner yet; they run on
+  Modal. FastSurfer runs locally from its own environment (above).
 - Versioning: `haversack.__version__` is haversack's own number and is what the server reports; the
   distribution's version belongs to the repository as a whole.

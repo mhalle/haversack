@@ -26,6 +26,7 @@ def test_segment_cli_kwargs_are_accepted_by_pipeline(monkeypatch, tmp_path):
         return FakeResult()
 
     monkeypatch.setattr(pipeline, "segment", fake_segment)
+    (tmp_path / "in.nii.gz").touch()
     rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
                    "-o", str(tmp_path / "out.nii.gz"),
                    "--model-root", str(tmp_path / "weights"), "--quiet"])
@@ -50,6 +51,7 @@ def test_errors_are_one_line_not_a_traceback(monkeypatch, tmp_path, capsys):
         raise InputError("the server needs the serve extra")
 
     monkeypatch.setattr(pipeline, "segment", fake_segment)
+    (tmp_path / "in.nii.gz").touch()
     rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
                    "-o", str(tmp_path / "out.nii.gz"), "--quiet"])
     err = capsys.readouterr().err
@@ -92,8 +94,19 @@ def test_bare_install_says_which_extra_it_needs(monkeypatch, tmp_path, capsys):
         return None if name == "torch" else real(name, *a, **k)
 
     monkeypatch.setattr(importlib.util, "find_spec", no_torch)
+    (tmp_path / "in.nii.gz").touch()
     rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
                    "-o", str(tmp_path / "out.nii.gz")])
     err = capsys.readouterr().err
     assert rc == 2
     assert "haversack[torch]" in err and "torch not installed" in err and "Traceback" not in err
+
+
+def test_missing_input_is_one_line(tmp_path, capsys):
+    """A missing input file ended in a SimpleITK traceback from inside the reader
+    (2026-09-03); the CLI now says so before touching any stack."""
+    from haversack import cli
+    rc = cli.main(["segment", str(tmp_path / "nope.nii.gz"), "--task", "total_fast",
+                   "-o", str(tmp_path / "out.nii.gz")])
+    err = capsys.readouterr().err
+    assert rc == 2 and err.strip() == f"haversack: input not found: {tmp_path / 'nope.nii.gz'}"

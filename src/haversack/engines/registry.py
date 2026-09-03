@@ -60,11 +60,19 @@ class Engine:
     name: str
     enabled_env: str | None = None          # None = always on (the default engine)
     weights_identity: Callable[[], list[dict]] | None = None
-    # The engine's compute entry point, for runtimes that can run in-process.
-    # None today for all three: engine compute is reached through the Modal
-    # worker's _compute hook. The field exists so local dispatch is a function
-    # body, not a new seam - see EcosystemCatalog.engine_of.
+    # The engine's compute entry point for in-process runs: called by
+    # Segmenter._run_engine as compute(image, device=, batch_size=, progress=,
+    # cancel=, probabilities=) and returns a Segmentation. Set for fastsurfer
+    # (local, 2026-09-03); the Modal worker keeps its own _compute hook. None
+    # means the engine runs only on Modal so far.
     compute: Callable | None = None
+    #: The importable module that proves the engine's runtime is present in THIS
+    #: environment - checked with find_spec, never imported. Installed runtime =
+    #: enabled locally (see `enabled`).
+    runtime_module: str | None = None
+    #: The extra that installs that runtime, in its own environment (pyproject's
+    #: [tool.uv] conflicts): UV_PROJECT_ENVIRONMENT=.venvs/<name> uv sync --extra <extra>.
+    extra: str | None = None
     #: Whether a stored result may be SERVED for a repeat request (RFC 9111
     #: `no-cache` when False - results are still stored, so artifacts, the job's
     #: `key` and its `links` all keep working; `no-store` is a different thing we
@@ -99,6 +107,12 @@ def _fastsurfer_identity() -> list[dict]:
     return [{"id": "fastsurfer", "version": "vinn-v2"}]
 
 
+def _fastsurfer_compute(image, **kw):
+    """Local FastSurfer run; the engine module (and FastSurfer) import only here."""
+    from .fastsurfer import run_local
+    return run_local(image, **kw)
+
+
 def _synthstrip_identity() -> list[dict]:
     return [{"id": "synthstrip", "version": "v1"}]
 
@@ -115,6 +129,7 @@ def _voxtell_identity() -> list[dict]:
 ENGINES: dict[str, Engine] = {
     NNUNETV2: Engine(
         name=NNUNETV2,
+        runtime_module="nnunetv2", extra="torch",
         # the only engine whose surrounding pipeline is ours, so the only one
         # where our processing knobs are real
         behavior=GRADED_RESTORE,
@@ -124,6 +139,8 @@ ENGINES: dict[str, Engine] = {
         name="fastsurfer",
         enabled_env="HAVERSACK_FASTSURFER",
         weights_identity=_fastsurfer_identity,
+        compute=_fastsurfer_compute,
+        runtime_module="FastSurferCNN", extra="fastsurfer",
         behavior=GRADED_RESTORE,
         processing_knobs=False,
         description="FastSurferVINN 2.5D view-aggregation parcellation",
@@ -131,6 +148,7 @@ ENGINES: dict[str, Engine] = {
     "synthstrip": Engine(
         name="synthstrip",
         enabled_env="HAVERSACK_SYNTHSTRIP",
+        runtime_module="synthstrip_torch", extra="synthstrip",
         weights_identity=_synthstrip_identity,
         behavior=GRADED_RESTORE,
         processing_knobs=False,
@@ -139,6 +157,7 @@ ENGINES: dict[str, Engine] = {
     "voxtell": Engine(
         name="voxtell",
         enabled_env="HAVERSACK_VOXTELL",
+        runtime_module="voxtell", extra="voxtell",
         weights_identity=_voxtell_identity,
         # free text means an unbounded key space and interactive, low-reuse
         # requests: memoizing them evicts results that do get re-read
@@ -153,6 +172,7 @@ ENGINES: dict[str, Engine] = {
     "monai": Engine(
         name="monai",
         enabled_env="HAVERSACK_MONAI",
+        runtime_module="monai", extra="monai",
         weights_identity=None,          # per bundle - see MonaiEcosystem
         processing_knobs=False,
         # The first engine that can be handed more than one image. Which bundles
@@ -189,13 +209,29 @@ def engine_for_task(task: str) -> Engine:
     return engine_for(str(task).partition(":")[0])
 
 
-def enabled(name: str) -> bool:
-    """Whether this deployment enables ``name``. Read from the environment on
-    every call (never cached) so a test can ``monkeypatch.setenv`` it; callers
-    that must decide at import time - Modal resolves decorators then - snapshot
-    the result themselves."""
+def available(name: str) -> bool:
+    """Whether the engine's runtime is importable in this environment. Looks the
+    module up (find_spec) and never imports it, so it is cheap and side-effect free."""
+    import importlib.util
     eng = ENGINES[name]
-    return eng.enabled_env is None or _truthy(os.environ.get(eng.enabled_env))
+    return eng.runtime_module is None or importlib.util.find_spec(eng.runtime_module) is not None
+
+
+def enabled(name: str) -> bool:
+    """Whether ``name`` can run here. The environment flag decides when it is set
+    (``=1`` on, ``=0`` off - the Modal deploy sets it per image); when it is unset,
+    an engine that can run in-process is enabled exactly when its runtime is
+    installed, so a per-engine venv (``uv sync --extra fastsurfer``) needs no
+    further switch. Read on every call (never cached) so a test can monkeypatch
+    either signal; callers that must decide at import time - Modal resolves
+    decorators then - snapshot the result themselves."""
+    eng = ENGINES[name]
+    if eng.enabled_env is None:
+        return True
+    flag = os.environ.get(eng.enabled_env)
+    if flag is not None:
+        return _truthy(flag)
+    return eng.compute is not None and available(name)
 
 
 def enabled_engines() -> list[str]:
