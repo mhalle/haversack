@@ -36,7 +36,7 @@ def _need_inference_stack() -> None:
 def _run(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="haversack", description="nnU-Net-family segmentation on torch: fused logit restore onto any grid")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    s = sub.add_parser("segment", help="segment one NIfTI")
+    s = sub.add_parser("segment", help="segment one image: NIfTI, NRRD, MetaImage, or a DICOM series directory")
     s.add_argument("input", help="NIfTI / NRRD / MetaImage file, or a DICOM series directory")
     s.add_argument("--task", required=True, help="task name from the catalog, e.g. total_fast, total")
     s.add_argument("-o", "--output", required=True)
