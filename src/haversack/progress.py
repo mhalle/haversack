@@ -19,7 +19,13 @@ from .errors import Cancelled
 
 # Rough share of a run spent before/after the network, used only to make the fraction move
 # sensibly during load and preprocess rather than sitting at 0 until the first patch.
-_PRE = 0.05
+# Where each stage starts, as a fraction of one model part. Sized from measured warm runs
+# (read ~15 %, load ~10 %, preprocess ~5 %, network ~60 %, restore ~10 %) so the number
+# moves with the work: it used to sit at 5 % through loading, preprocess and the start of
+# predict and then jump to 95 % - on a one-patch volume that was the whole readout.
+_STAGE_START = {"starting": 0.0, "queued": 0.0, "read": 0.0, "loading": 0.12, "preprocess": 0.22,
+                "cascade": 0.22, "predict": 0.27, "restore": 0.90, "finalize": 0.97}
+_PREDICT_SPAN = _STAGE_START["restore"] - _STAGE_START["predict"]
 
 
 @dataclass(frozen=True)
@@ -92,12 +98,13 @@ class Reporter:
 
     def stage(self, name: str, detail: str = "") -> None:
         self.stage_name = name
-        self._emit(detail=detail, step=0, n_steps=0, within=_PRE if name != "restore" else 0.95)
+        self._emit(detail=detail, step=0, n_steps=0,
+                   within=_STAGE_START.get(name, _STAGE_START["predict"]))
 
     def tick(self, step: int, n_steps: int, detail: str = "") -> None:
         """One patch done. Checks cancellation first - this is the interrupt point."""
         self.check()
-        within = _PRE + (0.9 * step / n_steps if n_steps else 0.0)
+        within = _STAGE_START["predict"] + (_PREDICT_SPAN * step / n_steps if n_steps else 0.0)
         self._emit(detail=detail, step=step, n_steps=n_steps, within=within)
 
     # -- plumbing -----------------------------------------------------------

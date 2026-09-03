@@ -20,6 +20,38 @@
 
 ## [Unreleased]
 
+- **Progress fractions move with the work.** A one-patch volume read `5 % loading`, `5 %
+  preprocess`, `5 % predict`, `95 % restore`: every stage but restore started at the same
+  number and only patch ticks moved it. Each stage now starts where the previous one's
+  work ends (read 0, load 12, preprocess 22, predict 27 to 90, restore 90, finalize 97 %,
+  sized from warm runs), the read and the final reorientation are reported as stages, and
+  the last patch lands exactly on restore. The wire's `Haversack-Fraction` and `progress`
+  fields change value, not shape.
+
+- **Engines run in-process when their runtime is installed: FastSurfer locally.** The
+  design note of 2026-08-26 planned a local FastSurfer for machines with the memory; the
+  seams it named were already cut (`Engine.compute` reserved, grammar routing without Modal,
+  `fastsurfer.segment` taking `mps`/`cpu`), and this fills them in. `Engine` gains
+  `runtime_module` and `extra`; `registry.available()` asks `find_spec` whether the runtime
+  is here, and `enabled()` treats an installed runtime as enabled when the env flag is
+  unset (`=0` still switches it off; the Modal deploy's `=1` still switches it on).
+  `Segmenter.segment`/`submit` route an engine task to `Engine.compute` and never to the
+  nnU-Net pipeline; without the runtime they refuse with the per-engine install line
+  (`UV_PROJECT_ENVIRONMENT=.venvs/fastsurfer uv sync --extra fastsurfer --extra serve`),
+  because an engine owns its environment (pyproject's conflicts: fastsurfer-lean pins torch
+  2.7.1). `haversack segment` and a local `haversack serve` follow, so a server started from
+  the FastSurfer venv lists and runs `fastsurfer:brain`; the CLI's stack check is per engine
+  and `haversack tasks` marks an engine installed when its runtime is. New in the engine:
+  `viewagg_device` is plumbed through, and `local_viewagg()` places FastSurfer's 79-class
+  aggregation field by reading the host - CUDA keeps FastSurfer's own rule, MPS keeps the
+  field on the CPU below 32 GB of unified memory (it would otherwise swap), CPU is CPU.
+  Verified FastSurfer-free (`tests/test_engines_local.py`) and by a dry call in the
+  FastSurfer venv that stops at the reader; **not yet run end to end on a brain** - this
+  16 GB Mac is below the field's comfortable size, and a machine with more memory should
+  run the first one and compare against the Modal result.
+- **A missing input is one line.** `haversack segment nope.nii.gz` traced back from inside
+  SimpleITK; the CLI now says `input not found` before touching any stack.
+
 - **No torch.jit.interface FutureWarning on every run.** torch 2.14 deprecates it, and
   `timm` (pulled in by nnunetv2's architecture package for its Primus/EVA models) trips it
   while nnunetv2 scans trainer modules for the checkpoint's class. Filtered at that scan

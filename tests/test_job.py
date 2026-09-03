@@ -173,3 +173,21 @@ def test_fraction_advances_across_parts():
     first = r.last.fraction
     r.enter_part(1, "b"); r.tick(10, 10)
     assert 0.0 < first < r.last.fraction <= 1.0
+
+
+def test_stages_advance_the_fraction_without_patches():
+    """A one-patch volume used to read 5 %, 5 %, 5 %, 95 %: every stage but restore
+    started at the same number and only patch ticks moved it (2026-09-03). Now each
+    stage starts where the previous one's work ends, and the last patch lands on restore."""
+    from haversack.progress import Reporter
+    seen = []
+    r = Reporter(progress=lambda p: seen.append((p.stage, round(p.fraction, 2))))
+    r.stage("read", "x"); r.enter_part(0, "m"); r.stage("preprocess"); r.stage("predict")
+    r.tick(1, 1); r.stage("restore"); r.stage("finalize")
+    fracs = [f for _, f in seen]
+    assert fracs == sorted(fracs) and len(set(fracs)) == len(fracs) - 1   # only the last tick == restore
+    assert dict(seen)["read"] == 0.0 and 0.05 < dict(seen)["loading"] < dict(seen)["preprocess"] < dict(seen)["predict"]
+    assert seen[-3] == ("predict", 0.9) and seen[-2] == ("restore", 0.9) and seen[-1][1] > 0.9
+    # a union of two parts: the second part's stages sit in the upper half
+    r2 = Reporter(progress=lambda p: seen.append(p), n_parts=2)
+    r2.enter_part(1, "second"); assert 0.5 < r2.last.fraction < 0.6

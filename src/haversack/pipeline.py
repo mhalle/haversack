@@ -167,6 +167,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             "weights_store": store.describe(),
             "haversack": _version()}
 
+    report.stage("read", Path(image).name if isinstance(image, (str, Path)) else "in-memory image")
     if isinstance(image, (str, Path)):
         data_zyx, geometry, orientation = nio.read(image, reorient=reorient,
                                                    target=canonical or nio.CANONICAL)
@@ -400,6 +401,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     with lock:
         labels, frame, out_grid = run_task_canonical(spec)
     t = time.perf_counter()
+    report.stage("finalize", "to input orientation")
     # back to the input's own orientation: a permute + flip where the labels already live,
     # not a single-threaded DICOMOrient over the host copy
     arr, geo = nio.reorient(labels, frame.output_geometry(out_grid), frame.original_orientation)
