@@ -219,3 +219,51 @@ def test_emit_probabilities_accepts_the_cpu_paths_axis_order():
 def test_emit_probabilities_is_a_noop_without_a_spec():
     ref = sitk.GetImageFromArray(np.zeros((2, 2, 2), np.float32))
     fs.emit_probabilities(None, np.zeros((2, 2, 2, 3), np.float32), ref, ref, [0, 1, 2])
+
+
+def test_checkpoint_dir_follows_env_then_xdg(monkeypatch, tmp_path):
+    monkeypatch.setenv("HAVERSACK_FASTSURFER_CHECKPOINTS", str(tmp_path / "mine"))
+    assert fs.checkpoint_dir() == tmp_path / "mine"
+    monkeypatch.delenv("HAVERSACK_FASTSURFER_CHECKPOINTS")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    assert fs.checkpoint_dir() == tmp_path / "cache" / "haversack" / "fastsurfer-checkpoints"
+    args = fs.checkpoint_args()
+    assert args[::2] == ["--ckpt_ax", "--ckpt_cor", "--ckpt_sag"]
+    assert [a.rsplit("/", 1)[1] for a in args[1::2]] == list(fs.CHECKPOINT_NAMES)
+
+
+def test_ensure_checkpoints_fetches_verifies_and_is_idempotent(monkeypatch, tmp_path):
+    """The Zenodo fetch (FastSurfer's b2share download fails cert verification, 2026-09-03):
+    a present file with the right hash is left alone; a bad hash is refused."""
+    import hashlib
+    import urllib.request
+
+    blobs = {n: f"weights-of-{n}".encode() for n in fs.CHECKPOINTS}
+    monkeypatch.setattr(fs, "CHECKPOINTS", {n: hashlib.sha256(b).hexdigest() for n, b in blobs.items()})
+    fetched = []
+
+    class Resp:
+        def __init__(self, data): self.data = data
+        def read(self): return self.data
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(url, timeout=0):
+        name = url.split("/files/")[1].split("?")[0]
+        fetched.append(name)
+        return Resp(blobs[name])
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    d = fs.ensure_checkpoints(tmp_path)
+    assert sorted(fetched) == sorted(fs.CHECKPOINTS) and d == tmp_path
+    fs.ensure_checkpoints(tmp_path)                        # second call: nothing refetched
+    assert sorted(fetched) == sorted(fs.CHECKPOINTS)
+    # a corrupted file is refetched, and a permanently-wrong hash is refused
+    (tmp_path / next(iter(fs.CHECKPOINTS))).write_bytes(b"corrupt")
+    fs.ensure_checkpoints(tmp_path)
+    assert len(fetched) == len(fs.CHECKPOINTS) + 1
+    monkeypatch.setitem(fs.CHECKPOINTS, next(iter(fs.CHECKPOINTS)), "0" * 64)
+    (tmp_path / next(iter(fs.CHECKPOINTS))).unlink()
+    from haversack.errors import ResourceError
+    with pytest.raises(ResourceError, match="sha256"):
+        fs.ensure_checkpoints(tmp_path)

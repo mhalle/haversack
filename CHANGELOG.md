@@ -20,6 +20,24 @@
 
 ## [Unreleased]
 
+- **FastSurfer shares the main environment.** The `torch==2.7.*` pin was upstream FastSurfer's
+  CUDA-11 caution, not a need of the parcellation net; the `fastsurfer-lean` fork relaxes it to
+  `>=2.7` (torchvision unbounded above), the `fastsurfer` extra leaves the uv conflict group,
+  and `uv sync --extra fastsurfer` (or `haversack[fastsurfer]`) installs it beside torch 2.14
+  and the nnU-Net path - no separate venv. Verified: the same T1 through the engine on torch
+  2.7.1 and on 2.14 gave **bit-identical** labels (0 of 654,295 voxels differ, all 95
+  structures, every per-label Dice 1.0), so the relaxation changes nothing about the output.
+  SynthStrip still owns its environment (numpy<2).
+
+- **FastSurfer checkpoints come from Zenodo, verified.** FastSurfer's own downloader tries
+  `b2share.fz-juelich.de` first, whose server omits an intermediate certificate; because its
+  helper catches only HTTPError, the resulting SSLError killed model load before the Zenodo
+  fallback was tried (and a Modal build could not bake the weights). haversack now fetches the
+  three DOI-versioned checkpoints from Zenodo itself (stdlib urllib, sha256-checked) into
+  `~/.cache/haversack/fastsurfer-checkpoints` (`HAVERSACK_FASTSURFER_CHECKPOINTS` overrides),
+  once per machine. The Modal image bakes them the same way at build (to `/opt`, off the
+  mounted `/weights` volume that a shipped copy would have blocked).
+
 - **`haversack get` fetches source data; `cache` and `weights list`/`remove` manage the disk.**
   `get idc:<uuid>` (or any `zenodo:`/`http` source) lands the data in the input cache and
   prints the path, so a later `segment` of the same id reuses it; with `-o` it also writes

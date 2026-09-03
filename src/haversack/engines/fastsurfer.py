@@ -214,6 +214,68 @@ def local_viewagg(device: str, host_gb: float | None = None) -> str:
     return "cpu"
 
 
+# The three FastSurferVINN v2.0.0 checkpoints, by filename and sha256. They are fixed,
+# DOI-versioned files on Zenodo - once fetched they never change, so a local cache is
+# permanent. haversack fetches them from Zenodo itself rather than through FastSurfer's
+# downloader (2026-09-03): FastSurfer tries b2share.fz-juelich.de first, whose server omits
+# an intermediate certificate, and its download helper catches only HTTPError - the SSLError
+# propagates and kills model load before the Zenodo fallback is ever tried. Zenodo's chain
+# is clean, so plain stdlib urllib verifies it.
+CHECKPOINTS = {
+    "aparc_vinn_axial_v2.0.0.pkl":    "81ab25ccbfc432cc41fb6089d11ff2a45b5a88e659092096cb1e067269f806b8",
+    "aparc_vinn_coronal_v2.0.0.pkl":  "73813957e83ec99d2c4e22f7854308916ec276d66ab7ed8ef8bf3998ba05e289",
+    "aparc_vinn_sagittal_v2.0.0.pkl": "edae6262d69526fea39a019f2dfd8df75eb705f8f025b9b97166e3e17b917414",
+}
+CHECKPOINT_NAMES = tuple(CHECKPOINTS)
+ZENODO_BASE = "https://zenodo.org/records/10390573/files"
+
+
+def checkpoint_dir() -> Path:
+    """Where haversack keeps the FastSurfer checkpoints: ``HAVERSACK_FASTSURFER_CHECKPOINTS``,
+    else ``$XDG_CACHE_HOME/haversack/fastsurfer-checkpoints`` (``~/.cache/...``). Permanent,
+    because the files are DOI-versioned - a download happens at most once per machine."""
+    env = os.environ.get("HAVERSACK_FASTSURFER_CHECKPOINTS")
+    if env:
+        return Path(env).expanduser()
+    base = os.environ.get("XDG_CACHE_HOME")
+    return (Path(base) if base else Path.home() / ".cache") / "haversack" / "fastsurfer-checkpoints"
+
+
+def ensure_checkpoints(directory=None, *, progress=None) -> Path:
+    """Fetch any missing checkpoint from Zenodo into ``directory`` (default
+    :func:`checkpoint_dir`), verify its sha256, and return the directory. A file already
+    present with the right hash is left alone; a partial or wrong one is refetched. Atomic
+    per file (temp + rename), so concurrent runs are safe."""
+    import hashlib
+    import urllib.request
+
+    d = Path(directory) if directory is not None else checkpoint_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    for name, sha in CHECKPOINTS.items():
+        dest = d / name
+        if dest.is_file() and hashlib.sha256(dest.read_bytes()).hexdigest() == sha:
+            continue
+        if progress:
+            progress(f"fetching {name} from Zenodo")
+        tmp = dest.with_suffix(dest.suffix + f".{os.getpid()}.part")
+        with urllib.request.urlopen(f"{ZENODO_BASE}/{name}?download=1", timeout=600) as r:
+            tmp.write_bytes(r.read())
+        got = hashlib.sha256(tmp.read_bytes()).hexdigest()
+        if got != sha:
+            tmp.unlink(missing_ok=True)
+            from ..errors import ResourceError
+            raise ResourceError(f"checkpoint {name}: sha256 {got} != expected {sha}")
+        tmp.rename(dest)
+    return d
+
+
+def checkpoint_args(directory=None) -> list:
+    """``--ckpt_*`` arguments pointing FastSurfer at :func:`checkpoint_dir` (or ``directory``)."""
+    d = Path(directory) if directory is not None else checkpoint_dir()
+    ax, cor, sag = (str(d / n) for n in CHECKPOINT_NAMES)
+    return ["--ckpt_ax", ax, "--ckpt_cor", cor, "--ckpt_sag", sag]
+
+
 def _get_runner(device: str, batch_size: int, viewagg_device: str = "auto"):
     """A FastSurfer ``RunModelOnData`` (the three view models + LUT), built ONCE
     per (device, batch_size) and reused across jobs. This is the expensive,
@@ -227,15 +289,12 @@ def _get_runner(device: str, batch_size: int, viewagg_device: str = "auto"):
     if runner is not None:
         return runner
     from FastSurferCNN import run_prediction as rp
-    from FastSurferCNN.utils.checkpoint import (
-        get_checkpoints, get_config_file, load_checkpoint_config_defaults)
 
+    ensure_checkpoints()                              # our own Zenodo fetch, sha256-verified
     args = rp.make_parser().parse_args(
         ["--t1", "x", "--sd", "x", "--device", device,
-         "--batch_size", str(int(batch_size)), "--viewagg_device", viewagg_device])
-    cfg_file = get_config_file("FastSurferCNN")
-    get_checkpoints(args.ckpt_ax, args.ckpt_cor, args.ckpt_sag,   # no-op once downloaded
-                    urls=load_checkpoint_config_defaults("url", filename=cfg_file))
+         "--batch_size", str(int(batch_size)), "--viewagg_device", viewagg_device,
+         *checkpoint_args()])
     # Mirror main()'s constructor EXACTLY, every knob from the parsed args - the
     # init defaults are NOT the CLI defaults (e.g. image_size init=True but CLI
     # "auto"), and a wrong conform knob yields a degenerate segmentation.

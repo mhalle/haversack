@@ -255,13 +255,12 @@ tasks, API, CLI and server. An installed runtime is the switch: `haversack tasks
 engine's task as installed when its package is importable, and refuses it otherwise with
 the install line.
 
-Each engine owns its own Python environment, because their dependency pins conflict with the
-nnU-Net path's (FastSurfer pins torch 2.7.1). Build one beside the main environment and run
-haversack from it:
+FastSurfer installs into the main environment, and its checkpoints (66 MB, DOI-versioned)
+download once from Zenodo into `~/.cache/haversack/fastsurfer-checkpoints`:
 
 ```bash
-UV_PROJECT_ENVIRONMENT=.venvs/fastsurfer uv sync --extra fastsurfer --extra serve
-.venvs/fastsurfer/bin/haversack segment t1.nii.gz --task fastsurfer:brain -o brain.seg.nrrd
+uv pip install "haversack[fastsurfer] @ git+https://github.com/mhalle/haversack"   # or --extra fastsurfer with uv sync
+haversack segment t1.nii.gz --task fastsurfer:brain -o brain.seg.nrrd
 ```
 
 SynthStrip's dependencies pin numpy below 2, so it owns a separate environment:

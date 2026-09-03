@@ -132,28 +132,27 @@ image = (
 # monai/meshpy/torchio); `idc` pulls obstore (source fetch); core deps (SimpleITK
 # etc.) come with the sync. frozen=False: this repo gitignores uv.lock (pyproject is
 # the source of truth), so resolve at build.
+_FS_CKPT = os.environ.get("HAVERSACK_FASTSURFER_CHECKPOINTS")
 fs_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")                       # uv needs git for the git source in pyproject
     .uv_sync(extras=["fastsurfer"], frozen=False)
-    # Bake the ~67 MB VINN checkpoints into the image at BUILD (via FastSurfer's own
-    # get_checkpoints, to the package-default paths) so cold containers never re-download
-    # them from Zenodo/b2share - a reliability win (no runtime dependency on those hosts)
-    # and it removes that slice from every cold start. At runtime get_checkpoints is then
-    # a no-op. Placed before the haversack mount so a haversack edit doesn't bust this cache layer.
-    .run_commands(
-        "python -c \""
-        "from FastSurferCNN import run_prediction as rp;"
-        "from FastSurferCNN.utils.checkpoint import get_checkpoints,get_config_file,"
-        "load_checkpoint_config_defaults as L;"
-        "a=rp.make_parser().parse_args(['--t1','x','--sd','x']);"
-        "get_checkpoints(a.ckpt_ax,a.ckpt_cor,a.ckpt_sag,"
-        "urls=L('url',filename=get_config_file('FastSurferCNN')))"
-        "\""
-    )
-    .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
-    .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
+    .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack", copy=True)
 )
+if _FS_CKPT:
+    # Ship a local checkpoint directory into the image (a user's pre-fetched copy).
+    fs_image = fs_image.add_local_dir(_FS_CKPT, remote_path="/opt/fastsurfer-checkpoints", copy=True)
+else:
+    # Bake the ~66 MB checkpoints at BUILD via haversack's own Zenodo fetch (sha256-verified,
+    # stdlib) - so cold containers never download them, and the build never touches
+    # FastSurfer's b2share host, whose certificate chain fails in the container (2026-09-03).
+    fs_image = fs_image.run_commands(
+        "PYTHONPATH=/root/pkg python -c "
+        "'from haversack.engines.fastsurfer import ensure_checkpoints;"
+        "ensure_checkpoints(\"/opt/fastsurfer-checkpoints\")'")
+fs_image = (fs_image
+            .env({"HAVERSACK_FASTSURFER_CHECKPOINTS": "/opt/fastsurfer-checkpoints"})
+            .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ}))
 
 # SynthStrip engine image (built only when enabled). uv-NATIVE, same shape as fs_image:
 # `synthstrip` brings synthstrip-torch (from its git source in pyproject) + scipy (haversack

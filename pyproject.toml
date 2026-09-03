@@ -119,16 +119,16 @@ artifacts = ["src/haversack/data/*.json"]
 "README.md" = "haversack/data/GUIDE.md"
 
 [tool.uv]
-# Engines own their environments (docs: "one environment per engine"). Engines whose deps
-# genuinely conflict with each other (synthstrip's numpy<2; fastsurfer's torch==2.7.1 against
-# voxtell's <2.9 and monai's) are declared here so uv resolves them in separate forks of ONE
-# universal lock -
+# Engines own their environments (docs: "one environment per engine") when their deps
+# genuinely conflict (synthstrip's numpy<2; voxtell's torch<2.9 against core's); those are
+# declared here so uv resolves them in separate forks of ONE universal lock. fastsurfer left
+# the group 2026-09-03: the fork's torch pin was upstream's CUDA-11 caution, relaxed, and the
+# engine now installs into the main environment (`uv sync --extra fastsurfer`) -
 # the same declaration then drives per-engine venvs locally and per-engine images on Modal.
 # A future engine with its own incompatible pins adds an extra + one entry here.
 conflicts = [
     [
       { extra = "synthstrip" },
-      { extra = "fastsurfer" },
       { extra = "voxtell" },
       { extra = "monai" },
     ],
@@ -142,7 +142,7 @@ conflicts = [
 # put the checkout in by hand: `uv pip install -e ../upstream/nnUNet`.
 # fastsurfer-lean = our slimmed FastSurfer fork (parcellation CNN only, packaging fixed).
 # Pinned to the slim branch's rev; import namespace stays FastSurferCNN.
-fastsurfer-lean = { git = "https://github.com/mhalle/fastsurfer-lean.git", rev = "041062008b1276b2fb21c886d6943f7bfc3bba6e" }
+fastsurfer-lean = { git = "https://github.com/mhalle/fastsurfer-lean.git", rev = "68322213c0c9ff2b6b1612aa5bd9b7272cc6a817" }
 # voxtell = MIC-DKFZ's free-text promptable segmentation. Pinned to a git rev, not the
 # PyPI release: 0.1.0 on PyPI predates helpers this engine uses (download_voxtell_model),
 # and pinning the rev means the source we integrated against is the source that runs.
