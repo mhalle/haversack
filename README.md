@@ -66,7 +66,9 @@ That environment runs `haversack tasks`, `haversack remote ...`, `haversack moda
 in one line and names what to add.
 
 lists every task the catalog knows, with the engine, modality, and whether its weights are
-already on disk. `haversack tasks --installed` shows what will run without a download.
+already on disk. `haversack tasks --installed` shows what will run without a download. This
+guide itself ships with the package: `haversack docs` prints it, `haversack docs weights`
+one section, and every command answers `--help` with its options, defaults and examples.
 
 ## Weights
 

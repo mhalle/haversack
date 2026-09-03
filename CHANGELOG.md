@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+- **The command line explains itself.** Every option has help, every command a description
+  and examples, defaults are shown, and the top line says what haversack is rather than how
+  it works. New `haversack docs [topic] [--sections]` prints the user guide - the README,
+  shipped inside the wheel as `haversack/data/GUIDE.md` (an editable checkout reads the
+  repository's README; one source of truth) - whole or one section. A test walks the parser
+  and fails on any future option without help.
+
 - **obstore is core.** `haversack segment idc:<crdc_series_uuid>` works from a bare install;
   the `idc` extra is gone, and the Modal image definitions no longer name it. The lean recipe gains
   `obstore` so a client-only install can still fetch from IDC.

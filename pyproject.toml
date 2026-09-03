@@ -113,6 +113,11 @@ packages = ["src/haversack"]
 # second time now that they are tracked) makes them part of the normal selection.
 artifacts = ["src/haversack/data/*.json"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# The README is the user guide, and `haversack docs` prints it from inside the wheel; an
+# editable checkout reads the repository's README instead (cli.user_guide) - one source.
+"README.md" = "haversack/data/GUIDE.md"
+
 [tool.uv]
 # Engines own their environments (docs: "one environment per engine"). Engines whose deps
 # genuinely conflict with each other (synthstrip's numpy<2; fastsurfer's torch==2.7.1 against
