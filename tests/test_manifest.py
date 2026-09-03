@@ -290,3 +290,47 @@ def test_the_earlier_current_key_still_reads():
     e = wf._normalize({"297": {"current": "v2.0.0", "versions": {"v2.0.0": {"url": "u"}}}})["297"]
     assert e["default"] == "v2.0.0" and "current" not in e
     assert wf.selected(e)["url"] == "u"
+
+
+# -- the user's own manifest -------------------------------------------------------------
+def test_installed_refresh_writes_the_users_manifest_and_reads_it_back(fake_github, tmp_path, monkeypatch):
+    """A refresh from an installed package must outlive an upgrade: it goes to the user's
+    file, which is laid over the packaged manifest on every read (2026-09-03)."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.delenv("HAVERSACK_TS_MANIFEST", raising=False)
+    monkeypatch.setattr(wf, "_is_checkout", lambda: False)
+    monkeypatch.setattr(wf, "_api", lambda url, token=None: [          # a dataset no release has
+        _release("v9.9.9", "2030-01-01T00:00:00Z", [("Dataset999_future.zip", "fff")])])
+    packaged_before = wf.MANIFEST.read_text()
+    assert wf.refresh_target() == tmp_path / "haversack" / "ts_weights.json"
+    r = wf.refresh_manifest()
+    assert r["path"] == str(tmp_path / "haversack" / "ts_weights.json")
+    assert (tmp_path / "haversack" / "ts_weights.json").is_file()
+    assert wf.MANIFEST.read_text() == packaged_before               # the package is untouched
+    assert "999" in wf._manifest() and "999" not in wf._manifest(wf.MANIFEST)
+    src = wf.manifest_sources()
+    assert src["user"] >= src["package"] and src["user_path"].endswith("ts_weights.json")
+
+
+def test_user_entry_overrides_the_packaged_one(tmp_path, monkeypatch):
+    monkeypatch.setenv("HAVERSACK_TS_MANIFEST", str(tmp_path / "mine.json"))
+    (tmp_path / "mine.json").write_text(json.dumps({"weights": {"297": {
+        "default": "vX", "versions": {"vX": {"url": "https://mine/297.zip"}}}}}))
+    assert wf.selected(wf._manifest()["297"])["url"] == "https://mine/297.zip"
+    assert wf.selected(wf._manifest(wf.MANIFEST)["297"])["url"] != "https://mine/297.zip"
+    assert wf.manifest_sources()["user_overrides"] == ["297"]
+
+
+def test_checkout_refresh_targets_the_repository_file(monkeypatch):
+    monkeypatch.setattr(wf, "_is_checkout", lambda: True)
+    assert wf.refresh_target() == wf.MANIFEST
+
+
+def test_explicit_target_wins(fake_github, tmp_path, monkeypatch):
+    monkeypatch.setattr(wf, "_is_checkout", lambda: False)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    out = tmp_path / "elsewhere.json"
+    out.write_text(json.dumps({"weights": {}}))
+    r = wf.refresh_manifest(path=out)
+    assert r["path"] == str(out) and set(json.loads(out.read_text())["weights"]) == {"291", "297", "305"}
+    assert not (tmp_path / "cfg").exists()

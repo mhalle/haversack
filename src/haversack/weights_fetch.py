@@ -79,11 +79,60 @@ def dataset_key(weights_id) -> str:
     return str(int(t)) if t.isdigit() else t
 
 
-def _manifest(path=None) -> dict:
-    raw = json.loads(Path(path or MANIFEST).read_text())
+def user_manifest_path() -> Path:
+    """The user's own manifest: ``HAVERSACK_TS_MANIFEST``, else
+    ``$XDG_CONFIG_HOME/haversack/ts_weights.json`` (``~/.config/haversack/...``).
+
+    A user should not wait for a release to pick up weights TotalSegmentator has published:
+    ``haversack weights refresh`` from an installed package writes here, and the packaged
+    manifest is read with this one laid over it (2026-09-03). It survives upgrades, which a
+    refresh into site-packages did not."""
+    env = os.environ.get("HAVERSACK_TS_MANIFEST")
+    if env:
+        return Path(env).expanduser()
+    base = os.environ.get("XDG_CONFIG_HOME")
+    return (Path(base) if base else Path.home() / ".config") / "haversack" / "ts_weights.json"
+
+
+def _read_manifest_file(path) -> dict:
+    raw = json.loads(Path(path).read_text())
     # `raw.get("weights") or raw` would fall through to the wrapper for an EMPTY manifest,
     # leaking the key "weights" in as a dataset id. Test for the key, not its truthiness.
     return _normalize(raw["weights"] if "weights" in raw else raw)
+
+
+def _manifest(path=None) -> dict:
+    """A named file alone, or (``None``) the packaged manifest with the user's laid over it:
+    a dataset the user's file names replaces the packaged entry for that id."""
+    if path is not None:
+        return _read_manifest_file(path)
+    merged = _read_manifest_file(MANIFEST)
+    user = user_manifest_path()
+    if user.is_file():
+        merged.update(_read_manifest_file(user))
+    return merged
+
+
+def manifest_sources() -> dict:
+    """Where the effective manifest's entries come from, for `weights coverage`."""
+    packaged = _read_manifest_file(MANIFEST)
+    user = user_manifest_path()
+    mine = _read_manifest_file(user) if user.is_file() else {}
+    return {"package": len(packaged), "user": len(mine), "user_path": str(user),
+            "user_overrides": sorted(w for w in mine if w in packaged)}
+
+
+def _is_checkout() -> bool:
+    """Whether this package is a source checkout (a refresh then edits the repository's
+    manifest, to be committed) rather than an installed copy (a refresh goes to the user's)."""
+    here = MANIFEST.resolve()
+    if "site-packages" in here.parts or "dist-packages" in here.parts:
+        return False
+    return any((parent / ".git").exists() for parent in here.parents)
+
+
+def refresh_target() -> Path:
+    return MANIFEST if _is_checkout() else user_manifest_path()
 
 
 def _normalize(entries: dict) -> dict:
@@ -313,7 +362,7 @@ def upstream_pins(repo: str = TS_REPO, *, progress=None) -> dict[str, str]:
     return pins
 
 
-def refresh_manifest(path=MANIFEST, *, repo: str = TS_REPO, token: str | None = None,
+def refresh_manifest(path=None, *, repo: str = TS_REPO, token: str | None = None,
                      add_missing: bool = True, update_existing: bool = False,
                      write: bool = True, progress=None) -> dict:
     """Merge newly published weights into the manifest.
@@ -322,9 +371,15 @@ def refresh_manifest(path=MANIFEST, *, repo: str = TS_REPO, token: str | None = 
     ``update_existing``: repointing a dataset at a newer release changes which weights get
     downloaded, and therefore the segmentations - not something to do silently. The return value
     reports what changed either way, so ``write=False`` is a dry run.
+
+    ``path=None`` picks the target by where the package lives (:func:`refresh_target`): the
+    repository's manifest in a checkout, the user's own file from an installed copy. The
+    user's file is written whole (the effective manifest plus the news), so it stands alone.
     """
     say = progress or (lambda s: None)
-    current = _manifest(path)
+    if path is None:
+        path = refresh_target()
+    current = _manifest() if Path(path) == user_manifest_path() else _manifest(path)
     upstream = discover_release_assets(repo, token=token, progress=progress)
     pins = upstream_pins(repo, progress=progress)
     for wid, up in upstream.items():                  # prefer TS's own pin over "newest asset"
@@ -368,9 +423,12 @@ def refresh_manifest(path=MANIFEST, *, repo: str = TS_REPO, token: str | None = 
         f"{'TotalSegmentator' if pins else 'upstream newest'}"
         f"{' (repointed)' if update_existing else ' (left alone)'}")
     if write and merged != current:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(json.dumps(
             {"weights": dict(sorted(merged.items(), key=_sort_key))}, indent=2) + "\n")
         say(f"wrote {path}")
+    elif write:
+        say(f"nothing to write ({path} is current)")
     return {"added": added, "new_versions": new_versions, "behind_upstream": behind,
             "migrated": migrated,
             "total": len(merged), "path": str(path)}
@@ -396,4 +454,4 @@ def coverage(catalog=None) -> dict:
         else:
             missing[name] = absent
     return {"covered": ok, "license_required": licensed, "missing": missing,
-            "n_weights": len(have), "n_tasks": len(cat)}
+            "n_weights": len(have), "n_tasks": len(cat), "sources": manifest_sources()}

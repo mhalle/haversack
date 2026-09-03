@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+- **Users refresh their own weights manifest.** `haversack weights refresh` from an installed
+  package writes `~/.config/haversack/ts_weights.json` (`HAVERSACK_TS_MANIFEST` moves it),
+  laid over the packaged manifest on every read - a user's entry for a dataset replaces the
+  packaged one - and kept across upgrades; before, a refresh edited the copy in
+  site-packages, lost on reinstall. A source checkout still edits the repository's file, and
+  `--to PATH` names any file. `weights coverage` says where its entries come from.
+
 - **After a blind usability test.** An agent given only `--help` and `haversack docs`
   completed listing, a CLI segmentation, a Python-API liver volume and a server round trip
   first try; what it stumbled on is fixed: `haversack tasks <name>` prints a task's

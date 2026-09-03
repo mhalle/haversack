@@ -91,6 +91,14 @@ haversack weights fetch total          # every part the task needs
 haversack weights coverage             # what the manifest can provision, and what it cannot
 ```
 
+`refresh` reads TotalSegmentator's GitHub releases and records new datasets and versions, so
+you need not wait for a haversack release to use newly published weights. From an installed
+package it writes your own manifest, `~/.config/haversack/ts_weights.json`
+(`HAVERSACK_TS_MANIFEST` to move it), which is laid over the packaged one on every read and
+survives upgrades; in a source checkout it edits the repository's file. `--dry-run` reports
+without writing, and existing entries are never repointed at a newer release unless you say
+`--update-existing`, because that changes the segmentations.
+
 `coverage` marks the TotalSegmentator tasks whose weights are behind TotalSegmentator's
 commercial license (`appendicular_bones`, `brain_structures`, `coronary_arteries`,
 `heartchambers_highres`, `tissue_types`, ...). haversack does not handle that license: install those

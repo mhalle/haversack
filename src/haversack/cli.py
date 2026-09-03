@@ -173,8 +173,14 @@ def _run(argv=None) -> int:
     wf.add_argument("task", help="a task name from `haversack tasks`; every model it needs is fetched")
     wf.add_argument("--root", default=None, help="weights root (default: the ecosystem's location)")
     wsub.add_parser("coverage", help="which catalog tasks the manifest can provision")
-    wr = wsub.add_parser("refresh", help="merge newly published weights into the manifest")
+    wr = wsub.add_parser("refresh", formatter_class=Fmt, help="merge newly published weights into the manifest",
+                         description="Reads TotalSegmentator's GitHub releases and records new datasets and versions. "
+                                     "From an installed package this writes YOUR manifest "
+                                     "(~/.config/haversack/ts_weights.json, or HAVERSACK_TS_MANIFEST), laid over the "
+                                     "packaged one and kept across upgrades; in a source checkout it edits the "
+                                     "repository's file. Set GITHUB_TOKEN to lift GitHub's 60 requests/hour.")
     wr.add_argument("--repo", default=None, help="GitHub repo to read releases from")
+    wr.add_argument("--to", default=None, help="write this file instead of the default target")
     wr.add_argument("--dry-run", action="store_true", help="report what would change, write nothing")
     wr.add_argument("--update-existing", action="store_true",
                     help="also repoint datasets at newer releases (changes which weights download)")
@@ -419,14 +425,20 @@ def _run(argv=None) -> int:
             print(f"{len(paths)} model(s) under {root}")
         elif args.wcmd == "coverage":
             c = wfm.coverage()
-            print(f"{len(c['covered'])}/{c['n_tasks']} tasks provisionable from {c['n_weights']} manifest entries")
+            src = c["sources"]
+            where = (f"{src['package']} packaged" + (f" + {src['user']} from {src['user_path']}"
+                                                     f"{' (overriding ' + ', '.join(src['user_overrides']) + ')' if src['user_overrides'] else ''}"
+                                                     if src["user"] else ""))
+            print(f"{len(c['covered'])}/{c['n_tasks']} tasks provisionable from {c['n_weights']} manifest entries ({where})")
             for name, ids in sorted(c["license_required"].items()):
                 print(f"  LICENSE  {name:32s} {','.join(ids)}  (TotalSegmentator licensed backend)")
             for name, ids in sorted(c["missing"].items()):
                 print(f"  MISSING  {name:32s} {','.join(ids)}")
             return 1 if c["missing"] else 0
         elif args.wcmd == "refresh":
-            kw = {"write": not args.dry_run, "update_existing": args.update_existing, "progress": say}
+            kw = {"write": not args.dry_run, "update_existing": args.update_existing, "progress": say,
+                  "path": args.to or wfm.refresh_target()}
+            say(f"target: {kw['path']}" + (" (dry run)" if args.dry_run else ""))
             if args.repo:
                 kw["repo"] = args.repo
             r = wfm.refresh_manifest(**kw)
