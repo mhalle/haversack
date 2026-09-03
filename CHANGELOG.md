@@ -1,24 +1,16 @@
 # Changelog
 
-## [0.3.0] - 2026-09-02
+## [0.4.0] - 2026-09-03
 
-- **nnseg is now haversack, in its own repository.** The package, the distribution, the
-  command, the environment variables (`HAVERSACK_*`), the results cache
-  (`~/.cache/haversack`), the Modal app and volumes (`haversack-serve`, `haversack-weights`,
-  ...) and the error class (`HaversackError`) all carry the new name; nothing external keeps
-  the old one except the weights sidecar, where `.nnseg-version.json` is still read so an
-  installed model folder is not re-fetched. Wire: the progress and credential headers are
-  `Haversack-Stage`, `Haversack-Fraction` and `Haversack-Source-Token` (were `NNSeg-*`); a
-  client written against nnseg must follow. History came along: this repository is
-  `nnunet-inference-mlx` filtered to nnseg's paths (275 commits), so `git log` and `git blame`
-  reach back to the 2026-08-22 "increment 1" commit and beyond into the packaging files' MLX
-  past; the MLX package itself stays behind in `nnunet-inference-mlx` as the oracle. The name
-  is scope-neutral on purpose - the same kernel (restore any field onto any grid) and the same
-  job protocol are meant to carry registration models next, and a `-seg` name would have been
-  wrong the day that landed. Entries below this line say "nnseg"; they are history and were
-  not rewritten. Test files lost their `test_nnseg_` prefix; the tests themselves are unchanged.
-
-## [Unreleased]
+- **Internal, undocumented, unstable: ranked stores and duckn.** The ranked-store tooling
+  (emit and build) moved into the package, stores can live in a standard zarr zip as well as
+  a directory, and every store attribute is now built and read through duckn's own metadata
+  models (seg extension 0.7: leaves and groups, coverage and partition claims, background as
+  a segment role). duckn volumes are accepted as input, and duckn is declared as the `duckn`
+  extra, installed from its GitHub release tag. None of this is in the README or the command
+  help on purpose: the format and duckn are being iterated together and nothing outside
+  should depend on them yet. The demo stores were upgraded in place and now live under
+  `data/duckn_demo`.
 
 - **`get` and `segment` take several inputs (batch mode).** With more than one input the
   output is a directory (`-o`, default the current directory) and `--format` names the type:
@@ -187,6 +179,24 @@
   and scipy before importing anything and end as one line naming `haversack[torch]` and the
   two install forms. A bare install stays torch-free on purpose: the client (`haversack
   remote`) and a describe-only front end never pay for it.
+
+## [0.3.0] - 2026-09-02
+
+- **nnseg is now haversack, in its own repository.** The package, the distribution, the
+  command, the environment variables (`HAVERSACK_*`), the results cache
+  (`~/.cache/haversack`), the Modal app and volumes (`haversack-serve`, `haversack-weights`,
+  ...) and the error class (`HaversackError`) all carry the new name; nothing external keeps
+  the old one except the weights sidecar, where `.nnseg-version.json` is still read so an
+  installed model folder is not re-fetched. Wire: the progress and credential headers are
+  `Haversack-Stage`, `Haversack-Fraction` and `Haversack-Source-Token` (were `NNSeg-*`); a
+  client written against nnseg must follow. History came along: this repository is
+  `nnunet-inference-mlx` filtered to nnseg's paths (275 commits), so `git log` and `git blame`
+  reach back to the 2026-08-22 "increment 1" commit and beyond into the packaging files' MLX
+  past; the MLX package itself stays behind in `nnunet-inference-mlx` as the oracle. The name
+  is scope-neutral on purpose - the same kernel (restore any field onto any grid) and the same
+  job protocol are meant to carry registration models next, and a `-seg` name would have been
+  wrong the day that landed. Entries below this line say "nnseg"; they are history and were
+  not rewritten. Test files lost their `test_nnseg_` prefix; the tests themselves are unchanged.
 
 ## [Unreleased before the rename]
 
