@@ -66,7 +66,7 @@ def test_idc_without_obstore_names_the_extra(tmp_path, monkeypatch):
         return real_import(name, *a, **k)
 
     monkeypatch.setattr(builtins, "__import__", no_obstore)
-    with pytest.raises(InputError, match=r"haversack\[idc\]"):
+    with pytest.raises(InputError, match="obstore"):
         sources.materialize("idc:0123abcd-0000-0000-0000-000000000000", cache_dir=tmp_path)
 
 

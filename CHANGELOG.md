@@ -20,6 +20,10 @@
 
 ## [Unreleased]
 
+- **obstore is core.** `haversack segment idc:<crdc_series_uuid>` works from a bare install;
+  `[idc]` stays as an empty alias for the Modal image definitions. The lean recipe gains
+  `obstore` so a client-only install can still fetch from IDC.
+
 - **A run that departs from what was asked says so.** `provenance["deviations"]` is a list
   of `{what, requested, effective, why}` records (`result.deviation()`), and it travels
   everywhere provenance does: the seg.nrrd header, the server's result payload, and the

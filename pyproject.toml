@@ -30,6 +30,10 @@ dependencies = [
     "nnunetv2",
     "scipy",
     "scikit-image",
+    # obstore is core (2026-09-03): `haversack segment idc:<uuid>` should work from a bare
+    # install, and the IDC source is how the demo cases come in. A small Rust wheel, no
+    # further dependencies.
+    "obstore",
 ]
 # NOTE: mlx is NOT a core dependency (moved to the `mlx` extra below, 2026-08-26).
 # The product is torch/MPS-first (haversack); MLX is the oracle-only path. Keeping mlx
@@ -51,8 +55,8 @@ haversack = "haversack.cli:main"
 remote = ["httpx"]
 # The REST job server (haversack serve).
 serve = ["matplotlib", "fastapi", "uvicorn", "python-multipart"]
-# Server-side fetch of IDC series by UUID (source kind "idc").
-idc = ["obstore"]
+# `[idc]` is an empty alias (obstore is core since 2026-09-03); the Modal images still name it.
+idc = []
 # Deploying the server to Modal (haversack modal deploy).
 modal = ["modal"]
 # Multi-label connected-component cleanup (segment --remove-small-components-mm3).

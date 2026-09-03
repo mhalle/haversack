@@ -58,7 +58,7 @@ it SimpleITK:
 
 ```bash
 uv pip install --no-deps "haversack @ git+https://github.com/mhalle/haversack"
-uv pip install numpy SimpleITK pydantic typer tqdm httpx     # add `modal` to deploy the server
+uv pip install numpy SimpleITK pydantic typer tqdm httpx obstore   # add `modal` to deploy the server
 ```
 
 That environment runs `haversack tasks`, `haversack remote ...`, `haversack modal deploy`, and
@@ -103,7 +103,7 @@ haversack segment scan.nii.gz --task total_fast -o labels.nii.gz
 Input: NIfTI, NRRD, MetaImage, or a DICOM series directory - local, or remote:
 
 ```bash
-haversack segment idc:1.2.3-style-crdc-series-uuid --task total_fast -o labels.seg.nrrd     # needs the idc extra
+haversack segment idc:<crdc_series_uuid> --task total_fast -o labels.seg.nrrd
 haversack segment "zenodo:<recid>/amos22.zip!amos22/imagesVa/amos_0575.nii.gz" --task mrsegmentator:base -o amos.seg.nrrd
 haversack segment https://example.org/scan.nii.gz --task total -o labels.nii.gz
 ```

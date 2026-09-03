@@ -652,8 +652,8 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
     if src is None:
         raise InputError(f"unknown input source {kind!r}; known: {', '.join(sorted(reg))} and http(s) URLs")
     if hasattr(src, "enabled") and not src.enabled():
-        raise InputError(f"the {kind} source needs the {kind} extra in this environment "
-                         f"(uv pip install 'haversack[{kind}]', or uv tool install with [torch,{kind}])")
+        raise InputError(f"the {kind} source's runtime is not installed in this environment "
+                         f"(a lean install?): uv pip install {'obstore' if kind == 'idc' else kind}")
     if src.id_pattern and not re.fullmatch(src.id_pattern, ident):
         raise InputError(f"{kind}:{ident} is not a valid {kind} identifier")
     root = Path(cache_dir) if cache_dir else default_input_cache()
