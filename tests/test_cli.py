@@ -83,10 +83,10 @@ def test_tasks_lists_the_catalog_without_torch(tmp_path):
     assert not [line for line in r2.stdout.splitlines() if line.startswith("ts:")]
 
 
-def test_bare_install_says_which_extra_it_needs(monkeypatch, tmp_path, capsys):
+def test_lean_install_says_what_it_lacks(monkeypatch, tmp_path, capsys):
     """`uvx git+https://github.com/mhalle/haversack segment ...` on 2026-09-03 died with a raw
-    `ModuleNotFoundError: torch` from pipeline.py. A bare install is torch-free on purpose;
-    the CLI now names the extra before importing anything."""
+    `ModuleNotFoundError: torch` while torch was an extra. The stack is core now; a lean
+    (--no-deps) install still gets one line naming what to install, never a traceback."""
     import importlib.util
     real = importlib.util.find_spec
 
@@ -99,7 +99,7 @@ def test_bare_install_says_which_extra_it_needs(monkeypatch, tmp_path, capsys):
                    "-o", str(tmp_path / "out.nii.gz")])
     err = capsys.readouterr().err
     assert rc == 2
-    assert "haversack[torch]" in err and "torch not installed" in err and "Traceback" not in err
+    assert "lean install" in err and "needs torch" in err and "Traceback" not in err
 
 
 def test_missing_input_is_one_line(tmp_path, capsys):

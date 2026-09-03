@@ -23,31 +23,47 @@ workspace it lives in; the API is documented in the docstrings.
 
 ```bash
 uv venv --python 3.12 && source .venv/bin/activate
-uv pip install "haversack[torch] @ git+https://github.com/mhalle/haversack"
+uv pip install "haversack @ git+https://github.com/mhalle/haversack"
 ```
 
 `pip install` of the same URL works too. Add `serve` to the extras for the local server,
 `remote` for the client:
 
 ```bash
-uv pip install "haversack[torch,serve,remote] @ git+https://github.com/mhalle/haversack"
+uv pip install "haversack[serve,remote] @ git+https://github.com/mhalle/haversack"
 ```
 
 For a command-line user, a tool install puts `haversack` on PATH in its own environment, away
 from any project:
 
 ```bash
-uv tool install --python 3.12 "haversack[torch,serve,remote] @ git+https://github.com/mhalle/haversack"
+uv tool install --python 3.12 "haversack[serve,remote] @ git+https://github.com/mhalle/haversack"
 ```
 
-and `uvx --from "haversack[torch] @ git+https://github.com/mhalle/haversack" haversack ...`
-runs it without installing anything.
+and `uvx git+https://github.com/mhalle/haversack segment ...` runs it without installing
+anything (`uvx --from "haversack[serve,remote] @ git+..." haversack ...` for the extras).
 
 Check it:
 
 ```bash
 haversack tasks
 ```
+
+**Lean install: the library, the client, the Modal operator.** The inference stack (torch,
+nnunetv2, scipy, scikit-image, about 1 GB) is part of the package, because a segmentation
+tool that cannot segment after `pip install` is a trap. But `import haversack` is torch-free
+(everything heavy imports lazily), so a client-only, describe-only or deploy-only install can
+skip it. Extras can only add, so this is a two-line `--no-deps` recipe, about 200 MB, most of
+it SimpleITK:
+
+```bash
+uv pip install --no-deps "haversack @ git+https://github.com/mhalle/haversack"
+uv pip install numpy SimpleITK pydantic typer tqdm httpx     # add `modal` to deploy the server
+```
+
+That environment runs `haversack tasks`, `haversack remote ...`, `haversack modal deploy`, and
+`from haversack import RemoteClient` (or `Segmenter.describe`). Asked to segment, it says so
+in one line and names what to add.
 
 lists every task the catalog knows, with the engine, modality, and whether its weights are
 already on disk. `haversack tasks --installed` shows what will run without a download.

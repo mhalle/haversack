@@ -20,6 +20,16 @@
 
 ## [Unreleased]
 
+- **The inference stack is core.** torch, nnunetv2, scipy and scikit-image are plain
+  dependencies, so `uvx git+https://github.com/mhalle/haversack segment ...` works with no
+  extra - a segmentation tool that could not segment after `pip install` was a trap, and it
+  caught the first user. `[torch]` remains as an empty alias so existing commands install.
+  numpy is no longer pinned `>=2` in core (the synthstrip engine's numpy<2 fork must still
+  resolve beside it), and `torch` leaves the conflict group. The lean, torch-free install
+  (client / describe-only) is a documented `--no-deps` recipe (README "Lean install") -
+  extras can only add - and such an install asked to segment still ends in one line naming
+  what to add. The Modal images mount the package and hand-list their packages, unchanged.
+
 - **`haversack segment` takes remote inputs.** `idc:<crdc_series_uuid>`,
   `zenodo:<recid>/<file>[!member]`, `tcia:`, `openneuro:`, `hf:` - the server's five sources,
   same grammar - and a bare `http(s)://` URL, with `!member` reading one file out of a remote

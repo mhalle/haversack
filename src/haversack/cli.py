@@ -16,18 +16,19 @@ def main(argv=None) -> int:
         return 2
 
 
-INSTALL_HINT = ('uv tool install "haversack[torch] @ git+https://github.com/mhalle/haversack" '
-                'or uvx --from "haversack[torch] @ git+https://github.com/mhalle/haversack" haversack ...')
+INSTALL_HINT = ('this is a lean install (--no-deps); a normal install has them: '
+                'uv pip install torch nnunetv2 scipy scikit-image, or reinstall with '
+                'uv tool install "haversack @ git+https://github.com/mhalle/haversack"')
 
 
 def _need_inference_stack(task=None) -> None:
     """Refuse early, with the install line, when this environment cannot run ``task``.
 
-    A bare install is deliberate (the client and a describe-only front end never pay for
-    torch), but `uvx git+.../haversack segment` is the first thing a new user types, and it
-    must say what to do rather than trace back from `import torch` (2026-09-03). An engine
-    task (``fastsurfer:brain``) needs that engine's runtime, which lives in its own
-    environment; ``task=None`` (the server) needs only torch - it checks per task at run time.
+    The inference stack is core, so this fires only on a lean install (``--no-deps``: the
+    client and a describe-only front end never pay for torch) - and then it must say what to
+    do rather than trace back from `import torch`. An engine task (``fastsurfer:brain``)
+    needs that engine's runtime, which lives in its own environment; ``task=None`` (the
+    server) needs only torch - it checks per task at run time.
     """
     import importlib.util
     from .engines import registry
@@ -46,8 +47,7 @@ def _need_inference_stack(task=None) -> None:
         raise InputError(f"{task} runs on the {eng.name} engine ({', '.join(missing)} not installed), "
                          f"which has its own environment: UV_PROJECT_ENVIRONMENT=.venvs/{eng.name} "
                          f"uv sync --extra {eng.extra} --extra serve, then run haversack from it")
-    raise InputError(f"segmenting needs the torch extra ({', '.join(missing)} not installed): "
-                     f"install haversack[torch] - {INSTALL_HINT}")
+    raise InputError(f"segmenting needs {', '.join(missing)}, not installed here: {INSTALL_HINT}")
 
 
 def _run(argv=None) -> int:

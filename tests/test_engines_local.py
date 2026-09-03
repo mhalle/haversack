@@ -93,7 +93,7 @@ def test_cli_stack_check_is_per_engine(monkeypatch, tmp_path, capsys):
                    "-o", str(tmp_path / "out.seg.nrrd")])
     err = capsys.readouterr().err
     assert rc == 2 and "fastsurfer engine" in err and "--extra fastsurfer" in err
-    assert "haversack[torch]" not in err                  # the wrong extra would mislead
+    assert "lean install" not in err                      # the wrong remedy would mislead
 
 
 def test_viewagg_placement_reads_the_host():
