@@ -110,3 +110,13 @@ def test_missing_input_is_one_line(tmp_path, capsys):
                    "-o", str(tmp_path / "out.nii.gz")])
     err = capsys.readouterr().err
     assert rc == 2 and err.strip() == f"haversack: input not found: {tmp_path / 'nope.nii.gz'}"
+
+
+def test_tasks_with_a_name_prints_its_structures(tmp_path):
+    """A blind user could not find the structure list (2026-09-03): `tasks` printed only
+    name/engine/modality and nothing said --json carried `structures`. Now `tasks <name>`."""
+    code = f"import haversack.cli as c; raise SystemExit(c.main(['tasks', 'total_fast', '--model-root', {str(tmp_path)!r}]))"
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    names = r.stdout.split()
+    assert len(names) == 117 and "liver" in names and names[0] != "ts:total_fast"

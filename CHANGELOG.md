@@ -20,6 +20,14 @@
 
 ## [Unreleased]
 
+- **After a blind usability test.** An agent given only `--help` and `haversack docs`
+  completed listing, a CLI segmentation, a Python-API liver volume and a server round trip
+  first try; what it stumbled on is fixed: `haversack tasks <name>` prints a task's
+  structures (they were only inside `--json`, unmentioned), `tasks --help` defines
+  `materialized` and `task_spec`, `remote submit` ends with `done 100%` and `wrote <path>`,
+  and the guide annotates the API's return values, names `total_fastest`, matches the CLI's
+  timing keys, and says how to stop the server and when it is ready.
+
 - **The command line explains itself.** Every option has help, every command a description
   and examples, defaults are shown, and the top line says what haversack is rather than how
   it works. New `haversack docs [topic] [--sections]` prints the user guide - the README,

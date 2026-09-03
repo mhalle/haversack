@@ -149,9 +149,18 @@ def _run(argv=None) -> int:
                         "or ~/.totalsegmentator/nnunet/results)")
     s.add_argument("--quiet", action="store_true", help="no progress or timings on stderr")
 
-    tl = sub.add_parser("tasks", formatter_class=Fmt, help="list every task the catalog can segment",
+    tl = sub.add_parser("tasks", formatter_class=Fmt, help="list every task the catalog can segment, or one task's structures",
                         description="One line per task: name, engine, modality, and whether its weights are on disk "
-                                    "(or, for an engine task, whether the engine's runtime is installed here).")
+                                    "(or, for an engine task, whether the engine's runtime is installed here). "
+                                    "With a task name, prints that task's structures, one per line, in label order.",
+                        epilog="""examples:
+  haversack tasks                        every task
+  haversack tasks --installed            what runs without a download
+  haversack tasks total_fast             the 117 structure names total_fast produces
+  haversack tasks --json                 full records: name, ecosystem, engine, modality, structures, installed;
+                                         `materialized` = the task's definition is known here without a download,
+                                         `task_spec` = it is an nnU-Net model (false for FastSurfer, SynthStrip, ...)""")
+    tl.add_argument("task", nargs="?", default=None, help="a task name: print its structures instead of the list")
     tl.add_argument("--model-root", default=None, help="weights root to check for installed models")
     tl.add_argument("--installed", action="store_true", help="only tasks whose weights are already on disk")
     tl.add_argument("--json", action="store_true", help="the full per-task info records")
@@ -307,6 +316,8 @@ def _run(argv=None) -> int:
                     _last["line"] = line
             final = c.run(args.input, args.task, out, on_status=show)
             if final["state"] == "done":
+                print("  done      100%", file=sys.stderr, flush=True)
+                print(f"wrote {out}", file=sys.stderr, flush=True)
                 print(out)
             else:
                 print(f"job ended {final['state']}", file=sys.stderr)
@@ -318,6 +329,19 @@ def _run(argv=None) -> int:
         from .weights import WeightsStore
         store = WeightsStore(args.model_root, fetch=False)
         cat = EcosystemCatalog(root=store.root)
+        if args.task:
+            info = cat.info(args.task)
+            names = info.get("structures") or []
+            if not names:
+                from .errors import InputError
+                raise InputError(f"{info['name']}: no structure list until its model is installed "
+                                 f"(haversack weights fetch {args.task})")
+            if args.json:
+                print(json.dumps({"name": info["name"], "structures": list(names)}, indent=2))
+            else:
+                for n in names:
+                    print(n)
+            return 0
 
         def installed(info) -> bool:
             # "materialized" is "the spec is answerable without installing" - for TS that is

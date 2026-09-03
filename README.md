@@ -66,7 +66,8 @@ That environment runs `haversack tasks`, `haversack remote ...`, `haversack moda
 in one line and names what to add.
 
 lists every task the catalog knows, with the engine, modality, and whether its weights are
-already on disk. `haversack tasks --installed` shows what will run without a download. This
+already on disk. `haversack tasks --installed` shows what will run without a download, and
+`haversack tasks total_fast` prints the structures a task produces, one per line. This
 guide itself ships with the package: `haversack docs` prints it, `haversack docs weights`
 one section, and every command answers `--help` with its options, defaults and examples.
 
@@ -120,7 +121,8 @@ Output format follows the extension
 orientation. Task names are `ecosystem:task`, and a bare name is looked up across ecosystems
 (`total_fast` is `ts:total_fast`).
 
-Useful options:
+`total_fast` is the 3 mm whole-body model; `total_fastest` is the 6 mm one (coarser, faster
+still), and `total` runs the five 1.5 mm models. Useful options:
 
 | Option | Meaning |
 |---|---|
@@ -135,7 +137,7 @@ What to expect on an M2 for `total_fast` on a 709 x 768 x 768 chest CT, one run 
 
 | Stage | First run after install | Later runs |
 |---|---|---|
-| read + orientation | 8 s | 8 s |
+| `read+canonical` (read + orientation) | 8 s | 8 s |
 | model load (checkpoint, architecture, GPU upload) | 38 s | 5 s |
 | network (8 patches, fp16 MPS) | 19 s | 15 s |
 | total | 68 s | 30 s |
@@ -152,9 +154,10 @@ from haversack import segment, Segmenter
 
 r = segment("scan.nii.gz", "total_fast")        # a Segmentation
 r.save("labels.nii.gz")
-liver = r.mask("liver")                          # boolean array on the output grid
-r.present()                                      # {label: name} for what was found
-r.volumes_ml()
+liver = r.mask("liver")                          # boolean array (Z, Y, X) on the output grid
+r.present()                                      # {label: name} for what was found, e.g. {5: "liver", ...}
+r.volumes_ml()                                   # {name: millilitres}, e.g. {"liver": 1424.3, ...}
+r.timings, r.provenance                          # per-stage seconds; what ran, with what, and any deviations
 
 seg = Segmenter(cache_models=5)                  # models stay warm across calls
 for path in paths:
@@ -200,7 +203,9 @@ haversack remote --token choose-a-secret submit scan.nii.gz --task total_fast -o
 
 `submit` uploads, shows progress, and downloads the labels; `--no-wait` returns a job id for
 `status`, `fetch`, and `cancel`. The endpoints are under `/v1/` (`/v1/health`, `/v1/tasks`,
-`/v1/jobs`); the OpenAPI document is at `/docs`. On this M2 a `total_fast` job through the
+`/v1/jobs`); the OpenAPI document is at `/docs`. The server is ready when `GET /v1/health`
+answers; stop it with Ctrl-C (or kill the process) - queued jobs are kept in its `jobs.db`
+and re-queued when it starts again. On this M2 a `total_fast` job through the
 server produced labels voxel-identical to the command line's.
 
 ## Engines: FastSurfer and friends
