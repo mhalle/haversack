@@ -1,4 +1,4 @@
-"""MONAI model-zoo bundles as an haversack engine.
+"""MONAI model-zoo bundles as a haversack engine.
 
 A bundle is not just weights: ``configs/inference.json`` is an executable
 description of the whole chain - network, preprocessing, sliding-window inferer,

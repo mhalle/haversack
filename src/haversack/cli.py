@@ -101,7 +101,7 @@ def _run(argv=None) -> int:
                     help="deploy WITHOUT auth - smoke tests only; anyone with the URL can spend your GPU credit")
     mosub.add_parser("app-path", help="print the deployable app file's path")
 
-    rc = sub.add_parser("remote", help="talk to an haversack server (needs the remote extra)")
+    rc = sub.add_parser("remote", help="talk to a haversack server (needs the remote extra)")
     rc.add_argument("--server", default=None,
                     help="server URL, e.g. http://gpu-box:8790 (or set HAVERSACK_SERVER)")
     rc.add_argument("--token", default=None, help="bearer token, if the server wants one")
@@ -109,7 +109,7 @@ def _run(argv=None) -> int:
     rs = rsub.add_parser("submit", help="upload, wait with progress, download the labels")
     rs.add_argument("input", help="a local image file, or idc:<crdc_series_uuid> to segment straight from the Imaging Data Commons")
     rs.add_argument("--task", required=True)
-    rs.add_argument("-o", "--output", default=None, help="where to save the labels (default: <input>_<task>.nii.gz)")
+    rs.add_argument("-o", "--output", default=None, help="where to save the labels (default: <input>_<task>.seg.nrrd)")
     rs.add_argument("--no-wait", action="store_true", help="print the job id and return")
     rst = rsub.add_parser("status", help="one job's status, as JSON")
     rst.add_argument("job_id")

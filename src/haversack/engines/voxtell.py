@@ -1,4 +1,4 @@
-"""VoxTell free-text promptable segmentation as an haversack engine.
+"""VoxTell free-text promptable segmentation as a haversack engine.
 
 VoxTell (MIC-DKFZ, CVPR 2026) maps free-form text - a word or a clinical sentence -
 onto a 3D mask, zero-shot across CT / MR / PET. That makes it a different *kind* of

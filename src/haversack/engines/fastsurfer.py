@@ -1,4 +1,4 @@
-"""FastSurfer whole-brain parcellation as an haversack engine.
+"""FastSurfer whole-brain parcellation as a haversack engine.
 
 FastSurferVINN is a 2.5D view-aggregation network, not an nnU-Net model, so it
 is an *engine* (a different runner) rather than an ecosystem entry. This module
@@ -44,7 +44,7 @@ WEIGHTS_VERSION = _registry.ENGINES[ENGINE].weights_identity()[0]["version"]
 def weights_installed() -> list[dict]:
     """The engine's weights identity for the result-cache key (from the registry).
 
-    FastSurfer bakes its checkpoints into the worker image rather than haversack's
+    FastSurfer bakes its checkpoints into the worker image rather tha haversack's
     weights volume, so this is a fixed version, not an install sidecar read."""
     return _registry.ENGINES[ENGINE].weights_identity()
 

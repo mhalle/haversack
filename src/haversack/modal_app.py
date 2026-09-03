@@ -147,7 +147,7 @@ fs_image = (
     # get_checkpoints, to the package-default paths) so cold containers never re-download
     # them from Zenodo/b2share - a reliability win (no runtime dependency on those hosts)
     # and it removes that slice from every cold start. At runtime get_checkpoints is then
-    # a no-op. Placed before the haversack mount so an haversack edit doesn't bust this cache layer.
+    # a no-op. Placed before the haversack mount so a haversack edit doesn't bust this cache layer.
     .run_commands(
         "python -c \""
         "from FastSurferCNN import run_prediction as rp;"

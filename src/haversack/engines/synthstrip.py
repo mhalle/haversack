@@ -1,4 +1,4 @@
-"""SynthStrip brain extraction (skull-strip) as an haversack engine.
+"""SynthStrip brain extraction (skull-strip) as a haversack engine.
 
 SynthStrip is a contrast-agnostic learned brain-mask generator (a small 3D UNet,
 Hoopes et al. 2022) - a different algorithm family from nnU-Net and FastSurfer.
