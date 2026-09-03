@@ -22,8 +22,8 @@
 
 - **No torch.jit.interface FutureWarning on every run.** torch 2.14 deprecates it, and
   `timm` (pulled in by nnunetv2's architecture package for its Primus/EVA models) trips it
-  while nnunetv2 scans trainer modules for the checkpoint's class. Filtered at the predictor,
-  beside the old-plans-format warning.
+  while nnunetv2 scans trainer modules for the checkpoint's class. Filtered at that scan
+  (`trainers._resolvable`) and at the predictor.
 
 - **A bare install says which extra it needs.** `uvx git+https://github.com/mhalle/haversack
   segment ...` installed the package without torch and died in a traceback from

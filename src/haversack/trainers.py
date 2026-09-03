@@ -26,9 +26,20 @@ def trainer_name_of(model_folder) -> str:
 
 
 def _resolvable(trainer_name: str) -> bool:
+    """Whether nnunetv2 can find this trainer class by name.
+
+    The lookup imports every trainer module under nnunetv2.training, and the Primus/EVA ones
+    import timm, whose hrnet decorates with ``torch.jit.interface`` - deprecated in torch
+    2.14, so it warns once per process on every run. Not our code, not our model; silenced
+    here at the site that triggers the scan. (nnunetv2 wraps those imports in try/except,
+    which is why treating the warning as an error never located it.)
+    """
+    import warnings
     try:
         from nnunetv2.utilities.find_objects import recursive_find_trainer_class_by_name
-        recursive_find_trainer_class_by_name(trainer_name)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.jit.interface.*")
+            recursive_find_trainer_class_by_name(trainer_name)
         return True
     except Exception:
         return False
