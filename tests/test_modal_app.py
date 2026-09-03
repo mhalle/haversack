@@ -263,3 +263,19 @@ def test_the_engine_shim_reports_the_weights_identity_the_api_reports(monkeypatc
             assert worker != ["unknown"], f"{name}: no weights identity at all"
             checked += 1
     assert checked, "no engine ecosystems were checked"
+
+
+def test_volume_attach_preflight_fails_with_the_remedy(monkeypatch, tmp_path):
+    """A deleted-under-snapshot volume once failed deep in a job with a cryptic
+    'volume vo-... not attached' (2026-09-03); the preflight raises at startup with the fix."""
+    import haversack.modal_app as m
+    monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path / "ok"))
+    (tmp_path / "ok").mkdir()
+    monkeypatch.setattr(m, "CACHE_ROOT", str(tmp_path / "ok"))
+    monkeypatch.setattr(m, "INPUTS_ROOT", str(tmp_path / "ok"))
+    monkeypatch.setattr(m, "WEIGHTS_ROOT", str(tmp_path / "ok"))
+    m._check_volumes_attached()                               # all writable: no error
+    monkeypatch.setattr(m, "SCRATCH_ROOT", "/no/such/volume/path")
+    import pytest
+    with pytest.raises(RuntimeError, match="HAVERSACK_SNAPSHOT=0"):
+        m._check_volumes_attached()

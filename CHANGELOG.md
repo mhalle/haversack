@@ -20,6 +20,15 @@
 
 ## [Unreleased]
 
+- **Modal workers fail fast when a volume was deleted under a snapshot.** A memory snapshot
+  (on by default) captures the container with its volume handles; deleting one of the per-app
+  `scratch`/`cache`/`inputs` volumes and redeploying left a restored worker holding a dead
+  handle, and the first write failed deep in a job with a cryptic `volume vo-... not
+  attached`. A one-line write probe at worker startup (`_check_volumes_attached`, post-restore)
+  now surfaces it immediately and names the remedy: redeploy once with `HAVERSACK_SNAPSHOT=0`,
+  or stop and redeploy the whole app. Root cause of the reference-deploy failures seen while
+  verifying FastSurfer on torch 2.14 - self-inflicted by an earlier volume cleanup, not Modal.
+
 - **FastSurfer shares the main environment.** The `torch==2.7.*` pin was upstream FastSurfer's
   CUDA-11 caution, not a need of the parcellation net; the `fastsurfer-lean` fork relaxes it to
   `>=2.7` (torchvision unbounded above), the `fastsurfer` extra leaves the uv conflict group,

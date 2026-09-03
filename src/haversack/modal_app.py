@@ -245,6 +245,30 @@ jobs_dict = modal.Dict.from_name(f"{APP_NAME}-jobs", create_if_missing=True)
 cache_vol = modal.Volume.from_name(f"{APP_NAME}-cache", create_if_missing=True)
 
 
+def _check_volumes_attached() -> None:
+    """Fail fast, with the fix, if a mounted volume is not actually attached.
+
+    A memory snapshot (HAVERSACK_SNAPSHOT, on by default) captures the container with its
+    volume handles; if one of the per-app volumes (`{APP_NAME}-scratch/cache/inputs`) is
+    deleted and recreated afterwards, a restored container carries the dead handle and the
+    FIRST WRITE fails deep in a job with a cryptic "volume vo-... not attached" (2026-09-03).
+    A tiny write here surfaces it at startup instead, and names the remedy. Runs post-restore
+    (in `setup`, snap-less), never during snapshotting - a volume touch there is unsafe.
+    """
+    import os
+    for root in (SCRATCH_ROOT, CACHE_ROOT, INPUTS_ROOT, WEIGHTS_ROOT):
+        probe = Path(root) / f".attach-probe-{os.getpid()}"
+        try:
+            probe.write_text("ok")
+            probe.unlink()
+        except Exception as e:
+            raise RuntimeError(
+                f"volume mounted at {root} is not writable ({e}). This usually means the "
+                f"volume was deleted while a memory snapshot still referenced it. Redeploy "
+                f"once with HAVERSACK_SNAPSHOT=0 to rebuild a clean snapshot, or delete and "
+                f"redeploy the whole app (`modal app stop {APP_NAME}` then deploy)." ) from e
+
+
 # -- marker operations -------------------------------------------------------
 # The ownership rules for the two marker namespaces, at module level so unit
 # tests can reach them (the closures they used to live in survived every
@@ -720,6 +744,7 @@ class _WorkerBase:
         """Post-restore, GPU attached: everything CUDA-adjacent lives here (unless
         the GPU snapshot already carries it)."""
         _pkg_dir()
+        _check_volumes_attached()
         from haversack.serve import ReadAhead, SeriesCache
         from haversack.sources import registry
         self._sources = registry(None)
