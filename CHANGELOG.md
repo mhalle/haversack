@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.2] - 2026-09-03
+
+- **`haversack view STORE...` (internal, undocumented, like the ranked store it shows).**
+  Serves a slice preview of one or more ranked stores on this machine and opens it: three
+  orthogonal panels in radiological display, derived from the direction cosines. Each pixel
+  is the class whose interpolated margin is largest there - the argmax after interpolation
+  that the restore performs to write labels on the image grid, done in the slice plane - so
+  boundaries fall where they fall in the labels and the field's edge artifacts show at that
+  resolution; nothing is outlined. Structures toggle per part; the wheel scrolls slices on a
+  clicked panel. The page is sdfview's single-file preview, shipped as `data/preview.html`;
+  the server hands out directory stores file by file and zips by Range request, and lists
+  the stores at `/stores`. Reviewed adversarially before release (paths, Range semantics,
+  hosts, lifecycle).
+
 ## [0.4.1] - 2026-09-03
 
 Two adversarial review rounds over 0.4.0 (four reviewers each), every agreed finding fixed.
