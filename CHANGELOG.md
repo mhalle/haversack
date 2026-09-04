@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.3] - 2026-09-04
+
+- **`WeightsStore.have()` now recognizes zero-padded dataset folders.** TotalSegmentator
+  ships weights id 8 as `Dataset008_HepaticVessel`; `have()` looked for `Dataset8_*` only, so
+  `ts:liver_vessels` never showed as installed - `weights_installed` from the server stayed
+  false after a successful fetch, a client polling it (the Slicer panel's fetch loop) spun
+  until it timed out, and its segment pre-check refused a model that was on disk. Every
+  other lookup already tolerated both spellings; this was the one that did not. Reported
+  from SlicerGotthard.
+
 ## [0.4.2] - 2026-09-03
 
 - **`haversack view STORE...` (internal, undocumented, like the ranked store it shows).**
