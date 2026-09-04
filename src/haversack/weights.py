@@ -55,7 +55,8 @@ class WeightsStore:
         p = Path(str(weights_id)).expanduser()
         if p.is_dir():
             return True
-        return bool(sorted(self.root.glob(f"Dataset{weights_id}_*")))
+        from .tasks import _dataset_dirs
+        return bool(_dataset_dirs(self.root, weights_id))
 
     def resolve(self, weights_id, *, configuration: str | None = None) -> Path:
         """A loadable ``trainer__plans__config`` folder, fetched first if it is missing.

@@ -188,6 +188,21 @@ def test_have_is_offline_and_resolve_finds_the_model(tmp_path):
     assert s.resolve(297) == d
 
 
+def test_have_tolerates_zero_padded_dataset_folders(tmp_path):
+    """TotalSegmentator ships ``Dataset008_HepaticVessel`` for weights id 8. ``have()`` used to
+    glob ``Dataset8_*`` only, so the serve tier's ``weights_installed`` (and a client polling it
+    after a fetch) never saw the model land - the Slicer panel's fetch loop spun until it timed
+    out, and its segment button refused a model that was on disk. Both spellings must count."""
+    from haversack.weights import WeightsStore
+    for name in ("Dataset008_HepaticVessel", "Dataset12_Unpadded"):
+        (tmp_path / name / "nnUNetTrainer__nnUNetPlans__3d_fullres").mkdir(parents=True)
+    s = WeightsStore(tmp_path, fetch=False)
+    assert s.have(8) and s.have("8") and s.have("008")
+    assert s.have(12) and s.have("012")
+    assert not s.have(9)
+    assert s.resolve(8).parent.name == "Dataset008_HepaticVessel"
+
+
 def test_fetch_disabled_raises_modelnotfound_instead_of_reaching_for_the_network(tmp_path):
     from haversack import errors
     from haversack.weights import WeightsStore
