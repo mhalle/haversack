@@ -115,6 +115,13 @@ def _docs(topic, list_sections: bool, which: str = "user") -> int:
 
 
 def _run(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["view"]:
+        # undocumented, with the ranked store it shows: the slice preview served locally.
+        # Parsed apart so it is not listed among the commands (argparse prints a
+        # suppressed subcommand's help as '==SUPPRESS==' under this formatter).
+        from .view import main_view
+        return main_view(argv[1:])
     F = argparse.ArgumentDefaultsHelpFormatter
 
     class Fmt(argparse.RawDescriptionHelpFormatter, F):

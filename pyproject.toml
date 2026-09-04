@@ -118,7 +118,7 @@ packages = ["src/haversack"]
 # the pushed branch had no catalog, and every `haversack segment` died on a missing
 # ts_tasks.json (2026-09-02). `artifacts` (not force-include, which would add the files a
 # second time now that they are tracked) makes them part of the normal selection.
-artifacts = ["src/haversack/data/*.json", "src/haversack/data/*.md"]
+artifacts = ["src/haversack/data/*.json", "src/haversack/data/*.md", "src/haversack/data/*.html"]
 
 [tool.hatch.build.targets.wheel.force-include]
 # The README is the user guide, and `haversack docs` prints it from inside the wheel; an
