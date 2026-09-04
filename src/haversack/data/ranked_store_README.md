@@ -610,7 +610,7 @@ the winner is stored as absent and decodes to the floor, not to its true value.
 ## Viewing a store
 
 `haversack view STORE.duckn[.zip] [...]` serves sdfview's single-file slice preview beside
-the store on this machine and opens it (`--no-browser` prints the URL; `--port 0` picks a
-free port). The page is `data/preview.html`, built in the sdfview checkout with
+the store on this machine and opens it (`--no-browser` skips opening the browser; `--port 0` picks a
+free port; `/stores` lists every store given). The page is `data/preview.html`, built in the sdfview checkout with
 `npm run build:preview` and copied here; it reads a directory store file by file and a zip
 by Range request. Undocumented, like the store.

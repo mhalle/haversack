@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import sys
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,6 +39,15 @@ def _is_store(p: Path) -> bool:
     return p.is_dir() and (p / "zarr.json").is_file()
 
 
+def _index_page(stores: dict) -> bytes:
+    items = "".join(
+        f'<li><a href="/preview.html?store={quote(STORE_PREFIX + n)}">{n}</a> '
+        f'<small>{p}</small></li>' for n, p in stores.items())
+    return (f"<!doctype html><meta charset=utf-8><title>haversack view</title>"
+            f"<body style='font:14px system-ui;padding:1em 2em'><h2>ranked stores</h2><ul>{items}</ul>"
+            ).encode("utf-8")
+
+
 class _Handler(SimpleHTTPRequestHandler):
     """``/`` and ``/preview.html`` hand out the page (``/`` redirects to it with the first
     store filled in); ``/stores/<name>`` is a zip, with Range; ``/stores/<name>/<path>`` is a
@@ -46,6 +56,7 @@ class _Handler(SimpleHTTPRequestHandler):
     stores: dict[str, Path] = {}
     page: bytes = b""
     quiet = True
+    protocol_version = "HTTP/1.1"       # keep-alive: a directory store is a few hundred files
 
     def log_message(self, *a):  # noqa: D102 - stdlib hook
         if not self.quiet:
@@ -80,6 +91,8 @@ class _Handler(SimpleHTTPRequestHandler):
             return
         if path == "/preview.html":
             return self._send(200, self.page, "text/html; charset=utf-8", head=head)
+        if path in ("/stores", "/stores/"):
+            return self._send(200, _index_page(self.stores), "text/html; charset=utf-8", head=head)
         if not path.startswith(STORE_PREFIX):
             return self._send(404, b"not found", "text/plain", head=head)
         rest = path[len(STORE_PREFIX):]
@@ -91,30 +104,26 @@ class _Handler(SimpleHTTPRequestHandler):
             if inner:
                 return self._send(404, b"a zip store has no members to serve", "text/plain", head=head)
             return self._file(store, "application/zip", head=head)
-        # a directory store: files inside it, and nothing outside it
-        target = (store / inner).resolve() if inner else None
-        if target is None or not str(target).startswith(str(store.resolve()) + os.sep) or not target.is_file():
+        # a directory store: files inside it, and nothing outside it. A path the OS
+        # refuses (a NUL byte, a name past the length limit) is a 404 like any other,
+        # not a dead connection.
+        try:
+            target = (store / inner).resolve() if inner else None
+            ok = (target is not None and str(target).startswith(str(store.resolve()) + os.sep)
+                  and target.is_file())
+        except (OSError, ValueError):
+            ok = False
+        if not ok:
             return self._send(404, b"not found", "text/plain", head=head)
         ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         return self._file(target, ctype, head=head)
 
     def _file(self, p: Path, ctype: str, *, head: bool):
         size = p.stat().st_size
-        rng = self.headers.get("Range")
-        start, end = 0, size - 1
-        if rng and rng.startswith("bytes="):
-            a, _, b = rng[6:].partition("-")
-            try:
-                if a:
-                    start = int(a)
-                    end = int(b) if b else size - 1
-                else:                            # suffix range: the last N bytes
-                    start = max(0, size - int(b))
-            except ValueError:
-                start, end, rng = 0, size - 1, None
-            if rng and (start > end or start >= size):
-                return self._send(416, b"", ctype, {"Content-Range": f"bytes */{size}"}, head=head)
-            end = min(end, size - 1)
+        rng = _byte_range(self.headers.get("Range"), size)
+        if rng == "unsatisfiable":
+            return self._send(416, b"", ctype, {"Content-Range": f"bytes */{size}"}, head=head)
+        start, end = rng if rng else (0, size - 1)
         with open(p, "rb") as f:
             f.seek(start)
             body = b"" if head else f.read(end - start + 1)
@@ -134,29 +143,86 @@ class _Handler(SimpleHTTPRequestHandler):
             self.wfile.write(body)
 
 
+def _byte_range(header, size: int):
+    """RFC 9110 §14: ``(start, end)`` for one satisfiable byte range; ``None`` when there
+    is no Range header or it must be ignored (another unit, malformed, several ranges,
+    ``start > end``); ``"unsatisfiable"`` for a well-formed range the file cannot serve."""
+    if not header or not header.strip().lower().startswith("bytes="):
+        return None
+    spec = header.strip()[6:].strip()
+    if "," in spec:
+        return None                          # several ranges: serve the whole thing
+    a, sep, b = spec.partition("-")
+    if not sep:
+        return None
+    try:
+        if a.strip():
+            start = int(a)
+            end = int(b) if b.strip() else None
+            if start < 0 or (end is not None and start > end):
+                return None                  # invalid byte-range-spec: the field is ignored
+            if start >= size:
+                return "unsatisfiable"
+            return start, size - 1 if end is None else min(end, size - 1)
+        if b.strip():                        # suffix range: the last N bytes
+            n = int(b)
+            if n <= 0 or size == 0:
+                return "unsatisfiable"
+            return max(0, size - n), size - 1
+    except ValueError:
+        return None
+    return None
+
+
+def _display_host(host: str) -> str:
+    """The host to put in a URL: a wildcard bind is reached on loopback, IPv6 in brackets."""
+    if host in ("", "0.0.0.0"):
+        return "127.0.0.1"
+    if host == "::":
+        return "[::1]"
+    return f"[{host}]" if ":" in host else host
+
+
 def serve_stores(paths, *, host: str = "127.0.0.1", port: int = 0, quiet: bool = True):
     """Start the preview server for ``paths`` (ranked stores: directories or zips) on a
     background thread; returns ``(server, url)``. ``port=0`` picks a free one."""
     stores: dict[str, Path] = {}
     for raw in paths:
-        p = Path(raw).expanduser()
+        p = Path(raw).expanduser().resolve()     # `.` and `..` have no name until resolved
         if not _is_store(p):
             raise InputError(f"{p}: not a ranked store (a .duckn directory with zarr.json, or a .duckn.zip)")
         name = p.name
+        if not name:
+            raise InputError(f"{p}: a store needs a name (the filesystem root has none)")
         n = 2
         while name in stores:                    # two stores with one name: number the second
             name, n = f"{p.name}~{n}", n + 1
         stores[name] = p
     handler = type("PreviewHandler", (_Handler,),
                    {"stores": stores, "page": preview_page().encode("utf-8"), "quiet": quiet})
+    import socket
+
+    class _Server(ThreadingHTTPServer):
+        address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
+
+        def handle_error(self, request, client_address):
+            # a browser that navigates away mid-load resets its connections; that is
+            # not an error of ours, and a traceback per abandoned chunk is noise
+            import sys as _sys
+            exc = _sys.exc_info()[1]
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+                return
+            if not quiet:
+                super().handle_error(request, client_address)
+
+    server_cls = _Server
     try:
-        server = ThreadingHTTPServer((host, port), handler)
+        server = server_cls((host, port), handler)
     except OSError as e:
         raise InputError(f"cannot listen on {host}:{port}: {e}") from None
     server.daemon_threads = True
     threading.Thread(target=server.serve_forever, name="haversack-view", daemon=True).start()
-    h, p_ = server.server_address[:2]
-    url = f"http://{h}:{p_}/"
+    url = f"http://{_display_host(host)}:{server.server_address[1]}/"
     return server, url
 
 
@@ -167,14 +233,22 @@ def main_view(argv=None) -> int:
         description="Serve the slice preview of one or more ranked stores (.duckn directories or "
                     ".duckn.zip files) on this machine and open it in the browser.")
     ap.add_argument("store", nargs="+", help="ranked store(s)")
-    ap.add_argument("--host", default="127.0.0.1", help="interface to listen on")
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="interface to listen on. Anything but loopback serves the stores to that "
+                         "network with NO authentication")
     ap.add_argument("--port", type=int, default=8795, help="0 picks a free port")
     ap.add_argument("--no-browser", action="store_true", help="print the URL only")
     ap.add_argument("--quiet", action="store_true", help="no request log")
     args = ap.parse_args(argv)
     server, url = serve_stores(args.store, host=args.host, port=args.port, quiet=args.quiet)
-    print(f"haversack view: {url}  ({len(args.store)} store{'s' if len(args.store) != 1 else ''}; "
+    names = list(server.RequestHandlerClass.stores)
+    print(f"haversack view: {url}  ({len(names)} store{'s' if len(names) != 1 else ''}; "
           "Ctrl-C to stop)", flush=True)
+    for n in names:
+        print(f"  {url}preview.html?store={quote(STORE_PREFIX + n)}", flush=True)
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"  note: bound to {args.host} - reachable from that network, with no authentication",
+              file=sys.stderr, flush=True)
     if not args.no_browser:
         import webbrowser
         webbrowser.open(url)
@@ -184,4 +258,5 @@ def main_view(argv=None) -> int:
         pass
     finally:
         server.shutdown()
+        server.server_close()               # shutdown alone leaves the port bound
     return 0
