@@ -66,6 +66,8 @@ class Segmenter:
 
         The deliberate form of what first use does implicitly - a server or a
         UI calls this to warm a task before the data arrives."""
+        from .progress import InstallProgress
+        progress = InstallProgress.of(progress)   # a Reporter, a message callback, or nothing
         if hasattr(self.catalog, "prepare"):
             self.catalog.prepare(task, progress=progress)
         else:

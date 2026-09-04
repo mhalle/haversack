@@ -1473,7 +1473,7 @@ def test_prepare_endpoint_installs_via_job(tmp_path):
     prepared = []
 
     seg = FakeSegmenter()
-    seg.prepare = lambda t: (prepared.append(t) or {"name": t, "materialized": True})
+    seg.prepare = lambda t, progress=None: (prepared.append(t) or {"name": t, "materialized": True})
     ex = LocalExecutor(seg, workdir=tmp_path)
     client = TestClient(create_app(ex))
     r = client.post("/v1/tasks/total_fast/prepare")
@@ -1484,9 +1484,54 @@ def test_prepare_endpoint_installs_via_job(tmp_path):
     assert client.post("/v1/tasks/nope/prepare").status_code == 404
 
 
+def test_prepare_job_reports_bytes_while_the_weights_download(tmp_path):
+    """A client polling a prepare job used to see one static 'weights' stage until done
+    (a 230 MB fetch looked hung; the Slicer panel fell back to a timer). The install now
+    reports through the job's reporter: one part per model, bytes as step / n_steps, and
+    a fraction that moves - visible mid-flight, not just on completion."""
+    from haversack.progress import InstallProgress
+    MB = 1 << 20
+    gate = threading.Event()
+    seg = FakeSegmenter()
+
+    def prepare(task, progress=None):
+        n = InstallProgress.of(progress)
+        n.begin(2)
+        n.item(0, "Dataset298"); n.finished("Dataset298 present")
+        n.item(1, "Dataset570")
+        n.download(0, MB * 1000, "downloading Dataset570")
+        n.download(MB * 500, MB * 1000, "downloading Dataset570")
+        gate.wait(timeout=5)
+        n.download(MB * 1000, MB * 1000, "downloading Dataset570")
+        n.unpack("unpacking Dataset570")
+        n.finished("Dataset570 installed")
+        return {"name": task}
+    seg.prepare = prepare
+    ex = LocalExecutor(seg, workdir=tmp_path)
+    client = TestClient(create_app(ex))
+    try:
+        jid = client.post("/v1/tasks/total_fast/prepare").json()["id"]
+        t0 = time.time()
+        while time.time() - t0 < 5:
+            p = client.get(f"/v1/jobs/{jid}").json().get("progress") or {}
+            if p.get("step") == MB * 500:
+                break
+            time.sleep(0.01)
+        assert p["stage"] == "weights" and (p["part"], p["n_parts"]) == (1, 2), p
+        assert (p["step"], p["n_steps"]) == (MB * 500, MB * 1000)
+        assert 0.7 < p["fraction"] < 0.75, p          # second of two parts, 45 % into it
+        assert "Dataset570" in p["detail"]
+        gate.set()
+        s = wait_state(client, jid, ("done",))
+        assert s["progress"]["fraction"] == 1.0 and s["progress"]["detail"] == "Dataset570 installed"
+    finally:
+        gate.set()
+        ex.close() if hasattr(ex, "close") else None
+
+
 def test_prepare_requires_auth_when_token_set(tmp_path):
     seg = FakeSegmenter()
-    seg.prepare = lambda t: {"name": t}
+    seg.prepare = lambda t, progress=None: {"name": t}
     ex = LocalExecutor(seg, workdir=tmp_path)
     client = TestClient(create_app(ex, token="s3cret"))
     assert client.post("/v1/tasks/total_fast/prepare").status_code == 401

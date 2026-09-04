@@ -474,14 +474,22 @@ def _download_and_extract_zip(url: str, dest_parent: Path, *, progress=None,
     import tempfile
     import urllib.request
     import zipfile
-    if progress:
-        progress(f"downloading {url.rsplit('/', 1)[-1]}")
+    from .progress import InstallProgress
+    from .weights_fetch import _content_length
+    say = InstallProgress.of(progress)
+    what = f"downloading {url.rsplit('/', 1)[-1]}"
+    say(what)
     with tempfile.NamedTemporaryFile(suffix=".zip", dir=dest_parent, delete=False) as tmp:
         tmp_path = Path(tmp.name)
         try:
             with urllib.request.urlopen(url, timeout=1800) as r:
+                total, done = _content_length(r), 0
+                say.download(done, total, what)
                 while chunk := r.read(1 << 20):
                     tmp.write(chunk)
+                    done += len(chunk)
+                    say.download(done, total, what)
+                say.download(done, done, what)
         except Exception as e:
             tmp_path.unlink(missing_ok=True)
             raise InputError(f"weights download failed: {e}") from e
@@ -495,6 +503,7 @@ def _download_and_extract_zip(url: str, dest_parent: Path, *, progress=None,
             tmp_path.unlink(missing_ok=True)
             raise InputError(f"weights zip digest mismatch: expected {sha256}, "
                              f"got {h.hexdigest()}")
+    say.unpack(f"unpacking {url.rsplit('/', 1)[-1]}")
     # extract into a sibling temp dir, then os.replace into place: an
     # interrupted unpack must never leave a folder that materialized() calls
     # complete (dataset.json present, checkpoints missing) - the exact trap

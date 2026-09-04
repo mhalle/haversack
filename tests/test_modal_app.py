@@ -177,6 +177,8 @@ def test_execute_job_and_hooks_exist():
     assert callable(modal_app._execute_job) and callable(modal_app._spawn_worker)
     for h in ("_ensure", "_compute", "_prepare"):
         assert callable(getattr(modal_app.Worker, h))
+    import inspect
+    assert "progress" in inspect.signature(modal_app.Worker._prepare).parameters  # the job's reporter
 
 
 def test_all_engine_workers_build_with_the_shared_base():

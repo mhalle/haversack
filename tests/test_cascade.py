@@ -55,6 +55,20 @@ def test_teeth_provisioning_recurses_through_crop_from_task(tmp_path):
     assert any("Dataset298" in n for n in names) and any("Dataset115" in n for n in names)  # nested
 
 
+def test_provisioning_a_cascade_reports_one_part_per_model(tmp_path):
+    """The install knows its whole chain up front, so a job shows 'part i of n'."""
+    from haversack.progress import Reporter
+    from haversack.weights_fetch import ensure_task_weights
+    for did in (113, 298, 115):
+        (tmp_path / f"Dataset{did}_x").mkdir()
+    seen = []
+    ensure_task_weights("teeth", tmp_path, progress=Reporter(progress=seen.append))
+    assert {p.n_parts for p in seen} == {3} and {p.part for p in seen} == {0, 1, 2}
+    assert [p.detail for p in seen if p.detail.endswith(" present")] == \
+        ["Dataset113 present", "Dataset298 present", "Dataset115 present"]
+    assert seen[-1].fraction == 1.0
+
+
 def test_catalog_get_and_segment_accept_a_taskspec():
     """Passing a constructed TaskSpec (not a name) must not try to hash it - regression for the
     mode-B oracle, which builds a synthetic single-model spec."""

@@ -334,3 +334,38 @@ def test_explicit_target_wins(fake_github, tmp_path, monkeypatch):
     r = wf.refresh_manifest(path=out)
     assert r["path"] == str(out) and set(json.loads(out.read_text())["weights"]) == {"291", "297", "305"}
     assert not (tmp_path / "cfg").exists()
+
+
+def test_fetch_one_reports_bytes_through_a_reporter(tmp_path, monkeypatch):
+    """A served install reports the download as step / n_steps in bytes (the manifest's size
+    when the server sends no Content-Length), then unpack, then installed - one part."""
+    from haversack.progress import Reporter
+    z = _fake_release_zip(tmp_path)
+    size = len(z.read_bytes())
+    monkeypatch.setattr(wf, "_manifest", lambda path=None: {"297": {
+        "default": "v2.0.0-weights",
+        "versions": {"v2.0.0-weights": {"url": "https://x/a.zip", "name": "a.zip", "size": size}}}})
+    _serve(monkeypatch, z)
+    seen = []
+    wf.fetch_one(297, tmp_path / "w", progress=Reporter(progress=seen.append))
+    assert {p.stage for p in seen} == {"weights"}
+    assert seen[0].detail == "downloading Dataset297 from a.zip"
+    assert any(p.step == p.n_steps == size for p in seen)
+    details = [p.detail for p in seen]
+    assert details[-2:] == ["unpacking Dataset297", "Dataset297 installed"]
+    fr = [p.fraction for p in seen]
+    assert fr == sorted(fr) and fr[-1] == 1.0
+
+
+def test_fetch_one_with_a_message_callback_prints_exactly_what_it_did(tmp_path, monkeypatch):
+    z = _fake_release_zip(tmp_path)
+    monkeypatch.setattr(wf, "_manifest", lambda path=None: {"297": {
+        "default": "v2.0.0-weights",
+        "versions": {"v2.0.0-weights": {"url": "https://x/a.zip"}}}})
+    _serve(monkeypatch, z)
+    lines = []
+    wf.fetch_one(297, tmp_path / "w", progress=lines.append)
+    assert lines == ["downloading Dataset297 from a.zip", "unpacking Dataset297"]
+    lines.clear()
+    wf.fetch_one(297, tmp_path / "w", progress=lines.append)     # present: says nothing
+    assert lines == []

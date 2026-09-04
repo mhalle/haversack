@@ -250,23 +250,38 @@ def ensure_checkpoints(directory=None, *, progress=None) -> Path:
     import hashlib
     import urllib.request
 
+    from ..progress import InstallProgress
+    from ..weights_fetch import _content_length
+
     d = Path(directory) if directory is not None else checkpoint_dir()
     d.mkdir(parents=True, exist_ok=True)
-    for name, sha in CHECKPOINTS.items():
+    say = InstallProgress.of(progress)
+    missing = [(name, sha) for name, sha in CHECKPOINTS.items()
+               if not ((d / name).is_file()
+                       and hashlib.sha256((d / name).read_bytes()).hexdigest() == sha)]
+    say.begin(len(missing))
+    for i, (name, sha) in enumerate(missing):
         dest = d / name
-        if dest.is_file() and hashlib.sha256(dest.read_bytes()).hexdigest() == sha:
-            continue
-        if progress:
-            progress(f"fetching {name} from Zenodo")
+        say.item(i, name)
+        what = f"fetching {name} from Zenodo"
+        say(what)
         tmp = dest.with_suffix(dest.suffix + f".{os.getpid()}.part")
-        with urllib.request.urlopen(f"{ZENODO_BASE}/{name}?download=1", timeout=600) as r:
-            tmp.write_bytes(r.read())
+        with urllib.request.urlopen(f"{ZENODO_BASE}/{name}?download=1", timeout=600) as r, \
+                open(tmp, "wb") as f:
+            total, done = _content_length(r), 0
+            say.download(done, total, what)
+            while chunk := r.read(1 << 20):
+                f.write(chunk)
+                done += len(chunk)
+                say.download(done, total, what)
+            say.download(done, done, what)
         got = hashlib.sha256(tmp.read_bytes()).hexdigest()
         if got != sha:
             tmp.unlink(missing_ok=True)
             from ..errors import ResourceError
             raise ResourceError(f"checkpoint {name}: sha256 {got} != expected {sha}")
         tmp.rename(dest)
+        say.finished(f"{name} installed")
     return d
 
 

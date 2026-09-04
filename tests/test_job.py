@@ -191,3 +191,64 @@ def test_stages_advance_the_fraction_without_patches():
     # a union of two parts: the second part's stages sit in the upper half
     r2 = Reporter(progress=lambda p: seen.append(p), n_parts=2)
     r2.enter_part(1, "second"); assert 0.5 < r2.last.fraction < 0.6
+
+
+# -- InstallProgress: what a weights installer reports through ---------------------------------
+
+def test_install_progress_with_a_message_callback_keeps_the_cli_contract():
+    """Positions (item / download / finished) are reporter-only; messages still reach the
+    callback, including through the legacy ``progress(msg)`` call."""
+    from haversack.progress import InstallProgress
+    lines = []
+    n = InstallProgress.of(lines.append)
+    n.begin(2); n.item(0, "Dataset8"); n.download(0, 100, "x"); n.download(100, 100, "x")
+    n("downloading Dataset8 from a.zip"); n.unpack("unpacking Dataset8"); n.finished("done")
+    assert lines == ["downloading Dataset8 from a.zip", "unpacking Dataset8"]
+    assert InstallProgress.of(n) is n
+    InstallProgress.of(None).say("silent")          # nothing to report to; must not raise
+
+
+def test_install_progress_drives_a_reporter_by_parts_and_bytes():
+    from haversack.progress import InstallProgress, Reporter
+    seen = []
+    n = InstallProgress.of(Reporter(progress=seen.append))
+    n.begin(2)
+    n.item(0, "Dataset298"); n.finished("Dataset298 present")
+    n.item(1, "Dataset570")
+    n.download(0, 1000, "downloading"); n.download(1000, 1000, "downloading")
+    n.unpack("unpacking Dataset570"); n.finished("Dataset570 installed")
+    assert {p.stage for p in seen} == {"weights"} and seen[0].n_parts == 2
+    fr = [p.fraction for p in seen]
+    assert fr == sorted(fr) and fr[-1] == 1.0
+    assert seen[1].fraction == 0.5                   # first part complete
+    mid = [p for p in seen if p.part == 1 and p.step == 1000 and p.detail == "downloading"][0]
+    assert mid.n_steps == 1000 and 0.94 < mid.fraction < 0.96      # 0.5 + 0.9/2
+    assert [p.detail for p in seen if p.part == 1][-2:] == ["unpacking Dataset570",
+                                                             "Dataset570 installed"]
+
+
+def test_install_progress_throttles_byte_snapshots():
+    """A 1 MiB read loop must not be a snapshot per chunk: emit first, at completion, and
+    every 2 % (at least 4 MiB) in between."""
+    from haversack.progress import InstallProgress, Reporter
+    seen = []
+    n = InstallProgress.of(Reporter(progress=seen.append))
+    total = 100 << 20
+    for done in range(0, total + 1, 1 << 20):
+        n.download(done, total)
+    steps = [p.step >> 20 for p in seen]
+    assert steps[0] == 0 and steps[-1] == 100 and len(steps) < 40, steps
+    assert all(b - a >= 4 for a, b in zip(steps, steps[1:]))
+    seen.clear()
+    n.item(1); n.download(0, 0); n.download(7, 7)   # unknown size: still opens and closes
+    assert [(p.step, p.n_steps) for p in seen[1:]] == [(0, 0), (7, 7)]
+
+
+def test_reporter_advance_is_a_cancellation_point():
+    from haversack.errors import Cancelled
+    from haversack.progress import CancelToken, Reporter
+    t = CancelToken(); r = Reporter(cancel=t)
+    r.advance(0.5, step=1, n_steps=2)
+    t.cancel()
+    with pytest.raises(Cancelled):
+        r.advance(0.6)

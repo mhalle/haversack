@@ -244,7 +244,9 @@ def test_ensure_checkpoints_fetches_verifies_and_is_idempotent(monkeypatch, tmp_
 
     class Resp:
         def __init__(self, data): self.data = data
-        def read(self): return self.data
+        def read(self, n=-1):                 # sized reads, like a real HTTPResponse
+            out, self.data = (self.data, b"") if n in (-1, None) else (self.data[:n], self.data[n:])
+            return out
         def __enter__(self): return self
         def __exit__(self, *a): return False
 

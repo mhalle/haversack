@@ -178,6 +178,15 @@ def selected(entry: dict, tag: str | None = None) -> dict:
     return versions[want]
 
 
+def _content_length(response) -> int:
+    """The byte size a download will be, or 0 when the server did not say."""
+    headers = getattr(response, "headers", None)
+    try:
+        return int(headers.get("Content-Length") or 0) if headers is not None else 0
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
 def is_present(weights_id, root) -> bool:
     from .tasks import _dataset_dirs
     return bool(_dataset_dirs(Path(root), weights_id))
@@ -207,9 +216,12 @@ def fetch_one(weights_id, root, *, tag: str | None = None, progress=None) -> Pat
     half-populated model folder that ``is_present`` would accept.
     """
     root = Path(root)
+    from .progress import InstallProgress
     from .tasks import _dataset_dirs
+    say = InstallProgress.of(progress)
     existing = _dataset_dirs(root, weights_id)
     if existing:
+        say.finished(f"Dataset{weights_id} present")
         return existing[0]
     entry = _manifest().get(dataset_key(weights_id))
     if entry is None:
@@ -219,20 +231,26 @@ def fetch_one(weights_id, root, *, tag: str | None = None, progress=None) -> Pat
     if not chosen.get("url"):                        # a placeholder, e.g. a license-gated dataset
         raise _no_entry(weights_id)
     url, expected = chosen["url"], chosen.get("sha256")
-    say = progress or (lambda m: None)
     root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=root) as tmp:
         tmp = Path(tmp)
         archive = tmp / f"Dataset{weights_id}.zip"
-        say(f"downloading Dataset{weights_id} from {url.rsplit('/', 1)[-1]}")
+        what = f"downloading Dataset{weights_id} from {url.rsplit('/', 1)[-1]}"
+        say(what)
         h = hashlib.sha256()
         with urllib.request.urlopen(url) as r, open(archive, "wb") as f:
+            total = _content_length(r) or int(chosen.get("size") or 0)
+            done = 0
+            say.download(done, total, what)
             while chunk := r.read(1 << 20):
                 f.write(chunk)
                 h.update(chunk)
+                done += len(chunk)
+                say.download(done, total, what)
+            say.download(done, done, what)            # closes the bar when the size was unknown
         if expected and h.hexdigest() != expected:
             raise ValueError(f"sha256 mismatch for Dataset{weights_id}: {h.hexdigest()} != {expected}")
-        say(f"unpacking Dataset{weights_id}")
+        say.unpack(f"unpacking Dataset{weights_id}")
         with zipfile.ZipFile(archive) as z:
             z.extractall(tmp)
         prefix = f"Dataset{int(str(weights_id)):03d}" if str(weights_id).isdigit() else f"Dataset{weights_id}"
@@ -240,6 +258,7 @@ def fetch_one(weights_id, root, *, tag: str | None = None, progress=None) -> Pat
                         and (p.name.startswith(f"Dataset{weights_id}") or p.name.startswith(prefix)))
         _write_sidecar(unpacked, weights_id, chosen_tag, chosen, h.hexdigest())
         dest = root / unpacked.name
+        say.finished(f"Dataset{weights_id} installed")
         os.replace(unpacked, dest)                    # sidecar is inside, so the move stays atomic
     return dest
 
@@ -249,16 +268,30 @@ def ensure_task_weights(task, root, *, catalog=None, progress=None, tag=None,
     """Fetch every model a task needs. Recurses through cascade ``crop_from_task`` stages, so a
     task that crops from another task (teeth <- craniofacial_structures) pulls that chain too.
     Idempotent."""
+    from .progress import InstallProgress
     from .tasks import TaskCatalog
     cat = catalog or TaskCatalog("ts")
     spec = cat.get(task) if isinstance(task, str) else task
-    seen = _seen if _seen is not None else set()
-    paths = [fetch_one(i, root, tag=tag, progress=progress) for i in spec.weights_ids]
+    chain = _weights_chain(spec, cat, tag, _seen if _seen is not None else set())
+    say = InstallProgress.of(progress)
+    say.begin(len(chain))                 # the parts a job reports: one per model
+    paths = []
+    for i, (wid, wtag) in enumerate(chain):
+        say.item(i, f"Dataset{wid}")
+        paths.append(fetch_one(wid, root, tag=wtag, progress=say))
+    return paths
+
+
+def _weights_chain(spec, cat, tag, seen) -> list[tuple]:
+    """Every ``(weights_id, tag)`` a task needs, in install order: the task's own models, then
+    each cascade crop-from task's chain. A version pin applies to the task's own models only;
+    a crop-from task installs its default, as it always did."""
+    chain = [(wid, tag) for wid in spec.weights_ids]
     for st in spec.cascade:
         if st.crop_from_task and st.crop_from_task not in seen:
             seen.add(st.crop_from_task)
-            paths += ensure_task_weights(st.crop_from_task, root, catalog=cat, progress=progress, _seen=seen)
-    return paths
+            chain += _weights_chain(cat.get(st.crop_from_task), cat, None, seen)
+    return chain
 
 
 # -- keeping the manifest current ------------------------------------------------------------

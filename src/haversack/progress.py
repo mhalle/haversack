@@ -24,7 +24,8 @@ from .errors import Cancelled
 # moves with the work: it used to sit at 5 % through loading, preprocess and the start of
 # predict and then jump to 95 % - on a one-patch volume that was the whole readout.
 _STAGE_START = {"starting": 0.0, "queued": 0.0, "read": 0.0, "loading": 0.12, "preprocess": 0.22,
-                "cascade": 0.22, "predict": 0.27, "restore": 0.90, "finalize": 0.97}
+                "cascade": 0.22, "predict": 0.27, "restore": 0.90, "finalize": 0.97,
+                "weights": 0.0}
 _PREDICT_SPAN = _STAGE_START["restore"] - _STAGE_START["predict"]
 
 
@@ -107,6 +108,13 @@ class Reporter:
         within = _STAGE_START["predict"] + (_PREDICT_SPAN * step / n_steps if n_steps else 0.0)
         self._emit(detail=detail, step=step, n_steps=n_steps, within=within)
 
+    def advance(self, within: float, *, step: int = 0, n_steps: int = 0, detail: str = "") -> None:
+        """Report a position inside the current part directly (``within`` in 0..1), for work
+        whose stages are not the segmentation pipeline's - a weights install reports bytes
+        received this way. Checks cancellation, like :meth:`tick`."""
+        self.check()
+        self._emit(detail=detail, step=step, n_steps=n_steps, within=within)
+
     # -- plumbing -----------------------------------------------------------
     def _emit(self, *, detail: str, step: int, n_steps: int, within: float) -> None:
         frac = (self.part + min(max(within, 0.0), 1.0)) / self.n_parts
@@ -123,3 +131,83 @@ class Reporter:
         if isinstance(progress, Reporter):
             return progress
         return Reporter(progress=progress, cancel=cancel, n_parts=n_parts)
+
+
+# Where a single weights install's phases sit within its part: the download is most of the
+# wall time, unpacking is a short tail. A job's fraction is then bytes-driven, not a guess.
+_DOWNLOAD_SPAN = 0.9
+_UNPACK_AT = 0.95
+
+
+class InstallProgress:
+    """What a weights installer reports through.
+
+    Installers used to take ``progress`` as a message callback, so a served install could say
+    nothing finer than "weights" until it was done - a 230 MB fetch showed a client one static
+    stage. This wraps whichever the caller passed - a job's :class:`Reporter`, a message
+    callback, or nothing - so an installer writes one thing and a job gets stage / part /
+    bytes / fraction snapshots while the CLI still gets its lines.
+
+    It is callable, so a call site that still does ``progress("downloading x")`` keeps working.
+    Messages go to the callback and the reporter's ``detail``; positions (``item``,
+    ``download``, ``finished``) go to the reporter only, so CLI output is unchanged.
+    """
+
+    def __init__(self, progress=None):
+        self.reporter = progress if isinstance(progress, Reporter) else None
+        self._say = progress if (self.reporter is None and callable(progress)) else None
+        self._within = 0.0
+        self._step = 0
+        self._n_steps = 0
+        self._last_bytes = -1
+
+    @classmethod
+    def of(cls, progress=None) -> "InstallProgress":
+        return progress if isinstance(progress, InstallProgress) else cls(progress)
+
+    def __call__(self, message: str) -> None:
+        self.say(message)
+
+    def begin(self, n_items: int) -> None:
+        """How many models this install covers - the reporter's parts."""
+        if self.reporter is not None:
+            self.reporter.n_parts = max(1, int(n_items))
+
+    def item(self, index: int, detail: str = "") -> None:
+        """Start model ``index`` of the install."""
+        self._within, self._step, self._n_steps, self._last_bytes = 0.0, 0, 0, -1
+        if self.reporter is not None:
+            self.reporter.part = int(index)
+            self.reporter.stage("weights", detail)
+
+    def _advance(self, detail: str) -> None:
+        r = self.reporter
+        if r is not None:
+            r.stage_name = "weights"          # whatever the job was doing, this is an install
+            r.advance(self._within, step=self._step, n_steps=self._n_steps, detail=detail)
+
+    def say(self, message: str) -> None:
+        if self._say is not None:
+            self._say(message)
+        self._advance(message)
+
+    def download(self, done: int, total: int, detail: str = "") -> None:
+        """Bytes received so far of ``total`` (0 when the size is unknown). Emits on the first
+        call, at completion, and otherwise every 2 % (at least 4 MiB) so a job's stream is
+        not a snapshot per chunk."""
+        step, n_steps = int(done), int(total)
+        if 0 <= self._last_bytes and step < n_steps and \
+                step - self._last_bytes < max(n_steps // 50, 4 << 20):
+            return
+        self._last_bytes = step
+        self._step, self._n_steps = step, n_steps
+        self._within = _DOWNLOAD_SPAN * (step / n_steps if n_steps else 0.0)
+        self._advance(detail)
+
+    def unpack(self, message: str) -> None:
+        self._within = _UNPACK_AT
+        self.say(message)
+
+    def finished(self, detail: str = "") -> None:
+        self._within = 1.0
+        self._advance(detail)

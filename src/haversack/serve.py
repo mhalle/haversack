@@ -61,7 +61,10 @@ cancel tokens, SSE subscriber queues - stay in memory and are rebuilt from the s
 at startup. Read the store without a server using ``tools/jobs.py``.
 Progress events are idempotent state
 snapshots, which is what makes the SSE stream robust - a dropped connection needs no
-replay, just a resubscribe or a fall back to polling the same JSON.
+replay, just a resubscribe or a fall back to polling the same JSON. A ``prepare`` job
+reports through the same ``progress`` object: stage ``weights``, one part per model,
+bytes received as ``step`` / ``n_steps``, so a client draws the download the way it
+draws the sliding window.
 
 Task names at this boundary are catalog names only - the in-process API's freedom to
 take a model-folder path does not cross the wire, so a served deployment never treats
@@ -1417,7 +1420,9 @@ class LocalExecutor:
                                        cancel=rec.cancel_token)
                 if rec.kind == "prepare":
                     reporter.stage("weights", rec.task)
-                    rec.result = self.segmenter.prepare(rec.task)
+                    # the install reports through the same reporter: one part per model,
+                    # bytes received as step / n_steps, so a client's bar moves during the fetch
+                    rec.result = self.segmenter.prepare(rec.task, progress=reporter)
                     reporter.check()
                     rec.state = "done"
                     self._persist(rec)

@@ -568,7 +568,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
         if meta.get("kind") == "prepare":
             rep = Reporter.of(on_progress, cancel=token)
             rep.stage("weights", meta["task"])
-            result = ctx._prepare(meta["task"])
+            result = ctx._prepare(meta["task"], progress=rep)
             _emit(jid, {"state": "done", "finished": time.time(), "result": result})
             return
         ctx._ensure(meta["task"])   # per-container weights provisioning (engine's own)
@@ -801,7 +801,7 @@ class _WorkerBase:
 
     # -- engine hooks; _execute_job calls these. Engines that ship their weights
     # in their image have nothing to install, so these are the defaults.
-    def _prepare(self, task: str) -> dict:
+    def _prepare(self, task: str, progress=None) -> dict:
         return {"engine": self.engine, "task": task,
                 "note": "weights ship with the engine image"}
 
@@ -855,8 +855,8 @@ class Worker(_WorkerBase):
 
     # -- engine hooks (nnU-Net): unlike the image-baked engines, weights install
     # into the shared volume, so these do real work.
-    def _prepare(self, task: str) -> dict:
-        r = self.seg.prepare(task)
+    def _prepare(self, task: str, progress=None) -> dict:
+        r = self.seg.prepare(task, progress=progress)
         weights_vol.commit()
         self._ensured.add(task)
         return r
@@ -1065,10 +1065,10 @@ if MONAI:
         def _bundle_of(self, task: str) -> str:
             return str(task).partition(":")[2] or str(task)
 
-        def _prepare(self, task: str) -> dict:
+        def _prepare(self, task: str, progress=None) -> dict:
             from haversack.ecosystems import MonaiEcosystem
             bundle = self._bundle_of(task)
-            MonaiEcosystem().ensure(bundle, WEIGHTS_ROOT)
+            MonaiEcosystem().ensure(bundle, WEIGHTS_ROOT, progress=progress)
             weights_vol.commit()
             self._ensured.add(task)
             return {"engine": self.engine, "task": task, "bundle": bundle}
