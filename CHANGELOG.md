@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.4] - 2026-09-04
+
+- **Weights installs report progress.** A `prepare` job used to show one static `weights`
+  stage until it finished, so a client could only run a timer against a 230 MB fetch. The
+  job's `progress` object now carries what it carries for a segmentation: stage `weights`,
+  one part per model (`part` / `n_parts`, the whole cascade chain counted up front), bytes
+  received as `step` / `n_steps` (Content-Length, else the manifest's `size`), and a
+  `fraction` that moves with the download. `detail` walks "downloading ...", "unpacking
+  ...", "installed" (or "present" for a model already on disk). Byte snapshots are throttled
+  to every 2 % (at least 4 MiB). Cancelling a prepare job now interrupts the download.
+  TotalSegmentator, MOOSE, MRSegmentator and FastSurfer installs all report this way, on
+  `haversack serve` and on Modal. The CLI's output is unchanged.
+- `Reporter.advance(within, step=, n_steps=, detail=)` reports a position inside the current
+  part directly, for work whose stages are not the pipeline's. `InstallProgress` is the
+  adapter installers write through; it accepts a `Reporter`, a message callback, or nothing.
+
 ## [0.4.3] - 2026-09-04
 
 - **`WeightsStore.have()` now recognizes zero-padded dataset folders.** TotalSegmentator
