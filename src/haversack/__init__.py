@@ -67,7 +67,7 @@ def __dir__():
 # Part of the result-cache key (serve.result_key): bumping it invalidates cached results.
 # 0.2.0 does exactly that - multi-model tasks before it ran parts 2..N on the first
 # model's normalization, so every cached `total` result predating it is degraded.
-__version__ = "0.4.0"
+__version__ = "0.6.0"
 __all__ = [
     # the API most callers need
     "segment", "Segmenter", "Segmentation", "Job", "Progress", "CancelToken", "ModelCache", "TaskCatalog", "TaskSpec", "io",

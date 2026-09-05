@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.6.0] - 2026-09-05
+
+**The ranked encoding is its own library.** encode / decode / the store-backed restore on
+torch, Metal and Triton / the float64 reference / `Frame`, `Grid`, `Mapping` and the level
+tables moved out to **rankfield** (github.com/mhalle/rankfield, pinned at `v0.1.0`), which
+has no serialization of its own. `haversack/ranked.py` is a shim over it - every name it used
+to define is re-exported, so no import changes - and keeps what is haversack's: `RankedSpec`,
+`emit`, and the distance and junction caches. rankfield joins the `duckn` extra (duckn + zarr
++ rankfield: the undocumented ranked store) as a git source at the tag; it is not core, and a
+test now proves the default path - `haversack segment IN -o labels.nii.gz` - imports none of
+the three.
+
+- **Ranked format 0.3**, written by every new emit. Two changes to the bytes:
+  - `keep: "shell"` - a class that wins at the voxel or at any of its 26 neighbors is stored
+    with its TRUE gap, however far behind, then the non-winners within the clip. The clip is
+    a relevance threshold and the floor for what is unnamed, no longer a cap on what is
+    stored. Flooring a dropped class at `-clip` is an upper bound, so the interpolated winner
+    was over-credited wherever a shell neighbor had been dropped, and thin structures grew.
+  - `gap_curve: "log"`, `gap_range` 64, `gap_origin` 0.5 - the support byte follows a log
+    curve over 0..64 logits: 0.004 logits per step at a tie, 0.12 at the clip, against 0.03
+    everywhere for the uniform byte. Every decoder indexes the same 256-entry float32 table,
+    `rankfield.levels(meta)`, so numpy, torch, the Metal and Triton kernels and the slice
+    preview agree bit for bit; a 0.2 part gets the uniform table from the same call.
+
+  Measured on idc-torso1 (`total_fast`, 3 mm restored to 1.5 mm, against the labels the run
+  wrote from its own logits): **0.0037 % of voxels moved and the worst structure, the left
+  12th rib, is +0.4 %**, against 0.0596 % / +18.8 % for the uniform byte at clip 8. 2.08 MB
+  against 1.96 MB uniform-8 and 4.01 MB uniform-16 (which is 0.0056 % / +2.0 %). Depth was
+  never the cause - depth 16 restores bit-identically to depth 6 - and a shell never exceeded
+  6 classes, so depth 6 stays the default. Companding alone, without the shell, bought
+  nothing. Reproduced through the product path: `segment -o torso.duckn.zip`, then `restore
+  --spacing 1.5`.
+
+  A 0.3 store cannot be made from 0.2 bytes - the shell's true gaps were never written - so
+  `tools/ranked_upgrade_format.py` stops at 0.2 (on its own constant; it refuses a 0.3 store)
+  and the demo stores stay 0.2, readable everywhere. The verifier reads both and requires
+  `keep`, `gap_curve`, `gap_range` and `gap_origin` on a 0.3 block.
+
+- **`haversack restore STORE -o LABELS`** (internal, undocumented, like the store and `view`).
+  Labels from a ranked store on any grid - the input's own, or `--spacing S` - written in the
+  input's orientation, `--interp linear|nearest`. `haversack.ranked_restore` is the store
+  adapter: it reads each part into a `rankfield.Part` and hands the list to `rankfield.restore`
+  in paint order. The builder now copies the run's `frame` record into the part block, so
+  output-to-model coordinates are composed exactly as `predict_into` did, crop included; a
+  part without one (every store built before this release) restores only onto grids in its
+  own model-grid frame, and the verifier warns about it. Work is bounded by the region asked
+  for. On that torso, 52.5 M voxels: 10 s linear and 1.6 s nearest on CPU, 0.36 s on Metal
+  (M2), 0.15 s on Triton (A10, proved bit-identical on Modal); one structure's box in 0.02 s.
+
+- The slice preview (`data/preview.html`, rebuilt from sdfview) reads the level table, so
+  `haversack view` shows 0.3 stores.
+
+- Fixed from the release review: the dense `junction_field` wrapper accepted `levels` and
+  dropped it (the numpy reference then read log bytes as uniform ones, up to 81 quanta off
+  torch; now pinned by a test); two renderer tools decoded 0.3 bytes with the uniform
+  formula; `restore --spacing 0` meant the input grid; an output grid that does not fit in
+  memory is an InputError, not a traceback. `__version__` had said 0.4.0 since 0.4.1 - it is
+  stamped into every store and reported by the server - and is bumped with the release from
+  now on. CI installs the ranked-store extra from its tags, so those suites run there.
+
+- The `cuda` extra floors triton at 3.0: rankfield's restore kernel passes
+  `enable_fp_fusion` as a launch option.
+
+- The area a store gives up to quantization was 0.3-1.1 %, always low, under the uniform
+  byte; under the log byte it is below 0.1 % with no sign left to it.
+
 ## [0.5.0] - 2026-09-05
 
 **Ranked format 0.2** (internal, undocumented; every reader refuses older parts, and
