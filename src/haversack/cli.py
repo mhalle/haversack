@@ -28,6 +28,28 @@ INSTALL_HINT = ('this is a lean install (--no-deps); a normal install has them: 
                 'uv tool install "haversack @ git+https://github.com/mhalle/haversack"')
 
 
+
+STORE_EXTRA_HINT = ("the ranked store needs the duckn extra: uv sync --extra duckn "
+                    "(or uv pip install 'haversack[duckn]')")
+
+
+def _need_store_extra():
+    """The three packages of the ranked-store extra, checked by name before anything is
+    imported or computed - a missing one is a one-line answer, not a traceback after the
+    network has run."""
+    import importlib.util
+
+    def absent(name):
+        try:
+            return importlib.util.find_spec(name) is None
+        except ModuleNotFoundError:          # a finder that refuses the name outright
+            return True
+    missing = [n for n in ("rankfield", "zarr", "duckn") if absent(n)]
+    if missing:
+        from .errors import InputError
+        raise InputError(f"{STORE_EXTRA_HINT} - missing {', '.join(missing)}")
+
+
 def _need_inference_stack(task=None) -> None:
     """Refuse early, with the install line, when this environment cannot run ``task``.
 
@@ -124,6 +146,7 @@ def _run(argv=None) -> int:
         return main_view(argv[1:])
     if argv[:1] == ["restore"]:
         # undocumented, the same way: labels from a ranked store, on any grid
+        _need_store_extra()
         from .ranked_restore import main_cli
         return main_cli(argv[1:])
     F = argparse.ArgumentDefaultsHelpFormatter
@@ -624,7 +647,7 @@ def _run(argv=None) -> int:
         # The cheap mistakes first - before the inference stack is demanded (a lean
         # install should hear about its typo, not about torch) and before any input is
         # downloaded or a minute of inference is spent on an output the writer cannot name.
-        from .ranked_output import is_store_output
+        from .io import is_store_output
         if not batch:
             if not args.output:
                 raise InputError("segment needs -o (the output file), or --format with -o a directory for batch")
@@ -633,6 +656,15 @@ def _run(argv=None) -> int:
                                  ".seg.nrrd, .nrrd, .nii.gz, .nii or .mha (a directory or a bare "
                                  "name is not a file), and a ranked store is named .duckn or "
                                  ".duckn.zip")
+            if is_store_output(args.output):
+                # the store's grid is the model's; a label spacing has nothing to apply to,
+                # and the target has to be writable BEFORE minutes of inference
+                if args.spacing:
+                    raise InputError("a ranked store is written on the model grid; --spacing applies "
+                                     "to labels only")
+                _need_store_extra()
+                from .ranked_store import check_target
+                check_target(args.output)
         else:
             if is_store_output(args.output or "."):
                 raise InputError("a ranked store output takes exactly one input and no --format")
@@ -680,15 +712,20 @@ def _run(argv=None) -> int:
                 # output distribution, not the labels (see haversack.ranked_output)
                 if engine_task:
                     raise InputError("a ranked store output is available for nnU-Net tasks only")
-                from .ranked_output import segment_to_store
+                from .ranked_output import input_source, segment_to_store
                 img = resolve(inputs[0])
                 r, out = segment_to_store(
                     img, args.task, args.output, case=source_stem(inputs[0]),
+                    source=input_source(inputs[0]),          # the spec as given, not the cache path
                     weights=args.model_root, device=args.device, dtype=args.dtype,
                     grid=args.spacing if args.spacing else "input", interp=args.interp,
                     accumulate=args.accumulate, batch_size=bs,
                     envelope_mm=args.envelope if args.envelope > 0 else None, progress=progress)
-                report(r, out)
+                if not args.quiet:
+                    for k, v in r.timings.items():
+                        print(f"  {v:7.2f} s  {k}", file=sys.stderr)
+                    print(f"wrote {out}: ranked store on the model grid, "
+                          f"{len(r.present())}/{len(r.schema.names)} structures present", file=sys.stderr)
             else:
                 r = run_one(inputs[0])
                 r.save(args.output)

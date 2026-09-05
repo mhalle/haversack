@@ -1,10 +1,10 @@
 [project]
 name = "haversack"
-version = "0.6.0"
+version = "0.6.1"
 description = "Medical-image segmentation models, many families behind one door: TotalSegmentator, MOOSE, MRSegmentator, stock nnU-Net and more, on MPS, CUDA or CPU, with a CLI and a local REST server"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "tqdm",
@@ -103,10 +103,9 @@ monai = ["monai>=1.4", "torch>=2.7", "nibabel", "itk", "pytorch-ignite", "einops
 # output - haversack.duckn_io, haversack.ranked_store, haversack.ranked_output. duckn is not
 # on PyPI; it installs from its GitHub tag (git source below). Not a conflict group: it sits
 # beside the torch extra. The dev env adds it: `uv sync --extra torch ... --extra duckn`.
-# Both need Python 3.12 (zarr 3.3 and duckn set that floor); below it the extra is empty
-# rather than pulling haversack's own floor up for an internal feature.
-duckn = ["duckn; python_version >= '3.12'", "zarr>=3.3; python_version >= '3.12'",
-         "rankfield; python_version >= '3.12'"]   # the ranked encoding + restore (github, a tag)
+# zarr 3.3 and duckn need Python 3.12, which is the project's floor (0.6.1: one floor, no
+# per-package markers - the extra was empty on 3.10 and rankfield-only on 3.11).
+duckn = ["duckn", "zarr>=3.3", "rankfield"]      # the ranked encoding + restore (github, a tag)
 
 [build-system]
 requires = ["hatchling"]
@@ -152,7 +151,7 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-rankfield = { git = "https://github.com/mhalle/rankfield.git", tag = "v0.1.0" }
+rankfield = { git = "https://github.com/mhalle/rankfield.git", tag = "v0.1.2" }
 # nnunetv2 comes from PyPI: haversack uses only stock nnunetv2 APIs (verified against 2.8.1). It
 # used to be a `path = "../upstream/nnUNet"` source here, but uv applies these sources to a
 # `git+https://...` install too, and that relative path exists only in the dev workspace - so

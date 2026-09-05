@@ -15,10 +15,17 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from rankfield import (CLIP, DEFAULT_DEPTH, FORMAT_VERSION, GAP_UNIT, RankField, decode_groups,
-                       deficit, encode, encode_regions, levels, margin, probabilities, settle_ties,
-                       to_device)
-from rankfield import SUPPORT_MAX, TAIL_MAX, ZERO_LEVEL  # noqa: F401 - re-exported for tools and tests
+try:
+    from rankfield import (CLIP, DEFAULT_DEPTH, FORMAT_VERSION, GAP_UNIT, RankField, decode_groups,
+                           deficit, encode, encode_regions, levels, margin, probabilities, settle_ties,
+                           to_device)
+    from rankfield import SUPPORT_MAX, TAIL_MAX, ZERO_LEVEL  # noqa: F401 - re-exported for tools and tests
+except ModuleNotFoundError as _e:
+    if _e.name != "rankfield":
+        raise
+    raise ImportError("haversack.ranked is a shim over rankfield, which the duckn extra installs: "
+                      "uv sync --extra duckn (or uv pip install 'haversack[duckn]'; on pip alone, "
+                      "rankfield @ git+https://github.com/mhalle/rankfield.git)") from None
 
 RankedCode = RankField                  # the name the pipeline and the tools grew up with
 RANKED_VERSION = FORMAT_VERSION

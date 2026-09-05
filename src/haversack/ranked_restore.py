@@ -161,14 +161,35 @@ def restore(store, *, grid="input", interp: str = "linear", roi=None, device="au
         if isinstance(grid, (int, float)) and not grid > 0:
             raise InputError(f"spacing must be positive, got {grid}")
         try:
+            import torch
+            torch.device(device)
+        except RuntimeError as e:
+            raise InputError(f"--device {device!r}: {e}") from None
+        try:
+            g, _ = rf.resolve_grid(parts[0], grid)
+        except ValueError as e:
+            raise InputError(str(e)) from None
+        box = roi or tuple((0, n) for n in g.shape)
+        voxels = int(np.prod([b - a for a, b in box]))
+        if voxels >= 2 ** 31:
+            # the kernels index the output with 32-bit offsets; and a grid this size is
+            # asked for by mistake (a spacing in the wrong unit), not on purpose
+            raise InputError(f"the output grid {tuple(g.shape)} at {tuple(round(v, 4) for v in g.spacing)} mm "
+                             f"is {voxels:,} voxels; the restore holds fewer than 2^31 - ask for a "
+                             f"coarser spacing or an roi")
+        try:
             r = rf.restore(parts, grid=grid, interp=interp, roi=roi, device=device,
                            slab_voxels=slab_voxels, progress=progress)
         except ValueError as e:
             raise InputError(str(e)) from None
-        except MemoryError:
-            g, _ = rf.resolve_grid(parts[0], grid)
-            raise InputError(f"the output grid {tuple(g.shape)} at {tuple(g.spacing)} mm does not fit in "
-                             f"memory; ask for a coarser spacing or an roi") from None
+        except (MemoryError, RuntimeError) as e:
+            # torch reports an allocation it cannot make as a RuntimeError (OutOfMemoryError
+            # on CUDA, "Invalid buffer size" on MPS), not a MemoryError
+            if isinstance(e, MemoryError) or any(w in str(e).lower() for w in ("memory", "buffer size", "alloc")):
+                raise InputError(f"the output grid {tuple(g.shape)} at {tuple(round(v, 4) for v in g.spacing)} mm "
+                                 f"({voxels:,} voxels) does not fit in memory on {device}; ask for a "
+                                 f"coarser spacing or an roi") from None
+            raise
         return Restored(labels=r.labels, grid=r.grid, geometry=r.geometry, frame=r.frame,
                         parts=r.parts, interp=r.interp, roi=r.roi)
     finally:

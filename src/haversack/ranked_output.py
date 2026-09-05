@@ -23,26 +23,67 @@ from pathlib import Path
 
 import numpy as np
 
-from haversack.pipeline import segment
-# NOT haversack.ranked at module level: the CLI imports this module on every `segment` for
-# `is_store_output`, and ranked is a shim over rankfield, which a plain install lacks.
+from haversack.io import STORE_OUTPUT_SUFFIXES, is_store_output  # noqa: F401 - re-exported
+
+# Nothing heavy at module level: haversack.pipeline brings torch and haversack.ranked brings
+# rankfield, and a lean install (no torch) or a plain one (no store extra) must still import
+# this module - the CLI once did so on every `segment`, and a README-recipe install died here.
 
 DISTANCE_VOXELS = 2.0            # truncation of the emitted distance field, in voxels
 
 
-def _true_spacing(meta):
-    """The grid the part actually landed on, mirroring ranked_build_store.geometry().
+CENTERING = {"corner": "node", "center": "cell"}
 
-    `spacing_zyx` in the meta is the nominal request; under the corner rule the true spacing
-    is (n_src-1)*s_src/(n_model-1). A distance stated in millimetres has to use the grid the
-    samples are really on, not the one that was asked for.
+
+def model_grid_geometry(meta):
+    """(true spacing zyx, first-voxel-center origin xyz, direction xyz, duckn centering) of a
+    part's array on an nnU-Net-path model grid - THE derivation, used by the builder's
+    geometry and by the emit's distance scale alike.
+
+    `spacing_zyx` in the meta is the nominal request. The grid the resampler actually produced
+    depends on the grid it RAN ON - `frame.model_source` when the source was cropped to
+    nonzero first (every nnU-Net-native lineage), else `frame.source`, never the full canonical
+    grid when a crop happened - and on the convention:
+
+      corner (TotalSegmentator, scipy.zoom)  holds the first and last sample centres, so
+          spacing is (n_src-1)*s_src/(n_model-1) and voxel 0 does not move  -> duckn `node`
+      center (nnU-Net native, skimage)       holds the field of view, so spacing is
+          n_src*s_src/n_model and voxel 0 moves in by half the spacing change -> duckn `cell`
+
+    The crop's offset (`model_source.origin`, mm along the source axes) and the envelope crop
+    (`envelope.start`, model voxels) both move voxel 0. Deriving from the canonical grid alone
+    once misplaced a cropped part by 19 mm with a 67 % spacing error, invisibly - the sample
+    values are unaffected and only the stated geometry is wrong.
     """
-    c = meta["frame"]["canonical"]
+    fr = meta["frame"]
+    c = fr["canonical"]
+    ran_on = fr.get("model_source") or fr.get("source")
+    if ran_on is None:                       # a frame that states only its canonical grid
+        ran_on = {"shape": c["shape_zyx"], "spacing": c["spacing_zyx"]}
+    n_src = [int(v) for v in ran_on["shape"]]
+    s_src = [float(v) for v in ran_on["spacing"]]
+    crop = [float(v) for v in (ran_on.get("origin") or (0.0, 0.0, 0.0))]
     model = [int(v) for v in meta["model_grid"]]
-    if meta.get("convention", "corner") == "corner":
-        return [(n_s - 1) * s / (n_m - 1) if n_m > 1 else s
-                for n_s, s, n_m in zip(c["shape_zyx"], c["spacing_zyx"], model)]
-    return [n_s * s / n_m for n_s, s, n_m in zip(c["shape_zyx"], c["spacing_zyx"], model)]
+    start = [int(v) for v in (meta.get("envelope") or {}).get("start", (0, 0, 0))]
+    convention = meta.get("convention") or fr.get("convention") or "corner"
+    centering = CENTERING[convention]
+    if centering == "node":
+        eff = [(n_s - 1) * s / (n_m - 1) if n_m > 1 else s for n_s, s, n_m in zip(n_src, s_src, model)]
+        shift = [0.0, 0.0, 0.0]                                    # voxel 0 stays put
+    else:
+        eff = [n_s * s / n_m for n_s, s, n_m in zip(n_src, s_src, model)]
+        shift = [(e - s) / 2 for e, s in zip(eff, s_src)]
+    D = np.asarray(c["direction_xyz"], float).reshape(3, 3)
+    off_zyx = [cr + sh + st * e for cr, sh, st, e in zip(crop, shift, start, eff)]
+    off_xyz = np.asarray([off_zyx[2], off_zyx[1], off_zyx[0]], float)
+    origin = np.asarray(c["origin_xyz"], float) + D @ off_xyz
+    return eff, tuple(float(v) for v in origin), list(c["direction_xyz"]), centering
+
+
+def _true_spacing(meta):
+    """The spacing the part actually landed on: a distance stated in millimetres has to use
+    the grid the samples are really on, not the one that was asked for."""
+    return model_grid_geometry(meta)[0]
 
 
 def _emit_distance(part, code, out):
@@ -120,6 +161,7 @@ def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=20.0, *, quiet=Fals
         say(f"  {part:<12} {code!r}  ->  {out.name}/{part}_*.npy")
 
     segment_kw.setdefault("progress", None if quiet else (lambda p: say(f"    {p}")))
+    from haversack.pipeline import segment
     from haversack.ranked import RankedSpec
     seg = segment(image, task, probabilities=RankedSpec(sink=sink, depth=depth, clip=clip),
                   envelope_mm=envelope_mm, **segment_kw)
@@ -133,19 +175,24 @@ def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=20.0, *, quiet=Fals
     return seg
 
 
-STORE_OUTPUT_SUFFIXES = (".duckn.zip", ".duckn")
 
-
-def is_store_output(path) -> bool:
-    """Whether an output path asks for a ranked store rather than labels: ``.duckn`` (a
-    directory) or ``.duckn.zip`` (a standard zarr zip). A bare ``.zip`` is not enough - that
-    would silently turn a typo into a different kind of output."""
-    return str(path).lower().endswith(STORE_OUTPUT_SUFFIXES)
+def input_source(spec) -> dict:
+    """A duckn provenance source naming the input: a data-source identifier (``idc:...``,
+    ``tcia:...``) as it was given, or a local file by name and format - so the case is
+    identifiable from the store alone (README section 6.1)."""
+    from .sources import parse_input
+    spec = str(spec)
+    if parse_input(spec) is not None:
+        return {"type": "image", "identifier": spec,
+                "description": "resolved by haversack's data sources"}
+    p = Path(spec)
+    fmt = "DICOM" if p.is_dir() else "".join(p.suffixes[-2:]).lstrip(".") or "unknown"
+    return {"type": "image", "format": fmt, "path": p.name}
 
 
 def segment_to_store(image, task, out, *, case=None, depth=6, clip=8.0, parts="all",
                      distance_voxels=DISTANCE_VOXELS, allow_unnamed=False, names=None,
-                     quiet=False, **segment_kw):
+                     quiet=False, source=None, **segment_kw):
     """Segment ``image`` with ``task`` and write the ranked store at ``out`` (``.duckn`` or
     ``.duckn.zip``); returns ``(segmentation, out)``.
 
@@ -174,7 +221,10 @@ def segment_to_store(image, task, out, *, case=None, depth=6, clip=8.0, parts="a
             names = {int(v): str(n) for v, n in seg.schema.names.items()}
         if case is None:
             case = Path(str(image)).name.split(".")[0] or "case"
-        build(staging, out, case, parts, allow_unnamed, distance_voxels, names=names, quiet=quiet)
+        if source is None:
+            source = input_source(image)
+        build(staging, out, case, parts, allow_unnamed, distance_voxels, names=names, quiet=quiet,
+              source=source)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return seg, out

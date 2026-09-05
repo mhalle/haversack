@@ -122,6 +122,40 @@ class TestLayering(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr[-1500:])
         self.assertNotIn("Traceback", r.stderr)
 
+    def test_a_lean_install_answers_segment_in_one_line(self):
+        """README "Lean install": no torch, no nnunetv2, no scipy, no skimage - and no store
+        extra. `haversack segment` must still validate its arguments and say what it lacks in
+        one line. 0.6.0 died at the store-output check, which imported a module that imported
+        the pipeline, which imported torch; the store door must likewise refuse before the
+        network, naming the extra."""
+        import subprocess
+        import sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            code = (
+                "import sys, importlib.abc\n"
+                "BLOCK = ('torch', 'nnunetv2', 'scipy', 'skimage', 'rankfield', 'duckn', 'zarr')\n"
+                "class Block(importlib.abc.MetaPathFinder):\n"
+                "    def find_spec(self, name, path=None, target=None):\n"
+                "        if name.split('.')[0] in BLOCK:\n"
+                "            raise ModuleNotFoundError(name)\n"
+                "sys.meta_path.insert(0, Block())\n"
+                "import haversack, haversack.cli\n"
+                "import numpy as np, SimpleITK as sitk\n"
+                f"img = '{d}/in.nii.gz'\n"
+                "sitk.WriteImage(sitk.GetImageFromArray(np.zeros((4, 5, 6), np.int16)), img)\n"
+                "rc = haversack.cli.main(['segment', img, '--task', 'total_fast', '-o', 'out.bogus'])\n"
+                "assert rc == 2, rc\n"
+                f"rc = haversack.cli.main(['segment', img, '--task', 'total_fast', '-o', '{d}/out.duckn.zip'])\n"
+                "assert rc == 2, rc\n"
+                "rc = haversack.cli.main(['restore', 'x.duckn', '-o', 'y.nii.gz'])\n"
+                "assert rc == 2, rc\n"
+            )
+            r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("duckn extra", r.stderr)
+
     def test_no_module_depends_on_the_mlx_toolkit(self):
         for path in sorted(SRC.rglob("*.py")):
             for mod, line in _imports(path, top_level_only=False):

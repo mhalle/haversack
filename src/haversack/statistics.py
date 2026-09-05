@@ -160,7 +160,7 @@ def compute_statistics(image, labels_path, out_json, *, pair=None,
                 "p10": round(float(p10), 3), "p90": round(float(p90), 3),
                 "centroid_ras_mm": [round(float(c), 2) for c in centroid_ras],
             })
-        field = _field_measurements(ranked_code)
+        field, problem = _field_measurements(ranked_code)
         for row in structures:
             got = field.get(row["label"])
             if got is not None:
@@ -173,6 +173,12 @@ def compute_statistics(image, labels_path, out_json, *, pair=None,
         if field:
             out["field_grid_spacing_mm"] = [
                 round(float(v), 4) for v in ranked_code.meta["spacing_zyx"]]
+        if ranked_code is not None:
+            # asked for: say whether they came, so a reader of the JSON is never left to
+            # guess why the field columns are absent (a missing rankfield once dropped them
+            # silently)
+            out["field_measurements"] = ({"available": True} if problem is None
+                                         else {"available": False, "reason": problem})
         path = Path(out_json)
         path.write_text(json.dumps(out, indent=1))
         return path
@@ -197,13 +203,16 @@ def _field_measurements(code) -> dict:
     field columns, and the counted ones are untouched.
     """
     if code is None:
-        return {}
+        return {}, None
     try:
         from . import measure, ranked
+    except ImportError as e:                # the duckn extra is not installed
+        return {}, str(e)
+    try:
         labels = code.meta.get("labels")
         spacing = code.meta.get("spacing_zyx")
         if not labels or not spacing:
-            return {}
+            return {}, "the ranked code names no labels or spacing"
         out = {}
         for channel, value in enumerate(labels):
             if int(value) == 0:                  # background is not a structure
@@ -215,9 +224,9 @@ def _field_measurements(code) -> dict:
                 continue
             if v > 0.0:
                 out[int(value)] = (v, a)
-        return out
-    except Exception:
-        return {}
+        return out, None
+    except Exception as e:                  # noqa: BLE001 - best effort, but said
+        return {}, f"{type(e).__name__}: {e}"
 
 
 def statistics_tsv(stats: dict) -> str:

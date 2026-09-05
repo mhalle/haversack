@@ -408,6 +408,11 @@ seg = haversack.segment(image, "total",
                     probabilities=ranked.RankedSpec(sink=my_writer, depth=6))
 ```
 
+Since 0.6.0 `haversack.ranked` is a shim over the **rankfield** library, installed by the
+`duckn` extra (`uv sync --extra duckn`, or `uv pip install 'haversack[duckn]'`; with pip alone,
+`rankfield @ git+https://github.com/mhalle/rankfield.git`). Without it the import says so in
+one line. The labels product needs none of this.
+
 `RankedSpec` takes a **sink** rather than returning codes, because a multi-model task holds one
 part's logits at a time and the uncompressed codes are far larger than the stored form — each
 part is handed over as produced, written, and dropped. It is off by default: labels are a
@@ -423,8 +428,9 @@ The encoder is settled; the container is not. Zarr v3 with 64³ chunks and `fill
 the natural fit — chunk skipping is exactly the sparsity this format creates, and 64³ is a GPU
 brick — but two things are open:
 
-- **`zarr` is in no haversack extra**, and the Modal nnU-Net worker syncs `["torch", "serve",
-  "idc", "cuda"]`. Adding it is an image change.
+- **`zarr`, `duckn` and `rankfield` are the `duckn` extra** (since 0.5.0 / 0.6.0), and the
+  Modal nnU-Net worker syncs `["torch", "serve", "cuda"]` and needs none of them: it never
+  emits a ranked code. Serving a store would be an image change.
 - **Artifact shape.** Every serve artifact today is a single file returned by `FileResponse`;
   a zarr store is a directory (893 files for a five-layer store). Either ship `.zarr.zip` —
   one file, fits the existing cache and `_place` mechanism, still range-readable by a client

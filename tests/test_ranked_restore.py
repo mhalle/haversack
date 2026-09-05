@@ -162,3 +162,12 @@ def test_the_command_writes_names_and_refuses_what_it_should(run, tmp_path):
         rr.main_cli([str(tmp_path / "notastore"), "-o", str(out)])
     with pytest.raises(rr.InputError, match="labels take"):
         rr.main_cli([str(path), "-o", str(tmp_path / "x.duckn")])
+
+
+def test_an_absurd_spacing_is_refused_before_anything_is_allocated(run):
+    from haversack.errors import InputError
+    _, path = run["linear"]
+    with pytest.raises(InputError, match="2\\^31|coarser"):
+        rr.restore(path, grid=0.0005, device="cpu")
+    with pytest.raises(InputError, match="device"):
+        rr.restore(path, grid=3.0, device="banana")

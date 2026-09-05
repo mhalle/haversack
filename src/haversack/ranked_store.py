@@ -227,6 +227,20 @@ class _Lock:
         self.fd = None
 
 
+def check_target(path) -> Path:
+    """What ``open_store(path, "w")`` would refuse, answered before anything is computed: the
+    path exists and is not a ranked store, or its nearest existing ancestor is not writable."""
+    p = Path(path).expanduser()
+    if p.exists() and not _looks_like_store(p):
+        raise InputError(f"{p}: exists and is not a ranked store; refusing to replace it")
+    anc = p.parent
+    while not anc.exists() and anc != anc.parent:
+        anc = anc.parent
+    if not os.access(anc, os.W_OK):
+        raise InputError(f"{p}: cannot write here ({anc} is not writable)")
+    return p
+
+
 def _looks_like_store(p: Path) -> bool:
     """Whether what sits at ``p`` is a zarr group (a ranked store, or at least something
     this module wrote); anything else is not ours to replace."""

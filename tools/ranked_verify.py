@@ -32,6 +32,7 @@ REQUIRED_RANKED = ("version", "mode", "classes", "depth", "clip", "gap_unit", "s
                    "rank_sentinel", "labels", "part", "task", "model_grid", "envelope")
 RANKED_VERSIONS = ("0.2", "0.3")   # what this verifier (and every reader in the ecosystem) knows
 CURVE_KEYS_03 = ("gap_curve", "gap_range", "gap_origin", "keep")
+README_MUST_MENTION = {"0.3": "format 0.3"}     # formats whose bytes an older README misreads
 
 
 class Report:
@@ -66,6 +67,7 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
     rep = Report(f"{path.parent.name}/{path.name}", quiet)
 
     rep.check(st.exists("README.md"), "no README.md - the format reference is missing")
+    readme = st.read_text("README.md").lower() if st.exists("README.md") else ""
     # The standard's own reading of the metadata, before any of ours: duckn's models parse
     # the root and every array, and its validators check the seg extension's consistency
     # rules and each array's geometry against its shape.
@@ -133,6 +135,14 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
                       f"{m['classes']}")
             rep.check(bool(soft.get("weights")), f"parts/{i}: softmax names no weights")
 
+        # The README is the format reference a cold reader follows. A 0.3 part under the 0.2
+        # README is decoded 8x wrong at every gap; a 0.2 part under a later README is fine
+        # (the reference documents every format it knows), so only the versions whose
+        # bytes changed are checked.
+        if str(m["version"]) in README_MUST_MENTION:
+            rep.check(README_MUST_MENTION[str(m["version"])] in readme,
+                      f"parts/{i}: the store's README does not document ranked format {m['version']} - "
+                      f"a reader following it would decode these bytes wrongly")
         rep.check(str(m["version"]) in RANKED_VERSIONS,
                   f"parts/{i}: ranked block version {m['version']!r} is not one this reader "
                   f"knows {RANKED_VERSIONS} - upgrade with tools/ranked_upgrade_format.py")

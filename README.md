@@ -11,7 +11,7 @@ workspace it lives in; the API is documented in the docstrings.
 
 - **Apple Silicon** (M1 or later) or a CUDA machine. There are no PyTorch wheels for Intel
   Macs anymore, so an Intel Mac cannot run it.
-- **Python 3.10 to 3.14** (3.12 is what the tests run on).
+- **Python 3.12 to 3.14** (3.12 is what the tests run on).
 - **Memory:** 16 GB runs every task. The 3 mm `total_fast` task is comfortable; whole-body
   `total` at 1.5 mm fits (the sliding-window accumulator moves to host memory when the GPU
   budget is short) but takes about 25 minutes on an M2. More memory means the accumulator
@@ -26,8 +26,10 @@ uv venv --python 3.12 && source .venv/bin/activate
 uv pip install "haversack @ git+https://github.com/mhalle/haversack"
 ```
 
-`pip install` of the same URL works too. Add `serve` to the extras for the local server,
-`remote` for the client:
+`pip install` of the same URL works too for the bare install and the extras that resolve
+from PyPI (`serve`, `remote`, `modal`); the extras whose packages come from git (`duckn`,
+`fastsurfer`, `synthstrip`, `voxtell`) need `uv pip install`, which reads the sources this
+project declares. Add `serve` to the extras for the local server, `remote` for the client:
 
 ```bash
 uv pip install "haversack[serve,remote] @ git+https://github.com/mhalle/haversack"

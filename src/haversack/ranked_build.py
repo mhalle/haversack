@@ -204,23 +204,8 @@ def geometry(part):
     if "source_grid" in part:                                      # fastsurfer
         g = part["source_grid"]
         return list(g["spacing_zyx"]), tuple(g["origin_xyz"]), g["direction_xyz"], "cell"
-    c = part["frame"]["canonical"]
-    model = [int(v) for v in part["model_grid"]]
-    start = [int(v) for v in part["envelope"]["start"]]
-    convention = part.get("convention", "corner")
-    centering = CENTERING[convention]
-    if centering == "node":
-        eff = [(n_s - 1) * s / (n_m - 1) if n_m > 1 else s
-               for n_s, s, n_m in zip(c["shape_zyx"], c["spacing_zyx"], model)]
-        shift = [0.0, 0.0, 0.0]                                    # voxel 0 stays put
-    else:
-        eff = [n_s * s / n_m for n_s, s, n_m in zip(c["shape_zyx"], c["spacing_zyx"], model)]
-        shift = [(e - s) / 2 for e, s in zip(eff, c["spacing_zyx"])]
-    D = np.asarray(c["direction_xyz"], float).reshape(3, 3)
-    off_zyx = [sh + st * e for sh, st, e in zip(shift, start, eff)]  # centring, then the crop
-    off_xyz = np.asarray([off_zyx[2], off_zyx[1], off_zyx[0]], float)
-    origin = np.asarray(c["origin_xyz"], float) + D @ off_xyz      # the crop moves voxel 0
-    return eff, tuple(float(v) for v in origin), c["direction_xyz"], centering
+    from .ranked_output import model_grid_geometry                   # the one derivation
+    return model_grid_geometry(part)
 
 
 def extent(part):
@@ -827,7 +812,8 @@ def layout(shape):
     return chunks, tuple(int(np.ceil(s / c) * c) for s, c in zip(shape, chunks))
 
 
-def generator_steps(meta, items, engine):
+def generator_steps(meta, items, engine, *, parts_kept="all", layers=("occupancy", "distance", "junction"),
+                    distance_voxels=DISTANCE_VOXELS):
     """duckn `processing` steps: what ran, with what, and with which parameters.
 
     Two steps, because they are genuinely separable and can fail independently - the network
@@ -857,17 +843,18 @@ def generator_steps(meta, items, engine):
                             "nearest-surface distance field and the triple-line junction layer",
              "software": {"name": "ranked_build_store.py", "version": haversack_v},
              "parameters": {"depth": meta.get("depth"), "clip": meta.get("clip"),
-                            "brick": [BRICK, BRICK, BRICK], "parts_kept": "all",
-                            "derived_layers": ["occupancy", "distance", "junction"],
-                            "distance_voxels": DISTANCE_VOXELS}}]
+                            "brick": [BRICK, BRICK, BRICK], "parts_kept": parts_kept,
+                            "derived_layers": list(layers),
+                            "distance_voxels": distance_voxels}}]
 
 
 def build(src, out, case, parts="all", allow_unnamed=False,
-          distance_voxels=DISTANCE_VOXELS, names=None, quiet=False):
+          distance_voxels=DISTANCE_VOXELS, names=None, quiet=False, source=None):
     """Build the store at ``out`` from an emit directory ``src``. ``names`` (label id -> name)
     overrides the catalog lookup, for a caller that already holds the task's label map.
-    Progress goes to stderr (``quiet`` silences it). The target is written only when the
-    build completes: a failure leaves the path as it was."""
+    Progress goes to stderr (``quiet`` silences it). ``source`` is a duckn provenance source
+    (type/identifier/path/...) naming the input, written as ``provenance.sources``. The target
+    is written only when the build completes: a failure leaves the path as it was."""
     import sys
 
     def say(*a, **k):                    # progress: stderr, silenced by quiet
@@ -878,13 +865,13 @@ def build(src, out, case, parts="all", allow_unnamed=False,
     src, out = Path(src), Path(out)
     meta = json.loads((src / "meta.json").read_text())
     with open_store(out, "w") as st:   # a directory, or a standard zarr zip when OUT ends in .zip
-        _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say)
+        _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say, source)
     if not quiet:                        # sizing the store walks it: not for a dropped line
         say(f"wrote {out} ({st.size_bytes() / 1e6:.2f} MB)")
     return out
 
 
-def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say):
+def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say, source=None):
     root = st.root
     segs, order = [], []
 
@@ -1077,7 +1064,13 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
         # naming its software. Writing it here rather than inventing a field means a duckn
         # reader finds the generator in the place the spec says to look. `sources` and
         # `attribution` are filled in per case by ranked_demo_provenance.py.
-        provenance={"version": "1.0", "processing": generator_steps(meta, items, engine)}))
+        provenance={"version": "1.0",
+                    **({"sources": [source]} if source else {}),
+                    "processing": generator_steps(
+                        meta, items, engine, parts_kept=parts, distance_voxels=distance_voxels,
+                        layers=sorted({k for n in root["parts"].group_keys()
+                                       for k in root[f"parts/{n}"].array_keys()
+                                       if k in ("occupancy", "distance", "junction")}))}))
     write_readme(st)
 
 

@@ -416,3 +416,15 @@ def dicom_series_ids(directory) -> list:
         return list(sitk.ImageSeriesReader.GetGDCMSeriesIDs(str(directory)))
     except Exception:
         return []
+
+
+# A ranked store output is named `.duckn` (a directory) or `.duckn.zip` (a standard zarr zip).
+# The check lives HERE, dependency-free: the CLI asks it on every `segment`, before the
+# inference stack, and the store modules it used to live in import rankfield and torch.
+STORE_OUTPUT_SUFFIXES = (".duckn.zip", ".duckn")
+
+
+def is_store_output(path) -> bool:
+    """Whether an output path asks for a ranked store rather than labels. A bare ``.zip`` is
+    not enough - that would silently turn a typo into a different kind of output."""
+    return str(path).lower().endswith(STORE_OUTPUT_SUFFIXES)
