@@ -26,12 +26,16 @@ jobs:
         # The second line is the serve/REST tier (fastapi..matplotlib) plus modal + pydicom:
         # without them the serve suite importorskips to nothing and CI proves less than it
         # appears to (found when unguarded fastapi imports failed the 2026-08-25 push).
+        # The third line is the ranked-store extra (duckn + rankfield, from their tags): without
+        # it the ranked suites skip, and since 0.6.0 haversack.ranked cannot even import.
         run: |
           uv venv
           uv pip install --index-strategy unsafe-best-match \
             --extra-index-url https://download.pytorch.org/whl/cpu \
             torch nnunetv2 scipy scikit-image 'SimpleITK>=2.3' pytest \
-            fastapi httpx python-multipart matplotlib modal pydicom 'zarr>=3'
+            fastapi httpx python-multipart matplotlib modal pydicom 'zarr>=3' \
+            'duckn @ git+https://github.com/mhalle/duckn.git@v0.3.2' \
+            'rankfield @ git+https://github.com/mhalle/rankfield.git@v0.1.0'
       - name: Run tests
         env:
           PYTHONPATH: src

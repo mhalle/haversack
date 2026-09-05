@@ -26,6 +26,7 @@ from pathlib import Path
 import matplotlib
 import numpy as np
 import torch
+from rankfield import levels as rf_levels
 
 from haversack.ranked_store import open_store
 
@@ -91,6 +92,7 @@ def load(store, device):
     # sub-voxel crossings from the deficits, and no gate anywhere downstream.
     import haversack.ranked_build as rbs
     clip = float(b["clip"])
+    lut = rf_levels(b)                 # the part's byte -> gap table (uniform for a 0.2 store)
 
     dmm = np.where(dist > 0, (1.0 - dist.astype(np.float32) / 255.0) * T, T)
 
@@ -110,9 +112,9 @@ def load(store, device):
             bt = tuple(bt)
             if SEED_FROM == "deficit":
                 dq_a = rbs._deficit_at(rk[(slice(None),) + at], su[(slice(None),) + at],
-                                       rk[0][bt], clip)
+                                       rk[0][bt], clip, lut)
                 dp_b = rbs._deficit_at(rk[(slice(None),) + bt], su[(slice(None),) + bt],
-                                       rk[0][at], clip)
+                                       rk[0][at], clip, lut)
             else:                       # "baked": crossings from the distance field alone -
                 dq_a, dp_b = dmm[at], dmm[bt]   # the planar cosine cancels in the ratio
             den = dq_a + dp_b

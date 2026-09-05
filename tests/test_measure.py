@@ -12,8 +12,10 @@ import math
 import unittest
 
 import numpy as np
+import pytest
 
-from haversack import measure, phantoms as ph, ranked
+pytest.importorskip("rankfield")          # haversack.ranked is a shim over it
+from haversack import measure, phantoms as ph, ranked   # noqa: E402
 from haversack.grid import Grid
 
 
@@ -91,12 +93,12 @@ class TestAccuracy(unittest.TestCase):
                 self.assertLess(abs(v / b.volume_mm3 - 1), 0.02)
                 self.assertLess(abs(a / b.area_mm2 - 1), 0.03)
 
-    def test_the_stored_form_is_free_for_volume_and_biases_area_low(self):
-        """The asymmetry, measured. Clip and the uint8 support cost the volume nothing;
-        they cost area 0.3-1.1 %, and always in the same direction, because quantizing a
-        field is a low-pass filter and area is a first-derivative functional. An area
-        read out of a store is a slight under-estimate by construction - still an order
-        of magnitude better than counting, but not a neutral measurement."""
+    def test_the_stored_form_is_free_for_volume_and_nearly_for_area(self):
+        """Clip and the support byte cost the volume nothing. Under the uniform byte they
+        cost area 0.3-1.1 %, always low, because quantizing a field is a low-pass filter
+        and area is a first-derivative functional; the log byte (format 0.3) quantizes the
+        boundary to a few thousandths of a logit and the area error falls below 0.1 %,
+        with no sign left to it."""
         g = _grid()
         losses = []
         for b in (ph.sphere(20.0), ph.torus(26.0, 8.0), ph.star(20.0, 0.15, 4)):
@@ -106,10 +108,8 @@ class TestAccuracy(unittest.TestCase):
                 code = ranked.encode(ph.logits(p, g), depth=2)
                 stored = measure.volume_area(ranked.margin(code, 1), g.spacing)
                 self.assertLess(abs(stored[0] / exact[0] - 1), 0.001, "volume is free")
-                self.assertLess(abs(stored[1] / exact[1] - 1), 0.015)
+                self.assertLess(abs(stored[1] / exact[1] - 1), 0.001, "area is nearly free too")
                 losses.append(stored[1] / exact[1] - 1)
-        self.assertTrue(all(x < 0 for x in losses),
-                        f"quantization should only ever remove area; got {losses}")
 
     def test_a_sharp_crease_reads_low_in_area_but_not_in_volume(self):
         """The known bias, pinned rather than left to be discovered. A trilinear field

@@ -1,5 +1,9 @@
 """Upgrade a ranked store's PARTS to ranked format 0.2, in place.
 
+Format 0.3 (the shell keep rule, rankfield) cannot be produced from 0.2 bytes - the dropped
+classes are gone - so this tool stops at 0.2, which every reader still reads; a 0.3 store
+comes from a new emit.
+
 What 0.2 changed (2026-09-05), and what this does to a store written before it:
 
   * a rank whose support byte is 0 (a gap that rounds to the clip) decodes as absent, so
@@ -22,15 +26,20 @@ from pathlib import Path
 
 import numpy as np
 
-from haversack.ranked import GAP_UNIT, RANKED_VERSION, TAIL_MAX
+from haversack.ranked import GAP_UNIT, TAIL_MAX
 from haversack.ranked_store import open_store
 
+TO_VERSION = "0.2"          # this tool's own target, NOT the library's current format: 0.3 bytes
+                            # (shell gaps, log byte) cannot be made from 0.2 bytes
 STEP = "Ranked format upgraded to 0.2"
 
 
 def _upgrade_part(g, index: int, say) -> dict:
     attrs = g.attrs.asdict()
     block = dict(attrs["duckn"]["extensions"]["ranked"])
+    have = str(block.get("version") or "0.1")
+    if tuple(int(v) for v in have.split(".")[:2]) >= (0, 3):
+        raise SystemExit(f"parts/{index}: already ranked {have}; this tool only brings stores up to {TO_VERSION}")
     if block.get("mode") not in (None, "ranked"):
         raise SystemExit(f"parts/{index}: mode {block.get('mode')!r} is not handled by this tool")
     masked = 0
@@ -59,7 +68,7 @@ def _upgrade_part(g, index: int, say) -> dict:
                            attributes=arr_attrs)
         z[:] = data
         widened = True
-    block.update({"version": RANKED_VERSION, "gap_unit": GAP_UNIT,
+    block.update({"version": TO_VERSION, "gap_unit": GAP_UNIT,
                   "tail_max": (TAIL_MAX if "tail" in g else None)})
     attrs["duckn"]["extensions"]["ranked"] = block
     g.attrs.update(attrs)
@@ -100,12 +109,12 @@ def upgrade(store: Path, quiet: bool = False) -> None:
                                      "uint16; version, gap_unit and tail_max stated; in place",
                       "software": {"name": "ranked_upgrade_format.py",
                                    "url": "https://github.com/mhalle/haversack"},
-                      "parameters": {"to_version": RANKED_VERSION}})
+                      "parameters": {"to_version": TO_VERSION}})
         pv["processing"] = steps
         ext["provenance"] = pv
         attrs["duckn"]["extensions"] = ext
         root.attrs.update(attrs)
-    say(f"{store.name}: {i} part(s) at ranked {RANKED_VERSION}")
+    say(f"{store.name}: {i} part(s) at ranked {TO_VERSION}")
 
 
 def main(argv=None):

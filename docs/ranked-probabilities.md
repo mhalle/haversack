@@ -394,8 +394,9 @@ copy per slab is well overlapped — slab size does not move the number.
 
 ## Where it lives
 
-`src/haversack/ranked.py` is **kernel layer**: torch and numpy only, no knowledge of tasks, plans,
-weights or files, enforced by `tests/test_layering.py`. That is what let the whole module
+`src/haversack/ranked.py` is **kernel layer**: torch, numpy and rankfield (the encoding library
+it is a shim over since 0.6.0), no knowledge of tasks, plans, weights or files, enforced by
+`tests/test_layering.py`. That is what let the whole module
 be shipped to a bare Modal image as a single file for the CUDA check.
 
 The pipeline hook is in `segment()`, between the network and the restore — the only moment the

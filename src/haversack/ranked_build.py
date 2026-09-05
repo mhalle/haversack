@@ -27,6 +27,7 @@ import re
 from pathlib import Path
 
 import numpy as np
+from rankfield import levels as rf_levels
 import zarr
 
 from haversack.ranked_store import (brick_attrs, grid_attrs, grid_reference, group, leaf,
@@ -268,7 +269,7 @@ JUNCTION_ZERO = 128          # the byte ON the interface
 JUNCTION_SPAN = 127          # byte steps from the interface to the truncation, each way
 
 
-def distance_field(ranks, support, clip, spacing, truncation):
+def distance_field(ranks, support, clip, spacing, truncation, levels=None):
     """``(Z, Y, X)`` uint8: how far the nearest surface is, in millimetres.
 
     ONE FIELD, NOT A STACK. It is the distance to the nearest place the argmax changes,
@@ -302,12 +303,12 @@ def distance_field(ranks, support, clip, spacing, truncation):
     the stored field. Two voxels is the floor, and it is expressed in voxels because the grid
     spacing was itself chosen to match the anatomy.
     """
-    d = _crossing_distance(ranks, support, clip, spacing, truncation)
+    d = _crossing_distance(ranks, support, clip, spacing, truncation, _lut(levels, clip))
     q = np.rint((1.0 - d / truncation) * DISTANCE_MAX)
     return np.where(d < truncation, np.clip(q, 0, DISTANCE_MAX), 0).astype(np.uint8)
 
 
-def _deficit_at(rank_cols, support_cols, want, clip):
+def _deficit_at(rank_cols, support_cols, want, clip, lut=None):
     """Logit deficit of class ``want`` at gathered positions.
 
     ``rank_cols`` / ``support_cols`` are ``(planes, N)`` columns gathered at N voxels; a dense
@@ -317,15 +318,23 @@ def _deficit_at(rank_cols, support_cols, want, clip):
     ``l_A - l_B`` regardless of who wins where. A class absent from the rank list is no better
     than the clip, which is the bound the encoding already guarantees.
     """
+    lut = _lut(lut, clip)
     d = np.full(want.shape, np.float32(clip))
     d[rank_cols[0] == want] = 0.0
     for j in range(1, rank_cols.shape[0]):
         hit = rank_cols[j] == want
-        d[hit] = (1.0 - support_cols[j - 1][hit].astype(np.float32) / 255.0) * clip
+        d[hit] = lut[support_cols[j - 1][hit]]          # the block's level table, never a formula
     return d
 
 
-def _crossing_distance(ranks, support, clip, spacing, truncation):
+def _lut(levels, clip):
+    """A 256-entry support -> gap table; format 0.2's uniform one when none is given."""
+    if levels is None:
+        return ((1.0 - np.arange(256, dtype=np.float64) / 255.0) * clip).astype(np.float32)
+    return np.ascontiguousarray(levels, dtype=np.float32)
+
+
+def _crossing_distance(ranks, support, clip, spacing, truncation, lut=None):
     """Distance in mm to the nearest surface: where the argmax changes.
 
     WHICH SURFACE IS FOUND BY THE LABELMAP, NOT BY A RANK PAIR. An earlier version watched the
@@ -362,9 +371,9 @@ def _crossing_distance(ranks, support, clip, spacing, truncation):
         bt = tuple(bt)
         # deficit of the far winner here, and of the near winner there
         dq_a = _deficit_at(ranks[(slice(None),) + at], support[(slice(None),) + at],
-                           win[bt], clip)
+                           win[bt], clip, lut)
         dp_b = _deficit_at(ranks[(slice(None),) + bt], support[(slice(None),) + bt],
-                           win[at], clip)
+                           win[at], clip, lut)
         denom = dq_a + dp_b
         # a tie splits the edge; it is the only sensible reading and it is rare
         t = np.divide(dq_a, denom, out=np.full_like(dq_a, 0.5), where=denom > 1e-9)
@@ -466,7 +475,7 @@ def _eikonal(d, spacing, truncation):
     return padded[core]
 
 
-def junction_field(ranks, support, clip, spacing, truncation, reach=None):
+def junction_field(ranks, support, clip, spacing, truncation, reach=None, levels=None):
     """``(junction, pair)``: the signed distance to the interface between two structures, near
     every TRIPLE LINE, and which two structures it is.
 
@@ -513,7 +522,7 @@ def junction_field(ranks, support, clip, spacing, truncation, reach=None):
     shape = tuple(ranks.shape[1:])
     idx, q, a, b = junction_sparse(lambda z0, z1: ranks[0, z0:z1],
                                    lambda z0, z1: (ranks[:, z0:z1], support[:, z0:z1]),
-                                   shape, clip, spacing, truncation, reach)
+                                   shape, clip, spacing, truncation, reach, levels=levels)
     junction = np.zeros(shape, np.uint8)
     pair = np.zeros((2,) + shape, ranks.dtype)
     junction.reshape(-1)[idx] = q
@@ -522,7 +531,7 @@ def junction_field(ranks, support, clip, spacing, truncation, reach=None):
     return junction, pair
 
 
-def junction_sparse(read_win, read_planes, shape, clip, spacing, truncation, reach=None,
+def junction_sparse(read_win, read_planes, shape, clip, spacing, truncation, reach=None, levels=None,
                     slab=32):
     """The layer as ``(flat_index, byte, a, b)``, computed slab by slab from two readers.
 
@@ -538,7 +547,7 @@ def junction_sparse(read_win, read_planes, shape, clip, spacing, truncation, rea
     idx = _triple_tube(read_win, shape, reach, slab=max(slab, 2 * reach + 2))
     if idx.size == 0:
         return idx, np.zeros(0, np.uint8), np.zeros(0, np.uint8), np.zeros(0, np.uint8)
-    q, a, b = _junction_at(idx, read_planes, shape, clip, h, truncation, slab)
+    q, a, b = _junction_at(idx, read_planes, shape, clip, h, truncation, slab, _lut(levels, clip))
     keep = q > 0
     return idx[keep], q[keep], a[keep], b[keep]
 
@@ -594,7 +603,7 @@ def _triple_tube(read_win, shape, reach, slab):
     return np.concatenate(found)
 
 
-def _junction_at(idx, read_planes, shape, clip, h, truncation, slab):
+def _junction_at(idx, read_planes, shape, clip, h, truncation, slab, lut=None):
     """The pair and the signed byte at sorted flat indices, gathering planes slab by slab."""
     Z, Y, X = shape
     N = idx.size
@@ -641,7 +650,7 @@ def _junction_at(idx, read_planes, shape, clip, h, truncation, slab):
         # halo of one slice holds every neighbour a slab voxel has.
         def m_at(zz, yy, xx):
             loc = (slice(None), zz - a0, yy, xx)
-            return _deficit_at(rk[loc], su[loc], b, clip) - _deficit_at(rk[loc], su[loc], a, clip)
+            return _deficit_at(rk[loc], su[loc], b, clip, lut) - _deficit_at(rk[loc], su[loc], a, clip, lut)
 
         m0 = m_at(z, y, x)
         grad2 = np.zeros(n, np.float32)
@@ -773,8 +782,8 @@ def attrs(direction, eff, origin, *, list_axis, centering):
     return grid_attrs(direction, eff, origin, list_axis=list_axis, centering=centering)
 
 
-CODEC = ("version", "mode", "classes", "depth", "clip", "gap_unit", "support_max",
-         "rank_sentinel", "exhaustive", "max_tail", "tail_max")
+CODEC = ("version", "mode", "classes", "depth", "clip", "gap_unit", "gap_curve", "gap_range",
+         "gap_origin", "keep", "support_max", "rank_sentinel", "exhaustive", "max_tail", "tail_max")
 
 CHUNK4, CHUNK3 = (1, 64, 64, 64), (64, 64, 64)
 
@@ -923,6 +932,13 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
         if "convention" in part:                                   # nnunetv2 only
             block["resample_alignment"] = part["convention"]
             block["nominal_spacing"] = [float(v) for v in part["spacing_zyx"]]
+        if "frame" in part:
+            # The pipeline's own frame record (haversack.frame.Frame.to_meta): the source
+            # grid, the crop, the model shape and the resample convention. With it a reader
+            # rebuilds the exact output-to-model mapping the run used, so the restore can
+            # be redone from the store onto any grid (haversack.ranked_restore). Without it
+            # the store restores only onto grids stated in its own model-grid frame.
+            block["frame"] = part["frame"]
         if "softmax" in part:
             # the identity of the normalization these classes competed in. Two parts share a
             # softmax only if this matches; margins are not comparable otherwise. See the
@@ -976,7 +992,7 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
                     say(f"    distance: emit used {part.get('distance_voxels')} voxels, "
                           f"{distance_voxels} requested - recomputing", flush=True)
                 trunc = float(distance_voxels) * min(eff)
-                dist = distance_field(rk_all, su_all, part["clip"], eff, trunc)
+                dist = distance_field(rk_all, su_all, part["clip"], eff, trunc, levels=rf_levels(block))
             chunks, shards = layout(dist.shape)
             dz = g.create_array("distance", shape=dist.shape, dtype=dist.dtype,
                                 chunks=chunks, shards=shards,
@@ -1008,7 +1024,7 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
                 jidx, jq, ja, jb = junction_sparse(
                     lambda z0, z1: rk_all[0, z0:z1],
                     lambda z0, z1: (rk_all[:, z0:z1], su_all[:, z0:z1]),
-                    tuple(rk_all.shape[1:]), part["clip"], eff, trunc)
+                    tuple(rk_all.shape[1:]), part["clip"], eff, trunc, levels=rf_levels(block))
             n_written = write_junction(
                 g, jidx, jq, ja, jb, tuple(rk_all.shape[1:]), rk_all.dtype,
                 attrs(direction, eff, origin, list_axis=False, centering=centering),

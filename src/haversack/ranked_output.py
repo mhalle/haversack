@@ -24,7 +24,8 @@ from pathlib import Path
 import numpy as np
 
 from haversack.pipeline import segment
-from haversack.ranked import RankedSpec
+# NOT haversack.ranked at module level: the CLI imports this module on every `segment` for
+# `is_store_output`, and ranked is a shim over rankfield, which a plain install lacks.
 
 DISTANCE_VOXELS = 2.0            # truncation of the emitted distance field, in voxels
 
@@ -60,7 +61,8 @@ def _emit_distance(part, code, out):
     t = time.perf_counter()
     eff = _true_spacing(code.meta)
     truncation = DISTANCE_VOXELS * min(eff)
-    dist = distance_field(code.ranks, code.support, clip=float(code.meta["clip"]),
+    from rankfield import levels           # call time: the CLI imports this module on every segment
+    dist = distance_field(code.ranks, code.support, clip=float(code.meta["clip"]), levels=levels(code.meta),
                           spacing_zyx=eff, truncation=truncation, device="cuda")
     np.save(out / f"{part}_distance.npy", dist)
     print(f"  {part:<12} distance on {torch.cuda.get_device_name(0)} in "
@@ -84,7 +86,8 @@ def _emit_junction(part, code, out, dist_meta):
     t = time.perf_counter()
     eff = _true_spacing(code.meta)
     truncation = float(dist_meta["distance_truncation"])
-    jn, jp = junction_field(code.ranks, code.support, clip=float(code.meta["clip"]),
+    from rankfield import levels
+    jn, jp = junction_field(code.ranks, code.support, clip=float(code.meta["clip"]), levels=levels(code.meta),
                             spacing_zyx=eff, truncation=truncation, device="cuda")
     np.save(out / f"{part}_junction.npy", jn)
     np.save(out / f"{part}_junction_pair.npy", jp)
@@ -117,6 +120,7 @@ def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=20.0, *, quiet=Fals
         say(f"  {part:<12} {code!r}  ->  {out.name}/{part}_*.npy")
 
     segment_kw.setdefault("progress", None if quiet else (lambda p: say(f"    {p}")))
+    from haversack.ranked import RankedSpec
     seg = segment(image, task, probabilities=RankedSpec(sink=sink, depth=depth, clip=clip),
                   envelope_mm=envelope_mm, **segment_kw)
 

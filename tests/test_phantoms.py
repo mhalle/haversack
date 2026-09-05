@@ -13,9 +13,11 @@ import math
 import unittest
 
 import numpy as np
+import pytest
 
-from haversack import phantoms as ph
-from haversack import ranked
+pytest.importorskip("rankfield")          # haversack.ranked is a shim over it
+from haversack import phantoms as ph     # noqa: E402
+from haversack import ranked             # noqa: E402
 from haversack.grid import Grid
 
 
@@ -168,8 +170,14 @@ class TestThroughTheEncoder(unittest.TestCase):
         want = ph.margins(p, g, gradient=grad, clip=ranked.CLIP)[1]
         band = np.abs(want) < ranked.CLIP - 2.0          # away from the saturated floor
         err = np.abs(got - want)[band].max()
-        self.assertLess(err, 0.5 * ranked.CLIP / ranked.SUPPORT_MAX * 1.01,
-                        "round-to-nearest should cost at most half a quantum")
+        # the quantum is the level table's, and the log byte's is not uniform: bound by
+        # half the largest step among the levels the band can land on
+        lut = ranked.levels(code.meta)
+        steps = np.abs(np.diff(lut))[lut[1:] < ranked.CLIP - 2.0]
+        self.assertLess(err, 0.5 * float(steps.max()) * 1.01,
+                        "round-to-nearest should cost at most half the local quantum")
+        self.assertLess(np.abs(got - want)[np.abs(want) < 0.5].max(), 0.01,
+                        "and at the boundary the log byte is a few thousandths of a logit")
 
     def test_the_decoded_winner_is_still_the_intended_labelmap(self):
         g, p = _grid(), ph.Phantom((ph.sphere(8.0), ph.torus(16.0, 3.0)))

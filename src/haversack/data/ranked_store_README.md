@@ -57,17 +57,22 @@ Every array is indexed `[..., Z, Y, X]` in **array order** (slowest axis first).
 `support[j]` describes the class named by `ranks[j+1]` (so `support` has one fewer plane than
 `ranks`; there is nothing to store for the winner, which trails by definition by zero).
 
-Convert a stored byte to **logits behind the winner**:
+Convert a stored byte to **logits behind the winner** through the part's level table -
+`rankfield.levels(meta)`, 256 float32 values every reader indexes:
 
 ```
-gap = (1 - support / support_max) * clip          # support_max is normally 255
+uniform (format 0.2, or gap_curve = "uniform"):   gap = (1 - s / 255) * range      range = clip
+log     (format 0.3 default):                     gap = origin * expm1((1 - s / 255) * log1p(range / origin))
+                                                  range = gap_range (64), origin = gap_origin (0.5)
 ```
 
-- `support == support_max` → gap 0 → **tied with the winner**.
-- `support == 0` → gap ≥ `clip` → **at the clip**: this class is indistinguishable from absent.
+- `support == 255` → gap 0 → **tied with the winner**.
+- `support == 0` → gap = the range: at the clip (0.2) or the curve's far end (0.3). A kept
+  class never stores 0 (the writer clamps to 1); 0 is the sentinel's own byte.
 
-Counting *up from the clip* rather than down from the winner is what makes `0` mean "nothing
-here" in this array too.
+Counting *up from the range* rather than down from the winner is what makes `0` mean "nothing
+here" in this array too. The log byte spends its resolution where the argmax is decided:
+one step is 0.004 logits at a tie and 0.12 at the clip (uniform: 0.03 everywhere).
 
 ### `tail` — what was thrown away
 
@@ -282,15 +287,19 @@ import numpy as np, zarr
 
 g    = zarr.open_group("<this directory>", mode="r")["parts/0"]
 meta = g.attrs["duckn"]["extensions"]["ranked"]
-K, clip, smax = meta["classes"], meta["clip"], meta["support_max"]
+K, clip = meta["classes"], meta["clip"]
 
 ranks   = np.asarray(g["ranks"])                    # (N, Z, Y, X)  values are class + 1
 support = np.asarray(g["support"])                  # (N-1, Z, Y, X)
-gap     = lambda s: (1.0 - s / smax) * clip         # bytes -> logits behind the winner
+from rankfield import levels
+lut     = levels(meta)                              # bytes -> logits behind the winner
+gap     = lambda s: lut[s]                          # (uniform over the clip for a 0.2 part)
 
-n_rank, n_sup = ranks.shape[0], support.shape[0]
-# what a class NOT named at this voxel is worth: no better than the last one that was
-floor = -gap(support[n_sup - 1]) if n_sup >= n_rank else np.float32(-clip)
+n_rank = ranks.shape[0]
+# what a class NOT named at this voxel is worth: the clip, the relevance threshold the
+# writer applied (a 0.3 part may name classes further behind than that - a shell class
+# keeps its true gap - but nothing unnamed is nearer than the clip)
+floor = np.float32(-clip)
 
 # Allocate K+1 channels and scatter with `ranks` UNSHIFTED. Because ranks holds class+1, the
 # sentinel 0 lands in scratch channel 0 and every real class lands at class+1. Subtracting 1
@@ -599,12 +608,14 @@ If you are unsure a store is intact:
 
 ## 9. Precision
 
-Values are quantized to one byte over the range `clip`, so one step is `clip / support_max`
-logits (≈ 0.03 at the common `clip = 8`, `support_max = 255`) and any decoded gap is accurate to
-half a step. That is the format's error floor: differences finer than a step are not
-recoverable, which is why exact ties appear in decoded output that were not ties in the model's
-logits. `clip` also bounds what is representable at all — a class more than `clip` logits behind
-the winner is stored as absent and decodes to the floor, not to its true value.
+Values are quantized to one byte through the level table, and any decoded gap is accurate
+to half a step of that table: a 0.2 part's step is `clip / 255` logits everywhere (≈ 0.03 at
+`clip = 8`); a 0.3 part's log byte steps 0.004 logits at a tie and 0.12 at the clip. That is
+the format's error floor: differences finer than a step are not recoverable, which is why
+exact ties appear in decoded output that were not ties in the model's logits. `clip` bounds
+what an UNNAMED class can be worth - it decodes to the floor, not to its true value - which
+in a 0.2 part is every class more than `clip` behind, and in a 0.3 part only those that win
+nowhere in the voxel's 27-neighborhood (a shell class keeps its true gap, however far).
 
 
 ## Viewing a store
@@ -633,5 +644,70 @@ Every reader (verify, sdfview, the slice preview) refuses a part without the ver
 unit. `tools/ranked_upgrade_format.py STORE...` brings an older store up in place (the tail is
 widened exactly; its definition cannot be recomputed without the logits, so an old value is
 carried as it was). What truncation costs a two-plane consumer is measured in
-`haversack/ranked.py`'s header: depth 2 moves the interpolated argmax at 2.1 % of boundary
+rankfield's `docs/format.md`: depth 2 moves the interpolated argmax at 2.1 % of boundary
 cells against depth 6, depth 3 at 0.08 %.
+
+
+## Ranked format 0.3 (2026-09-05, rankfield)
+
+The encoding moved into its own library, **rankfield** (`../rankfield`, `docs/format.md`
+there is the specification): encode, decode, the store-backed restore on torch / Metal /
+Triton and the float64 reference, with no serialization of its own. haversack's `ranked.py`
+is a shim over it and `ranked_restore.py` reads a store into `rankfield.Part`s. The block
+gains `keep`, `gap_curve`, `gap_range` and `gap_origin`; the bytes changed in two ways:
+
+- **`keep: "shell"`.** A class that wins at the voxel or at any of its 26 neighbors is kept
+  with its TRUE gap, however far behind; then the non-winners within the clip; kept entries
+  are ordered by gap, sentinels last. The clip is a relevance threshold and the floor for
+  what is unnamed, no longer a cap on what is stored. Why: flooring a dropped class at
+  `-clip` is an upper bound, so the interpolated winner was over-credited at every cell
+  where a shell neighbor had been dropped, and thin structures grew - on the torso
+  (`total_fast`, 3 mm to 1.5 mm, against the labels the run wrote from its own logits) the
+  left 12th rib by 18.8 % at uniform clip 8, with 0.0596 % of all voxels moved. Depth was
+  never the cause: depth 16 restored bit-identically to depth 6.
+- **`gap_curve: "log"`**, `gap_range` 64, `gap_origin` 0.5: the byte follows a log curve
+  over 0..64 logits, 0.004 logits per step at a tie. Every decoder indexes the same
+  256-entry float32 table, `rankfield.levels(meta)` (a 0.2 part gets the uniform table over
+  its clip from the same call), so numpy, torch, the Metal and Triton kernels and sdfview's
+  `levels.js` agree bit for bit.
+
+Measured on that torso, restore vs the run's own labels: **0.0037 % of voxels, worst
+structure +0.4 %** (the same rib), 2.08 MB against 1.96 MB for uniform 8, 4.01 MB for uniform
+16 (0.0056 % / +2.0 %); companding alone (log or sqrt at a fixed range, no shell) bought
+nothing; a shell of every neighbor never exceeded 6 classes, so depth 6 stays the default
+(cap 8). The number was reproduced through the product path - `haversack segment ...
+-o torso.duckn.zip`, then `haversack restore --spacing 1.5` - on 2026-09-05. A 0.3 store
+cannot be produced from 0.2 bytes (the shell's true gaps were never written), so the demo
+stores stay 0.2, readable everywhere; new emits write 0.3.
+
+
+## Restoring from the store
+
+`haversack.ranked_restore.restore(store, grid="input" | mm | Grid, interp="linear" | "nearest",
+roi=...)` returns labels on that grid, and `haversack restore STORE -o labels.seg.nrrd` (an
+undocumented command, like `view`) writes them in the input's orientation. It is the pipeline's
+restore read from the store: at each output voxel the candidates are the classes stored at the
+eight surrounding model voxels, each candidate's deficit is interpolated (zero where it won,
+minus the gap where it trailed, minus the clip where it is absent) and the largest wins - the
+argmax after interpolation, since the deficit is the logits up to a per-voxel constant. Cells
+whose eight corners share a winner take that winner outright; only boundary cells pay.
+
+The mapping is the run's own: parts built by haversack 0.6.0 or later carry `frame` (the pipeline's
+`Frame.to_meta()`), so output-to-model coordinates are composed exactly as `predict_into` did,
+crop included. A part without a frame restores onto grids stated in its own model-grid frame.
+Work is bounded by the region asked for: an ROI reads only the model chunks that cover it,
+and `roi_of(store, labels)` turns a structure's stored extent into that ROI.
+
+Measured on the torso (`total_fast`, 3 mm to 1.5 mm, 52.5 M voxels, CPU): 10 s linear, 1.6 s
+nearest, one structure's box in 0.02 s; 0.06 % of voxels differed from the labels the run wrote
+from its live logits under format 0.2 (0.0037 % under 0.3, see above), and none from a numpy
+reference restore of the store itself. On a GPU a fused kernel makes the same decisions bit for bit -
+Metal on Apple, Triton on CUDA (proved on Modal with `tools/ranked_restore_modal.py`): 0.36 s
+(M2) / 0.18 s (A10) for those 52.5 M voxels, 0.6 s / 0.3 s for 177 M at 1 mm.
+
+Three rules a reader of this restore should know (from the 2026-09-05 reviews): a tie after
+interpolation - which the support quantum manufactures - goes to the candidate with more
+winner mass, then the lower class index, so a model voxel restores to its stored winner;
+painting is transparent for the DECISION background (class 0), whatever the LUT maps it to,
+as in the pipeline; a store without a frame restores onto grids in its array's own frame,
+with the array's true spacing and direction cosines.

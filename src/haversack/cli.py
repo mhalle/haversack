@@ -122,6 +122,10 @@ def _run(argv=None) -> int:
         # suppressed subcommand's help as '==SUPPRESS==' under this formatter).
         from .view import main_view
         return main_view(argv[1:])
+    if argv[:1] == ["restore"]:
+        # undocumented, the same way: labels from a ranked store, on any grid
+        from .ranked_restore import main_cli
+        return main_cli(argv[1:])
     F = argparse.ArgumentDefaultsHelpFormatter
 
     class Fmt(argparse.RawDescriptionHelpFormatter, F):

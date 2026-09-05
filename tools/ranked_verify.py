@@ -30,7 +30,8 @@ from haversack.ranked_store import open_store, read_segmentation, validate_array
 
 REQUIRED_RANKED = ("version", "mode", "classes", "depth", "clip", "gap_unit", "support_max",
                    "rank_sentinel", "labels", "part", "task", "model_grid", "envelope")
-RANKED_VERSIONS = ("0.2",)   # what this verifier (and every reader in the ecosystem) knows
+RANKED_VERSIONS = ("0.2", "0.3")   # what this verifier (and every reader in the ecosystem) knows
+CURVE_KEYS_03 = ("gap_curve", "gap_range", "gap_origin", "keep")
 
 
 class Report:
@@ -135,6 +136,9 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
         rep.check(str(m["version"]) in RANKED_VERSIONS,
                   f"parts/{i}: ranked block version {m['version']!r} is not one this reader "
                   f"knows {RANKED_VERSIONS} - upgrade with tools/ranked_upgrade_format.py")
+        if str(m["version"]) == "0.3":
+            miss3 = [k for k in CURVE_KEYS_03 if k not in m]
+            rep.check(not miss3, f"parts/{i}: ranked 0.3 block missing {miss3}")
         rep.check(m["gap_unit"] == "logit",
                   f"parts/{i}: gap_unit {m['gap_unit']!r} - margins in another unit are not "
                   "comparable to logits and no reader here handles them yet")
@@ -175,6 +179,9 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
                       f"parts/{i}: tail is {g['tail'].dtype} but tail_max {m.get('tail_max')} "
                       f"says {want_tail}")
 
+        rep.check("frame" in m or "target_grid" in m,
+                  f"parts/{i}: no frame (or target_grid) - the store restores only onto grids "
+                  "given in its own model-grid frame, never onto the input's", warn_only=True)
         if "distance" in g:
             # The quantum is truncation/max, so without both the array is a uint8 with no
             # scale - the same roles `clip`/`support_max` play for `support`.
@@ -284,12 +291,21 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
                 # format 0.2 the encoder writes the sentinel there, so a nonzero rank byte
                 # over a zero support byte is a byte that means nothing
                 sup_arr = g["support"]
+                prev = None
                 for j in range(1, ranks.shape[0]):
                     rj, sj = np.asarray(ranks[j]), np.asarray(sup_arr[j - 1])
                     n = int(((rj != 0) & (sj == 0)).sum())
                     rep.check(n == 0, f"parts/{i}: rank plane {j} has {n} present entries whose "
                                       "support is 0 (at the clip) - masked since format 0.2")
-                    del rj, sj
+                    if prev is not None:
+                        # sentinels form a suffix: once a plane is absent every deeper one is.
+                        # The encoder guarantees it (gaps grow with depth) and the restore
+                        # kernels stop scanning at the first sentinel because of it.
+                        bad = int(((prev == 0) & (rj != 0)).sum())
+                        rep.check(bad == 0, f"parts/{i}: rank plane {j} is present at {bad} voxels "
+                                            f"where plane {j - 1} is the sentinel")
+                    prev = rj
+                    del sj
             rep.check(not (rk0 == 0).any(),
                       f"parts/{i}: ranks[0] holds the sentinel at "
                       f"{int((rk0 == 0).sum())} voxels - every voxel must have a winner")

@@ -229,3 +229,37 @@ def test_in_place_tool_matches_the_dense_function(tmp_path):
     m = g.attrs.asdict()["duckn"]["extensions"]["ranked"]
     assert m["junction_truncation"] == round(T, 6)
     assert m["junction_zero"] == rbs.JUNCTION_ZERO and m["junction_span"] == rbs.JUNCTION_SPAN
+
+
+@pytest.mark.parametrize("name", [n for n in IMPL_NAMES if n != "numpy"])
+def test_the_log_byte_reaches_both_implementations(name):
+    """Format 0.3 bytes (shell keep, log curve) decode through the part's level table, and BOTH
+    implementations must take it: the dense numpy wrapper once accepted `levels` and dropped
+    it, so the reference read log bytes as uniform ones and disagreed with torch by up to 81
+    quanta. Pin: same pairs, bytes within a quantum, and a result that is not the uniform one."""
+    rf = pytest.importorskip("rankfield")
+    import torch
+    rbs = _load_tools()
+    torch_field = pytest.importorskip("haversack.ranked").junction_field
+    n, sp = 24, SP[0]
+    z, y, x = np.meshgrid(*[np.arange(n) * sp] * 3, indexing="ij")
+    c = (n - 1) / 2 * sp
+    rad = np.sqrt((x - c) ** 2 + (y - c) ** 2 + (z - c) ** 2)
+    la = (8.0 - rad) * 0.4
+    lb = -la
+    lbg = np.maximum(la, lb) + ((z - c) * 0.7 + (x - c) * 0.3) * 0.3
+    code = rf.encode(torch.as_tensor(np.stack([lbg, la, lb]), dtype=torch.float32), depth=3)
+    assert code.meta["gap_curve"] == "log"
+    ranks, support = np.asarray(code.ranks), np.asarray(code.support)
+    lut = rf.levels(code.meta)
+    T = 2.0 * sp
+    dev = name.split("-", 1)[1]
+    jn_r, jp_r = rbs.junction_field(ranks, support, CLIP, SP, T, levels=lut)
+    jn_o, jp_o = torch_field(ranks, support, clip=CLIP, spacing_zyx=SP, truncation=T, device=dev, levels=lut)
+    assert jn_r.any()
+    assert (jp_r == jp_o).all(), "the pair planes differ"
+    assert ((jn_r > 0) == (jn_o > 0)).all(), "the tubes differ"
+    diff = np.abs(jn_r.astype(int) - jn_o.astype(int))
+    assert diff.max() <= 1, f"bytes differ by up to {diff.max()} quanta"
+    jn_u, _ = rbs.junction_field(ranks, support, CLIP, SP, T)          # the 0.2 table, wrongly
+    assert (jn_u != jn_r).any(), "the level table made no difference: it was not applied"

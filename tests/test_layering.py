@@ -1,7 +1,8 @@
 """The kernel layer must stay a leaf.
 
 ``haversack`` holds two layers in one package. The kernel modules know nothing about tasks, plans,
-weights or files - torch and numpy only - so they could be lifted into their own package the
+weights or files - torch and numpy only, plus rankfield (the ranked encoding, already lifted out
+as of 0.6.0; ``ranked`` is a shim over it) - so they could be lifted into their own package the
 day something outside wants them (nnU-Net's export path, TotalSegmentator, MOOSE, a CUDA user
 who only needs the fused restore). That property is easy to lose by accident and cheap to
 check, so it is checked here rather than trusted.
@@ -28,7 +29,7 @@ PIPELINE = {"io", "preprocess", "frame", "network", "pipeline", "cli", "tasks", 
             "weights_fetch", "trainers", "result", "cache", "segmenter", "weights", "progress", "job",
             "serve", "client", "modal_app", "sources", "ecosystems", "preview", "statistics",
             "schemas", "content", "jobstore", "cache_admin", "ranked_store", "ranked_build",
-            "ranked_output", "view", "duckn_io"}
+            "ranked_output", "view", "ranked_restore", "duckn_io"}
 # errors.py is deliberately dependency-free (stdlib only) so either layer may raise from it.
 SHARED = {"errors"}
 FORBIDDEN_FOR_KERNEL = {"nnunetv2", "SimpleITK", "nibabel", "scipy", "mlx", "totalsegmentator",
@@ -92,7 +93,34 @@ class TestLayering(unittest.TestCase):
                 if mod in FORBIDDEN_FOR_KERNEL:
                     self.assertIn(name, SCIPY_OK_AT_CALL_TIME if mod == "scipy" else set(),
                                   f"{name}.py:{line} imports {mod!r} at module level; the kernel "
-                                  f"layer must stay torch + numpy so it can be extracted")
+                                  f"layer must stay torch + numpy (+ rankfield) so it can be extracted")
+
+    def test_the_default_path_does_not_need_the_ranked_store_extra(self):
+        """rankfield, duckn and zarr are the `duckn` extra: the undocumented ranked store. A
+        plain install has none of them, and `haversack segment IN -o labels.nii.gz` must still
+        run - which it did not for a moment in 0.6.0, when the store-output check the CLI
+        makes on EVERY segment imported a module that imported rankfield at module level.
+        So: block the three, import the default path, run the CLI's error path."""
+        import subprocess
+        import sys
+        code = (
+            "import sys, importlib.abc\n"
+            "class Block(importlib.abc.MetaPathFinder):\n"
+            "    def find_spec(self, name, path=None, target=None):\n"
+            "        if name.split('.')[0] in ('rankfield', 'duckn', 'zarr'):\n"
+            "            raise ModuleNotFoundError(name)\n"
+            "sys.meta_path.insert(0, Block())\n"
+            "import haversack, haversack.cli, haversack.pipeline, haversack.segmenter\n"
+            "import haversack.statistics, haversack.preview, haversack.client\n"
+            "try:\n    import fastapi\nexcept ImportError:\n    pass\nelse:\n    import haversack.serve\n"
+            "rc = haversack.cli.main(['segment', 'x.nii.gz', '--task', 'total_fast', '-o', 'out.bogus'])\n"
+            "assert rc == 2, rc\n"
+            "rc = haversack.cli.main(['segment', 'missing.nii.gz', '--task', 'total_fast', '-o', 'out.nii.gz'])\n"
+            "assert rc == 2, rc\n"
+        )
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr[-1500:])
+        self.assertNotIn("Traceback", r.stderr)
 
     def test_no_module_depends_on_the_mlx_toolkit(self):
         for path in sorted(SRC.rglob("*.py")):

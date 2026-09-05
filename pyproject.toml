@@ -67,7 +67,7 @@ preview = ["matplotlib"]
 # CUDA-only acceleration for the nnU-Net worker: the Triton restore backend (picked
 # automatically on CUDA). No macOS/Linux-CPU wheels, so it is opt-in - only the GPU base
 # image syncs it. haversack falls back to the numpy/torch restore without it.
-cuda = ["triton"]
+cuda = ["triton>=3.0"]   # enable_fp_fusion as a launch option: the ranked restore needs it
 test = ["pytest", "pydicom", "fastapi", "httpx", "python-multipart"]
 # `[torch]` is an empty alias kept so that `haversack[torch]` in existing commands and docs
 # still installs (the stack is core since 2026-09-03).
@@ -105,7 +105,8 @@ monai = ["monai>=1.4", "torch>=2.7", "nibabel", "itk", "pytorch-ignite", "einops
 # beside the torch extra. The dev env adds it: `uv sync --extra torch ... --extra duckn`.
 # Both need Python 3.12 (zarr 3.3 and duckn set that floor); below it the extra is empty
 # rather than pulling haversack's own floor up for an internal feature.
-duckn = ["duckn; python_version >= '3.12'", "zarr>=3.3; python_version >= '3.12'"]
+duckn = ["duckn; python_version >= '3.12'", "zarr>=3.3; python_version >= '3.12'",
+         "rankfield; python_version >= '3.12'"]   # the ranked encoding + restore (github, a tag)
 
 [build-system]
 requires = ["hatchling"]
@@ -151,6 +152,7 @@ conflicts = [
 ]
 
 [tool.uv.sources]
+rankfield = { git = "https://github.com/mhalle/rankfield.git", tag = "v0.1.0" }
 # nnunetv2 comes from PyPI: haversack uses only stock nnunetv2 APIs (verified against 2.8.1). It
 # used to be a `path = "../upstream/nnUNet"` source here, but uv applies these sources to a
 # `git+https://...` install too, and that relative path exists only in the dev workspace - so

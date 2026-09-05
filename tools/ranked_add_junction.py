@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from rankfield import levels as rf_levels
 
 from haversack.ranked_build import (JUNCTION_SPAN, JUNCTION_ZERO, junction_sparse,
                                     write_junction, write_readme)
@@ -85,7 +86,7 @@ def add(store: Path, force=False):
         idx, q, a, b = junction_sparse(
             lambda z0, z1: ranks[0, z0:z1],
             lambda z0, z1: (ranks[:, z0:z1], support[:, z0:z1]),
-            shape, block["clip"], spacing, trunc)
+            shape, block["clip"], spacing, trunc, levels=rf_levels(block))
         n = write_junction(g, idx, q, a, b, shape, ranks.dtype,
                            _attrs_like(ranks, list_axis=False), _attrs_like(ranks, list_axis=True),
                            trunc, block)
