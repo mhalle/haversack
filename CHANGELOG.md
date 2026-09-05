@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0] - 2026-09-05
+
+**Ranked format 0.2** (internal, undocumented; every reader refuses older parts, and
+`tools/ranked_upgrade_format.py` brings a store up in place). From a critique of the encoding:
+
+- A rank whose support byte is 0 - a gap that rounds to the clip - is written as the
+  sentinel, since it decoded as absent anyway; the verifier's deep check enforces it.
+- Each part's block states `version`, `gap_unit` (`logit` for a softmax head) and `tail_max`.
+- The tail is uint16 and is the mass of everything not stored, the classes past the depth
+  and the masked ones alike.
+- `decode_groups` has a byte-valued fast path for disjoint groups, bit-identical to the
+  general one.
+- A round-trip test: the store's argmax, composited in paint order and aligned through both
+  geometries, equals the labels the run wrote. The truncation bias of a two-plane consumer is
+  measured and stated in the module header (depth 2: 2.1 % of boundary cells against depth 6).
+
 ## [0.4.4] - 2026-09-04
 
 - **Weights installs report progress.** A `prepare` job used to show one static `weights`

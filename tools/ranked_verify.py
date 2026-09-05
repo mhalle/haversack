@@ -28,8 +28,9 @@ from duckn import validate_seg_data
 
 from haversack.ranked_store import open_store, read_segmentation, validate_array
 
-REQUIRED_RANKED = ("version", "mode", "classes", "depth", "clip", "support_max",
+REQUIRED_RANKED = ("version", "mode", "classes", "depth", "clip", "gap_unit", "support_max",
                    "rank_sentinel", "labels", "part", "task", "model_grid", "envelope")
+RANKED_VERSIONS = ("0.2",)   # what this verifier (and every reader in the ecosystem) knows
 
 
 class Report:
@@ -131,6 +132,12 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
                       f"{m['classes']}")
             rep.check(bool(soft.get("weights")), f"parts/{i}: softmax names no weights")
 
+        rep.check(str(m["version"]) in RANKED_VERSIONS,
+                  f"parts/{i}: ranked block version {m['version']!r} is not one this reader "
+                  f"knows {RANKED_VERSIONS} - upgrade with tools/ranked_upgrade_format.py")
+        rep.check(m["gap_unit"] == "logit",
+                  f"parts/{i}: gap_unit {m['gap_unit']!r} - margins in another unit are not "
+                  "comparable to logits and no reader here handles them yet")
         K, smax, sent = m["classes"], m["support_max"], m["rank_sentinel"]
         rep.check(len(m["labels"]) == K,
                   f"parts/{i}: labels has {len(m['labels'])} entries for {K} classes")
@@ -162,6 +169,11 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
                       f"parts/{i}: support grid {tuple(g['support'].shape[1:])} != ranks {shape}")
         rep.check(m.get("exhaustive") or "tail" in g,
                   f"parts/{i}: not exhaustive but no tail array", warn_only=True)
+        if "tail" in g:
+            want_tail = "uint16" if int(m.get("tail_max") or 0) > 255 else "uint8"
+            rep.check(str(g["tail"].dtype) == want_tail,
+                      f"parts/{i}: tail is {g['tail'].dtype} but tail_max {m.get('tail_max')} "
+                      f"says {want_tail}")
 
         if "distance" in g:
             # The quantum is truncation/max, so without both the array is a uint8 with no
@@ -267,6 +279,17 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
 
         if deep:
             rk0 = np.asarray(ranks[0])
+            if "support" in g:
+                # a present rank whose support is at the clip decodes as absent: since
+                # format 0.2 the encoder writes the sentinel there, so a nonzero rank byte
+                # over a zero support byte is a byte that means nothing
+                sup_arr = g["support"]
+                for j in range(1, ranks.shape[0]):
+                    rj, sj = np.asarray(ranks[j]), np.asarray(sup_arr[j - 1])
+                    n = int(((rj != 0) & (sj == 0)).sum())
+                    rep.check(n == 0, f"parts/{i}: rank plane {j} has {n} present entries whose "
+                                      "support is 0 (at the clip) - masked since format 0.2")
+                    del rj, sj
             rep.check(not (rk0 == 0).any(),
                       f"parts/{i}: ranks[0] holds the sentinel at "
                       f"{int((rk0 == 0).sum())} voxels - every voxel must have a winner")

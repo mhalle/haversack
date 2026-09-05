@@ -614,3 +614,24 @@ the store on this machine and opens it (`--no-browser` skips opening the browser
 free port; `/stores` lists every store given). The page is `data/preview.html`, built in the sdfview checkout with
 `npm run build:preview` and copied here; it reads a directory store file by file and a zip
 by Range request. Undocumented, like the store.
+
+
+## Ranked format 0.2 (2026-09-05)
+
+Every part's `ranked` block now states `version` (`"0.2"`), `gap_unit` (`"logit"` for a softmax
+head: what the gaps, the levels and the clip are measured in, which decides what may be
+averaged or compared) and `tail_max`. Three things changed in the bytes:
+
+- a rank whose support byte is 0 (a gap that rounds to the clip) is written as the sentinel,
+  since it decoded as absent anyway - the verifier's deep check enforces it;
+- the tail is uint16 (`tail_max` 65535), so its quantum is 1/65535 of the mass, and it is
+  the mass of everything NOT stored - the classes past the depth and the masked ones alike;
+- the union decode has a byte-valued fast path for disjoint groups, bit-identical to the
+  general one (and the same one sdfview's decoder has always used).
+
+Every reader (verify, sdfview, the slice preview) refuses a part without the version and the
+unit. `tools/ranked_upgrade_format.py STORE...` brings an older store up in place (the tail is
+widened exactly; its definition cannot be recomputed without the logits, so an old value is
+carried as it was). What truncation costs a two-plane consumer is measured in
+`haversack/ranked.py`'s header: depth 2 moves the interpolated argmax at 2.1 % of boundary
+cells against depth 6, depth 3 at 0.08 %.

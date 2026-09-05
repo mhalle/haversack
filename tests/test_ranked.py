@@ -498,3 +498,60 @@ class TestDecodeGroups(unittest.TestCase):
             with self.assertRaises(TypeError) as cm:
                 fn()
             self.assertIn("decode_groups", str(cm.exception))
+
+
+class TestFormat02(unittest.TestCase):
+    """Format 0.2 (2026-09-05): masking on the rounded support, a uint16 tail over the stored
+    set, the version and unit stated, and a byte-valued fast path that matches the general
+    decode bit for bit."""
+
+    def test_the_block_states_its_version_unit_and_tail_width(self):
+        code = ranked.encode(_logits(K=12), depth=3)
+        self.assertEqual(code.meta["version"], ranked.RANKED_VERSION)
+        self.assertEqual(code.meta["gap_unit"], "logit")
+        self.assertEqual(code.meta["tail_max"], 65535)
+        self.assertEqual(code.tail.dtype, np.uint16)
+        full = ranked.encode(_logits(K=4), depth=4)
+        self.assertIsNone(full.tail)
+        self.assertIsNone(full.meta["tail_max"])
+        self.assertEqual(ranked.encode_regions(_logits(K=3)).meta["gap_unit"], "logit")
+
+    def test_a_present_rank_never_sits_over_a_zero_support(self):
+        # gaps exactly in the last half-quantum below the clip used to keep their rank
+        lg = torch.zeros((3, 2, 2, 2))
+        lg[1] = -(ranked.CLIP - 0.001)             # rounds to support 0: absent
+        lg[2] = -(ranked.CLIP - 0.1)               # support 3: present
+        code = ranked.encode(lg, depth=3)
+        for j in range(1, 3):
+            self.assertFalse(((code.ranks[j] != 0) & (code.support[j - 1] == 0)).any())
+        self.assertTrue((code.ranks[1] == 3).all())          # class 2 kept at rank 1
+        self.assertTrue((code.ranks[2] == 0).all())          # class 1 masked
+
+    def test_the_tail_is_the_mass_of_everything_not_stored(self):
+        lg = _logits(K=12)
+        code = ranked.encode(lg, depth=3)
+        ids, p = ranked.probabilities(code)
+        # the stored classes carry their absolute mass; the tail is the rest
+        np.testing.assert_allclose(p.sum(0) + code.tail / 65535.0, 1.0, atol=2.0 / 65535)
+        # the tail says what the decoder does not see: softmax mass of the absent classes
+        soft = torch.softmax(lg.double(), 0).numpy()
+        present = np.zeros(soft.shape, bool)
+        for j in range(3):
+            live = code.ranks[j] > 0
+            np.put_along_axis(present, np.where(live, code.ranks[j].astype(np.int64) - 1, 0)[None],
+                              live[None], axis=0)
+        absent_mass = (soft * ~present).sum(0)
+        np.testing.assert_allclose(code.tail / 65535.0, absent_mass, atol=1.0 / 65535)
+
+    def test_the_disjoint_fast_path_matches_the_general_decode_bit_for_bit(self):
+        code = ranked.encode(_logits(K=10, shape=(5, 9, 11)), depth=4)
+        groups = [[0], [1, 2], [3, 4, 5], [7]]
+        fast = ranked.decode_groups(code, groups)
+        # the same groups with one class shared force the general path
+        general = ranked.decode_groups(code, groups + [[7, 8]])[:4]
+        self.assertTrue(torch.equal(fast, general))
+        qf = ranked.decode_groups(code, groups, quantize=True)
+        qg = ranked.decode_groups(code, groups + [[7, 8]], quantize=True)[:4]
+        self.assertTrue(torch.equal(qf, qg))
+        # and both agree with the per-channel numpy reference for a group of one
+        np.testing.assert_allclose(fast[0].numpy(), ranked.margin(code, 0), atol=1e-6)

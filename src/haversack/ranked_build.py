@@ -773,8 +773,8 @@ def attrs(direction, eff, origin, *, list_axis, centering):
     return grid_attrs(direction, eff, origin, list_axis=list_axis, centering=centering)
 
 
-CODEC = ("mode", "classes", "depth", "clip", "support_max", "rank_sentinel",
-         "exhaustive", "max_tail")
+CODEC = ("version", "mode", "classes", "depth", "clip", "gap_unit", "support_max",
+         "rank_sentinel", "exhaustive", "max_tail", "tail_max")
 
 CHUNK4, CHUNK3 = (1, 64, 64, 64), (64, 64, 64)
 
@@ -915,8 +915,7 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
         # Axis order is not spelled in these keys. duckn states it structurally - `axes` is
         # positional, one entry per array axis - so a per-axis list here is in array order by
         # the same rule, and a `_zyx` suffix would be our vocabulary, not the format's.
-        block = {"version": "0.1",
-                 **{k: part[k] for k in CODEC if k in part},
+        block = {**{k: part[k] for k in CODEC if k in part},
                  "model_grid": grid,
                  "envelope": as_extent(start, stop),               # inclusive, like duckn
                  "labels": lut, "part": name,

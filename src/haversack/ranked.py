@@ -50,6 +50,21 @@ Region (sigmoid) heads have no winner and no normalizer, so ranking buys nothing
 but their logit IS already such a margin, referenced to the decision threshold. That is
 what :func:`encode_regions` writes, and it decodes through the same ``margin`` call, so a
 consumer never needs to know which head produced a file.
+
+*What truncation costs.* Where a class is stored at one corner of an interpolation stencil
+and absent at the next, the interpolant uses ``-clip`` for the missing corner - a lower
+bound - so near the depth boundary the interpolated argmax leans toward the classes that
+stayed in. Measured on the abdomen of a real K=118 case at 3 mm, at in-plane cell centres
+against depth 6: depth 2 changes the interpolated argmax at 2.1 % of boundary
+cells (cells whose corners disagree; 0.09 % of all cells), depth 3 at 0.08 %. Consumers that read
+two planes (an atlas, a slice preview) pay that; the store itself, at depth 6, does not.
+
+*The encoding is per part.* One softmax, one grid, one set of planes; the ``gap_unit`` says
+what the gaps and the clip are measured in (``logit`` for a softmax head), which decides
+what may be averaged or compared. Nothing here says how two parts combine: a multi-part
+store records a paint order and the compositor applies painter's rule over ``ranks[0]``,
+and margins from different parts are not comparable unless their ``softmax`` blocks match.
+That is the store's rule (see the store README), not the encoding's.
 """
 from __future__ import annotations
 
@@ -59,15 +74,17 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 
+RANKED_VERSION = "0.2"   # the ranked block's format; readers refuse what they do not know
+GAP_UNIT = "logit"       # what gaps, levels and the clip are measured in for a softmax head
 CLIP = 8.0            # logits behind the winner past which a class reads as absent
 SUPPORT_MAX = 255     # uint8: 0 = at/beyond the clip, 255 = tied with the winner
 ZERO_LEVEL = 128      # regions only: the level the decision boundary lands on exactly
-TAIL_MAX = 255
+TAIL_MAX = 65535      # uint16: the tail's quantum is 1/65535 of the mass, not 1/255
 DEFAULT_DEPTH = 6
 
-__all__ = ["CLIP", "DEFAULT_DEPTH", "RankedCode", "RankedSpec", "decode_groups", "deficit",
-           "distance_field", "emit", "encode", "encode_regions", "margin",
-           "probabilities", "to_device"]
+__all__ = ["CLIP", "DEFAULT_DEPTH", "GAP_UNIT", "RANKED_VERSION", "RankedCode", "RankedSpec",
+           "decode_groups", "deficit", "distance_field", "emit", "encode", "encode_regions",
+           "margin", "probabilities", "to_device"]
 
 
 @dataclass(frozen=True)
@@ -191,7 +208,7 @@ def encode(logits: torch.Tensor, *, depth: int = DEFAULT_DEPTH, clip: float = CL
 
     ranks = np.empty((N, Z, Y, X), rdt)
     support = np.empty((N - 1, Z, Y, X), np.uint8) if N > 1 else np.empty((0, Z, Y, X), np.uint8)
-    tail = None if (exhaustive or not with_tail) else np.empty((Z, Y, X), np.uint8)
+    tail = None if (exhaustive or not with_tail) else np.empty((Z, Y, X), np.uint16)
     max_tail = 0.0
 
     for z0 in range(0, Z, max(1, int(slab))):
@@ -202,27 +219,39 @@ def encode(logits: torch.Tensor, *, depth: int = DEFAULT_DEPTH, clip: float = CL
         gaps = top[0:1] - top                            # >= 0, and gaps[0] is exactly 0
 
         r = (idx + 1).to(torch.int32)
+        beyond = None
         if N > 1:
-            beyond = gaps[1:] >= clip
-            r[1:][beyond] = 0                            # sentinel: not this class here
             sup = ((1.0 - gaps[1:] / clip).clamp(0, 1) * SUPPORT_MAX).round()
+            # Masked on the ROUNDED support: a gap that rounds to the clip decodes as
+            # absent whatever its rank byte says, so the rank byte is the sentinel too.
+            # Masking on the raw gap left ~0.25 % of present ranks carrying a byte that
+            # meant nothing (2026-09-05).
+            beyond = sup <= 0
+            r[1:][beyond] = 0                            # sentinel: not this class here
             support[:, z0:z1] = sup.to(torch.uint8).cpu().numpy()
         ranks[:, z0:z1] = r.cpu().numpy().astype(rdt, copy=False)
 
         if tail is not None:
-            # the only place all K channels are looked at: what the top N discards
+            # the only place all K channels are looked at: the mass of everything NOT
+            # stored - the classes past N and the masked ones alike, so that what the
+            # tail says is missing is exactly what a decoder finds absent
             z_full = torch.exp(lg - top[0:1]).sum(0)
-            z_top = torch.exp(-gaps).sum(0)
+            kept = torch.exp(-gaps)
+            if beyond is not None:
+                kept[1:][beyond] = 0.0
+            z_top = kept.sum(0)
             t = ((z_full - z_top) / z_full).clamp(0, 1)
             max_tail = max(max_tail, float(t.max()))
-            tail[z0:z1] = (t * TAIL_MAX).round().to(torch.uint8).cpu().numpy()
+            tail[z0:z1] = (t * TAIL_MAX).round().cpu().numpy().astype(np.uint16)
         del lg, top, idx, gaps
 
     return RankedCode(ranks=ranks, support=support, tail=tail, meta={
-        "mode": "ranked", "classes": K, "depth": N, "clip": float(clip),
+        "version": RANKED_VERSION, "mode": "ranked", "classes": K, "depth": N,
+        "clip": float(clip), "gap_unit": GAP_UNIT,
         "rank_dtype": np.dtype(rdt).name, "support_max": SUPPORT_MAX,
         "rank_sentinel": 0, "exhaustive": bool(exhaustive),
         "max_tail": (0.0 if exhaustive else max_tail),
+        "tail_max": (None if tail is None else TAIL_MAX),
         "shape": [Z, Y, X],
     })
 
@@ -251,10 +280,11 @@ def encode_regions(logits: torch.Tensor, *, clip: float = CLIP, threshold: float
         support[:, z0:z1] = q.clamp(1, SUPPORT_MAX).to(torch.uint8).cpu().numpy()
         del m, q
     return RankedCode(ranks=None, support=support, tail=None, meta={
-        "mode": "regions", "classes": K, "depth": K, "clip": float(clip),
+        "version": RANKED_VERSION, "mode": "regions", "classes": K, "depth": K,
+        "clip": float(clip), "gap_unit": GAP_UNIT,
         "threshold": float(threshold), "support_max": SUPPORT_MAX,
         "signed_support": True, "support_zero": ZERO_LEVEL, "exhaustive": True,
-        "max_tail": 0.0, "shape": [Z, Y, X],
+        "max_tail": 0.0, "tail_max": None, "shape": [Z, Y, X],
     })
 
 
@@ -302,7 +332,6 @@ def deficit(code: RankedCode, channel: int) -> np.ndarray:
     through ``deficit``, 99.98 % and 99.4 %. Nearest-neighbor restore hides the difference
     entirely, because it never mixes voxels.
     """
-    clip = float(code.meta["clip"])
     out = margin(code, channel)
     if code.meta.get("mode") == "regions":
         return out                                            # no winner: nothing to remove
@@ -435,9 +464,17 @@ def decode_groups(code: RankedCode, groups, *, device=None,
     ranks = plane(code.ranks)
     sup = plane(code.support)
     memb = torch.zeros((G, K + 1), dtype=torch.bool, device=dev)   # indexed BY RANK VALUE
+    owner = torch.full((K + 1,), -1, dtype=torch.int64, device=dev)
+    disjoint = True
     for g, members in enumerate(groups):
         for c in members:
             memb[g, c + 1] = True                                  # 0 stays False: absent
+            if owner[c + 1] >= 0:
+                disjoint = False
+            owner[c + 1] = g
+    if disjoint and G:
+        out = _decode_disjoint(ranks, sup, owner, G, shape, clip, dev)
+        return _quantize_margin(out, clip) if quantize else out
 
     d_in = torch.full((G,) + shape, -clip, dtype=torch.float32, device=dev)
     d_out = torch.full((G,) + shape, -clip, dtype=torch.float32, device=dev)
@@ -455,6 +492,47 @@ def decode_groups(code: RankedCode, groups, *, device=None,
         del rj, present, level, mine
     out = d_in.sub_(d_out)                                         # in place: reuse d_in
     return _quantize_margin(out, clip) if quantize else out
+
+
+def _decode_disjoint(ranks, sup, owner, G, shape, clip, dev):
+    """The common case, disjoint groups, with the running maxima kept as BYTES.
+
+    Rank 0 is never the sentinel and sits at level 0, the highest level there is. So for
+    every group that does not own the winner the non-member maximum is exactly 0 and the
+    union's margin is its best member level; only the winner's own group needs the best
+    non-member level. Levels are monotone in the stored byte, so the maxima are taken on
+    the bytes - a quarter of the traffic of float32 accumulators - and converted once, with
+    the same expression the general path uses per plane, so the result is bit-identical
+    (tests pin it). This is the fast path sdfview's decoder has had since it was written.
+    """
+    V = 1
+    for n in shape:
+        V *= n
+    r0 = ranks[0].long().reshape(V)
+    g0 = owner[r0]                                             # -1: nobody owns the winner
+    best = torch.zeros((G, V), dtype=torch.uint8, device=dev)  # best member byte per group
+    out_b = torch.zeros(V, dtype=torch.uint8, device=dev)      # best non-member byte, winner's group
+    idx = torch.arange(V, device=dev)
+    has = g0 >= 0
+    best[g0[has], idx[has]] = SUPPORT_MAX                      # the winner: level 0
+    for j in range(1, ranks.shape[0]):
+        rj = ranks[j].long().reshape(V)
+        present = rj != 0
+        s = sup[j - 1].reshape(V)
+        gj = owner[rj]
+        mine = present & (gj >= 0)
+        gi, ii = gj[mine], idx[mine]
+        best[gi, ii] = torch.maximum(best[gi, ii], s[mine])
+        other = present & (gj != g0) & has
+        out_b = torch.where(other, torch.maximum(out_b, s), out_b)
+    def level(b):                                              # the general path's expression
+        return -(1.0 - b.to(torch.float32) / SUPPORT_MAX) * clip
+    out = torch.empty((G, V), dtype=torch.float32, device=dev)
+    lv_out = level(out_b)
+    for g in range(G):
+        winner_here = g0 == g
+        out[g] = torch.where(winner_here, 0.0 - lv_out, level(best[g]) - 0.0)
+    return out.reshape((G,) + shape)
 
 
 def _quantize_margin(m: torch.Tensor, clip: float) -> torch.Tensor:
@@ -490,7 +568,8 @@ def probabilities(code: RankedCode) -> tuple[np.ndarray, np.ndarray]:
     if code.tail is None:
         z = z_top
     else:
-        z = z_top / np.clip(1.0 - code.tail.astype(np.float32) / TAIL_MAX, 1e-6, None)
+        tail_max = float(code.meta.get("tail_max") or 255)    # pre-0.2 stores: uint8
+        z = z_top / np.clip(1.0 - code.tail.astype(np.float32) / tail_max, 1e-6, None)
     ids = code.ranks.astype(np.int64) - 1                     # sentinel 0 -> -1 (absent)
     p = w / z
     p[ids < 0] = 0.0

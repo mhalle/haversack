@@ -80,3 +80,47 @@ def test_the_store_output_may_not_be_the_input(tmp_path):
     src.mkdir()
     with pytest.raises(InputError, match="is the input"):
         segment_to_store(str(src), "total_fast", src)
+
+
+def test_the_stores_argmax_is_the_runs_labels(tmp_path, monkeypatch):
+    """The property the store is sold on: what a reader decodes is what the run wrote. On the
+    model grid the restore is the identity, so ranks[0] through each part's label table,
+    composited in paint order, must equal the labels voxel for voxel."""
+    from haversack import pipeline
+    organs, ribs = _ShapedStub(ORGANS._props), _StubModel(RIBS._props)
+    spec, store, cache = _two_part_task(tmp_path, [organs, ribs])
+    monkeypatch.setattr(pipeline, "as_store", lambda *a, **k: store)
+    out = tmp_path / "rt.duckn"
+    seg, _ = segment_to_store(str(_write_ct(tmp_path)), spec, out, case="rt",
+                              models=cache, device="cpu", envelope_mm=None, grid="input",
+                              convention="corner", folds=(0,), quiet=True)
+    with rs.open_store(out) as st:
+        order = st.root.attrs["duckn"]["extensions"]["haversack"]["part_order"]
+        painted = None
+        for p in order:
+            g = st.root[f"parts/{p['index']}"]
+            lut = np.asarray(g.attrs["duckn"]["extensions"]["ranked"]["labels"])
+            win = np.asarray(g["ranks"][0]).astype(np.int64) - 1
+            labels = lut[win]
+            painted = labels if painted is None else np.where(labels > 0, labels, painted)
+        store_dirs = [ax["space_direction"] for ax in g["ranks"].attrs["duckn"]["axes"]
+                      if ax.get("space_direction")]                # store axes z,y,x in LPS
+    # The store is on the model grid in canonical orientation; the labels are in the
+    # input's. Align through the geometries - the world direction of each store axis
+    # against the world direction of each label-array axis - never by assumed order.
+    D = np.asarray(seg.labels.GetDirection()).reshape(3, 3)       # SimpleITK: LPS, columns x,y,z
+    label_dirs = [D[:, 2 - k] for k in range(3)]                  # array axes z,y,x
+    perm, flips = [], []
+    for sd in store_dirs:
+        dots = [float(np.dot(sd, ld)) / (np.linalg.norm(sd) * np.linalg.norm(ld)) for ld in label_dirs]
+        k = int(np.argmax(np.abs(dots)))
+        assert abs(dots[k]) > 0.999, "the stub grids are axis-aligned"
+        perm.append(k)
+        flips.append(dots[k] < 0)
+    assert sorted(perm) == [0, 1, 2]
+    aligned = np.transpose(seg.array, perm)                      # label axes into store order
+    for axis, f in enumerate(flips):
+        if f:
+            aligned = np.flip(aligned, axis=axis)
+    assert painted.shape == aligned.shape, (painted.shape, aligned.shape)
+    assert (painted == aligned).all()
