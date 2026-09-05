@@ -1,5 +1,51 @@
 # Changelog
 
+## [0.6.1] - 2026-09-05
+
+Fixes from five adversarial reviews of 0.6.0 (the library, the store path, an outsider's
+install, the default path against 0.5.0, the viewer), with rankfield moved to 0.1.2.
+
+- **A lean install (README's own recipe, no torch) died on `haversack segment`**: the
+  store-output name check imported a module that imported the pipeline. The check now lives in
+  `haversack.io` with nothing behind it, and a test runs the CLI with torch, nnunetv2, scipy,
+  skimage and the store extra all blocked.
+- **The ranked API says what it needs.** `haversack.ranked` (`RankedSpec`, `margin`, `encode`,
+  ...) is a shim over rankfield, which the `duckn` extra installs; in 0.6.0 a plain install
+  got a raw ModuleNotFoundError. The import, `haversack restore` and `segment -o x.duckn.zip`
+  now answer in one line naming the extra, before anything is computed.
+- **Python 3.12 is the floor**, one floor for everything: the `duckn` extra's per-package
+  markers made it empty on 3.10 and rankfield-only on 3.11, silently.
+- **Store geometry follows the crop.** The array's true spacing and origin were derived from
+  the full canonical grid, not from the crop-to-nonzero sub-grid the resample ran on (every
+  nnU-Net-native lineage): a 60^3 crop of a 100^3 source placed the store 19 mm off with a
+  67 % spacing error. One derivation now serves the builder and the emit; the restore was never
+  affected, since it follows the frame. No shipped store is affected: TotalSegmentator and
+  FastSurfer never crop.
+- **rankfield 0.1.2**: `margin()` read a winner's sentinel byte as level 0 - the log curve's far
+  end, 64 logits - instead of the clip, on 15 % of a real field's voxels; the field
+  measurements in statistics consumed it. Encoding is now reproducible across devices (`topk`
+  selected arbitrarily among tied keys; the tail summed in device order). The Metal and Triton
+  kernels check the label table's length. The 0.6.0 note that the log byte made area free was
+  that bug: under a correct margin the area a store gives up is again 0.3-1.1 %, always low,
+  and the test says so.
+- `haversack restore`: an output grid past 2^31 voxels, or one that does not fit in memory
+  (torch raises RuntimeError, not MemoryError), is an InputError naming the grid; an unknown
+  `--device` too.
+- `segment -o x.duckn.zip`: the target is checked for writability before the network runs;
+  `--spacing` is refused (the store is on the model grid); the report names the store, not the
+  discarded label grid.
+- Provenance records what was built (`parts_kept`, the derived layers present,
+  `distance_voxels`) instead of constants, and the product path writes `provenance.sources`
+  naming the input as given (`idc:...`, or the file); the verifier refuses a 0.3 store whose
+  embedded README documents the 0.2 byte.
+- Statistics asked for field measurements say in the JSON whether they came
+  (`field_measurements.available`, with the reason), instead of dropping the columns silently.
+- `haversack.RemoteClient` is exported as the README says; the README says which extras pip
+  can install (the git-sourced engine and store extras need uv).
+- The slice preview (sdfview) refuses a part without a clip and null curve keys; its 3-D
+  renderer decodes the rival gap through the level table (it read log bytes with the uniform
+  formula) and refuses parts on different grids, clips or curves.
+
 ## [0.6.0] - 2026-09-05
 
 **The ranked encoding is its own library.** encode / decode / the store-backed restore on

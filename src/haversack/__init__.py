@@ -33,6 +33,7 @@ from .tables import AxisTable, build_tables
 # shuffleup); keeping them lazy is what makes `import haversack` torch-free.
 _LAZY = {
     "segment": ("pipeline", "segment"),
+    "RemoteClient": ("client", "RemoteClient"),      # httpx: the remote extra, so lazy
     "TorchModel": ("network", "TorchModel"),
     "resample_data": ("resample", "resample_data"),
     "available_backends": ("restore", "available_backends"),
@@ -67,7 +68,7 @@ def __dir__():
 # Part of the result-cache key (serve.result_key): bumping it invalidates cached results.
 # 0.2.0 does exactly that - multi-model tasks before it ran parts 2..N on the first
 # model's normalization, so every cached `total` result predating it is degraded.
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 __all__ = [
     # the API most callers need
     "segment", "Segmenter", "Segmentation", "Job", "Progress", "CancelToken", "ModelCache", "TaskCatalog", "TaskSpec", "io",
@@ -80,4 +81,5 @@ __all__ = [
     "AxisTable", "ShuffleUp3d", "available_backends", "backends", "build_tables", "margins",
     "resample_argmax", "resample_data", "resample_paint", "swap_transposed", "to_labels",
     "__version__",
+    "RemoteClient",
 ]
