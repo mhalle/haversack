@@ -149,6 +149,16 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
         if str(m["version"]) == "0.3":
             miss3 = [k for k in CURVE_KEYS_03 if k not in m]
             rep.check(not miss3, f"parts/{i}: ranked 0.3 block missing {miss3}")
+            # Values, not just presence: a block that names a curve no reader knows, or a
+            # range or origin that describes none, passes a key check and then fails inside
+            # every decoder. Ask the reference reader itself - what it refuses, this refuses.
+            rep.check(m.get("keep") in ("shell", "clip"),
+                      f"parts/{i}: keep {m.get('keep')!r} is not a keep rule (shell, clip)")
+            try:
+                import rankfield
+                rankfield.levels(m)
+            except Exception as e:                 # noqa: BLE001 - the refusal is the finding
+                rep.check(False, f"parts/{i}: the level table cannot be built from this block: {e}")
         rep.check(m["gap_unit"] == "logit",
                   f"parts/{i}: gap_unit {m['gap_unit']!r} - margins in another unit are not "
                   "comparable to logits and no reader here handles them yet")
