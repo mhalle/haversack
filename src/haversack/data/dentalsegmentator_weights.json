@@ -1,0 +1,16 @@
+{
+ "source": "https://zenodo.org/api/records/10829675 + the zip's own dataset.json (read by Range)",
+ "tasks": {
+  "base": {
+   "url": "https://zenodo.org/records/10829675/files/Dataset112_DentalSegmentator_v100.zip?download=1",
+   "tag": "v100",
+   "folder": "Dataset112_DentalSegmentator_v100",
+   "release": "zenodo:10829675",
+   "modality": "CT",
+   "structures": 5,
+   "description": "dento-maxillo-facial CBCT and CT: upper skull, mandible, upper and lower teeth, mandibular canal",
+   "license": "cc-by-4.0",
+   "md5": "b71cd5230168d28a4f71b078265b76be"
+  }
+ }
+}

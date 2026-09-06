@@ -1,0 +1,131 @@
+{
+ "source": "https://api.github.com/repos/robert-graf/VibeSegmentator/releases/tags/v1.0.0 + each zip's own dataset.json / plans.json (read by Range)",
+ "note": "labels and the orientation the model must see are read from each installed checkpoint's own dataset.json, never from here",
+ "repository": "https://github.com/robert-graf/VibeSegmentator",
+ "release_assets": [
+  "001",
+  "011",
+  "012",
+  "080",
+  "085",
+  "086",
+  "087",
+  "098",
+  "099",
+  "100",
+  "278",
+  "282",
+  "511",
+  "512",
+  "520",
+  "524",
+  "527",
+  "538",
+  "540"
+ ],
+ "unverified": {
+  "tasks": [
+   "body_regions",
+   "vertebrae",
+   "vibe_sagittal"
+  ],
+  "why": "the GitHub API publishes no digest for these assets, so their download cannot be checked against one; every other task is verified against the sha256 the release states"
+ },
+ "excluded": {
+  "001": "single-channel and would run, but is outside the curated set - never exercised here, so not offered as a task",
+  "011": "single-channel and would run, but is outside the curated set - never exercised here, so not offered as a task",
+  "080": "single-channel and would run, but is outside the curated set - never exercised here, so not offered as a task",
+  "085": "2 input channels (any, noNorm); multi-channel nnU-Net input is not on haversack's nnU-Net path; also a cascade cropped by dataset 278's output",
+  "086": "2 input channels (any, noNorm); multi-channel nnU-Net input is not on haversack's nnU-Net path; also a cascade cropped by dataset 278's output",
+  "087": "single-channel and would run, but is outside the curated set - never exercised here, so not offered as a task",
+  "098": "the published asset carries no dataset.json / plans.json beside its checkpoint, so nothing can describe or run it",
+  "282": "3 input channels (fat_fraction, eco0-opp1, eco1-pip1); multi-channel nnU-Net input is not on haversack's nnU-Net path",
+  "512": "single-channel and would run, but is outside the curated set - never exercised here, so not offered as a task",
+  "520": "the published asset carries no dataset.json / plans.json beside its checkpoint, so nothing can describe or run it",
+  "524": "single-channel and would run, but is outside the curated set - never exercised here, so not offered as a task",
+  "527": "single-channel and would run, but is outside the curated set - never exercised here, so not offered as a task"
+ },
+ "tasks": {
+  "vibe": {
+   "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/100.zip",
+   "tag": "v1.0.0",
+   "folder": "Dataset100",
+   "release": "v1.0.0",
+   "dataset_id": "100",
+   "modality": "MR",
+   "structures": 72,
+   "description": "whole-torso VIBE MRI (axial), the flagship model",
+   "license": "Apache-2.0",
+   "sha256": "97483c90952bd988c58e8a040a59e685183a259d903c42e25f1b78224082f4fe"
+  },
+  "vibe_sagittal": {
+   "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/099.zip",
+   "tag": "v1.0.0",
+   "folder": "Dataset099",
+   "release": "v1.0.0",
+   "dataset_id": "099",
+   "modality": "MR",
+   "structures": 72,
+   "description": "whole-torso VIBE MRI, sagittal acquisition",
+   "license": "Apache-2.0"
+  },
+  "ct_bones": {
+   "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/012.zip",
+   "tag": "v1.0.0",
+   "folder": "Dataset012",
+   "release": "v1.0.0",
+   "dataset_id": "012",
+   "modality": "CT",
+   "structures": 92,
+   "description": "whole-body bone and organ CT at 0.8 mm",
+   "license": "Apache-2.0",
+   "sha256": "c53fd265fe713023c1d24955f05770f996f7aaac5c850e96958f3c760e0630a3"
+  },
+  "body_regions": {
+   "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/278.zip",
+   "tag": "v1.0.0",
+   "folder": "Dataset278",
+   "release": "v1.0.0",
+   "dataset_id": "278",
+   "modality": "MR",
+   "structures": 11,
+   "description": "body-region splitter (head, thorax, abdomen, ...)",
+   "license": "Apache-2.0"
+  },
+  "vertebrae": {
+   "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/511.zip",
+   "tag": "v1.0.0",
+   "folder": "Dataset511",
+   "release": "v1.0.0",
+   "dataset_id": "511",
+   "modality": "MR",
+   "structures": 28,
+   "description": "vertebra and intervertebral-disc instances, C1 to the sacrum",
+   "license": "Apache-2.0"
+  },
+  "feet_bones": {
+   "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/538.zip",
+   "tag": "v1.0.0",
+   "folder": "Dataset538",
+   "release": "v1.0.0",
+   "dataset_id": "538",
+   "modality": "CT",
+   "structures": 36,
+   "description": "bones of the feet, CT at 0.8 mm",
+   "license": "Apache-2.0",
+   "sha256": "0dceeeb30c8f4ec441019c043a193156141bfb1bcb7c11191b754fc871eae8ac"
+  },
+  "pancreas": {
+   "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/540.zip",
+   "tag": "v1.0.0",
+   "folder": "Dataset540",
+   "release": "v1.0.0",
+   "dataset_id": "540",
+   "modality": "MR",
+   "structures": 1,
+   "description": "pancreas",
+   "license": "Apache-2.0",
+   "sha256": "ca78f6a7b586eb18acd094e32677ff41b62f6487f63fabc0fad16cbdfa787c6a"
+  }
+ }
+}

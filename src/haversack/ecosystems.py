@@ -59,6 +59,8 @@ from .tasks import TaskCatalog, TaskSpec
 
 MOOSE_MANIFEST = Path(__file__).parent / "data" / "moose_weights.json"
 MRSEGMENTATOR_MANIFEST = Path(__file__).parent / "data" / "mrsegmentator_weights.json"
+DENTALSEGMENTATOR_MANIFEST = Path(__file__).parent / "data" / "dentalsegmentator_weights.json"
+TOTALVIBE_MANIFEST = Path(__file__).parent / "data" / "totalvibe_weights.json"
 
 
 def manifest_entry(entries: dict, task: str, *, what: str = "", generator: str = "") -> dict:
@@ -238,7 +240,13 @@ class ModelEcosystem:
                     out["unresolved"] = str(e)
                     return out
                 out["modality"] = spec.modality
-                out["structures"] = sorted(spec.label_map.values())
+                # LABEL order, matching Segmenter.describe - not alphabetical. And
+                # the labels themselves: a caller reading a result needs label ->
+                # name, and cannot assume the labels are 1..N (feet_bones uses
+                # 1-17 and 99-117) or that the names sort meaningfully (several
+                # checkpoints name their structures with numbers).
+                out["structures"] = [spec.label_map[k] for k in sorted(spec.label_map)]
+                out["label_map"] = {str(k): spec.label_map[k] for k in sorted(spec.label_map)}
             else:
                 # a catalog of engine models reads its own metadata per task
                 out.update(self.describe_task(task, root))
@@ -741,6 +749,152 @@ class MRSegmentatorEcosystem(ModelEcosystem):
         entry = self._entries.get(task, {})
         out["tag"] = entry.get("tag")
         out["orientation"] = "LPS"
+        return out
+
+
+class DentalSegmentatorEcosystem(ZipManifestEcosystem):
+    """DentalSegmentator (Dot et al., Journal of Dentistry 2024; weights CC BY 4.0):
+    one stock nnU-Net v2 model for dento-maxillo-facial CT and CBCT - upper skull,
+    mandible, upper teeth, lower teeth and the mandibular canal.
+
+    **Its plans permute the axes** (``transpose_forward=(1, 0, 2)``), which
+    haversack refuses by default, so running it needs ``allow_transpose=True``
+    (the command line and the server each expose it as ``--allow-transpose``). The transposed path has
+    since been checked against nnU-Net's own predictor on this model - 99.86 % of
+    voxels, Dice 0.999 on the two large structures - but the gate is a
+    project-wide policy and is left as it is.
+
+    The reference client (the DentalSegmentator Slicer extension) also removes
+    connected components under 60 mm³ from every structure except the mandibular
+    canal; haversack does no post-processing, so its output carries speckle that
+    the reference tool would have cleaned.
+
+    Otherwise the plainest possible catalog on :class:`ZipManifestEcosystem`: the Zenodo
+    asset carries its own ``Dataset112_DentalSegmentator_v100/`` parent, so the
+    default install (unpack into ``<root>/dentalsegmentator/``) is already right
+    and only the manifest differs. Two details are the packaging's, not the
+    model's: the archive is zipped by macOS and carries an ``__MACOSX`` tree,
+    which the installer drops, and Zenodo publishes an md5 rather than a sha256,
+    which is therefore what is verified.
+    """
+
+    name = "dentalsegmentator"
+    description = "DentalSegmentator CBCT / CT dento-maxillo-facial model"
+    modality = "CT"                       # CBCT too; the checkpoint declares "CT"
+    bucket = "dentalsegmentator"
+    MANIFEST = DENTALSEGMENTATOR_MANIFEST
+    generator = "tools/gen_dentalsegmentator_manifest.py"
+
+
+
+
+class TotalVibeEcosystem(ZipManifestEcosystem):
+    """TotalVibeSegmentator (Graf et al., Apache-2.0): stock nnU-Net v2 models for
+    whole-torso VIBE MRI, plus the CT and single-organ models published beside
+    them - ``vibe`` (72 structures, axial), ``vibe_sagittal``, ``ct_bones``,
+    ``body_regions``, ``vertebrae``, ``feet_bones`` and ``pancreas``.
+
+    Two things differ from the MOOSE shape, both properties of the packaging:
+
+    - **The zip has no Dataset parent.** Its top level is the
+      ``<trainer>__<plans>__<config>`` folder (five of the seven also carry an
+      ``other_downloads.json`` beside it, naming the extra-fold assets upstream
+      would fetch next), so ``_unpack_into`` puts the contents inside
+      the ``Dataset<id>`` directory this catalog creates - which is what
+      upstream's own downloader does, and what makes the result an ordinary
+      nnU-Net results tree.
+    - **The orientation is per model and the checkpoint states it.** Upstream
+      reorients every input to a model's own axis codes before the network (RAS
+      for the whole-body and CT models, LPS for the body-region, vertebra and
+      pancreas ones) while the plans still declare ``SimpleITKIO``, which does not
+      reorient. That is MRSegmentator's LPS problem exactly, except here upstream
+      records the answer in each ``dataset.json`` - so :meth:`spec` reads it and
+      nothing is hardcoded.
+
+    The release publishes more models than this catalog offers, and the manifest
+    accounts for **every** one of them: seven tasks, and twelve recorded
+    exclusions with a reason each - multi-channel (the nnU-Net path takes one
+    input image), unreadable (published without ``dataset.json``/``plans.json``),
+    or single-channel but outside the curated set. ``tools/gen_totalvibe_manifest.py``
+    verifies each reason against the asset and refuses to run if the release
+    grows a model that is in neither list, so a drop cannot be silent. Upstream's
+    extra ``_1``/``_2`` assets are further folds; haversack's default is fold 0,
+    so the base asset is what installs.
+
+    Three assets are published with no digest, and the manifest says which
+    (``unverified``): their download is checked against nothing, because GitHub
+    states nothing to check it against.
+
+    ``vibe_sagittal`` and ``pancreas`` permute the axes in their plans, so they
+    need ``allow_transpose=True`` like :class:`DentalSegmentatorEcosystem`; the
+    other five run by default.
+
+    ``feet_bones`` carries a ``labels_mapping`` that upstream applies after
+    inference, renumbering 19 of its structures into the 99-117 range. haversack
+    does not apply it, so its label INTEGERS differ from upstream's for that task
+    while the names are unchanged and correctly paired - ``mask("100")`` finds the
+    same structure either way, but a numerical diff against an upstream NIfTI
+    will not line up.
+
+    ``body_regions`` and ``feet_bones`` report numbered structures (``"1"``,
+    ``"2"``, ...) because that is what their checkpoints' own ``dataset.json``
+    calls them. Upstream names those regions in its README only, and a class map
+    written here from prose is the stale-class-map failure this package refuses
+    everywhere else - so the numbers stand until upstream names them.
+    """
+
+    name = "totalvibe"
+    description = "TotalVibeSegmentator whole-body VIBE MRI and CT models"
+    bucket = "totalvibe"
+    MANIFEST = TOTALVIBE_MANIFEST
+    generator = "tools/gen_totalvibe_manifest.py"
+
+    def _unpack_into(self, task: str, root) -> Path:
+        # the archive's top level is the configuration folder itself; the
+        # Dataset<id> parent is this catalog's to create
+        return self._folder(task, root)
+
+    def _declared_orientation(self, task: str, root) -> str | None:
+        """The axis codes the installed checkpoint's own dataset.json asks for."""
+        from .tasks import resolve_model_folder
+        try:
+            folder = resolve_model_folder(self._folder(task, root))
+            raw = json.loads((folder / "dataset.json").read_text()).get("orientation")
+        except (OSError, ValueError, ModelNotFound):
+            return None
+        code = "".join(str(c) for c in raw).upper() if isinstance(raw, (list, tuple)) \
+            else str(raw or "").upper()
+        # one letter per anatomical axis, each axis named once - anything else is
+        # not an orientation and must not reach DICOMOrient
+        pairs = ("RL", "AP", "SI")
+        if len(code) == 3 and all(sum(c in pair for c in code) == 1 for pair in pairs):
+            return code
+        return None
+
+    def spec(self, task: str, root) -> TaskSpec:
+        import dataclasses
+        spec = super().spec(task, root)
+        # Both facts are applied HERE rather than in info(), so `describe()` -
+        # which builds its answer from the spec - cannot disagree with `info()`,
+        # and cannot report a modality that flips once the weights are installed.
+        fields = {}
+        orientation = self._declared_orientation(task, root)
+        if orientation is not None:
+            fields["orientation"] = orientation
+        modality = (self._entries.get(task) or {}).get("modality")
+        if modality:
+            fields["modality"] = modality
+        return dataclasses.replace(spec, **fields) if fields else spec
+
+    def info(self, task: str, root) -> dict:
+        out = super().info(task, root)
+        # modality/description/dataset_id come from the manifest through the base:
+        # a channel named "any" or "ct" is a contrast claim, not a modality, and
+        # upstream states the modality in prose.
+        if out["materialized"]:
+            orientation = self._declared_orientation(task, root)
+            if orientation:
+                out["orientation"] = orientation
         return out
 
 
@@ -1369,7 +1523,8 @@ def default_ecosystems() -> list:
     """The catalogs this deployment serves: the nnU-Net ones, plus one per
     enabled engine. Enablement is the registry's answer (read from the
     environment per call), so the catalog and the workers cannot disagree."""
-    ecos = [TSEcosystem(), MooseEcosystem(), MRSegmentatorEcosystem()]
+    ecos = [TSEcosystem(), MooseEcosystem(), MRSegmentatorEcosystem(),
+            DentalSegmentatorEcosystem(), TotalVibeEcosystem()]
     ecos += [cls() for engine, cls in _ENGINE_ECOSYSTEMS.items()
              if _registry.enabled(engine)]
     return ecos

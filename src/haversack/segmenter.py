@@ -234,6 +234,10 @@ class Segmenter:
              "engine": (info or {}).get("engine", NNUNETV2),
              "shape": spec.shape, "n_structures": len(spec.label_map),
              "structures": [spec.label_map[k] for k in sorted(spec.label_map)],
+             # label -> name, because a caller reading a result cannot assume the
+             # labels are 1..N (totalvibe:feet_bones uses 1-17 and 99-117) and
+             # `structures` alone leaves them guessing
+             "label_map": {str(k): spec.label_map[k] for k in sorted(spec.label_map)},
              "weights": [str(w) for w in spec.weights_ids],
              "folds_default": list(self.policy["folds"]),
              "configuration": self.policy["configuration"]}

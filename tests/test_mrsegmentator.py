@@ -95,7 +95,10 @@ def test_install_lands_the_flat_zip_in_a_configuration_folder(tmp_path):
     assert spec.lineage == "nnunetv2" and spec.modality == "MR" and spec.orientation == "LPS"
     assert set(spec.label_map.values()) == {"spleen", "right_kidney", "left_kidney"}
     info = eco.info("base", tmp_path)
-    assert info["materialized"] and info["structures"] == ["left_kidney", "right_kidney", "spleen"]
+    # LABEL order, matching describe() - not alphabetical: a caller reading a
+    # labelmap needs the order the labels are in, and info carries the mapping
+    assert info["materialized"] and info["structures"] == ["spleen", "right_kidney", "left_kidney"]
+    assert info["label_map"] == {"1": "spleen", "2": "right_kidney", "3": "left_kidney"}
     # idempotent, and a matching pin is satisfied by the sidecar
     with _serve(b"not a zip"):
         eco.ensure("base", tmp_path)

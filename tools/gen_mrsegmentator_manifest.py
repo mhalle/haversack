@@ -18,8 +18,9 @@ import re
 import struct
 import sys
 import urllib.request
-import zlib
 from pathlib import Path
+
+import zippeek
 
 UPSTREAM_CONFIG = ("https://raw.githubusercontent.com/hhaentze/MRSegmentator/master/"
                    "src/mrsegmentator/config.py")
@@ -39,66 +40,15 @@ def parse_registry(config_py: str) -> dict:
     raise SystemExit("MODEL_REGISTRY not found in config.py")
 
 
-def _fetch(url: str, start: int, end: int) -> bytes:
-    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return r.read()
-
-
-def _central_directory(url: str) -> dict:
-    """{member name: (method, compressed size, local header offset)} via two Range reads."""
-    with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=120) as r:
-        total = int(r.headers["Content-Length"])
-    tail = _fetch(url, max(0, total - 66000), total - 1)
-    i = tail.rfind(b"PK\x05\x06")
-    _, cd_size, cd_off = struct.unpack("<HII", tail[i + 10:i + 20])
-    if cd_off == 0xFFFFFFFF:                                  # zip64
-        j = tail.rfind(b"PK\x06\x06")
-        cd_size, cd_off = struct.unpack("<QQ", tail[j + 40:j + 56])
-    cd = _fetch(url, cd_off, cd_off + cd_size - 1)
-    out, p = {}, 0
-    while p < len(cd) and cd[p:p + 4] == b"PK\x01\x02":
-        method, = struct.unpack("<H", cd[p + 10:p + 12])
-        csize, usize = struct.unpack("<II", cd[p + 20:p + 28])
-        nlen, elen, clen = struct.unpack("<HHH", cd[p + 28:p + 34])
-        off, = struct.unpack("<I", cd[p + 42:p + 46])
-        name = cd[p + 46:p + 46 + nlen].decode()
-        extra = cd[p + 46 + nlen:p + 46 + nlen + elen]
-        if 0xFFFFFFFF in (csize, usize, off):
-            q = 0
-            while q < len(extra):
-                hid, hsz = struct.unpack("<HH", extra[q:q + 4])
-                if hid == 1:
-                    vals = list(struct.unpack("<" + "Q" * (hsz // 8), extra[q + 4:q + 4 + hsz - hsz % 8]))
-                    if usize == 0xFFFFFFFF: usize = vals.pop(0)
-                    if csize == 0xFFFFFFFF: csize = vals.pop(0)
-                    if off == 0xFFFFFFFF: off = vals.pop(0)
-                q += 4 + hsz
-        out[name] = (method, csize, off)
-        p += 46 + nlen + elen + clen
-    return out
-
-
-def _member_head(url: str, cd: dict, name: str, limit: int | None = None) -> bytes:
-    method, csize, off = cd[name]
-    lh = _fetch(url, off, off + 29)
-    nlen, elen = struct.unpack("<HH", lh[26:30])
-    start = off + 30 + nlen + elen
-    data = _fetch(url, start, start + (csize if limit is None else min(csize, limit)) - 1)
-    if method == 8:
-        return zlib.decompressobj(-15).decompress(data)
-    return data
-
-
 def describe_zip(url: str) -> dict:
-    cd = _central_directory(url)
+    cd = zippeek.central_directory(url)
     names = set(cd)
     if "plans.json" not in names or "dataset.json" not in names:
         raise SystemExit(f"{url}: not a flat nnU-Net configuration folder ({sorted(names)[:8]}...)")
-    plans = json.loads(_member_head(url, cd, "plans.json"))
-    version = json.loads(_member_head(url, cd, "version.json")) if "version.json" in names else {}
+    plans = json.loads(zippeek.member_head(url, cd, "plans.json"))
+    version = json.loads(zippeek.member_head(url, cd, "version.json")) if "version.json" in names else {}
     ckpt = next(n for n in sorted(names) if re.fullmatch(r"fold_\w+/checkpoint_final\.pth", n))
-    head = _member_head(url, cd, ckpt, limit=3_000_000)      # data.pkl is the first member
+    head = zippeek.member_head(url, cd, ckpt, limit=3_000_000)      # data.pkl is the first member
     # the value is a pickle BINUNICODE: opcode 'X', a 4-byte little-endian length, the bytes -
     # read exactly that many, or the memo opcode that follows rides along as garbage
     m = re.search(rb"trainer_name.{0,40}?X(.{4})", head, re.DOTALL)
@@ -114,7 +64,7 @@ def describe_zip(url: str) -> dict:
     folds = sorted(n.split("/")[0] for n in names if re.fullmatch(r"fold_\w+/checkpoint_final\.pth", n))
     return {"folder": f"{plans['dataset_name']}/{trainer}__{plans['plans_name']}__{config}",
             "weights_version": version.get("weights_version"), "folds": folds,
-            "structures": sum(1 for v in json.loads(_member_head(url, cd, "dataset.json"))["labels"].values()
+            "structures": sum(1 for v in json.loads(zippeek.member_head(url, cd, "dataset.json"))["labels"].values()
                               if v != 0)}
 
 
