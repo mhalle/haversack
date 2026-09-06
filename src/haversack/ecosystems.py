@@ -1030,7 +1030,7 @@ def _download_and_extract_zip(url: str, dest_parent: Path, *, progress=None,
     import tempfile
     import urllib.request
     from .progress import InstallProgress
-    from .weights_fetch import _content_length
+    from .weights_fetch import _content_length, user_agent
     say = InstallProgress.of(progress)
     scratch = Path(work_dir) if work_dir is not None else dest_parent
     scratch.mkdir(parents=True, exist_ok=True)
@@ -1041,7 +1041,10 @@ def _download_and_extract_zip(url: str, dest_parent: Path, *, progress=None,
     with tempfile.NamedTemporaryFile(suffix=".zip", dir=scratch, delete=False) as tmp:
         tmp_path = Path(tmp.name)
         try:
-            with urllib.request.urlopen(url, timeout=1800) as r:
+            # Named, not Python's default: one host refuses ``Python-urllib`` (see
+            # ``user_agent``), and a 403 here read as a dead asset
+            req = urllib.request.Request(url, headers={"User-Agent": user_agent()})
+            with urllib.request.urlopen(req, timeout=1800) as r:
                 total, done = _content_length(r), 0
                 say.download(done, total, what)
                 while chunk := r.read(1 << 20):

@@ -13,17 +13,42 @@ run under `uv run --no-project python tools/<generator>.py`.
 import json
 import re
 import struct
+import urllib.error
 import urllib.request
 import zlib
 
+#: What these readers identify as. The installer sends ``haversack/<version>``
+#: (haversack.weights_fetch.user_agent); this is the same name without the
+#: version a --no-project script cannot import. It matters: the Cloudflare rule
+#: in front of model.s.mdforge.com (MOOSE's ``clin_ct_dental``) answers 403 to
+#: Python's default ``Python-urllib/3.x`` and 200 to anything that says who is
+#: asking, so a generator using the default would describe that asset as dead.
+USER_AGENT = "haversack"
+
+
+def request(url: str, **kw) -> urllib.request.Request:
+    headers = {"User-Agent": USER_AGENT, **kw.pop("headers", {})}
+    return urllib.request.Request(url, headers=headers, **kw)
+
+
+def head_status(url: str) -> int:
+    """The HTTP status a HEAD gets, sent the way the installer will send it.
+    A 4xx/5xx is returned, not raised; a failure below HTTP (DNS, refused,
+    timeout) still raises ``urllib.error.URLError``."""
+    try:
+        with urllib.request.urlopen(request(url, method="HEAD"), timeout=60) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
 
 def content_length(url: str) -> int:
-    with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=120) as r:
+    with urllib.request.urlopen(request(url, method="HEAD"), timeout=120) as r:
         return int(r.headers["Content-Length"])
 
 
 def fetch_range(url: str, start: int, end: int) -> bytes:
-    req = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
+    req = request(url, headers={"Range": f"bytes={start}-{end}"})
     with urllib.request.urlopen(req, timeout=120) as r:
         return r.read()
 
@@ -80,6 +105,13 @@ def member_head(url: str, cd: dict, name: str, limit: int | None = None) -> byte
 
 def read_json(url: str, cd: dict, name: str) -> dict:
     return json.loads(member_head(url, cd, name))
+
+
+def top_level(url: str) -> list:
+    """The names the archive unpacks to at its top level, junk excluded - what
+    haversack.ecosystems._unpack compares against the manifest folder before
+    moving anything into place."""
+    return sorted({n.split("/")[0] for n in central_directory(url) if not is_junk(n)})
 
 
 def is_junk(name: str) -> bool:

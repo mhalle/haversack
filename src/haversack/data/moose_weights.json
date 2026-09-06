@@ -1,5 +1,8 @@
 {
  "source": "moosez/models.py",
+ "excluded": {
+  "clin_mr_FVM": "the archive does not unpack to the folder the registry names, so haversack's installer would refuse it and moosez's own extractor would not find a model where it looks (the archive's top level is ['clin_mr_FVM'], the registry names 'Dataset501_FVM'; https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.2.0/clin_mr_FVM_30032026.zip)"
+ },
  "tasks": {
   "clin_ct_body": {
    "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_body_27112023.zip",
@@ -45,6 +48,21 @@
    "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_digestive_06102024.zip",
    "folder": "Dataset999_Digestive",
    "tag": "06102024"
+  },
+  "clin_ct_ALPACA": {
+   "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_ALPACA.zip",
+   "folder": "Dataset080_Alpaca",
+   "tag": "v.3.1.3"
+  },
+  "clin_ct_PUMA": {
+   "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_PUMA_1k_23052024.zip",
+   "folder": "Dataset002_PUMA",
+   "tag": "23052024"
+  },
+  "clin_ct_PUMA4": {
+   "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_PUMA4_06032024.zip",
+   "folder": "Dataset003_PUMA4",
+   "tag": "06032024"
   },
   "clin_ct_body_composition": {
    "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_body_composition_05092024.zip",

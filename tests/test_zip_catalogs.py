@@ -445,6 +445,30 @@ def test_a_download_that_is_not_an_archive_is_an_error_not_a_traceback(tmp_path)
         assert not eco.materialized("base", tmp_path)
 
 
+def test_a_weights_download_says_who_is_asking(tmp_path):
+    """The installer sent Python's default User-Agent, and the Cloudflare rule in
+    front of MOOSE's one non-GitHub asset (``clin_ct_dental``) answers that with
+    403 and anything named with 200 - so a live asset failed mid-install as if
+    it were dead. The request must carry the package's name and version."""
+    import urllib.request
+    from haversack import __version__
+    from haversack import ecosystems as eco_mod
+    payload = _nested_zip(litter=False)
+    seen = []
+
+    def urlopen(req, *a, **k):
+        seen.append(req)
+        return _Resp(payload)
+
+    with mock.patch.object(urllib.request, "urlopen", urlopen):
+        eco_mod._download_and_extract_zip("http://h/w.zip", tmp_path)
+    assert len(seen) == 1
+    req = seen[0]
+    assert isinstance(req, urllib.request.Request), "a bare URL is sent as Python-urllib"
+    assert req.get_header("User-agent") == f"haversack/{__version__}"
+    assert (tmp_path / "Dataset112_DentalSegmentator_v100").is_dir()
+
+
 def test_a_checkpoint_whose_dataset_json_is_corrupt_is_not_installed(tmp_path):
     """`installed` meant the file existed, not that it parsed - so a corrupt
     archive installed "successfully", made materialized() true forever, and then

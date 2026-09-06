@@ -57,6 +57,19 @@ Two data sources and two model catalogs, each on the extension seam that already
   refuses to run if the release grows a model in neither list. `feet_bones` keeps nnU-Net's
   label integers where upstream renumbers them into 99-117; the names are unchanged and
   correctly paired, but a numerical diff against an upstream volume will not line up.
+- **MOOSE offers 24 of upstream's 25 models and records the one it does not.** The
+  generator's name pattern was lowercase-only, so `clin_ct_ALPACA`, `clin_ct_PUMA`,
+  `clin_ct_PUMA4` and `clin_mr_FVM` fell through it without a word: 21 models shipped and
+  nothing said the registry held more. The three CT models are ordinary single-channel
+  checkpoints under their own `Dataset*` folder and are offered now: `clin_ct_ALPACA` (aorta,
+  pulmonary artery, both iliac arteries and both ventricles), `clin_ct_PUMA` (23 whole-body
+  organs and tissues) and `clin_ct_PUMA4` (22, with the bowel and the fat compartments split
+  out). `clin_mr_FVM` is excluded: its zip unpacks to `clin_mr_FVM/` with `Dataset501_FVM` a
+  level down, so haversack's installer would refuse it and moosez's own extractor would not
+  find a model where it looks. The manifest records that under `excluded`, the generator reads
+  the reason off the archive rather than taking it on trust, and it now refuses to run when any
+  `KEY_URL` block in the registry does not parse as an entry - so the next layout change is an
+  error, not a missing model.
 - **`base` is now an ambiguous short name**, since MRSegmentator already had one. That is the
   documented behavior for a collision, but it will break a script that says `task="base"`.
 - **One install for three packagings, `ZipManifestEcosystem`.** MOOSE, DentalSegmentator and
@@ -81,8 +94,19 @@ Two data sources and two model catalogs, each on the extension seam that already
 - **Digests are whichever the publisher states** - Zenodo publishes md5, GitHub sha256, and
   the install sidecar records the one it verified under that name. Three
   TotalVibeSegmentator assets are published with no digest at all and are checked against
-  nothing; the manifest records which and why. So are all 21 MOOSE assets, which predates this
+  nothing; the manifest records which and why. So are all 24 MOOSE assets, which predates this
   change and is not something it fixes.
+- **`moose:clin_ct_dental` installs.** Its asset is the one MOOSE entry not hosted as a
+  GitHub release, and the Cloudflare rule in front of `model.s.mdforge.com` answers 403 to
+  Python's default `Python-urllib/3.x` User-Agent while answering anything named with 200. The
+  zip installer sent the default, so a live asset failed mid-install and read as dead. Every
+  weights download - the zip catalogs and TotalSegmentator's - now identifies itself as
+  `haversack/<version>`, and `tools/zippeek.py` sends the same name so the generators see what
+  the installer sees. The MOOSE generator, the one generator that never reads the assets it offers,
+  now HEADs every URL before writing the manifest and refuses to record one that does not
+  answer. (The same model is also `dentalsegmentator:base`, installed from its original
+  Zenodo record and md5-verified; the MOOSE copy is checked against nothing, like the other
+  23.)
 - **An archive that would replace another task's weights is refused.** Unpacking replaces a
   directory of the archive's own top-level name, so with a stale manifest one task's download
   could overwrite another's model and leave it silently running the wrong network. The names
