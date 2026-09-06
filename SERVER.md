@@ -248,6 +248,8 @@ Deploy-time knobs, all environment variables because Modal resolves decorators a
 default on), `HAVERSACK_WARM_TASK` (the task loaded at startup, default `total_fast`),
 `HAVERSACK_JOBS_TTL_H` (default 72), `HAVERSACK_RESULTS_KEEP` (default 500),
 `HAVERSACK_INPUTS_GB` (default 50), `HAVERSACK_ARTIFACTS` (default `preview,statistics`),
+`HAVERSACK_IDC_CLOUD` (`aws`, or `gcp` to read IDC's Google Cloud mirror first - for a
+deployment that lives there),
 and `HAVERSACK_PUBLIC=1`, which adds an anonymous read-only twin that serves cache hits and
 nothing else. A redeploy does not preempt warm containers running the old code; stop the
 app first. Costs run while a worker is warm.
