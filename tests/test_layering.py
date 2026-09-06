@@ -28,7 +28,7 @@ KERNEL = {"grid", "mapping", "tables", "restore", "resample", "reference", "shuf
 PIPELINE = {"io", "preprocess", "frame", "network", "pipeline", "cli", "tasks", "values", "envelope",
             "weights_fetch", "trainers", "result", "cache", "segmenter", "weights", "progress", "job",
             "serve", "client", "modal_app", "sources", "ecosystems", "preview", "statistics",
-            "schemas", "content", "jobstore", "jobpolicy", "filelock", "fetchlib", "cache_admin", "ranked_store", "ranked_build",
+            "schemas", "content", "jobstore", "jobpolicy", "filelock", "fetchlib", "attribution", "cache_admin", "ranked_store", "ranked_build",
             "ranked_output", "view", "ranked_restore", "duckn_io"}
 # errors.py is deliberately dependency-free (stdlib only) so either layer may raise from it.
 SHARED = {"errors"}

@@ -74,6 +74,13 @@ def canonical_orientation_for(spec, store, *, configuration: str | None = None) 
     return nio.CANONICAL
 
 
+def _attribution(spec) -> dict:
+    from . import attribution
+    return attribution.provenance_block(
+        spec.name, {"ecosystem": spec.name.partition(":")[0] if ":" in spec.name else "",
+                    "modality": spec.modality})
+
+
 def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto", dtype: str = "fp16",
             grid="input", interp="linear", outside: str = "background", convention: str = "auto",
             folds=(0,), accumulate: str = "auto", resampling_order: int = 3, batch_size="auto",
@@ -166,7 +173,10 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             "canonical_orientation": canonical, "interp": interp,
             "envelope_mm": envelope_mm, "resampling_order": resampling_order, "models": [],
             "weights_store": store.describe(),
-            "haversack": _version()}
+            "haversack": _version(),
+            # which license governs this output and what to cite for it - the
+            # identifiers only; `describe()` has the full record
+            "attribution": _attribution(spec)}
 
     report.stage("read", Path(image).name if isinstance(image, (str, Path)) else "in-memory image")
     if isinstance(image, (str, Path)):

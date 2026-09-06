@@ -289,6 +289,19 @@ def _run(argv=None) -> int:
     tl.add_argument("--installed", action="store_true", help="only tasks whose weights are already on disk")
     tl.add_argument("--json", action="store_true", help="the full per-task info records")
 
+    ci = sub.add_parser("cite", formatter_class=Fmt, help="who made a task's model, its license, and what to cite",
+                        description="The credit for one task, from all three layers: the task's own facts (a "
+                                    "bundle's authors, a per-model license), its ecosystem (the group, the "
+                                    "repository, the license, the papers) and the engine that runs it (nnU-Net "
+                                    "asks to be cited alongside every model trained with it). Every reference "
+                                    "carries its DOI and PubMed ID where one exists. Nothing is downloaded.",
+                        epilog="""examples:
+  haversack cite total_fast              TotalSegmentator's CT paper, nnU-Net, the license
+  haversack cite totalvibe:body_regions  the TUM group, European Radiology 2026, Apache-2.0
+  haversack cite monai:brats_mri_segmentation --json   the bundle's own references, as data""")
+    ci.add_argument("task", help="a task name, in any accepted form")
+    ci.add_argument("--json", action="store_true", help="the full attribution record")
+
     w = sub.add_parser("weights", formatter_class=Fmt, help="download model weights ahead of time, or see what can be",
                        description="Weights download on first use; these commands do it ahead of time, or report "
                                    "what the manifest can provision (some TotalSegmentator tasks are behind its license).")
@@ -509,6 +522,18 @@ def _run(argv=None) -> int:
             else:
                 print(f"job ended {final['state']}", file=sys.stderr)
                 return 1
+        return 0
+    if args.cmd == "cite":
+        import json
+        from . import attribution
+        from .ecosystems import EcosystemCatalog
+        from .weights import WeightsStore
+        cat = EcosystemCatalog(root=WeightsStore(None, fetch=False).root)
+        info = cat.info(args.task)
+        if args.json:
+            print(json.dumps(info["attribution"], indent=2, ensure_ascii=False))
+        else:
+            print(attribution.format(info["name"], info))
         return 0
     if args.cmd == "tasks":
         import json

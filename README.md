@@ -272,6 +272,18 @@ With more than one source, `-o` is a directory (default: the current directory);
 converts each into it, and without `--format` each is raw-copied. As with `segment`, a failing
 source is reported and the run exits non-zero without stopping the rest.
 
+## Citing the models
+
+Every model haversack runs is someone else's work. `haversack cite <task>` prints who made it,
+under what license, and what its authors ask to be cited - with a DOI and a PubMed ID for each
+reference - from all three layers: the task's own facts (a MONAI bundle's authors, a per-model
+license), its ecosystem (the group, the repository, the papers) and the engine that runs it
+(nnU-Net asks to be cited alongside every model trained with it). The same record is the
+`attribution` block of `haversack tasks --json`, of `GET /v1/tasks/<task>`, and - identifiers
+only - of every result's provenance, so a `.seg.nrrd` header says which license governs it.
+TotalSegmentator's license-gated models say so here too. Everything in the record was read from
+each project's own README, LICENSE or documentation; a test fails if a catalog ships without one.
+
 ## Managing the cache and weights
 
 `haversack cache` shows and clears what haversack keeps on disk; `haversack weights` handles

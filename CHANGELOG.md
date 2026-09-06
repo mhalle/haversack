@@ -58,6 +58,23 @@ Two data sources and two model catalogs, each on the extension seam that already
 
 ### Catalogs
 
+- **Every task credits its makers.** Who made the model, under what license, and what its
+  authors ask to be cited - each reference with its DOI and PubMed ID - from three layers at
+  once: the task's own facts from its catalog manifest (a MONAI bundle's authors, copyright and
+  references; DentalSegmentator's CC BY 4.0; TotalVibeSegmentator's per-model release), its
+  ecosystem (the group, the repository, the papers, the license, TotalSegmentator's list of
+  license-gated models and the MRI paper for its MR tasks) and the engine that runs it
+  (nnU-Net, which every nnU-Net catalog's authors ask to be cited). `haversack cite <task>`
+  prints it; `describe()` and `GET /v1/tasks/<task>` carry it as `attribution`; every result's
+  provenance carries the license and the identifiers. Two things this fixes on the way: the
+  manifest's license and description used to reach a client only while a task was NOT
+  installed - the installed path of `describe()` rebuilt its answer from the checkpoint and
+  dropped them, so the credit vanished at the moment the model became usable - and MOOSE,
+  MRSegmentator, TotalSegmentator and the engines recorded no license or citation at all.
+  Every entry in `data/attribution.json` was read from the project's own README, LICENSE or
+  documentation and every PMID resolved through PubMed from the DOI the authors publish; the
+  MONAI manifest now records each bundle's authors, copyright, description and references from
+  its own `metadata.json`.
 - **DentalSegmentator** (`dentalsegmentator:base`, weights CC BY 4.0): dento-maxillo-facial
   CBCT and CT - upper skull, mandible, upper and lower teeth, mandibular canal. Its plans
   permute the axes, so it needs the transpose opt-in below. The reference Slicer extension also

@@ -1477,6 +1477,12 @@ class MonaiEcosystem(EngineEcosystem):
         out["bundle_version"] = entry["version"]
         if entry.get("task"):
             out["summary"] = entry["task"]
+        # the bundle's own credit, from its metadata.json via the manifest: a
+        # bundle's authors are not the MONAI team's, and its references are
+        # what it asks to be cited
+        for key in ("description", "authors", "copyright", "references", "data_source"):
+            if entry.get(key):
+                out[key] = entry[key]
         if not out.get("materialized"):
             out["n_structures"] = max(int(entry.get("n_labels", 1)) - 1, 0)
             out.update(self._preinstall_inputs(entry, out.get("modality")))
@@ -1626,6 +1632,12 @@ class EcosystemCatalog:
         out["name"] = canonical
         if version is not None:
             out["version_requested"] = version
+        # Credit travels with every task record: the task's own facts from its
+        # manifest, its ecosystem's license and papers, and its engine's - so a
+        # client that found the task can find whom to thank without knowing
+        # which catalog it came from.
+        from . import attribution
+        out["attribution"] = attribution.for_task(canonical, out)
         return out
 
     def prepare(self, name: str, progress=None) -> dict:

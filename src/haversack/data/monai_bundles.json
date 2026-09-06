@@ -14,6 +14,14 @@
    },
    "n_labels": 2,
    "task": "Automated Spleen Segmentation in CT Images",
+   "description": "A 3D segmentation model for spleen delineation in CT images. The model processes 96x96x96 pixel patches and provides segmentation masks for spleen tissue. Trained on the Medical Segmentation Decathlon dataset.",
+   "authors": "MONAI team",
+   "copyright": "Copyright (c) MONAI Consortium",
+   "references": [
+    "Xia, Yingda, et al. '3D Semi-Supervised Learning with Uncertainty-Aware Multi-View Co-Training. arXiv preprint arXiv:1811.12506 (2018). https://arxiv.org/abs/1811.12506.",
+    "Kerfoot E., Clough J., Oksuz I., Lee J., King A.P., Schnabel J.A. (2019) Left-Ventricle Quantification Using Residual U-Net. In: Pop M. et al. (eds) Statistical Atlases and Computational Models of the Heart. Atrial Segmentation and LV Quantification Challenges. STACOM 2018. Lecture Notes in Computer Science, vol 11395. Springer, Cham. https://doi.org/10.1007/978-3-030-12029-0_40"
+   ],
+   "data_source": "Task09_Spleen.tar from http://medicaldecathlon.com/",
    "monai_version": "1.4.0",
    "required_packages": {
     "nibabel": "5.2.1",
@@ -33,6 +41,15 @@
    },
    "n_labels": 105,
    "task": "Multi-organ Segmentation in Whole Body CT Scans",
+   "description": "A SegResNet-based volumetric segmentation model that segments 104 distinct anatomical structures from CT scans. The model processes 96x96x96 pixel patches and provides segmentation masks for major organs, bones, muscles, and vascular structures throughout the body, trained on TotalSegmentator data.",
+   "authors": "MONAI team",
+   "copyright": "Copyright (c) MONAI Consortium",
+   "references": [
+    "Wasserthal, J., Meyer, M., Breit, H.C., Cyriac, J., Yang, S. and Segeroth, M., 2022. TotalSegmentator: robust segmentation of 104 anatomical structures in CT images. arXiv preprint arXiv:2208.05868.",
+    "Myronenko, A., Siddiquee, M.M.R., Yang, D., He, Y. and Xu, D., 2022. Automated head and neck tumor segmentation from 3D PET/CT. arXiv preprint arXiv:2209.10809.",
+    "Tang, Y., Gao, R., Lee, H.H., Han, S., Chen, Y., Gao, D., Nath, V., Bermudez, C., Savona, M.R., Abramson, R.G. and Bao, S., 2021. High-resolution 3D abdominal segmentation with random patch network fusion. Medical image analysis, 69, p.101894."
+   ],
+   "data_source": "TotalSegmentator",
    "monai_version": "1.4.0",
    "required_packages": {
     "itk": "5.4.0",
@@ -53,6 +70,13 @@
    },
    "n_labels": 3,
    "task": "Pancreas and Pancreatic Tumor Segmentation in CT Images",
+   "description": "A 3D segmentation model optimized through Neural Architecture Search (DiNTS) that processes 96x96x96 pixel patches from CT scans to segment pancreas and pancreatic tumors. The model architecture was automatically discovered to balance accuracy and computational efficiency, achieving a mean Dice score of 0.62 across both structures.",
+   "authors": "MONAI team",
+   "copyright": "Copyright (c) MONAI Consortium",
+   "references": [
+    "He, Y., Yang, D., Roth, H., Zhao, C. and Xu, D., 2021. Dints: Differentiable neural network topology search for 3d medical image segmentation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (pp. 5841-5850)."
+   ],
+   "data_source": "Task07_Pancreas.tar from http://medicaldecathlon.com/",
    "monai_version": "1.4.0",
    "required_packages": {
     "fire": "0.6.0",
@@ -75,6 +99,14 @@
    },
    "n_labels": 14,
    "task": "Multi-organ Segmentation in Abdominal CT Scans",
+   "description": "A 3D segmentation model based on the Swin UNETR architecture that processes 96x96x96 pixel patches from CT scans to segment 13 abdominal organs and structures. The model utilizes self-supervised pre-training and hierarchical transformer blocks.",
+   "authors": "MONAI team",
+   "copyright": "Copyright (c) MONAI Consortium",
+   "references": [
+    "Hatamizadeh, Ali, et al. 'Swin UNETR: Swin Transformers for Semantic Segmentation of Brain Tumors in MRI Images. arXiv preprint arXiv:2201.01266 (2022). https://arxiv.org/abs/2201.01266.",
+    "Tang, Yucheng, et al. 'Self-supervised pre-training of swin transformers for 3d medical image analysis. arXiv preprint arXiv:2111.14791 (2021). https://arxiv.org/abs/2111.14791."
+   ],
+   "data_source": "Beyond the Cranial Vault (BTCV) Challenge Dataset: RawData.zip from https://www.synapse.org/#!Synapse:syn3193805/wiki/217752/",
    "monai_version": "1.4.0",
    "required_packages": {
     "itk": "5.4.0",
@@ -96,6 +128,13 @@
    },
    "n_labels": 133,
    "task": "Whole Brain Segmentation in T1W MRI",
+   "description": "A transformer-based 3D segmentation model that identifies 133 distinct brain structures in T1W MRI scans. The model processes 96x96x96 pixel patches and provides segmentation masks for comprehensive neuroanatomical analysis.",
+   "authors": "Vanderbilt University + MONAI team",
+   "copyright": "Copyright (c) MONAI Consortium",
+   "references": [
+    "Xin, et al. Characterizing Renal Structures with 3D Block Aggregate Transformers. arXiv preprint arXiv:2203.02430 (2022). https://arxiv.org/pdf/2203.02430.pdf"
+   ],
+   "data_source": "",
    "monai_version": "1.4.0",
    "required_packages": {
     "nibabel": "5.2.1",
@@ -122,6 +161,13 @@
    },
    "n_labels": 3,
    "task": "Multimodal Brain Tumor Subregion Segmentation",
+   "description": "3D segmentation model for delineating brain tumor subregions from multimodal MRI scans (T1, T1c, T2, FLAIR). The model processes 4-channel input volumes with 1mm isotropic resolution and outputs 3-channel segmentation masks for tumor core (TC), whole tumor (WT), and enhancing tumor (ET).",
+   "authors": "MONAI team",
+   "copyright": "Copyright (c) MONAI Consortium",
+   "references": [
+    "Myronenko, Andriy. '3D MRI brain tumor segmentation using autoencoder regularization.' International MICCAI Brainlesion Workshop. Springer, Cham, 2018. https://arxiv.org/abs/1810.11654"
+   ],
+   "data_source": "BraTS 2018 Challenge Dataset (https://www.med.upenn.edu/sbia/brats2018/data.html)",
    "monai_version": "1.4.0",
    "required_packages": {
     "nibabel": "5.2.1",

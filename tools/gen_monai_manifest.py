@@ -97,6 +97,15 @@ def segmentation_facts(meta: dict) -> dict | None:
             "channel_def": inp.get("channel_def") or {},
             "n_labels": len(channel_def),
             "task": (meta.get("task") or "").strip(),
+            # Credit, from the bundle's own metadata: who made it, what it is,
+            # and the references its authors list. Published through describe()
+            # and carried into every result's provenance - a bundle's authors
+            # are not the MONAI team's, and the two must not be conflated.
+            "description": (meta.get("description") or "").strip(),
+            "authors": (meta.get("authors") or "").strip(),
+            "copyright": (meta.get("copyright") or "").strip(),
+            "references": [str(r).strip() for r in (meta.get("references") or [])],
+            "data_source": (meta.get("data_source") or "").strip(),
             "monai_version": meta.get("monai_version"),
             "required_packages": meta.get("required_packages_version") or {}}
 

@@ -106,9 +106,21 @@ class Segmenter:
                 f"uv sync --extra {eng.extra} --extra serve, then run haversack from it "
                 f"(or deploy with {eng.enabled_env}=1 to run it on Modal).")
         kw = {**self.policy, **overrides}
-        return eng.compute(image, device=kw["device"], batch_size=kw["batch_size"],
-                           progress=kw.get("progress"), cancel=kw.get("cancel"),
-                           probabilities=kw.get("probabilities"))
+        seg = eng.compute(image, device=kw["device"], batch_size=kw["batch_size"],
+                          progress=kw.get("progress"), cancel=kw.get("cancel"),
+                          probabilities=kw.get("probabilities"))
+        # the same credit the nnU-Net pipeline writes: which license governs
+        # this output, and what to cite for it
+        from . import attribution
+        try:
+            canonical = self.resolve_task(task)
+            info = self.catalog.info(canonical) if hasattr(self.catalog, "info") else None
+        except Exception:                        # a spec or a name the catalog does not know
+            canonical, info = str(task), None
+        if isinstance(getattr(seg, "provenance", None), dict):
+            seg.provenance.setdefault("attribution",
+                                      attribution.provenance_block(canonical, info))
+        return seg
 
     # -- the operation ------------------------------------------------------
     def segment(self, image, task, **overrides):
@@ -264,6 +276,18 @@ class Segmenter:
             installed.append(entry)
         d["weights_installed"] = installed
         d["channel_names"] = channels
+        # The catalog's record carries facts the spec cannot: the manifest's
+        # license, release and description, and the attribution block. They
+        # used to reach a client only while the task was NOT installed - this
+        # path rebuilt the answer from the checkpoint and dropped them - so the
+        # credit vanished at the moment someone started using the model.
+        for key in ("license", "release", "description", "tag", "authors", "copyright",
+                    "references", "data_source", "summary", "bundle_version", "attribution"):
+            if info and key in info and key not in d:
+                d[key] = info[key]
+        if "attribution" not in d:
+            from . import attribution
+            d["attribution"] = attribution.for_task(spec.name, {**(info or {}), "modality": spec.modality})
         return self._introspection(d)
 
     def structures(self, task) -> list[str]:
