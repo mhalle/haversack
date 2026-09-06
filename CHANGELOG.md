@@ -125,6 +125,44 @@ Two data sources and two model catalogs, each on the extension seam that already
   describing a 1 GB asset costs a few kilobytes and the zip64 parsing exists once. New
   generators `tools/gen_dentalsegmentator_manifest.py` and `tools/gen_totalvibe_manifest.py`.
 
+### Cache and job protocol
+
+- **A staging claim is now taken and named in one operation.** It used to be two - create the
+  directory, then write `.owner` - which left a window where a claim existed that nothing
+  could identify, and `_owner_of` returning nothing could not distinguish a writer that
+  crashed before naming itself from a successor two statements in. Every guard around the
+  reclaim path existed to work around that: an mtime-based freshness heuristic, an owner
+  re-read immediately before the reclaim, an extension counter. The claim is now published by
+  a single `os.link` of a file that already holds the token, so a claim that exists always
+  names its owner. `os.link` rather than `os.symlink`, which has the same property but needs
+  Developer Mode or a privilege on Windows; a filesystem without hard links falls back to an
+  exclusive create, where an empty claim reads as live and is never reclaimed.
+- **A cached input can no longer be deleted while it is being read.** The read-ahead filled
+  from a committed entry during the window where nothing holds a pin, so a concurrent
+  `no-cache` discard or an eviction under budget pressure could remove a DICOM series
+  directory while the reader was still walking it - a partial read of a series that no longer
+  exists, rather than a clean failure. The pre-read now holds a pin for its duration.
+- **`Cache-Control: no-cache` refreshes when a pre-read is in flight.** The pin above is
+  refused by `discard`, which cannot say who holds it, and the prefetcher did not consult the
+  job's own refresh flag - so a forced recompute could return the cached answer instead. It
+  no longer pre-reads an input the queued job asked to refresh. This matters most for `s3:`
+  and `github:`, whose bytes can be replaced under one identifier.
+- **A claim that cannot be read is no longer treated as absent.** It reported as unclaimed,
+  and the waiter retook it without pausing - measured at 95% of a core on the single
+  dispatcher thread, indefinitely. The trigger is ordinary: under `umask 077` the claim file
+  is owner-only, so a second user on a shared cache root reached it.
+- **Stale staging is cleared when a claim takes over an entry**, and a long-lived server
+  re-sweeps its graveyard rather than only at startup. Content sitting under a claim with no
+  completion marker is an attempt that never finished, and adopting it produced a series
+  assembled from two different fetches, marked complete.
+- **Retention and terminal job states agree across deployments by construction.** The local
+  server decides in SQL and the Modal deployment in Python, so they cannot share code; a test
+  now drives both over the same cases instead of asserting in a comment that they match.
+- Internal: `haversack.jobpolicy` holds the decisions both deployments have to make the same
+  way - the no-cache rule, the pinned pre-read, the terminal states, retention, and how a job
+  source becomes a cache key. Six places built that key by hand and two of the spellings
+  disagreed when a source had no identifier. No public API change.
+
 ## [0.6.1] - 2026-09-05
 
 Fixes from five adversarial reviews of 0.6.0 (the library, the store path, an outsider's
