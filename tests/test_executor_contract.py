@@ -20,8 +20,9 @@ import unittest
 from haversack import serve
 
 
-def _required_of_executor() -> set:
-    """Every ``executor.<name>`` that ``create_app`` touches.
+def _executor_surface() -> tuple:
+    """Every executor member ``create_app`` touches, split into required and
+    getattr-with-a-default.
 
     Taken from the parameter's real name so renaming it cannot silently empty
     the set - which would turn every assertion below into a tautology.
@@ -30,9 +31,31 @@ def _required_of_executor() -> set:
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == "create_app")
     param = fn.args.args[0].arg
-    return {n.attr for n in ast.walk(fn)
-            if isinstance(n, ast.Attribute)
-            and isinstance(n.value, ast.Name) and n.value.id == param}
+    direct = {n.attr for n in ast.walk(fn)
+              if isinstance(n, ast.Attribute)
+              and isinstance(n.value, ast.Name) and n.value.id == param}
+    # create_app also reaches the executor through getattr - a third of the
+    # surface. Those all pass a default today, so a missing one degrades rather
+    # than 500s, but reading only the direct attributes meant this file's whole
+    # premise ("the list cannot fall behind the code") quietly excluded seven
+    # names. They are returned separately because they are genuinely optional.
+    indirect = {a.args[1].value for a in ast.walk(fn)
+                if isinstance(a, ast.Call) and isinstance(a.func, ast.Name)
+                and a.func.id == "getattr" and len(a.args) >= 2
+                and isinstance(a.args[0], ast.Name) and a.args[0].id == param
+                and isinstance(a.args[1], ast.Constant)
+                and isinstance(a.args[1].value, str)}
+    return direct, indirect
+
+
+def _required_of_executor() -> set:
+    """The names create_app uses WITHOUT a fallback - an executor owes all of these."""
+    return _executor_surface()[0]
+
+
+def _optional_of_executor() -> set:
+    """Reached through getattr with a default: absent means degraded, not broken."""
+    return _executor_surface()[1] - _required_of_executor()
 
 
 def _declares(cls, name: str) -> bool:
@@ -75,6 +98,13 @@ PUSH_ONLY = {"subscribe", "unsubscribe"}
 
 
 class ExecutorContract(unittest.TestCase):
+
+    def test_the_optional_surface_is_seen_too(self):
+        """A getattr-reached requirement used to be invisible to this file."""
+        optional = _optional_of_executor()
+        self.assertGreaterEqual(len(optional), 4, f"only found {sorted(optional)}")
+        for name in ("supports_push", "content"):
+            self.assertIn(name, optional)
 
     def test_the_derived_surface_is_not_empty(self):
         """The tripwire for the extractor itself: if create_app is refactored so

@@ -317,6 +317,13 @@ class SeriesCache:
 
     MARKER = ".done"
     GRAVEYARD = ".graveyard"
+    #: Where `_claim` stages its token before linking it. NOT inside the entry:
+    #: `_writer_alive` walks the entry with rglob and stats what it finds, so a
+    #: temp file appearing and vanishing at that level made a LIVE writer read as
+    #: dead (86 of 3000 calls; 3 of 24 runs then reclaimed and deleted a live
+    #: writer mid-fetch). Same filesystem as the entries, because a hard link
+    #: cannot cross one.
+    CLAIMS = ".claims"
 
     def __init__(self, root, fetch_fn, *, budget_bytes: int = 8 << 30,
                  claim_timeout: float = 180.0):
@@ -335,6 +342,7 @@ class SeriesCache:
         #: live *claims*), and a separate directory ends the class rather than
         #: narrowing it again.
         self.graveyard = self.root / self.GRAVEYARD
+        self.claims = self.root / self.CLAIMS
         self.sweep_stale()                     # a crash between rename and delete
         #: Debris only appears when a process dies between the rename into the
         #: graveyard and the delete, so sweeping at construction cleaned up after
@@ -357,7 +365,8 @@ class SeriesCache:
         # thread loops forever. No production key can spell it (every one carries
         # a ":" which escapes), but the namespace is shared with our own
         # directory, so the reservation is explicit.
-        if name not in (".", "..", self.GRAVEYARD) and 0 < len(name) <= 200:
+        if (name not in (".", "..", self.GRAVEYARD, self.CLAIMS)
+                and 0 < len(name) <= 200):
             return self.root / name
         import hashlib
         d = self.root / ("h_" + hashlib.sha256(series.encode()).hexdigest()[:32])
@@ -419,7 +428,8 @@ class SeriesCache:
         entry.mkdir(parents=True, exist_ok=True)
         claim = entry / self.CLAIM
         token = uuid.uuid4().hex
-        tmp = entry / f".owner.tmp.{token}"
+        self.claims.mkdir(parents=True, exist_ok=True)
+        tmp = self.claims / token
         try:
             tmp.write_text(token)
             try:
@@ -447,6 +457,19 @@ class SeriesCache:
                 # replace good bytes and reset their LRU age for nothing.
                 claim.unlink(missing_ok=True)
                 return None
+            # We hold the claim on an entry with no marker, so anything already
+            # in it is a previous attempt that never completed - untrusted by
+            # definition. Clear it, or this writer's output is that attempt's
+            # leftovers PLUS ours, committed as one complete series. The old
+            # protocol got this free: the directory WAS the claim, so stale
+            # scaffolding blocked the claim instead of being adopted.
+            for stale in entry.iterdir():
+                if stale == claim:
+                    continue
+                if stale.is_dir() and not stale.is_symlink():
+                    shutil.rmtree(stale, ignore_errors=True)
+                else:
+                    stale.unlink(missing_ok=True)
             return token
         except OSError:
             return None                    # cannot write into the entry at all
@@ -463,8 +486,16 @@ class SeriesCache:
         """
         try:
             return (entry / self.CLAIM).read_text() or "<establishing>"
+        except FileNotFoundError:
+            return None                    # genuinely unclaimed
         except OSError:
-            return None
+            # A claim we cannot READ is still a claim. Returning None here said
+            # "unclaimed", and the waiter's `break` skipped its sleep and retook
+            # the claim immediately - 6399 attempts and 95% of a core in three
+            # seconds, on the single dispatcher thread, forever. The trigger is
+            # ordinary: under umask 077 the claim is mode 0600 and os.link
+            # preserves it, so any second uid on a shared cache root span.
+            return "<unreadable>"
 
     def _teardown_claim(self, entry: Path, token: str) -> None:
         """Remove a failed claim - only while this writer still owns it.
@@ -481,7 +512,7 @@ class SeriesCache:
             return                         # cannot prove ownership: never delete
         shutil.rmtree(entry, ignore_errors=True)
 
-    def _hb_start(self, entry: Path):
+    def _hb_start(self, entry: Path, token: str | None = None):
         """Tick the claim's mtime while the fetch runs. _writer_alive reads
         file mtimes as the heartbeat, but a fetch that buffers in memory
         (IDC reads whole objects before writing) is disk-silent for minutes -
@@ -494,6 +525,16 @@ class SeriesCache:
         def tick():
             while not stop.wait(min(10.0, self.claim_timeout / 6)):
                 try:
+                    # Stop the moment this is no longer OUR claim. The ticker
+                    # holds a PATH, not a handle: after a reclaim renamed the
+                    # entry aside and re-created it, a writer still stuck inside
+                    # fetch_fn went on touching its SUCCESSOR's claim file every
+                    # 10s, so if the successor then died nothing ever aged it out
+                    # and the key became permanently unfetchable. hb.set() cannot
+                    # help - it runs when fetch_fn returns, which is exactly what
+                    # a hung writer never does.
+                    if token is not None and self._owner_of(entry) != token:
+                        return
                     os.utime(beat if beat.exists() else entry)
                 except OSError:
                     return
@@ -553,7 +594,7 @@ class SeriesCache:
                 # states are exact rather than inferred: a claim that is present
                 # and unchanged, a claim that changed hands, or no claim at all.
                 deadline = time.time() + self.claim_timeout
-                extensions = 0
+                extensions = handovers = 0
                 while not marker.exists():
                     owner_before = self._owner_of(entry)
                     if owner_before is None:
@@ -582,14 +623,33 @@ class SeriesCache:
                                     f"{4 * self.claim_timeout:.0f}s by a writer that is "
                                     "still alive; giving up rather than risk a mixed "
                                     "series - retry later")
-                        elif self._owner_of(entry) != owner_before:
+                        elif handovers >= self.MAX_HANDOVERS:
+                            raise ResourceError(
+                                f"staging of {series!r} changed hands "
+                                f"{handovers} times without completing; giving up "
+                                "rather than wait indefinitely - retry later")
+                        elif (self._owner_of(entry) != owner_before
+                              and handovers < self.MAX_HANDOVERS):
+                            # A handover is PROGRESS, not the writer being slow,
+                            # so it must not spend the slow-writer budget - three
+                            # legitimate handovers used to exhaust it and the next
+                            # live writer produced a "held for 720s" error whose
+                            # number was arbitrary, since each handover had reset
+                            # the deadline.
+                            #
+                            # But it needs a ceiling of its own. Without one this
+                            # branch reset the deadline unconditionally, and a
+                            # claim that keeps appearing to change hands - a
+                            # thrashing pool of writers, or an owner read that is
+                            # never twice the same - waits here forever, on the
+                            # single dispatcher thread, with no error and no exit.
+                            handovers += 1
                             # It changed hands while we were walking the tree.
                             # Whoever holds it now is not who we judged dead, so
                             # wait on them rather than destroy their work. This
                             # comparison is now decisive: under the old layout a
                             # successor was ownerless for two statements and read
                             # as None on both sides of the check.
-                            extensions += 1
                             deadline = time.time() + self.claim_timeout
                         else:
                             # Dead, and still the same claim. Rename aside first
@@ -609,8 +669,13 @@ class SeriesCache:
                     if check is not None:
                         check()
                     time.sleep(0.2)
+                # Every exit from that loop retries the claim, and a break skips
+                # the sleep above. One unsleeping retry path was enough to spin
+                # this thread - the single dispatcher - at 95% of a core
+                # indefinitely, so the pause is here rather than on each break.
+                time.sleep(0.05)
                 continue
-            hb = self._hb_start(entry)
+            hb = self._hb_start(entry, token)
             try:
                 fn = fetch or self.fetch
                 dest = Path(fn(series, entry, credentials=credentials)
@@ -632,7 +697,7 @@ class SeriesCache:
         token = self._claim(entry)
         if token is None:
             return False                       # claimed elsewhere, or just committed
-        hb = self._hb_start(entry)
+        hb = self._hb_start(entry, token)
         try:
             self.fetch(series, entry)
             self._commit(entry, key=series, token=token)
@@ -718,6 +783,11 @@ class SeriesCache:
         for d in self.graveyard.iterdir():
             shutil.rmtree(d, ignore_errors=True) if d.is_dir() else d.unlink(missing_ok=True)
 
+    #: How many times the claim may change hands under one waiter before it
+    #: gives up. Each handover is real progress, so this is generous - but it is
+    #: a CEILING, because the branch that counts them also resets the deadline.
+    MAX_HANDOVERS = 10
+
     #: How often _evict re-sweeps the graveyard. Long, because debris is
     #: crash-only: the cost of sweeping late is bounded disk, and the cost of
     #: sweeping often is an iterdir on every eviction pass.
@@ -737,7 +807,7 @@ class SeriesCache:
             protected = set(keep) | set(self._pins)
             entries, kept_bytes = [], 0
             for e in self.root.iterdir():
-                if e == self.graveyard:
+                if e in (self.graveyard, self.claims):
                     continue                   # ours, not an entry
                 m = e / self.MARKER
                 if not m.exists():
@@ -1838,7 +1908,16 @@ class LocalExecutor:
             # a fraction of one job's read; _stage_many deliberately never pops
             # it, and a pre-read nobody claims is pure waste.
             return
+        if getattr(nxt, "refresh_input", False):
+            # This job asked for fresh bytes. Pre-reading them warms an image it
+            # is about to discard, and worse: fill_read_ahead PINS for the read,
+            # and `discard` refuses on any pin without being able to say whose.
+            # The dispatcher's refresh then failed and the job served the stale
+            # answer - on s3: and github:, whose bytes can change under one
+            # identifier, which is the case no-cache exists for.
+            return
         src = nxt.source[0] if nxt.source else {"kind": "upload"}
+        kind = src.get("kind", "upload")
         sk = source_cache_key(src)
         if sk is not None and sk.ident:
             key = sk.key
@@ -1849,15 +1928,31 @@ class LocalExecutor:
                 if self.series_cache.has(key) or self.series_cache.prefetch(key):
                     fill_read_ahead(key, cache=self.series_cache,
                                     read_ahead=self.read_ahead)
-        else:                                  # upload: bytes are local, hide the read
-            key, path = nxt.id, nxt.input_path
+        elif kind == "upload" and nxt.input_path is not None:
+            key, path = nxt.id, nxt.input_path      # local bytes: hide the read
             if self.read_ahead.has(key):
                 return
 
             def work():
                 fill_read_ahead(key, read_ahead=self.read_ahead, path=path)
+        else:
+            # An `input` source is resolved through the content store and has no
+            # series to stage and no input_path yet, so there is nothing to
+            # pre-read. It used to reach the upload branch with path=None and
+            # kill this thread on `cache.pin(None)`.
+            return
 
-        threading.Thread(target=work, name="haversack-prefetch", daemon=True).start()
+        def guarded():
+            try:
+                work()
+            except Exception as e:             # best effort, and a daemon thread:
+                                               # a failed pre-read must not raise
+                                               # into threading.excepthook. Same
+                                               # line the Modal worker prints, so
+                                               # the two read alike in a log.
+                print(f"[prefetch] failed: {e}", flush=True)
+
+        threading.Thread(target=guarded, name="haversack-prefetch", daemon=True).start()
 
     def _on_progress(self, rec: JobRecord, p) -> None:
         rec.progress = asdict(p)

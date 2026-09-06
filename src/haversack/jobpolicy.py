@@ -97,8 +97,12 @@ def refresh_cached_input(key: str, *, wanted: bool, cache, reporter, on_skipped,
     # Say so rather than publish a result computed from bytes the caller
     # explicitly asked not to reuse - and leave the read-ahead alone, because it
     # belongs to the job that is still using it.
-    reporter.stage("fetch", "cached (no-cache could not refresh: input in use)")
+    # Record the skip BEFORE the stage message. `stage` publishes a status
+    # snapshot, and on the local server the flag is only carried once it is set -
+    # this order round the other way emitted the message without the flag, so a
+    # client acting on that one snapshot could not see the refresh had failed.
     on_skipped()
+    reporter.stage("fetch", "cached (no-cache could not refresh: input in use)")
     return False
 
 
@@ -122,6 +126,9 @@ def fill_read_ahead(key: str, *, read_ahead, cache=None, path=None) -> bool:
     """
     if path is not None:
         return read_ahead.fill(key, path)
+    if cache is None:
+        raise ValueError(f"fill_read_ahead({key!r}) needs either a cache to pin "
+                         "or a local path; got neither")
     cache.pin(key)
     try:
         return read_ahead.fill(key, cache.path(key))

@@ -356,6 +356,10 @@ def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock) -> None:
             if m.get("state") != "queued" or m.get("kind") == "prepare":
                 continue                       # prepare has no input to stage
             src = (m.get("source") or [{"kind": "upload"}])[0]
+            if src.get("kind", "upload") == "input":
+                continue                       # resolved through the content
+                                               # store: no series to stage, and
+                                               # no local file to pre-read either
             sk = source_cache_key(src)
             if sk is not None and sk.ident:
                 cands.append((m.get("created", 0), sk.kind, sk.key, m["id"]))
@@ -1159,7 +1163,10 @@ class ModalExecutor:
     #: catalog-only Segmenter (device is cosmetic there; jobs run on the Worker).
     #: Declared here because `submit` reads it through `weights_versions_of`, so
     #: it is part of this class's contract rather than a field `api` happens to
-    #: attach: an executor constructed without it fails at submit, not at import.
+    #: attach. It does NOT fail loudly if left unset - `weights_versions_of`
+    #: catches and answers ["unknown"], and create_app's `seg = executor.segmenter`
+    #: then works with None - so declaring the slot is what makes the requirement
+    #: visible at all.
     #: tests/test_executor_contract.py checks the declared surface against what
     #: create_app actually touches, and an undeclared slot reads as a gap.
     segmenter = None
