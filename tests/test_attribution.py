@@ -120,6 +120,26 @@ class TheThreeLayersMerge(unittest.TestCase):
         self.assertEqual(dental["cite"][0]["pmid"], "38878813")
         self.assertEqual(dental["cite"][1]["title"][:7], "nnU-Net")
 
+    def test_a_redistributed_model_credits_its_real_makers(self):
+        """MOOSE's registry offers DentalSegmentator's checkpoint on its own host.
+        The output is governed by Dot et al.'s CC BY 4.0, and their paper leads."""
+        rec = attribution.for_task("moose:clin_ct_dental", {"ecosystem": "moose", "engine": "nnunetv2"})
+        self.assertEqual(rec["task"]["derived_from"], "dentalsegmentator")
+        self.assertEqual(rec["task"]["license"]["weights"], "CC-BY-4.0")
+        self.assertEqual(rec["cite"][0]["pmid"], "38878813")          # Dot et al. first
+        self.assertIn("35772962", [r.get("pmid") for r in rec["cite"]])  # MOOSE still cited
+        block = attribution.provenance_block("moose:clin_ct_dental", {"ecosystem": "moose"})
+        self.assertEqual(block["license"]["weights"], "CC-BY-4.0")
+        other = attribution.for_task("moose:clin_ct_organs", {"ecosystem": "moose"})
+        self.assertNotIn("derived_from", other["task"])
+
+    def test_the_non_commercial_weights_are_named_as_such(self):
+        for eco, expected in (("voxtell", "CC-BY-NC-SA-4.0"),):
+            rec = attribution.for_ecosystem(eco)
+            self.assertEqual(rec["license"]["weights"], expected)
+        self.assertEqual(attribution.for_task("ts:brain_aneurysm", {"ecosystem": "ts"})
+                         ["task"]["license"]["weights"], "CC-BY-NC-4.0")
+
     def test_an_engine_that_is_its_own_ecosystem_is_cited_once(self):
         rec = attribution.for_task("synthstrip:mask", {"ecosystem": "synthstrip", "engine": "synthstrip"})
         dois = [r.get("doi") for r in rec["cite"]]

@@ -116,6 +116,18 @@ def for_task(canonical: str, info: dict | None = None) -> dict:
     eng_name = info.get("engine") or "nnunetv2"
     eng = for_engine(eng_name) or {}
     task = _task_block(short, eco, info)
+    # A task whose model comes from somewhere other than its catalog (MOOSE
+    # redistributes DentalSegmentator's checkpoint) credits its real makers:
+    # their license governs the output, and their paper leads the list.
+    override = (load().get("tasks") or {}).get(canonical) or {}
+    origin = for_ecosystem(override.get("derived_from", "")) if override.get("derived_from") else None
+    if origin:
+        task["derived_from"] = override["derived_from"]
+        task["origin"] = {k: origin[k] for k in ("title", "group", "repository", "license") if k in origin}
+        if origin.get("license"):
+            task["license"] = dict(origin["license"])
+        if override.get("note"):
+            task["note"] = override["note"]
 
     cite, seen = [], set()
 
@@ -128,6 +140,8 @@ def for_task(canonical: str, info: dict | None = None) -> dict:
 
     for ref in task.get("references") or []:
         add(ref, "task")
+    for ref in (origin or {}).get("cite") or []:
+        add({k: v for k, v in ref.items() if k != "when"}, "task")
     for ref in eco.get("cite") or []:
         if _applies(ref, info):
             add({k: v for k, v in ref.items() if k != "when"}, "ecosystem")
@@ -219,6 +233,13 @@ def format(canonical: str, info: dict | None = None) -> str:
         for key in ("description", "summary", "release", "authors", "copyright", "data_source"):
             if task.get(key):
                 out.append(f"    {key + ':':<13}{task[key]}")
+        if task.get("origin"):
+            o = task["origin"]
+            out.append(f"    made by:     {o.get('title', '')} - {o.get('group', '')}")
+            if o.get("repository"):
+                out.append(f"                 {o['repository']}")
+        if task.get("note"):
+            out.append(f"    note:        {task['note']}")
         if task.get("license"):
             out.append(f"    license:    {_license_line(task['license'])}")
     if eng and rec["engine"] != rec["ecosystem"]:

@@ -75,6 +75,9 @@ Two data sources and two model catalogs, each on the extension seam that already
   documentation and every PMID resolved through PubMed from the DOI the authors publish; the
   MONAI manifest now records each bundle's authors, copyright, description and references from
   its own `metadata.json`.
+  Two facts worth knowing that this surfaced: VoxTell's weights are CC BY-NC-SA 4.0 (non-commercial;
+  the repository's Apache-2.0 covers the code only), and `moose:clin_ct_dental` is
+  DentalSegmentator's checkpoint redistributed, so its credit and its CC BY 4.0 are Dot et al.'s.
 - **DentalSegmentator** (`dentalsegmentator:base`, weights CC BY 4.0): dento-maxillo-facial
   CBCT and CT - upper skull, mandible, upper and lower teeth, mandibular canal. Its plans
   permute the axes, so it needs the transpose opt-in below. The reference Slicer extension also

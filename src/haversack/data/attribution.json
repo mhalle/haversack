@@ -1,6 +1,6 @@
 {
  "_meta": {
-  "note": "Who made each model, under what license, and what its authors ask to be cited. Every entry was checked against the project's own README, LICENSE or documentation on 2026-09-06, and every PMID was resolved through PubMed from the DOI the authors publish. Task-level facts (a bundle's authors, a per-model license) live in the catalog manifests and are merged in by haversack.attribution; this file holds what is true of a whole ecosystem or engine.",
+  "note": "Who made each model, under what license, and what its authors ask to be cited. Every entry was checked against the project's own README, LICENSE or documentation on 2026-09-06, and every PMID was resolved through PubMed from the DOI the authors publish. Task-level facts (a bundle's authors, a per-model license) live in the catalog manifests and are merged in by haversack.attribution; this file holds what is true of a whole ecosystem or engine. The `tasks` section overrides a single task whose model comes from somewhere other than its catalog.",
   "checked": "2026-09-06"
  },
  "ecosystems": {
@@ -15,55 +15,111 @@
     "note": "The models listed under licensed_tasks need a free non-commercial or a paid commercial license from the authors, obtained through TotalSegmentator's own license flow; haversack does not handle that license and refuses to download those weights. brain_aneurysm is CC BY-NC 4.0 with no commercial license offered.",
     "url": "https://backend.totalsegmentator.com/license-academic/"
    },
-   "licensed_tasks": ["heartchambers_highres", "appendicular_bones", "appendicular_bones_mr", "tissue_types", "tissue_types_mr", "tissue_4_types", "brain_structures", "face", "face_mr", "thigh_shoulder_muscles", "thigh_shoulder_muscles_mr", "coronary_arteries", "coronary_arteries_LEGACY", "aortic_sinuses"],
-   "cite": [
-    {"title": "TotalSegmentator: Robust Segmentation of 104 Anatomic Structures in CT Images",
-     "authors": "Wasserthal J, Breit HC, Meyer MT, Pradella M, Hinck D, Sauter AW, Heye T, Boll D, Cyriac J, Yang S, Bach M, Segeroth M",
-     "journal": "Radiology: Artificial Intelligence", "year": 2023,
-     "doi": "10.1148/ryai.230024", "pmid": "37795137"},
-    {"title": "TotalSegmentator MRI: Robust Sequence-independent Segmentation of Multiple Anatomic Structures in MRI",
-     "authors": "Akinci D'Antonoli T, Berger LK, Indrakanti AK, et al.",
-     "journal": "Radiology", "year": 2025,
-     "doi": "10.1148/radiol.241613", "pmid": "39964271", "arxiv": "2405.19492",
-     "when": {"modality": "MR"}, "note": "for the MR models"}
+   "licensed_tasks": [
+    "heartchambers_highres",
+    "appendicular_bones",
+    "appendicular_bones_mr",
+    "tissue_types",
+    "tissue_types_mr",
+    "tissue_4_types",
+    "brain_structures",
+    "face",
+    "face_mr",
+    "thigh_shoulder_muscles",
+    "thigh_shoulder_muscles_mr",
+    "coronary_arteries",
+    "coronary_arteries_LEGACY",
+    "aortic_sinuses"
    ],
-   "also_cite": ["nnunetv2"]
+   "cite": [
+    {
+     "title": "TotalSegmentator: Robust Segmentation of 104 Anatomic Structures in CT Images",
+     "authors": "Wasserthal J, Breit HC, Meyer MT, Pradella M, Hinck D, Sauter AW, Heye T, Boll D, Cyriac J, Yang S, Bach M, Segeroth M",
+     "journal": "Radiology: Artificial Intelligence",
+     "year": 2023,
+     "doi": "10.1148/ryai.230024",
+     "pmid": "37795137"
+    },
+    {
+     "title": "TotalSegmentator MRI: Robust Sequence-independent Segmentation of Multiple Anatomic Structures in MRI",
+     "authors": "Akinci D'Antonoli T, Berger LK, Indrakanti AK, et al.",
+     "journal": "Radiology",
+     "year": 2025,
+     "doi": "10.1148/radiol.241613",
+     "pmid": "39964271",
+     "arxiv": "2405.19492",
+     "when": {
+      "modality": "MR"
+     },
+     "note": "for the MR models"
+    }
+   ],
+   "also_cite": [
+    "nnunetv2"
+   ]
   },
   "moose": {
    "title": "MOOSE (moosez)",
    "description": "Multi-organ objective segmentation of CT, MR and PET, trained on multi-center data; an ENHANCE.PET initiative.",
    "group": "Quantitative Imaging and Medical Physics (QIMP) team, Center for Medical Physics and Biomedical Engineering, Medical University of Vienna",
    "repository": "https://github.com/ENHANCE-PET/MOOSE",
-   "license": {"code": "Apache-2.0", "weights": "CC-BY-4.0"},
+   "license": {
+    "code": "Apache-2.0",
+    "weights": "CC-BY-4.0"
+   },
    "cite": [
-    {"title": "Fully Automated, Semantic Segmentation of Whole-Body 18F-FDG PET/CT Images Based on Data-Centric Artificial Intelligence",
+    {
+     "title": "Fully Automated, Semantic Segmentation of Whole-Body 18F-FDG PET/CT Images Based on Data-Centric Artificial Intelligence",
      "authors": "Shiyam Sundar LK, Yu J, Muzik O, et al.",
-     "journal": "Journal of Nuclear Medicine", "year": 2022,
-     "doi": "10.2967/jnumed.122.264063", "pmid": "35772962"},
-    {"title": "Sharing a whole-/total-body [18F]FDG-PET/CT dataset with CT-derived segmentations: an ENHANCE.PET initiative",
+     "journal": "Journal of Nuclear Medicine",
+     "year": 2022,
+     "doi": "10.2967/jnumed.122.264063",
+     "pmid": "35772962"
+    },
+    {
+     "title": "Sharing a whole-/total-body [18F]FDG-PET/CT dataset with CT-derived segmentations: an ENHANCE.PET initiative",
      "authors": "Ferrara D, Pires M, Gutschmayer S, et al.",
-     "journal": "Scientific Data", "year": 2026,
-     "doi": "10.1038/s41597-026-07218-y", "pmid": "41980990", "note": "the training dataset"}
+     "journal": "Scientific Data",
+     "year": 2026,
+     "doi": "10.1038/s41597-026-07218-y",
+     "pmid": "41980990",
+     "note": "the training dataset"
+    }
    ],
-   "also_cite": ["nnunetv2"]
+   "also_cite": [
+    "nnunetv2"
+   ]
   },
   "mrsegmentator": {
    "title": "MRSegmentator",
    "description": "40 anatomical structures across the thorax, abdomen and pelvis on MRI of any sequence and on CT, with 10 body-composition classes for MRI.",
    "group": "Department of Radiology, Charité – Universitätsmedizin Berlin (Häntze) with Klinikum rechts der Isar, Technical University of Munich (Bressem)",
    "repository": "https://github.com/hhaentze/MRSegmentator",
-   "license": {"code": "Apache-2.0", "weights": "Apache-2.0"},
+   "license": {
+    "code": "Apache-2.0",
+    "weights": "Apache-2.0"
+   },
    "cite": [
-    {"title": "Segmenting Whole-Body MRI and CT for Multiorgan Anatomic Structure Delineation",
+    {
+     "title": "Segmenting Whole-Body MRI and CT for Multiorgan Anatomic Structure Delineation",
      "authors": "Häntze H, Xu L, Mertens CJ, et al.",
-     "journal": "Radiology: Artificial Intelligence", "year": 2025,
-     "doi": "10.1148/ryai.240777", "pmid": "40767616"},
-    {"title": "MRSegmentator body composition classes (preprint)",
+     "journal": "Radiology: Artificial Intelligence",
+     "year": 2025,
+     "doi": "10.1148/ryai.240777",
+     "pmid": "40767616"
+    },
+    {
+     "title": "MRSegmentator body composition classes (preprint)",
      "authors": "Häntze H, et al.",
-     "journal": "medRxiv", "year": 2025,
-     "doi": "10.1101/2025.06.03.25328867", "note": "for the body-composition classes"}
+     "journal": "medRxiv",
+     "year": 2025,
+     "doi": "10.1101/2025.06.03.25328867",
+     "note": "for the body-composition classes"
+    }
    ],
-   "also_cite": ["nnunetv2"]
+   "also_cite": [
+    "nnunetv2"
+   ]
   },
   "dentalsegmentator": {
    "title": "DentalSegmentator",
@@ -75,51 +131,82 @@
     "note": "The weights are published on Zenodo (record 10829675) under CC BY 4.0, which requires attribution. The Slicer extension's own license file was not reachable in the repository as of 2026-09-06; see the repository."
    },
    "cite": [
-    {"title": "DentalSegmentator: Robust open source deep learning-based CT and CBCT image segmentation",
+    {
+     "title": "DentalSegmentator: Robust open source deep learning-based CT and CBCT image segmentation",
      "authors": "Dot G, Chaurasia A, Dubois G, et al.",
-     "journal": "Journal of Dentistry", "year": 2024,
-     "doi": "10.1016/j.jdent.2024.105130", "pmid": "38878813"}
+     "journal": "Journal of Dentistry",
+     "year": 2024,
+     "doi": "10.1016/j.jdent.2024.105130",
+     "pmid": "38878813"
+    }
    ],
-   "also_cite": ["nnunetv2"]
+   "also_cite": [
+    "nnunetv2"
+   ],
+   "weights_record": "https://zenodo.org/records/10829675"
   },
   "totalvibe": {
    "title": "TotalVibeSegmentator (VIBESegmentator)",
    "description": "Full-body MRI segmentation for the NAKO and UK Biobank VIBE Dixon protocols, also usable on CT, with auxiliary models for body regions, water-fat-swap detection, feet bones and the pancreas.",
    "group": "Department of Diagnostic and Interventional Neuroradiology, TUM University Hospital (Klinikum rechts der Isar), Technical University of Munich (Graf, Kirschke)",
    "repository": "https://github.com/robert-graf/VIBESegmentator",
-   "license": {"code": "Apache-2.0", "weights": "Apache-2.0"},
+   "license": {
+    "code": "Apache-2.0",
+    "weights": "Apache-2.0"
+   },
    "cite": [
-    {"title": "VIBESegmentator: full body MRI segmentation for the NAKO and UK Biobank",
+    {
+     "title": "VIBESegmentator: full body MRI segmentation for the NAKO and UK Biobank",
      "authors": "Graf R, Platzek PS, Riedel EO, Ramschütz C, Starck S, Möller HK, Atad M, Völzke H, Bülow R, Schmidt CO, Rüdebusch J, Jung M, Reisert M, Weiss J, Löffler M, Bamberg F, Wiestler B, Paetzold JC, Rueckert D, Kirschke JS",
-     "journal": "European Radiology", "year": 2026,
-     "doi": "10.1007/s00330-025-12035-9", "pmid": "41068435", "arxiv": "2406.00125"}
+     "journal": "European Radiology",
+     "year": 2026,
+     "doi": "10.1007/s00330-025-12035-9",
+     "pmid": "41068435",
+     "arxiv": "2406.00125"
+    }
    ],
-   "also_cite": ["nnunetv2"]
+   "also_cite": [
+    "nnunetv2"
+   ]
   },
   "custom": {
    "title": "your own nnU-Net models",
    "description": "Model folders you point haversack at. Their license and citation are whatever their authors state; haversack knows nothing about them.",
    "license": null,
    "cite": [],
-   "also_cite": ["nnunetv2"]
+   "also_cite": [
+    "nnunetv2"
+   ]
   },
   "fastsurfer": {
    "title": "FastSurfer",
    "description": "A fast deep-learning neuroimaging pipeline; haversack runs its whole-brain parcellation network (FastSurferVINN).",
    "group": "Deep Learning in Medical Imaging lab (Reuter), German Center for Neurodegenerative Diseases (DZNE), Bonn",
    "repository": "https://github.com/Deep-MI/FastSurfer",
-   "license": {"code": "Apache-2.0", "weights": "Apache-2.0",
-               "note": "haversack runs the parcellation CNN through a slimmed fork (mhalle/fastsurfer-lean); the network and its checkpoints are FastSurfer's."},
+   "license": {
+    "code": "Apache-2.0",
+    "weights": "Apache-2.0",
+    "note": "The checkpoints are Zenodo record 10390573 (FastSurferVINN Checkpoints; Henschel, Kügler, Reuter), licensed Apache-2.0 there too. haversack runs the parcellation CNN through a slimmed fork (mhalle/fastsurfer-lean); the network and its checkpoints are FastSurfer's."
+   },
    "cite": [
-    {"title": "FastSurfer - A fast and accurate deep learning based neuroimaging pipeline",
+    {
+     "title": "FastSurfer - A fast and accurate deep learning based neuroimaging pipeline",
      "authors": "Henschel L, Conjeti S, Estrada S, Diers K, Fischl B, Reuter M",
-     "journal": "NeuroImage", "year": 2020,
-     "doi": "10.1016/j.neuroimage.2020.117012", "pmid": "32526386"},
-    {"title": "FastSurferVINN: Building Resolution-Independence into Deep Learning Segmentation Methods - A Solution for HighRes Brain MRI",
+     "journal": "NeuroImage",
+     "year": 2020,
+     "doi": "10.1016/j.neuroimage.2020.117012",
+     "pmid": "32526386"
+    },
+    {
+     "title": "FastSurferVINN: Building Resolution-Independence into Deep Learning Segmentation Methods - A Solution for HighRes Brain MRI",
      "authors": "Henschel L, Kuegler D, Reuter M",
-     "journal": "NeuroImage", "year": 2022,
-     "doi": "10.1016/j.neuroimage.2022.118933", "pmid": "35122967"}
-   ]
+     "journal": "NeuroImage",
+     "year": 2022,
+     "doi": "10.1016/j.neuroimage.2022.118933",
+     "pmid": "35122967"
+    }
+   ],
+   "weights_record": "https://zenodo.org/records/10390573"
   },
   "synthstrip": {
    "title": "SynthStrip",
@@ -127,17 +214,29 @@
    "group": "Athinoula A. Martinos Center for Biomedical Imaging, Massachusetts General Hospital (Hoopes, Hoffmann)",
    "repository": "https://github.com/freesurfer/freesurfer",
    "url": "https://surfer.nmr.mgh.harvard.edu/docs/synthstrip/",
-   "license": {"code": "MIT or CC-BY-4.0 (the user's choice)", "weights": "MIT or CC-BY-4.0 (the user's choice)",
-               "note": "haversack runs the model through a torch port (mhalle/synthstrip-torch); the model and weights are SynthStrip's."},
+   "license": {
+    "code": "MIT or CC-BY-4.0 (the user's choice)",
+    "weights": "MIT or CC-BY-4.0 (the user's choice)",
+    "note": "haversack runs the model through a torch port (mhalle/synthstrip-torch); the model and weights are SynthStrip's."
+   },
    "cite": [
-    {"title": "SynthStrip: skull-stripping for any brain image",
+    {
+     "title": "SynthStrip: skull-stripping for any brain image",
      "authors": "Hoopes A, Mora JS, Dalca AV, Fischl B, Hoffmann M",
-     "journal": "NeuroImage", "year": 2022,
-     "doi": "10.1016/j.neuroimage.2022.119474", "pmid": "35842095"},
-    {"title": "Domain-Randomized Deep Learning for Neuroimage Analysis",
+     "journal": "NeuroImage",
+     "year": 2022,
+     "doi": "10.1016/j.neuroimage.2022.119474",
+     "pmid": "35842095"
+    },
+    {
+     "title": "Domain-Randomized Deep Learning for Neuroimage Analysis",
      "authors": "Hoffmann M",
-     "journal": "IEEE Signal Processing Magazine", "year": 2025,
-     "doi": "10.1109/MSP.2025.3590806", "pmid": "41306561", "note": "the synthesis-driven training"}
+     "journal": "IEEE Signal Processing Magazine",
+     "year": 2025,
+     "doi": "10.1109/MSP.2025.3590806",
+     "pmid": "41306561",
+     "note": "the synthesis-driven training"
+    }
    ]
   },
   "voxtell": {
@@ -145,13 +244,20 @@
    "description": "Free-text promptable universal 3D medical image segmentation: a vision-language model that turns a prompt, from one word to a clinical sentence, into a volumetric mask on CT, PET and MRI.",
    "group": "Division of Medical Image Computing (MIC), German Cancer Research Center (DKFZ), Heidelberg (Rokuss, Maier-Hein)",
    "repository": "https://github.com/MIC-DKFZ/VoxTell",
-   "license": {"code": "Apache-2.0", "weights": null,
-               "note": "The repository states Apache-2.0 for the code and nothing for the weights, which are published on Hugging Face (mrokuss/VoxTell); check the model card before redistributing outputs commercially."},
+   "license": {
+    "code": "Apache-2.0",
+    "weights": "CC-BY-NC-SA-4.0",
+    "note": "The repository is Apache-2.0; the weights on Hugging Face (mrokuss/VoxTell) are CC BY-NC-SA 4.0 - non-commercial use only, and derivatives under the same terms (model card, read 2026-09-06).",
+    "url": "https://huggingface.co/mrokuss/VoxTell"
+   },
    "cite": [
-    {"title": "VoxTell: Free-Text Promptable Universal 3D Medical Image Segmentation",
+    {
+     "title": "VoxTell: Free-Text Promptable Universal 3D Medical Image Segmentation",
      "authors": "Rokuss M, Langenberg M, Kirchhoff Y, Isensee F, Hamm B, Ulrich C, Regnery S, Bauer L, Katsigiannopulos E, Norajitra T, Maier-Hein K",
-     "journal": "Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)", "year": 2026,
-     "arxiv": "2511.11450"}
+     "journal": "Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)",
+     "year": 2026,
+     "arxiv": "2511.11450"
+    }
    ]
   },
   "monai": {
@@ -159,9 +265,14 @@
    "description": "Curated bundles from the MONAI model zoo, each carrying its own network, transforms, authors and references.",
    "group": "MONAI Consortium (Project MONAI); each bundle names its own authors",
    "repository": "https://github.com/Project-MONAI/model-zoo",
-   "license": {"code": "Apache-2.0", "weights": "Apache-2.0 (the model zoo's license; a bundle may state its own in its metadata)"},
+   "license": {
+    "code": "Apache-2.0",
+    "weights": "Apache-2.0 (the model zoo's license; a bundle may state its own in its metadata)"
+   },
    "cite": [],
-   "also_cite": ["monai"]
+   "also_cite": [
+    "monai"
+   ]
   }
  },
  "engines": {
@@ -170,12 +281,18 @@
    "description": "The self-configuring segmentation framework every nnU-Net catalog's models were trained with; haversack runs their networks with its own resampling and restore.",
    "group": "Division of Medical Image Computing, German Cancer Research Center (DKFZ) and Helmholtz Imaging Applied Computer Vision Lab, Heidelberg (Isensee, Maier-Hein)",
    "repository": "https://github.com/MIC-DKFZ/nnUNet",
-   "license": {"code": "Apache-2.0"},
+   "license": {
+    "code": "Apache-2.0"
+   },
    "cite": [
-    {"title": "nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation",
+    {
+     "title": "nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation",
      "authors": "Isensee F, Jaeger PF, Kohl SAA, Petersen J, Maier-Hein KH",
-     "journal": "Nature Methods", "year": 2021,
-     "doi": "10.1038/s41592-020-01008-z", "pmid": "33288961"}
+     "journal": "Nature Methods",
+     "year": 2021,
+     "doi": "10.1038/s41592-020-01008-z",
+     "pmid": "33288961"
+    }
    ]
   },
   "monai": {
@@ -183,16 +300,34 @@
    "description": "The PyTorch-based framework that runs each bundle's own configuration.",
    "group": "MONAI Consortium (Project MONAI)",
    "repository": "https://github.com/Project-MONAI/MONAI",
-   "license": {"code": "Apache-2.0"},
+   "license": {
+    "code": "Apache-2.0"
+   },
    "cite": [
-    {"title": "MONAI: An open-source framework for deep learning in healthcare",
+    {
+     "title": "MONAI: An open-source framework for deep learning in healthcare",
      "authors": "Cardoso MJ, Li W, Brown R, et al.",
-     "journal": "arXiv", "year": 2022,
-     "doi": "10.48550/arXiv.2211.02701", "arxiv": "2211.02701"}
+     "journal": "arXiv",
+     "year": 2022,
+     "doi": "10.48550/arXiv.2211.02701",
+     "arxiv": "2211.02701"
+    }
    ]
   },
-  "fastsurfer": {"same_as_ecosystem": "fastsurfer"},
-  "synthstrip": {"same_as_ecosystem": "synthstrip"},
-  "voxtell": {"same_as_ecosystem": "voxtell"}
+  "fastsurfer": {
+   "same_as_ecosystem": "fastsurfer"
+  },
+  "synthstrip": {
+   "same_as_ecosystem": "synthstrip"
+  },
+  "voxtell": {
+   "same_as_ecosystem": "voxtell"
+  }
+ },
+ "tasks": {
+  "moose:clin_ct_dental": {
+   "derived_from": "dentalsegmentator",
+   "note": "MOOSE's registry offers DentalSegmentator's Dataset112 checkpoint repackaged on its own host; the model, the license (CC BY 4.0, attribution required) and the paper to cite are DentalSegmentator's, not MOOSE's."
+  }
  }
 }
