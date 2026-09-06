@@ -171,6 +171,18 @@ Two data sources and two model catalogs, each on the extension seam that already
   one-writer lock uses it too. Two other Windows-hostile spots fixed on the way: a download
   temp file was unlinked while still open, and a checkpoint move used `rename` where the
   target may exist.
+- **Modal: jobs orphaned by a stopped deployment are failed, not left queued forever.**
+  `modal app stop` cancels the spawned calls but leaves their records `queued`, and queued
+  records are never purged by age (deliberately). Five of them, 76 hours old, were found on a
+  live deployment and had done three kinds of damage: probes of their keys reported a flight
+  that would never land; the prefetcher, which warms the oldest queued job, warmed them on
+  every job and so never staged a real one; and they were listed as queued indefinitely. The
+  worker now asks Modal whether each active record's call still exists - at container start
+  and after every job, skipping records younger than two minutes so it can never race a
+  job's own completion - and fails the dead ones with a message that says to resubmit. The
+  local server has reconciled its store at startup all along; this is the same rule on the
+  other substrate. An `inflight:` marker is now also dropped as soon as its job is terminal,
+  rather than only once it is strictly older than zero seconds.
 - **Retention and terminal job states agree across deployments by construction.** The local
   server decides in SQL and the Modal deployment in Python, so they cannot share code; a test
   now drives both over the same cases instead of asserting in a comment that they match.

@@ -92,6 +92,58 @@ def test_prefetch_candidate_follows_jobpolicy(monkeypatch):
     assert m._prefetch_candidate("f") == ("upload", None, "g")
 
 
+def test_orphaned_records_are_failed_and_live_ones_left_alone(monkeypatch, tmp_path):
+    """Records whose spawned call is gone (a `modal app stop` between deploys)
+    stayed queued forever: never purged, poisoning single-flight for their key,
+    and starving the prefetcher as the oldest candidates. Found live with five
+    of them 76 hours old."""
+    m, fake = _swap_dict(monkeypatch)
+    now = 1_000_000.0
+    calls = {"dead": "dead", "live": "live", "fin": "finished"}
+    monkeypatch.setattr(m, "_call_state", lambda cid: calls.get(cid, "dead"))
+    old = now - 76 * 3600
+    fake["stale"] = {"id": "stale", "state": "queued", "created": old, "call_id": "dead",
+                     "cache_key": "K"}
+    fake["inflight:K"] = "stale"
+    fake["alive"] = {"id": "alive", "state": "queued", "created": old, "call_id": "live"}
+    fake["young"] = {"id": "young", "state": "queued", "created": now - 5, "call_id": "dead"}
+    fake["crashed"] = {"id": "crashed", "state": "running", "created": old,
+                       "started": old + 1, "call_id": "fin"}
+    fake["nocall"] = {"id": "nocall", "state": "queued", "created": old}
+    fake["me"] = {"id": "me", "state": "running", "created": old, "call_id": "dead"}
+    fake["done"] = {"id": "done", "state": "done", "created": old, "finished": old}
+
+    assert sorted(m._reconcile_orphans("me", now)) == ["crashed", "nocall", "stale"]
+    assert fake["stale"]["state"] == "failed" and "resubmit" in fake["stale"]["error"]
+    assert fake["crashed"]["state"] == "failed"
+    assert fake["alive"]["state"] == "queued"          # its call answers "still here"
+    assert fake["young"]["state"] == "queued"          # too fresh to probe at all
+    assert fake["me"]["state"] == "running"            # never the job that is running this
+    assert fake["done"]["state"] == "done"
+
+    # ...and the retention pass runs it first, so the orphan's inflight marker
+    # is dropped in the same pass instead of surviving to the next job
+    class Vol:
+        def commit(self):
+            pass
+    monkeypatch.setattr(m, "scratch_vol", Vol())
+    monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path))
+    fake["stale"]["state"] = "queued"                  # reset: prove the pass does it
+    monkeypatch.setattr(m.time, "time", lambda: now)
+    m._bound_jobs_store("me")
+    assert fake["stale"]["state"] == "failed"
+    assert "inflight:K" not in fake
+
+
+def test_a_running_job_is_never_probed_as_an_orphan_by_its_own_container():
+    """The container's own job is excluded by id, not by liveness, because
+    `_call_state` for it would be a network round trip on every job."""
+    import inspect
+    from haversack import modal_app
+    src = inspect.getsource(modal_app._reconcile_orphans)
+    assert "k == current_jid" in src
+
+
 def test_inflight_marker_ownership(monkeypatch):
     """Opus verification round: the marker operations, unit-reachable at
     module level. Under duplicate flights the marker names the latest job;

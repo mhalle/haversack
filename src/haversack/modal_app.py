@@ -441,6 +441,82 @@ def _purgeable(meta: dict, now: float, ttl_s: float) -> bool:
     return purgeable(meta, now, ttl_s)
 
 
+#: How long a record must have been active before its call is probed. A call
+#: finishes and emits `done` in one go, and terminal-wins lets one terminal
+#: state replace another, so a probe racing that could turn a fresh `done` into
+#: `failed`; two minutes is far past that window and far short of a stop.
+ORPHAN_MIN_AGE_S = 120.0
+
+
+def _call_state(call_id) -> str:
+    """``live``, ``finished`` or ``dead``, from Modal's own view of a spawned call.
+
+    Measured 2026-09-06 against modal 1.5.5: a queued or running call raises the
+    builtin TimeoutError from ``get(timeout=0)``; a call whose function returned
+    hands back its result; a call cancelled by ``modal app stop`` raises
+    RemoteError; an unknown id raises NotFoundError. TimeoutError is the one
+    answer that means "still alive", so it is the only one treated that way and
+    every other failure counts as dead. Erring toward "live" is the safe
+    direction: the thing that must never happen is failing a running job.
+    """
+    if not call_id:
+        return "dead"
+    try:
+        modal.FunctionCall.from_id(call_id).get(timeout=0)
+    except TimeoutError:
+        return "live"
+    except Exception:
+        return "dead"
+    return "finished"
+
+
+def _reconcile_orphans(current_jid: str | None = None, now: float | None = None) -> list:
+    """Fail every active record whose spawned call is gone. Returns their ids.
+
+    The local server reconciles its job store at startup; this deployment had
+    no counterpart, so a record whose call was cancelled by ``modal app stop``
+    stayed ``queued`` for good. Five of them, 76 hours old, were found on
+    2026-09-06, and they did three kinds of damage: they were never purged
+    (queued records do not age out, on purpose - an active record that is
+    stale is a symptom to surface); their ``inflight:`` markers made every
+    probe of their keys report a flight that would never land; and, being the
+    oldest queued records, they were what the prefetcher warmed on every job,
+    so no real queued job was ever staged ahead. A ``running`` record whose
+    call has returned is the same thing from the other side: the worker died
+    before its terminal emit, and no emit is coming.
+
+    Runs at container start and after every job. Only records older than
+    ``ORPHAN_MIN_AGE_S`` are probed, and the record is re-read immediately
+    before it is failed, so a job finishing while this runs is left alone.
+    """
+    now = time.time() if now is None else now
+    failed = []
+    try:
+        keys = [str(k) for k in jobs_dict.keys()]
+    except Exception:
+        return failed
+    for k in keys:
+        if ":" in k or k == current_jid:
+            continue
+        m = jobs_dict.get(k) or {}
+        if m.get("state") not in ("queued", "running"):
+            continue
+        if now - float(m.get("started") or m.get("created") or now) < ORPHAN_MIN_AGE_S:
+            continue
+        if _call_state(m.get("call_id")) == "live":
+            continue
+        m = jobs_dict.get(k) or {}                 # re-read: it may just have finished
+        if m.get("state") not in ("queued", "running"):
+            continue
+        _emit(k, {"state": "failed", "finished": now,
+                  "error": "orphaned: the deployment that spawned this job was "
+                           "stopped or replaced before it finished - resubmit it"})
+        failed.append(k)
+    if failed:
+        print(f"[reconcile] {len(failed)} orphaned job(s) failed: {' '.join(failed)}", flush=True)
+    return failed
+
+
 def _bound_jobs_store(current_jid: str) -> None:
     """The retention policy for the jobs store, run after every job: delete the
     finished job's own input upload (the bulk of the bytes - nothing reads an
@@ -451,6 +527,7 @@ def _bound_jobs_store(current_jid: str) -> None:
     import shutil
     now, ttl_s = time.time(), JOBS_TTL_H * 3600.0
     try:
+        _reconcile_orphans(current_jid, now)     # first, so their markers drop below
         jdir = Path(SCRATCH_ROOT) / current_jid
         for f in jdir.glob("input_*"):
             f.unlink(missing_ok=True)
@@ -473,7 +550,12 @@ def _bound_jobs_store(current_jid: str) -> None:
             if k.startswith("inflight:"):
                 jid = jobs_dict.get(k)         # markers hold the job id
                 tgt = jobs_dict.get(jid) if isinstance(jid, str) else None
-                if tgt is None or _purgeable(tgt, now, 0.0):
+                # A flight that has landed - or crashed - is no flight. Judged by
+                # state, not by `purgeable(ttl=0)`: that is a strict "older than
+                # zero seconds", which a record failed in this same pass (the
+                # reconcile above stamps the same `now`) does not satisfy, so its
+                # marker lived on to the next job.
+                if tgt is None or tgt.get("state") in _TERMINAL:
                     try:
                         del jobs_dict[k]
                     except Exception:
@@ -807,6 +889,13 @@ class _WorkerBase:
             self._ensured = set()        # tasks whose weights this container verified
         if not hasattr(self, "seg"):
             self._engine_setup()
+        try:
+            # Records orphaned by the previous deployment are failed before the
+            # first job's prefetcher scans for them; the per-job pass below
+            # would only catch them after that first job had warmed one.
+            _reconcile_orphans()
+        except Exception as e:                    # never keep a container from starting
+            print(f"[reconcile] skipped: {e}", flush=True)
 
     def _artifact_worker(self, pair, cache_key: str, jid: str, task: str) -> None:
         """Post-done artifacts via the shared overlap body; this side's place
