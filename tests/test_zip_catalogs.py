@@ -18,6 +18,9 @@ from unittest import mock
 
 import pytest
 
+import urllib.request
+
+from haversack import fetchlib
 from haversack.ecosystems import (DentalSegmentatorEcosystem, EcosystemCatalog,
                               TotalVibeEcosystem, ZipManifestEcosystem, registry)
 from haversack.errors import InputError, ModelNotFound
@@ -66,8 +69,7 @@ class _Resp(io.BytesIO):
 
 
 def _serve(payload: bytes):
-    import urllib.request
-    return mock.patch.object(urllib.request, "urlopen", lambda *a, **k: _Resp(payload))
+    return mock.patch.object(fetchlib, "urlopen", lambda *a, **k: _Resp(payload))
 
 
 def _expecting(eco, payload: bytes, task: str):
@@ -315,7 +317,6 @@ def test_a_failed_install_never_deletes_weights_it_did_not_create(tmp_path):
     there is the user's - weights installed by hand, or by an older version in a
     layout this one does not resolve - and a transient failure (an offline
     machine is enough) must not destroy data no retry can bring back."""
-    import urllib.request
     eco = DentalSegmentatorEcosystem()
     folder = eco._folder("base", tmp_path)
     config = folder / "nnUNetTrainerV2__nnUNetPlansv2.1"        # a layout we cannot resolve
@@ -327,7 +328,7 @@ def test_a_failed_install_never_deletes_weights_it_did_not_create(tmp_path):
     def offline(*a, **k):
         raise OSError("network is unreachable")
 
-    with mock.patch.object(urllib.request, "urlopen", offline), pytest.raises(Exception):
+    with mock.patch.object(fetchlib, "urlopen", offline), pytest.raises(Exception):
         eco.ensure("base", tmp_path)
     assert (config / "checkpoint_final.pth").read_bytes() == b"the user's own weights"
 
@@ -369,7 +370,6 @@ def test_two_installs_of_one_task_serialize_and_the_second_downloads_nothing(tmp
     deletes the winner's finished weights. Under the lock the second caller waits,
     finds the work done, and fetches nothing."""
     import threading
-    import urllib.request
     payload = _nested_zip()
     eco = _expecting(DentalSegmentatorEcosystem(), payload, "base")
     downloads, overlapping = [], []
@@ -384,7 +384,7 @@ def test_two_installs_of_one_task_serialize_and_the_second_downloads_nothing(tmp
         downloads.append(1)
         return _Resp(payload)
 
-    with mock.patch.object(urllib.request, "urlopen", urlopen):
+    with mock.patch.object(fetchlib, "urlopen", urlopen):
         threads = [threading.Thread(target=lambda: results.append(_capture(eco.ensure, "base", tmp_path)))
                    for _ in range(2)]
         results = []
@@ -410,12 +410,11 @@ def test_four_concurrent_installs_of_one_task_leave_exactly_one(tmp_path):
     """Unlocked, four at once left NOTHING installed while one of them reported
     success - the destroy-then-move in the unpacker interleaves."""
     import threading
-    import urllib.request
     from haversack.weights_fetch import installed_version
     payload = _bare_config_zip()                       # the unpack-into-the-model-folder layout
     eco = _expecting(TotalVibeEcosystem(), payload, "vibe")
     errors = []
-    with mock.patch.object(urllib.request, "urlopen", lambda *a, **k: _Resp(payload)):
+    with mock.patch.object(fetchlib, "urlopen", lambda *a, **k: _Resp(payload)):
         threads = [threading.Thread(target=lambda: errors.append(_capture(eco.ensure, "vibe", tmp_path)))
                    for _ in range(4)]
         for t in threads:
@@ -434,12 +433,11 @@ def test_a_download_that_is_not_an_archive_is_an_error_not_a_traceback(tmp_path)
     unpack half was not, so these surfaced as tracebacks - and one of the escaping
     types is NotImplementedError, which UnsupportedModel inherits, making a bad
     download indistinguishable from this package's own half-written marker."""
-    import urllib.request
     from haversack.errors import HaversackError
     eco = DentalSegmentatorEcosystem()
     for payload in (b"<html>404 Not Found</html>", b"PK\x03\x04truncated", b""):
         eco = _expecting(DentalSegmentatorEcosystem(), payload, "base")
-        with mock.patch.object(urllib.request, "urlopen", lambda *a, **k: _Resp(payload)):
+        with mock.patch.object(fetchlib, "urlopen", lambda *a, **k: _Resp(payload)):
             with pytest.raises(HaversackError, match="could not be unpacked"):
                 eco.ensure("base", tmp_path)
         assert not eco.materialized("base", tmp_path)
@@ -450,7 +448,6 @@ def test_a_weights_download_says_who_is_asking(tmp_path):
     front of MOOSE's one non-GitHub asset (``clin_ct_dental``) answers that with
     403 and anything named with 200 - so a live asset failed mid-install as if
     it were dead. The request must carry the package's name and version."""
-    import urllib.request
     from haversack import __version__
     from haversack import ecosystems as eco_mod
     payload = _nested_zip(litter=False)
@@ -460,7 +457,7 @@ def test_a_weights_download_says_who_is_asking(tmp_path):
         seen.append(req)
         return _Resp(payload)
 
-    with mock.patch.object(urllib.request, "urlopen", urlopen):
+    with mock.patch.object(fetchlib, "urlopen", urlopen):
         eco_mod._download_and_extract_zip("http://h/w.zip", tmp_path)
     assert len(seen) == 1
     req = seen[0]
@@ -531,7 +528,6 @@ def test_a_download_larger_than_the_ceiling_is_refused(tmp_path, monkeypatch):
     under a published tag, so a download with nothing to check it against needs a
     ceiling. The ceiling is read at call time: parsed at import, a typo in the
     environment variable took down the CLI, the server and the Modal worker."""
-    import urllib.request
     from haversack import ecosystems as eco_mod
     from haversack.errors import InputError
 
@@ -546,7 +542,7 @@ def test_a_download_larger_than_the_ceiling_is_refused(tmp_path, monkeypatch):
     monkeypatch.delenv("HAVERSACK_MAX_WEIGHTS_GB")
 
     monkeypatch.setattr(eco_mod, "_weights_cap", lambda: 1024)
-    with mock.patch.object(urllib.request, "urlopen", lambda *a, **k: _Big(b"x" * 8192)):
+    with mock.patch.object(fetchlib, "urlopen", lambda *a, **k: _Big(b"x" * 8192)):
         with pytest.raises(InputError, match="over the .* byte cap"):
             eco_mod._download_and_extract_zip("http://h/w.zip", tmp_path)
     assert not list(tmp_path.glob("*.zip"))                        # the part-file is gone

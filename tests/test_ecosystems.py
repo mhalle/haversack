@@ -162,7 +162,7 @@ def test_moose_extract_is_atomic_and_digest_checked(tmp_path):
         z.writestr("Dataset001/fold_0/checkpoint.pth", b"weights")
     payload = zbuf.getvalue()
 
-    import urllib.request
+    from haversack import fetchlib
     from unittest import mock
 
     class R(io.BytesIO):
@@ -171,7 +171,7 @@ def test_moose_extract_is_atomic_and_digest_checked(tmp_path):
 
     dest = tmp_path / "moose"
     dest.mkdir()
-    with mock.patch.object(urllib.request, "urlopen",
+    with mock.patch.object(fetchlib, "urlopen",
                            lambda *a, **k: R(payload)):
         with pytest.raises(InputError, match="digest"):
             _download_and_extract_zip("http://h/w.zip", dest, sha256="00" * 32)

@@ -19,7 +19,6 @@ Usage (stdlib only):  uv run --no-project python tools/gen_dentalsegmentator_man
 """
 import json
 import sys
-import urllib.request
 from pathlib import Path
 
 import zippeek
@@ -59,8 +58,7 @@ def describe_zip(url: str) -> dict:
 
 
 def main() -> None:
-    with urllib.request.urlopen(API, timeout=60) as r:
-        rec = json.load(r)
+    rec = zippeek.get_json(API)
     meta = rec.get("metadata") or {}
     access = meta.get("access_right")
     if access not in ("open", "public"):

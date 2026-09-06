@@ -186,7 +186,7 @@ def _serve(monkeypatch, zip_path):
             out, data = (data, b"") if n in (-1, None) or n >= len(data) else (data[:n], data[n:])
             return out
 
-    monkeypatch.setattr(wf.urllib.request, "urlopen", lambda *a, **k: contextlib.nullcontext(R()))
+    monkeypatch.setattr(wf.fetchlib, "urlopen", lambda *a, **k: contextlib.nullcontext(R()))
 
 
 def test_fetch_writes_a_sidecar_naming_the_version(tmp_path, monkeypatch):
@@ -238,7 +238,7 @@ def test_pins_are_parsed_from_totalsegmentators_config(monkeypatch):
         "version": "v2.0.0-weights"
     },
     '''
-    monkeypatch.setattr(wf.urllib.request, "urlopen",
+    monkeypatch.setattr(wf.fetchlib, "urlopen",
                         lambda *a, **k: __import__("contextlib").nullcontext(
                             type("R", (), {"read": lambda self: src.encode()})()))
     assert wf.upstream_pins() == {"291": "v2.0.0-weights", "297": "v2.0.0-weights"}
@@ -247,7 +247,7 @@ def test_pins_are_parsed_from_totalsegmentators_config(monkeypatch):
 def test_unreachable_pins_fall_back_to_newest_rather_than_failing(monkeypatch):
     def boom(*a, **k):
         raise OSError("no network")
-    monkeypatch.setattr(wf.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(wf.fetchlib, "urlopen", boom)
     assert wf.upstream_pins() == {}          # advisory, never fatal
 
 

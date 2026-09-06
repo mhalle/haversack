@@ -1389,7 +1389,7 @@ def test_tcia_source_flattens_and_blocks_zip_slip(tmp_path, monkeypatch):
         def __exit__(self, *a):
             return False
 
-    monkeypatch.setattr("urllib.request.urlopen",
+    monkeypatch.setattr("haversack.fetchlib.urlopen",
                         lambda url, timeout=0: FakeResp(buf.getvalue()))
     src = TCIASource()
     got = src.fetch("1.2.3.4.5.6.7", tmp_path)
@@ -1421,11 +1421,11 @@ def test_openneuro_is_a_data_only_source(tmp_path, monkeypatch):
         def __exit__(self, *a):
             return False
 
-    def fake_open(url, timeout=0):
-        seen["url"] = url
+    def fake_open(req, timeout=0):
+        seen["url"] = req.full_url
         return FakeResp(volume_bytes())
 
-    monkeypatch.setattr("haversack.sources._OPENER", type("O", (), {"open": staticmethod(fake_open)})())
+    monkeypatch.setattr("haversack.fetchlib.urlopen", fake_open)
     got = src.fetch("ds000001/sub-01/anat/sub-01_T1w.nii.gz", tmp_path)
     assert seen["url"].endswith("openneuro.org/ds000001/sub-01/anat/sub-01_T1w.nii.gz")
     assert (got / "sub-01_T1w.nii.gz").exists()          # basename keeps the format

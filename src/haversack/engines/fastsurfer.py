@@ -248,10 +248,9 @@ def ensure_checkpoints(directory=None, *, progress=None) -> Path:
     present with the right hash is left alone; a partial or wrong one is refetched. Atomic
     per file (temp + rename), so concurrent runs are safe."""
     import hashlib
-    import urllib.request
 
+    from .. import fetchlib
     from ..progress import InstallProgress
-    from ..weights_fetch import _content_length
 
     d = Path(directory) if directory is not None else checkpoint_dir()
     d.mkdir(parents=True, exist_ok=True)
@@ -266,9 +265,9 @@ def ensure_checkpoints(directory=None, *, progress=None) -> Path:
         what = f"fetching {name} from Zenodo"
         say(what)
         tmp = dest.with_suffix(dest.suffix + f".{os.getpid()}.part")
-        with urllib.request.urlopen(f"{ZENODO_BASE}/{name}?download=1", timeout=600) as r, \
+        with fetchlib.open(f"{ZENODO_BASE}/{name}?download=1", timeout=600) as r, \
                 open(tmp, "wb") as f:
-            total, done = _content_length(r), 0
+            total, done = fetchlib.content_length(r), 0
             say.download(done, total, what)
             while chunk := r.read(1 << 20):
                 f.write(chunk)

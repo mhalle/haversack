@@ -17,7 +17,6 @@ import json
 import re
 import struct
 import sys
-import urllib.request
 from pathlib import Path
 
 import zippeek
@@ -73,7 +72,7 @@ def main(argv: list) -> None:
         config_py = Path(argv[0]).read_text()
         source = str(argv[0])
     else:
-        with urllib.request.urlopen(UPSTREAM_CONFIG, timeout=60) as r:
+        with zippeek.open_url(UPSTREAM_CONFIG) as r:
             config_py = r.read().decode()
         source = UPSTREAM_CONFIG
     registry = parse_registry(config_py)

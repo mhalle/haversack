@@ -15,9 +15,11 @@ import json
 import re
 import os
 import tempfile
-import urllib.request
 import zipfile
 from pathlib import Path
+
+from . import fetchlib
+from .fetchlib import content_length as _content_length, user_agent  # noqa: F401 - callers import these from here
 
 MANIFEST = Path(__file__).parent / "data" / "ts_weights.json"
 
@@ -182,29 +184,6 @@ def selected(entry: dict, tag: str | None = None) -> dict:
     return versions[want]
 
 
-def user_agent() -> str:
-    """What every weights download identifies itself as.
-
-    Python's default, ``Python-urllib/3.x``, is answered 403 by the Cloudflare
-    rule in front of ``model.s.mdforge.com`` - the host of MOOSE's one asset that
-    is not a GitHub release (``clin_ct_dental``, 2026-09-06) - while any name
-    that says who is asking gets the bytes. The installer sent the default and
-    so failed mid-install on a URL that was never dead. Read at call time so
-    the version is the package's own without a circular import.
-    """
-    from . import __version__
-    return f"haversack/{__version__}"
-
-
-def _content_length(response) -> int:
-    """The byte size a download will be, or 0 when the server did not say."""
-    headers = getattr(response, "headers", None)
-    try:
-        return int(headers.get("Content-Length") or 0) if headers is not None else 0
-    except (TypeError, ValueError, AttributeError):
-        return 0
-
-
 def is_present(weights_id, root) -> bool:
     from .tasks import _dataset_dirs
     return bool(_dataset_dirs(Path(root), weights_id))
@@ -256,8 +235,7 @@ def fetch_one(weights_id, root, *, tag: str | None = None, progress=None) -> Pat
         what = f"downloading Dataset{weights_id} from {url.rsplit('/', 1)[-1]}"
         say(what)
         h = hashlib.sha256()
-        req = urllib.request.Request(url, headers={"User-Agent": user_agent()})
-        with urllib.request.urlopen(req) as r, open(archive, "wb") as f:
+        with fetchlib.open(url, timeout=1800) as r, open(archive, "wb") as f:
             total = _content_length(r) or int(chosen.get("size") or 0)
             done = 0
             say.download(done, total, what)
@@ -341,13 +319,11 @@ def _api(url: str, token: str | None = None) -> list:
     """One GitHub API GET, following pagination. Stdlib only, like the rest of this module."""
     out, page = [], 1
     while True:
-        req = urllib.request.Request(f"{url}?per_page=100&page={page}",
-                                     headers={"Accept": "application/vnd.github+json",
-                                              "User-Agent": user_agent()})
+        headers = {"Accept": "application/vnd.github+json"}
         tok = token or os.environ.get("GITHUB_TOKEN")
         if tok:
-            req.add_header("Authorization", f"Bearer {tok}")
-        with urllib.request.urlopen(req, timeout=60) as r:
+            headers["Authorization"] = f"Bearer {tok}"
+        with fetchlib.open(f"{url}?per_page=100&page={page}", timeout=60, headers=headers) as r:
             batch = json.loads(r.read())
         out += batch
         if len(batch) < 100:
@@ -403,8 +379,7 @@ def upstream_pins(repo: str = TS_REPO, *, progress=None) -> dict[str, str]:
     """
     say = progress or (lambda s: None)
     try:
-        req = urllib.request.Request(PINS_URL.format(repo=repo), headers={"User-Agent": user_agent()})
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with fetchlib.open(PINS_URL.format(repo=repo), timeout=60) as r:
             src = r.read().decode("utf-8", "replace")
     except Exception as e:                            # noqa: BLE001 - advisory, never fatal
         say(f"  ! could not read {repo}'s version pins ({type(e).__name__}); falling back to newest")

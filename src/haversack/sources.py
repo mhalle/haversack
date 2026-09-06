@@ -23,8 +23,10 @@ identities byte for byte.
 """
 import os
 import re
+import urllib.error
 from pathlib import Path
 
+from . import fetchlib
 from .errors import InputError
 
 __all__ = ["DataSource", "UrlTemplateSource", "IDCSource", "GitHubReleaseSource",
@@ -142,8 +144,8 @@ class UrlTemplateSource(DataSource):
         dest.mkdir(exist_ok=True)
         out = dest / self._filename(identifier)
         try:
-            with _OPENER.open(url, timeout=300) as r, open(out, "wb") as f:
-                _copy_capped(r, f, MAX_FETCH_BYTES, f"{self.prefix}:{identifier}")
+            with fetchlib.open(url, timeout=300) as r, open(out, "wb") as f:
+                fetchlib.copy_capped(r, f, MAX_FETCH_BYTES, f"{self.prefix}:{identifier}")
         except InputError:
             raise
         except Exception as e:
@@ -220,14 +222,13 @@ class TCIASource(DataSource):
 
     def fetch(self, identifier: str, dest_dir: Path, *, credentials=None) -> Path:
         import shutil
-        import urllib.request
         import zipfile
         dest = Path(dest_dir) / "series"
         dest.mkdir(exist_ok=True)
         tmp = Path(dest_dir) / "series.zip"
         try:
-            with urllib.request.urlopen(f"{self.API}?SeriesInstanceUID={identifier}",
-                                        timeout=600) as r, open(tmp, "wb") as f:
+            with fetchlib.open(f"{self.API}?SeriesInstanceUID={identifier}",
+                               timeout=600) as r, open(tmp, "wb") as f:
                 while chunk := r.read(1 << 20):
                     f.write(chunk)
             n = 0
@@ -283,53 +284,6 @@ def _has_dotdot(identifier: str) -> bool:
     return any(seg == ".." for seg in re.split(r"[/\\]", identifier))
 
 
-def _copy_capped(src, dst, cap: int, what: str) -> int:
-    """copyfileobj with a hard byte ceiling - a server that lies about
-    Content-Length (or a bomb) cannot fill the disk."""
-    n = 0
-    while True:
-        chunk = src.read(1 << 20)
-        if not chunk:
-            return n
-        n += len(chunk)
-        if n > cap:
-            raise InputError(f"{what}: exceeded the {cap}-byte fetch cap")
-        dst.write(chunk)
-    return n
-
-
-def _safe_opener():
-    """A urllib opener that DROPS Authorization on a cross-host redirect.
-    urllib copies every header across redirects except content-*, so a
-    per-request source token would otherwise follow a first-hop redirect to
-    any host it names. httpx (the client) already does this; sources.py did
-    not."""
-    import urllib.request
-    from urllib.parse import urlparse
-
-    def _origin_change(old_url: str, new_url: str) -> bool:
-        a, b = urlparse(old_url), urlparse(new_url)
-        if a.netloc != b.netloc:
-            return True
-        # an https->http downgrade on the SAME host still exposes the token in
-        # cleartext; strip it (an http->https upgrade is safe and kept, which
-        # is exactly what httpx does)
-        return a.scheme == "https" and b.scheme == "http"
-
-    class _StripCrossHostAuth(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            new = super().redirect_request(req, fp, code, msg, headers, newurl)
-            if new is not None and _origin_change(req.full_url, newurl):
-                for k in [h for h in new.headers if h.lower() == "authorization"]:
-                    del new.headers[k]
-            return new
-
-    return urllib.request.build_opener(_StripCrossHostAuth)
-
-
-_OPENER = _safe_opener()
-
-
 class RangeFile:
     """A seekable read-only file over HTTP Range requests, with an LRU block
     cache. Handing one to :class:`zipfile.ZipFile` gives remote archives
@@ -363,12 +317,10 @@ class RangeFile:
         if i in self._blocks:
             self._blocks.move_to_end(i)
             return self._blocks[i]
-        import urllib.request
         lo = i * self.block_size
         hi = min(self.size, lo + self.block_size) - 1
-        req = urllib.request.Request(self.url,
-                                     headers={**self.headers, "Range": f"bytes={lo}-{hi}"})
-        with _OPENER.open(req, timeout=300) as r:
+        with fetchlib.open(self.url, timeout=300,
+                           headers={**self.headers, "Range": f"bytes={lo}-{hi}"}) as r:
             if r.status != 206:
                 # a 200 means the server ignored Range and is streaming the
                 # WHOLE body - on a multi-GB archive that is an unbounded read
@@ -443,7 +395,6 @@ class ArchiveReadingSource(DataSource):
 
     def fetch(self, identifier: str, dest_dir: Path, *, credentials=None) -> Path:
         import shutil
-        import urllib.request
         outer, _, member = identifier.partition("!")
         if _has_dotdot(outer):             # the outer id steers the URL; the
                                            # member is neutralized by flatten
@@ -456,9 +407,9 @@ class ArchiveReadingSource(DataSource):
                 name = Path(outer).name
                 if not name or name in (".", ".."):
                     name = "image"
-                req = urllib.request.Request(url, headers=self._headers(credentials))
-                with _OPENER.open(req, timeout=1800) as r, open(dest / name, "wb") as f:
-                    _copy_capped(r, f, MAX_FETCH_BYTES, f"{self.prefix}:{identifier}")
+                with fetchlib.open(url, timeout=1800, headers=self._headers(credentials)) as r, \
+                        open(dest / name, "wb") as f:
+                    fetchlib.copy_capped(r, f, MAX_FETCH_BYTES, f"{self.prefix}:{identifier}")
                 return dest
             z = self._zip(outer, credentials)
             members = ([m for m in z.namelist()
@@ -511,11 +462,9 @@ class ZenodoSource(ArchiveReadingSource):
 
     def resolve(self, outer: str, credentials=None) -> tuple:
         import json as _json
-        import urllib.request
         recid, _, filename = outer.partition("/")
-        req = urllib.request.Request(f"https://zenodo.org/api/records/{recid}",
-                                     headers=self._headers(credentials))
-        with _OPENER.open(req, timeout=60) as r:
+        with fetchlib.open(f"https://zenodo.org/api/records/{recid}", timeout=60,
+                           headers=self._headers(credentials)) as r:
             rec = _json.load(r)
         access = ((rec.get("metadata") or {}).get("access_right")
                   or (rec.get("access") or {}).get("files") or "")
@@ -555,14 +504,12 @@ class HuggingFaceSource(ArchiveReadingSource):
         self.allow_restricted = allow_restricted
 
     def resolve(self, outer: str, credentials=None) -> tuple:
-        import urllib.request
         repo, _, rest = outer.partition("@")
         sha, _, path = rest.partition("/")
         url = f"https://huggingface.co/datasets/{repo}/resolve/{sha}/{path}"
-        req = urllib.request.Request(url, method="HEAD",
-                                     headers=self._headers(credentials))
         try:
-            with _OPENER.open(req, timeout=60) as r:
+            with fetchlib.open(url, method="HEAD", timeout=60,
+                               headers=self._headers(credentials)) as r:
                 size = int(r.headers.get("Content-Length") or 0)
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
@@ -640,15 +587,13 @@ class S3Source(ArchiveReadingSource):
                 f"served buckets: {', '.join(sorted(self.buckets))}")
 
     def resolve(self, outer: str, credentials=None) -> tuple:
-        import urllib.request
         self.check(outer, credentials)         # allowlist and token, before any request
         bucket, _, key = outer.partition("/")
         region = self.buckets[bucket]
         host = "s3.amazonaws.com" if region is None else f"s3.{region}.amazonaws.com"
         url = f"https://{host}/{bucket}/{key}"
-        req = urllib.request.Request(url, method="HEAD")
         try:
-            with _OPENER.open(req, timeout=60) as r:
+            with fetchlib.open(url, method="HEAD", timeout=60) as r:
                 size = int(r.headers.get("Content-Length") or 0)
         except Exception as e:
             raise InputError(f"s3:{outer}: HEAD failed: {e}") from e
@@ -711,16 +656,14 @@ class GitHubReleaseSource(ArchiveReadingSource):
         self._headers(credentials)
 
     def resolve(self, outer: str, credentials=None) -> tuple:
-        import urllib.request
         headers = self._headers(credentials)       # refuse a token before any request
         repo, _, rest = outer.partition("@")
         tag, _, asset = rest.partition("/")
         if not asset:
             raise InputError(f"github:{outer}: no asset name after the tag")
         url = f"{self.HOST}/{repo}/releases/download/{tag}/{asset}"
-        req = urllib.request.Request(url, method="HEAD", headers=headers)
         try:
-            with _OPENER.open(req, timeout=60) as r:
+            with fetchlib.open(url, method="HEAD", timeout=60, headers=headers) as r:
                 size = int(r.headers.get("Content-Length") or 0)
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
@@ -822,11 +765,10 @@ class HttpSource(ArchiveReadingSource):
         """``(url, size)`` from a HEAD request; a host that will not say its size
         still works for whole-file downloads (size 0 means unknown), but a zip
         member needs the size for Range reads and fails clearly without it."""
-        import urllib.request
         url = outer if "://" in outer else f"http://{outer}"
-        req = urllib.request.Request(url, method="HEAD", headers=self._headers(credentials))
         try:
-            with _OPENER.open(req, timeout=60) as r:
+            with fetchlib.open(url, method="HEAD", timeout=60,
+                               headers=self._headers(credentials)) as r:
                 size = int(r.headers.get("Content-Length") or 0)
                 url = r.url or url                  # follow the redirect once here
         except Exception as e:

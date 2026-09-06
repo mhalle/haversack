@@ -107,6 +107,15 @@ Two data sources and two model catalogs, each on the extension seam that already
   answer. (The same model is also `dentalsegmentator:base`, installed from its original
   Zenodo record and md5-verified; the MOOSE copy is checked against nothing, like the other
   23.)
+- **Every HTTP request haversack makes goes through one door.** There were three: a
+  hand-built opener in the sources that dropped `Authorization` on a cross-host redirect, the
+  weights installers' bare `urlopen` calls that had just learned to name themselves, and an
+  engine checkpoint fetch that did neither - so the User-Agent fix above reached the weights
+  path and left every hosted *source* still sending `Python-urllib/3.x`, which is the path a
+  server takes on a client's behalf. `haversack.fetchlib` (stdlib, no new dependency) now
+  holds both properties, every request in the package passes through it, and a test fails if
+  a `urlopen` grows anywhere else. The manifest generators, which cannot import the package,
+  route through `tools/zippeek.py` the same way.
 - **Three MOOSE models that were never offered now are: `moose:clin_ct_ALPACA`,
   `moose:clin_ct_PUMA` and `moose:clin_ct_PUMA4`.** The generator's name pattern was
   lowercase-only, so these and `clin_mr_FVM` fell through it without a word - 21 of 25 models

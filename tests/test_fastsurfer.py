@@ -236,7 +236,7 @@ def test_ensure_checkpoints_fetches_verifies_and_is_idempotent(monkeypatch, tmp_
     """The Zenodo fetch (FastSurfer's b2share download fails cert verification, 2026-09-03):
     a present file with the right hash is left alone; a bad hash is refused."""
     import hashlib
-    import urllib.request
+    from haversack import fetchlib
 
     blobs = {n: f"weights-of-{n}".encode() for n in fs.CHECKPOINTS}
     monkeypatch.setattr(fs, "CHECKPOINTS", {n: hashlib.sha256(b).hexdigest() for n, b in blobs.items()})
@@ -250,12 +250,12 @@ def test_ensure_checkpoints_fetches_verifies_and_is_idempotent(monkeypatch, tmp_
         def __enter__(self): return self
         def __exit__(self, *a): return False
 
-    def fake_urlopen(url, timeout=0):
-        name = url.split("/files/")[1].split("?")[0]
+    def fake_urlopen(req, timeout=0):
+        name = req.full_url.split("/files/")[1].split("?")[0]
         fetched.append(name)
         return Resp(blobs[name])
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(fetchlib, "urlopen", fake_urlopen)
     d = fs.ensure_checkpoints(tmp_path)
     assert sorted(fetched) == sorted(fs.CHECKPOINTS) and d == tmp_path
     fs.ensure_checkpoints(tmp_path)                        # second call: nothing refetched

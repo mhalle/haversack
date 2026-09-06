@@ -28,8 +28,9 @@ from __future__ import annotations
 import json
 import re
 import sys
-import urllib.request
 from pathlib import Path
+
+import zippeek
 
 ZOO_INFO = ("https://raw.githubusercontent.com/Project-MONAI/model-zoo/dev/"
             "models/model_info.json")
@@ -55,8 +56,7 @@ CURATED = (
 
 
 def fetch_json(url: str):
-    with urllib.request.urlopen(url, timeout=60) as r:
-        return json.loads(r.read())
+    return zippeek.get_json(url)
 
 
 def newest_versions(info: dict) -> dict:

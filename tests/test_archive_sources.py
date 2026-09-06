@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from haversack.errors import InputError
-from haversack import sources
 from haversack.sources import (ArchiveReadingSource, GitHubReleaseSource, HuggingFaceSource,
                            RangeFile, S3Source, ZenodoSource, registry)
 
@@ -351,8 +350,8 @@ def test_zenodo_access_fails_closed(monkeypatch):
         return FakeResp(json.dumps({"files": [{"key": "x.nii.gz", "size": 10,
                         "links": {"content": "http://h/x"}}]}).encode())
 
-    import haversack.sources as srcmod
-    monkeypatch.setattr(srcmod._OPENER, "open", fake_open)
+    from haversack import fetchlib
+    monkeypatch.setattr(fetchlib, "urlopen", fake_open)
     z = ZenodoSource()                                 # allow_restricted=False
     with pytest.raises(InputError, match="undeclared access|restricted|only fetches"):
         z.resolve("1234567/x.nii.gz")
@@ -362,8 +361,8 @@ def test_redirect_strips_auth_on_scheme_downgrade():
     """Round-4 sign-off: the token is dropped on an https->http downgrade
     even on the same host (cleartext exposure), while an http->https upgrade
     keeps it - matching httpx."""
-    import haversack.sources as srcmod
-    opener = srcmod._safe_opener()
+    from haversack import fetchlib
+    opener = fetchlib._build_opener()
     (h,) = [x for x in opener.handlers
             if type(x).__name__ == "_StripCrossHostAuth"]
     import urllib.request
@@ -411,7 +410,8 @@ def test_s3_builds_its_url_from_the_allowlist_and_never_from_the_identifier(monk
             seen["url"], seen["method"] = req.full_url, req.get_method()
             return _Resp()
 
-    monkeypatch.setattr(sources, "_OPENER", _Opener())
+    from haversack import fetchlib
+    monkeypatch.setattr(fetchlib, "urlopen", _Opener().open)
     src = S3Source()
     assert src.resolve("fcp-indi/data/x.nii.gz") == (
         "https://s3.amazonaws.com/fcp-indi/data/x.nii.gz", 123)

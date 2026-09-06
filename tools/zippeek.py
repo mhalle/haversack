@@ -42,6 +42,19 @@ def head_status(url: str) -> int:
         return e.code
 
 
+def open_url(url, *, timeout: float = 60, headers=None, method=None):
+    """Open a URL (or a ready Request) the way the installer would - named, with
+    a timeout. The generators' one door, as haversack.fetchlib is the package's."""
+    req = url if isinstance(url, urllib.request.Request) else request(
+        url, method=method, headers=headers or {})
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def get_json(url: str, **kw):
+    with open_url(url, **kw) as r:
+        return json.load(r)
+
+
 def content_length(url: str) -> int:
     with urllib.request.urlopen(request(url, method="HEAD"), timeout=120) as r:
         return int(r.headers["Content-Length"])

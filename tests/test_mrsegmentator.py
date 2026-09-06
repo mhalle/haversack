@@ -36,8 +36,8 @@ class _Resp(io.BytesIO):
 
 
 def _serve(payload: bytes):
-    import urllib.request
-    return mock.patch.object(urllib.request, "urlopen", lambda *a, **k: _Resp(payload))
+    from haversack import fetchlib
+    return mock.patch.object(fetchlib, "urlopen", lambda *a, **k: _Resp(payload))
 
 
 def _eco_expecting(payload: bytes, task="base") -> MRSegmentatorEcosystem:

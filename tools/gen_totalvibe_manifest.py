@@ -37,7 +37,6 @@ import json
 import os
 import re
 import sys
-import urllib.request
 from pathlib import Path
 
 import zippeek
@@ -130,11 +129,10 @@ def base_assets(assets: dict) -> list:
 
 
 def main() -> None:
-    req = urllib.request.Request(API, headers={"Accept": "application/vnd.github+json"})
+    headers = {"Accept": "application/vnd.github+json"}
     if os.environ.get("GITHUB_TOKEN"):
-        req.add_header("Authorization", f"Bearer {os.environ['GITHUB_TOKEN']}")
-    with urllib.request.urlopen(req, timeout=60) as r:
-        release = json.load(r)
+        headers["Authorization"] = f"Bearer {os.environ['GITHUB_TOKEN']}"
+    release = zippeek.get_json(API, headers=headers)
     assets = {a["name"]: a for a in release["assets"]}
 
     published = base_assets(assets)
