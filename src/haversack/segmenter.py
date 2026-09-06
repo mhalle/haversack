@@ -206,6 +206,13 @@ class Segmenter:
                     {**info, "folds_default": list(self.policy["folds"]),
                      "hint": "structures are read from the checkpoint once "
                              "installed; prepare() or first use installs it"})
+            if info is not None and info.get("unresolved"):
+                # The weights are installed but this build cannot choose among
+                # the configurations they ship. Report that, with the resolver's
+                # own remedy - propagating turns a real install into a 404
+                # "unknown task" at every door that catches LookupError.
+                return self._introspection(
+                    {**info, "folds_default": list(self.policy["folds"])})
             if info is not None and not info.get("task_spec", True):
                 # This ecosystem's tasks have no nnU-Net TaskSpec (an engine runs
                 # its own network), so _resolve_spec would raise; its describe IS
@@ -256,8 +263,13 @@ class Segmenter:
         return self._introspection(d)
 
     def structures(self, task) -> list[str]:
-        """The structure names a task produces, in label order."""
-        return self.describe(task)["structures"]
+        """The structure names a task produces, in label order.
+
+        Empty when they are not knowable yet - the weights are not installed, or
+        are installed in a shape this build cannot choose among. ``describe()``
+        says which; this is the convenience, and it should not raise KeyError at
+        a caller that only wanted a list."""
+        return list(self.describe(task).get("structures") or [])
 
     # -- warm models --------------------------------------------------------
     def warm(self, task) -> int:

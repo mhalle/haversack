@@ -133,9 +133,11 @@ def test_moose_pin_checks_installed_not_manifest_tag(tmp_path):
     moose = MooseEcosystem()
     task = moose.tasks()[0]
     entry = moose._entries[task]
-    folder = moose._folder(task, tmp_path)
-    folder.mkdir(parents=True)
-    (folder / "dataset.json").write_text("{}")     # materialized...
+    # a real model folder, not a bare dataset.json: "installed" means a
+    # RESOLVABLE nnU-Net folder, so that a half-written unpack is never mistaken
+    # for a finished one
+    folder = _fake_model_folder(tmp_path / "moose", entry["folder"])
+    assert moose.materialized(task, tmp_path)
     _write_sidecar(folder, "x", "OLD-RELEASE", {"url": "u"}, None)
     with pytest.raises(ModelNotFound, match="OLD-RELEASE|remove"):
         moose.ensure(task, tmp_path, version=entry["tag"])   # == manifest tag

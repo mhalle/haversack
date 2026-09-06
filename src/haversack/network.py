@@ -225,6 +225,30 @@ def canonical_spacing(spacing_t, fwd) -> tuple:
     return tuple(out)
 
 
+def checkpoint_name(folder, folds) -> str:
+    """Which checkpoint file to load from the requested folds.
+
+    nnU-Net writes ``checkpoint_final.pth`` when training ends and
+    ``checkpoint_best.pth`` at the best validation epoch, and a published model
+    may ship either: every TotalSegmentator, MOOSE and MRSegmentator asset ships
+    ``final``, while TotalVibeSegmentator's body-region and vertebra models ship
+    only ``best``. Prefer ``final`` - it is what nnU-Net's own predictor defaults
+    to, so preferring it keeps the common case byte-identical - and fall back to
+    ``best`` rather than dying inside nnU-Net on a bare file-not-found.
+    """
+    root = Path(folder)
+    dirs = [root / f"fold_{f}" for f in folds]
+    for name in ("checkpoint_final.pth", "checkpoint_best.pth"):
+        if dirs and all((d / name).is_file() for d in dirs):
+            return name
+    have = sorted({f"{d.name}/{c.name}" for d in dirs if d.is_dir()
+                   for c in d.glob("checkpoint_*.pth")})
+    raise ModelNotFound(
+        f"{root.name}: no checkpoint_final.pth or checkpoint_best.pth in every "
+        f"requested fold ({', '.join(d.name for d in dirs)}); found "
+        + (", ".join(have) if have else "no checkpoint_*.pth at all"))
+
+
 def available_folds(folder, folds) -> tuple:
     """The requested folds, restricted to the ``fold_*`` directories that exist.
 
@@ -313,8 +337,9 @@ class TorchModel:
             p = nnUNetPredictor(tile_step_size=step_size, use_gaussian=True, use_mirroring=False,
                                 perform_everything_on_device=False, device=self.device, verbose=False,
                                 allow_tqdm=False)
-            p.initialize_from_trained_model_folder(str(self.folder), use_folds=available_folds(self.folder, folds),
-                                                   checkpoint_name="checkpoint_final.pth")
+            use = available_folds(self.folder, folds)
+            p.initialize_from_trained_model_folder(str(self.folder), use_folds=use,
+                                                   checkpoint_name=checkpoint_name(self.folder, use))
         self.predictor = p
         self.plans = p.plans_manager.plans
         self.dataset_json = p.dataset_json

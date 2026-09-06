@@ -247,3 +247,43 @@ def test_fold_all_layout_satisfies_any_fold_request(tmp_path):
     (mixed / "fold_0").mkdir()
     assert available_folds(mixed, (0,)) == (0,)
     assert available_folds(mixed, "all") == (0,)   # numeric folds enumerate
+
+
+# -- which checkpoint file a published model actually ships ---------------------------
+def _fold(root, name, *checkpoints):
+    d = root / name
+    d.mkdir(parents=True)
+    for c in checkpoints:
+        (d / c).write_bytes(b"weights")
+    return root
+
+
+def test_checkpoint_final_is_preferred_and_best_is_the_fallback(tmp_path):
+    """nnU-Net writes checkpoint_final.pth at the end of training and
+    checkpoint_best.pth at the best validation epoch, and a published model may
+    ship either: every TotalSegmentator, MOOSE and MRSegmentator asset ships
+    `final`, TotalVibeSegmentator's body-region and vertebra models ship only
+    `best`. Preferring `final` keeps every existing model byte-identical."""
+    from haversack.network import checkpoint_name
+    both = _fold(tmp_path / "both", "fold_0", "checkpoint_final.pth", "checkpoint_best.pth")
+    assert checkpoint_name(both, (0,)) == "checkpoint_final.pth"
+    best = _fold(tmp_path / "best", "fold_0", "checkpoint_best.pth")
+    assert checkpoint_name(best, (0,)) == "checkpoint_best.pth"
+    every = _fold(tmp_path / "all", "fold_all", "checkpoint_final.pth")
+    assert checkpoint_name(every, ("all",)) == "checkpoint_final.pth"
+
+
+def test_a_checkpoint_missing_from_one_requested_fold_is_named_not_guessed(tmp_path):
+    """An ensemble must not silently load `final` from one fold and `best` from
+    another - the choice is one name across every requested fold."""
+    from haversack.errors import ModelNotFound
+    from haversack.network import checkpoint_name
+    root = _fold(tmp_path, "fold_0", "checkpoint_final.pth")
+    _fold(root, "fold_1", "checkpoint_best.pth")
+    with pytest.raises(ModelNotFound, match="fold_0, fold_1"):
+        checkpoint_name(root, (0, 1))
+    assert checkpoint_name(root, (0,)) == "checkpoint_final.pth"
+    empty = tmp_path / "empty"
+    (empty / "fold_0").mkdir(parents=True)
+    with pytest.raises(ModelNotFound, match="no checkpoint_.*at all"):
+        checkpoint_name(empty, (0,))

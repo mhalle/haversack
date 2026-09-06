@@ -59,6 +59,10 @@ def installed_version(folder) -> dict | None:
 def _write_sidecar(dest: Path, weights_id, tag: str, entry: dict, sha256: str | None) -> None:
     import datetime
     rec = {"id": dataset_key(weights_id), "tag": tag, "sha256": sha256 or entry.get("sha256"),
+           # whichever digest the publisher states and the install verified.
+           # Zenodo publishes md5 only; recording it under "sha256" made
+           # provenance claim a hash it is not.
+           "md5": entry.get("md5"),
            "url": entry.get("url"), "name": entry.get("name"),
            "installed": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
            "by": "haversack"}
