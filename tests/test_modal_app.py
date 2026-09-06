@@ -69,6 +69,29 @@ def _swap_dict(monkeypatch):
     return modal_app, fake
 
 
+def test_prefetch_candidate_follows_jobpolicy(monkeypatch):
+    """The scan's exclusions are jobpolicy's, not its own. A job that asked for
+    fresh bytes and a multi-input job were both selected before - and the first
+    was then pinned by the pre-read, so its own no-cache refresh was refused."""
+    m, fake = _swap_dict(monkeypatch)
+    fake["inflight:K"] = "x"                     # markers never crash the scan
+    fake["cancel:y"] = 1.0
+    fake["a"] = {"id": "a", "state": "queued", "created": 1, "refresh_input": True,
+                 "source": [{"kind": "s3", "id": "b/a"}]}
+    fake["b"] = {"id": "b", "state": "queued", "created": 2,
+                 "source": [{"kind": "s3", "id": "b/1", "role": "image"},
+                            {"kind": "s3", "id": "b/2", "role": "mask"}]}
+    fake["c"] = {"id": "c", "state": "queued", "created": 3, "kind": "prepare"}
+    fake["d"] = {"id": "d", "state": "queued", "created": 4,
+                 "source": [{"kind": "input", "id": "sha256:0"}]}
+    fake["e"] = {"id": "e", "state": "queued", "created": 5,
+                 "source": [{"kind": "s3", "id": "b/e"}]}
+    fake["f"] = {"id": "f", "state": "running", "created": 0}   # the current job
+    assert m._prefetch_candidate("f") == ("s3", "s3:b/e", "e")
+    fake["g"] = {"id": "g", "state": "queued", "created": 0.5}  # an upload, older
+    assert m._prefetch_candidate("f") == ("upload", None, "g")
+
+
 def test_inflight_marker_ownership(monkeypatch):
     """Opus verification round: the marker operations, unit-reachable at
     module level. Under duplicate flights the marker names the latest job;

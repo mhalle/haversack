@@ -17,7 +17,8 @@ import threading
 import time
 import unittest
 
-from haversack.jobpolicy import fill_read_ahead, refresh_cached_input
+from haversack.jobpolicy import (fill_read_ahead, prefetchable, refresh_cached_input,
+                                 take_pre_read)
 
 SRC = pathlib.Path(inspect.getsourcefile(__import__("haversack"))).parent
 
@@ -708,6 +709,147 @@ class ClaimStatesThatWereUntested(unittest.TestCase):
             self.assertEqual(cache._owner_of(entry), won[0])
             self.assertEqual(list(cache.claims.iterdir()), [],
                              "the fallback leaked a staged token")
+
+
+class PrefetchCandidates(unittest.TestCase):
+    """Which queued jobs the prefetcher may warm. Both substrates ask
+    jobpolicy.prefetchable: the Modal scan kept its own list of exclusions and
+    had fallen two behind the local server's (multi-input jobs, and jobs that
+    asked for fresh bytes - which it then pinned, so their own refresh was
+    refused and they served the stale answer)."""
+
+    def _ok(self, **kw):
+        base = dict(state="queued", kind="segment", refresh_input=False,
+                    sources=[{"kind": "s3", "id": "b/k"}])
+        base.update(kw)
+        return prefetchable(**base)
+
+    def test_a_plain_queued_remote_job_qualifies(self):
+        self.assertTrue(self._ok())
+
+    def test_an_upload_qualifies_too(self):
+        self.assertTrue(self._ok(sources=None))
+        self.assertTrue(self._ok(sources=[{"kind": "upload"}]))
+
+    def test_only_queued_non_prepare_jobs(self):
+        self.assertFalse(self._ok(state="running"))
+        self.assertFalse(self._ok(kind="prepare"))
+
+    def test_a_job_that_asked_for_fresh_bytes_is_never_pre_read(self):
+        self.assertFalse(self._ok(refresh_input=True))
+
+    def test_multi_input_and_content_store_jobs_are_skipped(self):
+        self.assertFalse(self._ok(sources=[{"kind": "s3", "id": "a", "role": "image"},
+                                           {"kind": "s3", "id": "b", "role": "mask"}]))
+        self.assertFalse(self._ok(sources=[{"kind": "input", "id": "sha256:0"}]))
+
+    def test_both_prefetchers_ask_jobpolicy(self):
+        """Structural: the local head-of-queue check and the Modal scan both
+        call prefetchable from their own bodies."""
+        for module, fname in (("serve.py", "_prefetch_next"),
+                              ("modal_app.py", "_prefetch_candidate")):
+            tree = ast.parse((SRC / module).read_text())
+            fn = next((n for n in ast.walk(tree)
+                       if isinstance(n, ast.FunctionDef) and n.name == fname), None)
+            self.assertIsNotNone(fn, f"{module}: {fname} is gone")
+            calls = {ast.unparse(n.func) for n in ast.walk(fn)
+                     if isinstance(n, ast.Call)}
+            self.assertIn("prefetchable", calls, f"{module}:{fname} decides for itself")
+
+
+class PreReadIsClaimedThroughPolicy(unittest.TestCase):
+    """A job that asked for fresh bytes never uses a pre-read image. The local
+    server had that guard; the Modal worker popped unconditionally."""
+
+    class _Slot:
+        def __init__(self):
+            self.slot = {"k": "IMAGE"}
+
+        def pop(self, key):
+            return self.slot.pop(key, None)
+
+    def test_fresh_bytes_wanted_means_none_and_an_emptied_slot(self):
+        ra = self._Slot()
+        self.assertIsNone(take_pre_read(ra, "k", fresh_bytes_wanted=True))
+        self.assertEqual(ra.slot, {}, "the stale image stayed in the slot")
+
+    def test_otherwise_the_image_is_handed_over(self):
+        ra = self._Slot()
+        self.assertEqual(take_pre_read(ra, "k", fresh_bytes_wanted=False), "IMAGE")
+        self.assertIsNone(take_pre_read(ra, "k", fresh_bytes_wanted=False))
+
+    def test_nothing_pops_the_read_ahead_by_hand(self):
+        """A bare read_ahead.pop in a job body is this guard coming off on one
+        side only. Matched on the receiver's source, like the fill guard."""
+        callers = []
+        for path in sorted(SRC.glob("*.py")):
+            if path.name == "jobpolicy.py":
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "pop"
+                        and ast.unparse(node.func.value).endswith("read_ahead")):
+                    callers.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(callers, [], "a pre-read is taken without the fresh-bytes "
+                                      f"check: {callers}")
+
+
+class ClaimFailuresAfterTheLink(unittest.TestCase):
+
+    def test_a_failed_clear_takes_the_claim_back(self):
+        """Found by probing an entry that is writable but not readable: the link
+        succeeds and the iterdir raises. The outer handler then returned None
+        with our token still linked - a claim nobody held, staging() true, and
+        the key dead until the timeout reclaimed it."""
+        if os.name == "nt" or getattr(os, "geteuid", lambda: 1)() == 0:
+            self.skipTest("needs POSIX mode bits and a non-root uid")
+        import stat
+
+        from haversack.serve import SeriesCache
+        with tempfile.TemporaryDirectory() as td:
+            cache = SeriesCache(pathlib.Path(td), lambda k, e: e / "series")
+            entry = cache._entry("s3:b/x")
+            entry.mkdir()
+            (entry / "leftover").write_text("x")
+            os.chmod(entry, stat.S_IWUSR | stat.S_IXUSR)
+            try:
+                self.assertIsNone(cache._claim(entry))
+            finally:
+                os.chmod(entry, 0o755)
+            self.assertIsNone(cache._owner_of(entry), "a claim nobody holds was left behind")
+            self.assertFalse(cache.staging("s3:b/x"))
+            self.assertIsNotNone(cache._claim(entry), "the next writer could not take it")
+
+
+class HeartbeatFollowsTheClaimName(unittest.TestCase):
+
+    def test_the_ticker_touches_the_claim_whatever_it_is_called(self):
+        """_hb_start spelled ".owner" by hand. Renaming CLAIM would have left it
+        touching the directory, which _writer_alive (rglob) cannot see - every
+        slow writer then reads as dead."""
+        from haversack.serve import SeriesCache
+
+        class Renamed(SeriesCache):
+            CLAIM = ".lease"
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = Renamed(pathlib.Path(td), lambda k, e: e / "series", claim_timeout=0.6)
+            entry = cache._entry("s3:b/x")
+            token = cache._claim(entry)
+            claim = entry / ".lease"
+            self.assertTrue(claim.exists())
+            old = time.time() - 100
+            os.utime(claim, (old, old))
+            stop = cache._hb_start(entry, token)     # ticks every 0.1 s at this timeout
+            try:
+                deadline = time.time() + 3
+                while claim.stat().st_mtime < old + 50 and time.time() < deadline:
+                    time.sleep(0.05)
+            finally:
+                stop.set()
+            self.assertGreater(claim.stat().st_mtime, old + 50,
+                               "the heartbeat never touched the claim")
 
 
 if __name__ == "__main__":

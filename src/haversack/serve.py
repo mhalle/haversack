@@ -105,7 +105,7 @@ from . import content
 from .content import ContentStore, is_digest
 from .jobstore import JobStore
 from .errors import Cancelled, InputError, HaversackError, ResourceError
-from .jobpolicy import (fill_read_ahead, refresh_cached_input,
+from .jobpolicy import (fill_read_ahead, prefetchable, take_pre_read, refresh_cached_input,
                         source_cache_key)
 from .progress import CancelToken, Reporter
 
@@ -451,25 +451,36 @@ class SeriesCache:
                     return None            # read-only cache root: never claim
                 with os.fdopen(fd, "w") as f:
                     f.write(token)
-            if (marker or (entry / self.MARKER)).exists():
-                # Committed under us between the caller's marker check and this
-                # claim. Release it: re-fetching over a finished entry would
-                # replace good bytes and reset their LRU age for nothing.
+            try:
+                if (marker or (entry / self.MARKER)).exists():
+                    # Committed under us between the caller's marker check and
+                    # this claim. Release it: re-fetching over a finished entry
+                    # would replace good bytes and reset their LRU age for nothing.
+                    claim.unlink(missing_ok=True)
+                    return None
+                # We hold the claim on an entry with no marker, so anything
+                # already in it is a previous attempt that never completed -
+                # untrusted by definition. Clear it, or this writer's output is
+                # that attempt's leftovers PLUS ours, committed as one complete
+                # series. The old protocol got this free: the directory WAS the
+                # claim, so stale scaffolding blocked the claim instead of being
+                # adopted.
+                for stale in entry.iterdir():
+                    if stale == claim:
+                        continue
+                    if stale.is_dir() and not stale.is_symlink():
+                        shutil.rmtree(stale, ignore_errors=True)
+                    else:
+                        stale.unlink(missing_ok=True)
+            except OSError:
+                # The claim is already published, so a failure here has to take
+                # it back. Falling through to the outer handler returned None
+                # with our token still linked: a claim nobody held, `staging()`
+                # true, and the key dead until the timeout reclaimed it (found
+                # 2026-09-06 by probing an entry that is writable but not
+                # readable - the link succeeds and the iterdir raises).
                 claim.unlink(missing_ok=True)
                 return None
-            # We hold the claim on an entry with no marker, so anything already
-            # in it is a previous attempt that never completed - untrusted by
-            # definition. Clear it, or this writer's output is that attempt's
-            # leftovers PLUS ours, committed as one complete series. The old
-            # protocol got this free: the directory WAS the claim, so stale
-            # scaffolding blocked the claim instead of being adopted.
-            for stale in entry.iterdir():
-                if stale == claim:
-                    continue
-                if stale.is_dir() and not stale.is_symlink():
-                    shutil.rmtree(stale, ignore_errors=True)
-                else:
-                    stale.unlink(missing_ok=True)
             return token
         except OSError:
             return None                    # cannot write into the entry at all
@@ -519,7 +530,7 @@ class SeriesCache:
         long enough to be declared dead while alive. The ticker makes
         liveness mean process-liveness, which is what reclaim must key on."""
         stop = threading.Event()
-        beat = entry / ".owner"            # a FILE: _writer_alive scans files
+        beat = entry / self.CLAIM          # a FILE: _writer_alive scans files
                                            # (rglob), a directory utime is
                                            # invisible to it
         def tick():
@@ -1759,22 +1770,21 @@ class LocalExecutor:
                             key, check=reporter.check,
                             credentials=(rec.source_tokens or {}).get(kind))
                         reporter.check()
-                        # A job that asked for fresh bytes must not use a pre-read
-                        # image at all. Popping it in _refresh_input is not enough:
-                        # the prefetch thread refills that slot with no
-                        # synchronisation, and a refill landing after the pop
-                        # reinstalls the stale image - the fetch is paid for and
-                        # the stale answer returned anyway.
-                        preread = self.read_ahead.pop(key)
-                        if getattr(rec, "refresh_input", False):
-                            preread = None
+                        # A job that asked for fresh bytes never uses a pre-read
+                        # image; the rule (and why the pop alone is not enough)
+                        # is jobpolicy.take_pre_read's.
+                        preread = take_pre_read(
+                            self.read_ahead, key,
+                            fresh_bytes_wanted=getattr(rec, "refresh_input", False))
                         if preread is not None:
                             reporter.stage("read", "preread")
                             inp = preread
                         else:
                             inp = rec.input_path
                     else:
-                        preread = self.read_ahead.pop(rec.id)
+                        # uploaded bytes are the job's own: nothing to be stale
+                        preread = take_pre_read(self.read_ahead, rec.id,
+                                                fresh_bytes_wanted=False)
                         if preread is not None:
                             reporter.stage("read", "preread")
                             inp = preread
@@ -1900,21 +1910,14 @@ class LocalExecutor:
         pipeline - it hides the fetch; hiding the read is the follow-on."""
         with self._cv:
             nxt = self._jobs.get(self._pending[0]) if self._pending else None
-            if nxt is None or nxt.state != "queued" or nxt.kind == "prepare":
-                return                         # prepare has no input to stage
-        if len(nxt.input_paths) > 1:
-            # A multi-input job. The read-ahead holds ONE volume, so pre-reading
-            # a fraction of this job's inputs would evict a useful entry to save
-            # a fraction of one job's read; _stage_many deliberately never pops
-            # it, and a pre-read nobody claims is pure waste.
-            return
-        if getattr(nxt, "refresh_input", False):
-            # This job asked for fresh bytes. Pre-reading them warms an image it
-            # is about to discard, and worse: fill_read_ahead PINS for the read,
-            # and `discard` refuses on any pin without being able to say whose.
-            # The dispatcher's refresh then failed and the job served the stale
-            # answer - on s3: and github:, whose bytes can change under one
-            # identifier, which is the case no-cache exists for.
+        # Which jobs may be warmed - not a prepare, not multi-input, not one that
+        # asked for fresh bytes, not an `input` source - is decided once, in
+        # jobpolicy.prefetchable. The Modal worker's scan has to agree, and two
+        # of those exclusions once existed here alone.
+        if nxt is None or not prefetchable(
+                state=nxt.state, kind=nxt.kind,
+                refresh_input=getattr(nxt, "refresh_input", False),
+                sources=nxt.source):
             return
         src = nxt.source[0] if nxt.source else {"kind": "upload"}
         kind = src.get("kind", "upload")

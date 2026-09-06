@@ -145,8 +145,12 @@ Two data sources and two model catalogs, each on the extension seam that already
 - **`Cache-Control: no-cache` refreshes when a pre-read is in flight.** The pin above is
   refused by `discard`, which cannot say who holds it, and the prefetcher did not consult the
   job's own refresh flag - so a forced recompute could return the cached answer instead. It
-  no longer pre-reads an input the queued job asked to refresh. This matters most for `s3:`
-  and `github:`, whose bytes can be replaced under one identifier.
+  no longer pre-reads an input the queued job asked to refresh, and such a job never uses a
+  pre-read image even if one landed. This matters most for `s3:` and `github:`, whose bytes
+  can be replaced under one identifier. Both rules were first fixed on the local server only;
+  the Modal worker kept selecting those jobs, and now asks the same shared rule
+  (`jobpolicy.prefetchable`, `take_pre_read`) - which also stops it pre-reading a fraction of
+  a multi-input job's inputs, another exclusion the two sides had disagreed on.
 - **A claim that cannot be read is no longer treated as absent.** It reported as unclaimed,
   and the waiter retook it without pausing - measured at 95% of a core on the single
   dispatcher thread, indefinitely. The trigger is ordinary: under `umask 077` the claim file
@@ -155,6 +159,11 @@ Two data sources and two model catalogs, each on the extension seam that already
   re-sweeps its graveyard rather than only at startup. Content sitting under a claim with no
   completion marker is an attempt that never finished, and adopting it produced a series
   assembled from two different fetches, marked complete.
+- **A claim that fails after it is published is taken back.** Clearing stale content under a
+  fresh claim could raise (an entry that is writable but not readable, found by probing), and
+  the handler then returned "not claimed" with the token still linked: a claim nobody held,
+  reported as staging, and the key unusable until the timeout reclaimed it. The heartbeat also
+  named the claim file by its literal spelling rather than the constant.
 - **Retention and terminal job states agree across deployments by construction.** The local
   server decides in SQL and the Modal deployment in Python, so they cannot share code; a test
   now drives both over the same cases instead of asserting in a comment that they match.

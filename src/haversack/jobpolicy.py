@@ -165,3 +165,51 @@ def source_cache_key(source) -> SourceKey | None:
         return None
     ident = str(src.get("id") or src.get("crdc_series_uuid") or "")
     return SourceKey(kind, ident, f"{kind}:{ident}")
+
+
+def prefetchable(*, state, kind, refresh_input, sources) -> bool:
+    """May this job's input be staged ahead of its turn?
+
+    The prefetcher runs beside the current job and warms the NEXT one's input:
+    downloads its series into the series cache, then reads the image into the
+    read-ahead. Four kinds of job must be left alone, and both deployments had
+    to know all four - the local server selected the head of its queue, the
+    Modal worker scanned its whole jobs dict, and the two lists of exclusions
+    had drifted apart by two entries before this function existed.
+
+    - Not queued, or a ``prepare``: nothing to stage.
+    - A job that asked for fresh bytes (``refresh_input``). Pre-reading them
+      warms an image the job is about to discard, and worse: the pre-read PINS
+      for the duration, ``discard`` refuses on any pin without being able to say
+      whose, so the job's own refresh failed and it served the stale answer -
+      on ``s3:`` and ``github:``, whose bytes can change under one identifier,
+      which is the case ``no-cache`` exists for.
+    - A multi-input job. The read-ahead holds ONE volume, so pre-reading a
+      fraction of this job's inputs evicts a useful entry to save a fraction of
+      one read, and the multi-input stager deliberately never pops it.
+    - An ``input`` source: resolved through the content store, so there is no
+      series to stage and no local file to pre-read either. Treating it as an
+      upload once killed the prefetch thread on ``cache.pin(None)``.
+    """
+    if state != "queued" or kind == "prepare":
+        return False
+    if refresh_input:
+        return False
+    entries = list(sources or [{"kind": "upload"}])
+    if len(entries) > 1:
+        return False
+    return entries[0].get("kind", "upload") != "input"
+
+
+def take_pre_read(read_ahead, key: str, *, fresh_bytes_wanted: bool):
+    """Claim the pre-read image for ``key`` - or None when this job must not use one.
+
+    A job that asked for fresh bytes gets None even if an image is there, and
+    the slot is emptied either way. Popping in the refresh step alone was not
+    enough: the prefetch thread refills the slot with no synchronization, and a
+    refill landing after that pop reinstalls the stale image - the fetch is paid
+    for and the stale answer returned anyway. The local server had this guard
+    and the Modal worker did not, which is why it lives here now.
+    """
+    image = read_ahead.pop(key)
+    return None if fresh_bytes_wanted else image

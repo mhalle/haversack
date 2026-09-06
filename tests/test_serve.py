@@ -4171,8 +4171,17 @@ def test_a_no_cache_job_never_uses_a_pre_read_image(tmp_path):
     thread refills that slot with no synchronisation, so a refill landing after
     the drop reinstalls the stale image and the job segments it - the fetch paid
     for, the stale answer returned. A job that asked for fresh bytes uses none."""
-    src = (pathlib.Path(__file__).resolve().parents[1] / "src/haversack/serve.py").read_text()
-    i = src.index("preread = self.read_ahead.pop(key)")
-    following = src[i:i + 400]
-    assert 'if getattr(rec, "refresh_input", False):' in following
-    assert "preread = None" in following
+    import ast
+    import inspect
+    import textwrap
+
+    from haversack import serve
+    tree = ast.parse(textwrap.dedent(inspect.getsource(serve.LocalExecutor._dispatch)))
+    takes = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and ast.unparse(n.func) == "take_pre_read"]
+    assert takes, "the dispatcher no longer claims the pre-read through jobpolicy"
+    # the remote branch passes the JOB'S flag; a literal False there would
+    # silently hand a no-cache job the stale image again
+    flags = [ast.unparse(kw.value) for call in takes for kw in call.keywords
+             if kw.arg == "fresh_bytes_wanted"]
+    assert any("refresh_input" in f for f in flags), flags

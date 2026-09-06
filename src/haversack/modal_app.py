@@ -332,6 +332,34 @@ def _clear_own_artifacts_marker(jid: str, meta: dict) -> None:
         _clear_pending_marker(key, jid)
 
 
+def _prefetch_candidate(current_jid: str):
+    """The oldest OTHER queued job whose input may be warmed, as
+    ``(kind, series_key, jid)``, or None. Which jobs qualify is decided by
+    :func:`haversack.jobpolicy.prefetchable`, shared with the local server's
+    head-of-queue check: this scan kept its own list of exclusions and had
+    fallen two behind it (multi-input jobs, and jobs that asked for fresh
+    bytes - which it then pinned, so their own refresh was refused)."""
+    cands = []
+    for k in jobs_dict.keys():
+        if ":" in str(k) or k == current_jid:
+            continue                       # namespaced markers (inflight:/
+                                           # artifacts:/cancel:) are not job
+                                           # records; cancel: values are bare
+                                           # floats and crashed this scan
+        m = jobs_dict.get(k) or {}
+        if not prefetchable(state=m.get("state"), kind=m.get("kind"),
+                            refresh_input=m.get("refresh_input"),
+                            sources=m.get("source")):
+            continue
+        src = (m.get("source") or [{"kind": "upload"}])[0]
+        sk = source_cache_key(src)
+        if sk is not None and sk.ident:
+            cands.append((m.get("created", 0), sk.kind, sk.key, m["id"]))
+        else:
+            cands.append((m.get("created", 0), "upload", None, m["id"]))
+    return min(cands)[1:] if cands else None
+
+
 def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock) -> None:
 
     """Best-effort CPU downloader, parallel to this GPU job: watch the shared
@@ -344,34 +372,11 @@ def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock) -> None:
     failed staging leaves nothing behind."""
     import threading
 
-    def scan_once():
-        cands = []
-        for k in jobs_dict.keys():
-            if ":" in str(k) or k == current_jid:
-                continue                   # namespaced markers (inflight:/
-                                           # artifacts:/cancel:) are not job
-                                           # records; cancel: values are bare
-                                           # floats and crashed this scan
-            m = jobs_dict.get(k) or {}
-            if m.get("state") != "queued" or m.get("kind") == "prepare":
-                continue                       # prepare has no input to stage
-            src = (m.get("source") or [{"kind": "upload"}])[0]
-            if src.get("kind", "upload") == "input":
-                continue                       # resolved through the content
-                                               # store: no series to stage, and
-                                               # no local file to pre-read either
-            sk = source_cache_key(src)
-            if sk is not None and sk.ident:
-                cands.append((m.get("created", 0), sk.kind, sk.key, m["id"]))
-            else:
-                cands.append((m.get("created", 0), "upload", None, m["id"]))
-        return min(cands)[1:] if cands else None
-
     def work():
         import shutil
         try:
             while not stop.is_set():
-                nxt = scan_once()
+                nxt = _prefetch_candidate(current_jid)
                 if nxt is None:
                     stop.wait(2.0)
                     continue
@@ -494,8 +499,9 @@ def _bound_jobs_store(current_jid: str) -> None:
 
 
 from haversack.jobpolicy import (TERMINAL as _TERMINAL,  # noqa: E402
-                                 fill_read_ahead, refresh_cached_input,
-                                 source_cache_key)
+                                 fill_read_ahead, prefetchable,
+                                 refresh_cached_input, source_cache_key,
+                                 take_pre_read)
 
 
 def _emit(jid: str, update: dict) -> None:
@@ -660,13 +666,14 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
                 credentials=(source_tokens or {}).get(kind))
             print(f"[fetch] {ident[:13]} {how} {time.time() - t_f:.1f}s", flush=True)
             rep.check()
-            preread = ctx.read_ahead.pop(key)
+            preread = take_pre_read(ctx.read_ahead, key,
+                                    fresh_bytes_wanted=bool(meta.get("refresh_input")))
             if preread is not None:
                 rep.stage("read", "preread")
                 print(f"[read] {ident[:13]} preread", flush=True)
                 input_path = preread
         else:
-            preread = ctx.read_ahead.pop(jid)
+            preread = take_pre_read(ctx.read_ahead, jid, fresh_bytes_wanted=False)
             if preread is not None:
                 rep2 = Reporter.of(on_progress, cancel=token)
                 rep2.stage("read", "preread")
