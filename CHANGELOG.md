@@ -183,6 +183,14 @@ Two data sources and two model catalogs, each on the extension seam that already
   local server has reconciled its store at startup all along; this is the same rule on the
   other substrate. An `inflight:` marker is now also dropped as soon as its job is terminal,
   rather than only once it is strictly older than zero seconds.
+- **Modal: each engine worker now warms only the jobs that will run on it.** The prefetcher
+  scanned the shared jobs dict for the oldest queued job with no regard for which worker
+  would run it, and every worker class is its own container with its own series cache and
+  read-ahead. With five engines deployed, the SynthStrip container pre-read the nnU-Net
+  worker's upload into a read-ahead nothing there would ever pop, the nnU-Net worker spent
+  its one-ahead slot staging a FastSurfer job's series and ran its own next job cold, and
+  every container downloaded the same MRI once. The scan is now filtered by the worker's
+  engine.
 - **Retention and terminal job states agree across deployments by construction.** The local
   server decides in SQL and the Modal deployment in Python, so they cannot share code; a test
   now drives both over the same cases instead of asserting in a comment that they match.

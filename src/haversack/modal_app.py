@@ -332,13 +332,23 @@ def _clear_own_artifacts_marker(jid: str, meta: dict) -> None:
         _clear_pending_marker(key, jid)
 
 
-def _prefetch_candidate(current_jid: str):
+def _prefetch_candidate(current_jid: str, engine: str | None = None):
     """The oldest OTHER queued job whose input may be warmed, as
     ``(kind, series_key, jid)``, or None. Which jobs qualify is decided by
     :func:`haversack.jobpolicy.prefetchable`, shared with the local server's
     head-of-queue check: this scan kept its own list of exclusions and had
     fallen two behind it (multi-input jobs, and jobs that asked for fresh
-    bytes - which it then pinned, so their own refresh was refused)."""
+    bytes - which it then pinned, so their own refresh was refused).
+
+    ``engine`` restricts the scan to jobs that will run on THIS worker. Every
+    worker class has its own container, series cache and read-ahead, and the
+    jobs dict is shared by all of them - so without the filter each worker
+    warmed whichever queued job was oldest, engine regardless. Seen live on
+    2026-09-06 with five engines deployed: the SynthStrip container pre-read
+    the nnU-Net worker's upload into a read-ahead nothing there would pop,
+    the nnU-Net worker spent its one-ahead slot staging a FastSurfer job's
+    series and never warmed its own next job, and every container downloaded
+    the same MRI once."""
     cands = []
     for k in jobs_dict.keys():
         if ":" in str(k) or k == current_jid:
@@ -351,6 +361,9 @@ def _prefetch_candidate(current_jid: str):
                             refresh_input=m.get("refresh_input"),
                             sources=m.get("source")):
             continue
+        if engine is not None and m.get("task") and \
+                _engines.engine_for_task(m["task"]).name != engine:
+            continue                       # another worker's job: not ours to warm
         src = (m.get("source") or [{"kind": "upload"}])[0]
         sk = source_cache_key(src)
         if sk is not None and sk.ident:
@@ -360,7 +373,8 @@ def _prefetch_candidate(current_jid: str):
     return min(cands)[1:] if cands else None
 
 
-def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock) -> None:
+def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock,
+                   engine: str | None = None) -> None:
 
     """Best-effort CPU downloader, parallel to this GPU job: watch the shared
     jobs Dict for the oldest OTHER queued idc job and stage its series into the
@@ -376,7 +390,7 @@ def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock) -> None:
         import shutil
         try:
             while not stop.is_set():
-                nxt = _prefetch_candidate(current_jid)
+                nxt = _prefetch_candidate(current_jid, engine)
                 if nxt is None:
                     stop.wait(2.0)
                     continue
@@ -680,8 +694,8 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
     pinned = []
     _emit(jid, {"state": "running", "started": started})
     prefetch_stop = threading.Event()
-    _prefetch_next(jid, prefetch_stop, ctx.series_cache,
-                   ctx.read_ahead, ctx._vol_lock)   # CPU downloader + pre-reader
+    _prefetch_next(jid, prefetch_stop, ctx.series_cache, ctx.read_ahead,
+                   ctx._vol_lock, engine=getattr(ctx, "engine", None))   # CPU downloader + pre-reader
     try:
         if meta.get("kind") == "prepare":
             rep = Reporter.of(on_progress, cancel=token)

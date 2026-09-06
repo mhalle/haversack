@@ -92,6 +92,22 @@ def test_prefetch_candidate_follows_jobpolicy(monkeypatch):
     assert m._prefetch_candidate("f") == ("upload", None, "g")
 
 
+def test_a_worker_warms_only_the_jobs_that_will_run_on_it(monkeypatch):
+    """Each engine worker is its own container with its own caches, sharing one
+    jobs dict. Seen live with five engines deployed: the SynthStrip container
+    pre-read the nnU-Net worker's upload, the nnU-Net worker staged a FastSurfer
+    job's series and then stopped (one-ahead), and its own next job ran cold."""
+    m, fake = _swap_dict(monkeypatch)
+    fake["cur"] = {"id": "cur", "state": "running", "created": 0, "task": "ts:total"}
+    fake["fs"] = {"id": "fs", "state": "queued", "created": 1, "task": "fastsurfer:brain",
+                  "source": [{"kind": "s3", "id": "b/mprage"}]}
+    fake["nn"] = {"id": "nn", "state": "queued", "created": 2, "task": "ts:total_fast"}
+    assert m._prefetch_candidate("cur", "nnunetv2") == ("upload", None, "nn")
+    assert m._prefetch_candidate("cur", "fastsurfer") == ("s3", "s3:b/mprage", "fs")
+    assert m._prefetch_candidate("cur", "monai") is None
+    assert m._prefetch_candidate("cur") == ("s3", "s3:b/mprage", "fs")   # unfiltered: oldest
+
+
 def test_orphaned_records_are_failed_and_live_ones_left_alone(monkeypatch, tmp_path):
     """Records whose spawned call is gone (a `modal app stop` between deploys)
     stayed queued forever: never purged, poisoning single-flight for their key,
