@@ -27,8 +27,8 @@ from pathlib import Path
 
 from .errors import InputError
 
-__all__ = ["DataSource", "UrlTemplateSource", "IDCSource", "default_sources",
-           "IDC_BUCKETS", "CRDC_RE"]
+__all__ = ["DataSource", "UrlTemplateSource", "IDCSource", "GitHubReleaseSource",
+           "S3Source", "default_sources", "IDC_BUCKETS", "PUBLIC_S3_BUCKETS", "CRDC_RE"]
 
 CRDC_RE = r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
 
@@ -37,6 +37,22 @@ CRDC_RE = r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
 # upgrade path is resolving per series via idc-index (`series_aws_url`), which we
 # take when /v1/resolve lands.
 IDC_BUCKETS = ("idc-open-data", "idc-open-data-two", "idc-open-data-cr")
+
+
+# The S3 buckets a server may be pointed at, and the region each answers in
+# (None = the global path-style endpoint). An ALLOWLIST, not a parameter the
+# identifier carries: "fetch s3://<whatever the client says>" is the SSRF hole
+# this module exists to avoid, so the bucket is chosen by the operator and the
+# identifier only picks a key inside one. Buckets here are public, requester-pays
+# free, and anonymously readable - checked by a range GET, 2026-09-05.
+PUBLIC_S3_BUCKETS = {
+    "fcp-indi": None,               # INDI / Preprocessed Connectomes (ABIDE, ADHD-200, CoRR, NKI-RS)
+    "openneuro.org": None,          # OpenNeuro's own bucket (also the openneuro: source's backing)
+    "msd-for-monai": "us-west-2",   # the Medical Segmentation Decathlon mirror
+    "idc-open-data": None,          # IDC's buckets, for reaching one object rather than a series
+    "idc-open-data-two": None,
+    "idc-open-data-cr": None,
+}
 
 
 class DataSource:
@@ -68,6 +84,21 @@ class DataSource:
         secret (e.g. a bearer token) - a credential in transit: never store,
         log, or record it anywhere durable."""
         raise NotImplementedError
+
+    def check(self, identifier: str, credentials=None) -> None:
+        """Refuse what this source cannot serve, doing NO I/O.
+
+        Every door calls this - the CLI before it fetches, the server at submit -
+        so a request that was always going to fail is refused where the caller is
+        still listening, instead of minutes later inside a worker (which on Modal
+        means a GPU container was started for it). Anything decidable without a
+        network round trip belongs here: the identifier grammar, an allowlist, a
+        credential this source does not accept. Anything needing the network
+        (does the object exist?) belongs in :meth:`fetch`.
+        """
+        if self.id_pattern and not re.fullmatch(self.id_pattern, identifier):
+            raise InputError(f"{self.prefix}:{identifier} is not a valid {self.prefix} "
+                             f"identifier - {self.description or self.id_pattern}")
 
     def identity(self, identifier: str) -> str:
         """The result-cache identity token for one identifier."""
@@ -547,10 +578,211 @@ class HuggingFaceSource(ArchiveReadingSource):
         return url, size
 
 
+class S3Source(ArchiveReadingSource):
+    """Public S3 buckets, one object per identifier: ``<bucket>/<key>[!member]``.
+
+    The bucket is checked against :data:`PUBLIC_S3_BUCKETS` before anything is
+    fetched, so a client picks a key inside a bucket the *operator* chose and
+    never the bucket itself - the same containment the other sources get from a
+    fixed host. Reads go over anonymous HTTPS (path-style, which is what a
+    dotted bucket name like ``openneuro.org`` needs: it cannot appear in a
+    virtual-hosted name without breaking TLS), so this needs no obstore and no
+    credentials, and inherits ``!member`` zip reading from the base.
+
+    NOT version-pinned, like ``tcia`` and unlike ``idc``: a bucket key can be
+    overwritten in place, so the same identity can resolve to different bytes
+    across dataset releases. Whole DICOM *series* have their own doors (``idc``,
+    ``tcia``) - this one addresses a single object.
+    """
+
+    prefix = "s3"
+    # <bucket>/<key>[!member]. Bucket syntax is AWS's own (3-63 chars, lowercase
+    # alphanumerics, dots and hyphens); membership in the allowlist is checked in
+    # resolve(), because a rejected bucket deserves a message naming the ones served.
+    id_pattern = (r"(?!.*(?:^|/)\.\.(?:/|!|$))"
+                  r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9][A-Za-z0-9._/-]{0,300}"
+                  r"(?:![A-Za-z0-9._ /-]+)?")
+    description = "public S3 buckets, by bucket/key (!member for zip contents)"
+
+    def __init__(self, buckets=None):
+        self.buckets = dict(PUBLIC_S3_BUCKETS if buckets is None else buckets)
+
+    def describe(self) -> dict:
+        return {**super().describe(), "buckets": sorted(self.buckets)}
+
+    def _headers(self, credentials=None) -> dict:
+        """Anonymous only. The allowlisted buckets are public, and S3 answers a
+        bearer token with ``400 InvalidArgument`` - so a token could only turn a
+        working fetch into a failing one. Refused rather than dropped, because a
+        caller who set one meant it to be used."""
+        if credentials:
+            raise InputError("s3: this source reads public buckets anonymously and takes "
+                             "no credentials; a bearer token is refused by S3 itself")
+        return {}
+
+    def explain_refusal(self, identifier: str) -> None:
+        """`s3://bucket/key` is the spelling every AWS tool uses and the first
+        thing anyone types here. The identifier IS the cache key, so accepting
+        both spellings would split it - name the one this takes instead."""
+        if identifier.startswith("//"):
+            bare = identifier.lstrip("/")
+            raise InputError(f"s3://{bare}: drop the slashes - this source takes "
+                             f"s3:{bare}, so that one object has one identity")
+
+    def check(self, identifier: str, credentials=None) -> None:
+        self.explain_refusal(identifier)
+        super().check(identifier, credentials)
+        self._headers(credentials)
+        bucket = identifier.partition("!")[0].partition("/")[0]
+        if bucket not in self.buckets:
+            raise InputError(
+                f"s3 bucket {bucket!r} is not one this server fetches from; "
+                f"served buckets: {', '.join(sorted(self.buckets))}")
+
+    def resolve(self, outer: str, credentials=None) -> tuple:
+        import urllib.request
+        self.check(outer, credentials)         # allowlist and token, before any request
+        bucket, _, key = outer.partition("/")
+        region = self.buckets[bucket]
+        host = "s3.amazonaws.com" if region is None else f"s3.{region}.amazonaws.com"
+        url = f"https://{host}/{bucket}/{key}"
+        req = urllib.request.Request(url, method="HEAD")
+        try:
+            with _OPENER.open(req, timeout=60) as r:
+                size = int(r.headers.get("Content-Length") or 0)
+        except Exception as e:
+            raise InputError(f"s3:{outer}: HEAD failed: {e}") from e
+        if size <= 0:
+            raise InputError(f"s3:{outer}: the bucket gives no Content-Length")
+        return url, size
+
+
+class GitHubReleaseSource(ArchiveReadingSource):
+    """GitHub release assets: ``<owner>/<repo>@<tag>/<asset>[!member]``.
+
+    The tag is REQUIRED - a branch or ``latest`` floats, and reaching a
+    repository's *source* is deliberately not offered; only the assets attached
+    to a release, which is where datasets and model zips are published.
+
+    **A tag is readable, not immutable.** Unlike ``hf``'s commit sha, ``zenodo``'s
+    record id or ``idc``'s version-pinned uuid, a release asset can be replaced
+    under a published tag (``gh release upload --clobber``, or delete and
+    re-upload through the API), and the tag itself is a git ref that can be
+    moved. So this identity is the ``tcia`` kind: stable only as far as the
+    publisher's discipline goes, and a result cached under it can outlive the
+    bytes it describes. Where that matters, address an asset the publisher names
+    by digest (``Slicer/SlicerTestingData`` names every asset by its sha256), or
+    use one of the pinning sources.
+
+    Credentials are not accepted, so a private repository's asset can never be
+    fetched with a caller's token and then served from a cache every reader can
+    ask - the rule ``zenodo`` and ``hf`` state for gated content. A token would
+    not work anyway: github.com redirects an authenticated asset download to a
+    host that rejects the token, which :func:`_safe_opener` correctly strips on
+    the cross-host hop.
+
+    ``resolve`` returns the stable ``github.com/.../releases/download/...`` URL
+    rather than the signed CDN URL a HEAD redirects to: those expire in the hour,
+    and :class:`RangeFile` re-requests (and so re-follows) per block, which is
+    exactly the case its per-request redirect handling exists for.
+    """
+
+    prefix = "github"
+    id_pattern = (r"(?!.*(?:^|/)\.\.(?:/|!|$))"
+                  r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*"
+                  r"@[A-Za-z0-9][A-Za-z0-9._+-]*/[A-Za-z0-9][A-Za-z0-9._-]*"
+                  r"(?:![A-Za-z0-9._ /-]+)?")
+    description = ("GitHub release assets, by owner/repo@tag/asset "
+                   "(!member for zip contents)")
+    HOST = "https://github.com"
+
+    def _headers(self, credentials=None) -> dict:
+        if credentials:
+            raise InputError(
+                "github: this source fetches public release assets only and takes no "
+                "credentials - a private asset fetched with your token would be cached "
+                "where every reader of the cache can ask for it, and github.com "
+                "redirects an authenticated download to a host that rejects the token "
+                "in any case")
+        return {}
+
+    def check(self, identifier: str, credentials=None) -> None:
+        super().check(identifier, credentials)
+        self._headers(credentials)
+
+    def resolve(self, outer: str, credentials=None) -> tuple:
+        import urllib.request
+        headers = self._headers(credentials)       # refuse a token before any request
+        repo, _, rest = outer.partition("@")
+        tag, _, asset = rest.partition("/")
+        if not asset:
+            raise InputError(f"github:{outer}: no asset name after the tag")
+        url = f"{self.HOST}/{repo}/releases/download/{tag}/{asset}"
+        req = urllib.request.Request(url, method="HEAD", headers=headers)
+        try:
+            with _OPENER.open(req, timeout=60) as r:
+                size = int(r.headers.get("Content-Length") or 0)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise InputError(
+                    f"github:{outer}: {e.code} from github.com - this source reads public "
+                    f"release assets only, and {repo} is private or does not exist") from e
+            if e.code == 404:
+                raise InputError(
+                    f"github:{outer}: no such release asset. Check that {repo} has a RELEASE "
+                    f"tagged {tag!r} with an asset named {asset!r} - a branch name or 'latest' "
+                    "will not do, and a release's assets are not its source archive") from e
+            raise InputError(f"github:{outer}: HEAD failed: {e}") from e
+        except Exception as e:
+            raise InputError(f"github:{outer}: HEAD failed: {e}") from e
+        if size <= 0:
+            raise InputError(
+                f"github:{outer}: no Content-Length for the asset - check that "
+                f"release {tag!r} of {repo} has an asset named {asset!r}")
+        return url, size
+
+
+def check_identifier(src, identifier: str, credentials=None) -> None:
+    """``src.check(...)``, for a source that has one.
+
+    Sources are duck-typed here - :func:`registry` accepts any object with a
+    prefix, an id_pattern and a fetch - so a source predating :meth:`DataSource.check`
+    (or a test stand-in) still gets the grammar enforced, which is the part that
+    was always the boundary."""
+    # The pattern is checked HERE, always, and the hook runs after. Deferring to
+    # the hook when one exists let a stand-in with a do-nothing `check` (a Mock's
+    # attributes are all callable) skip validation entirely - the opposite of what
+    # a fallback for duck-typed sources is for.
+    # A source may recognize a shape the pattern will reject and say something
+    # better about it (`s3://bucket/key` is the spelling every AWS tool uses).
+    # Give it that chance before the generic refusal, then check the pattern
+    # anyway, so a do-nothing hook cannot skip validation.
+    explain = getattr(src, "explain_refusal", None)
+    if callable(explain):
+        explain(identifier)
+    pattern = getattr(src, "id_pattern", "")
+    if pattern and not re.fullmatch(pattern, identifier):
+        raise InputError(f"{getattr(src, 'prefix', '?')}:{identifier} is not a valid "
+                         f"{getattr(src, 'prefix', '?')} identifier - "
+                         f"{getattr(src, 'description', '') or pattern}")
+    hook = getattr(src, "check", None)
+    if callable(hook):
+        hook(identifier, credentials)
+
+
 def default_sources() -> list:
     """The sources a server carries unless told otherwise."""
     return [IDCSource(), TCIASource(), openneuro_source(), ZenodoSource(),
-            HuggingFaceSource()]
+            HuggingFaceSource(), S3Source(), GitHubReleaseSource()]
+
+
+#: The prefixes the built-in sources declare. Read from the sources themselves so
+#: it cannot drift from them, and frozen at import rather than per call: a caller
+#: may swap ``default_sources`` for its own registry, and whether a string is
+#: shaped like a remote input must not depend on which sources a given server
+#: happens to serve. Only :func:`parse_input` uses it, and only to recognize a
+#: prefix the local-path heuristic would otherwise reject.
+_BUILTIN_PREFIXES: frozenset = frozenset()
 
 
 def registry(sources=None) -> dict:
@@ -569,6 +801,9 @@ def registry(sources=None) -> dict:
         # address them in ordinary URLs - so no pattern restriction is needed.
         out[s.prefix] = s
     return out
+
+
+_BUILTIN_PREFIXES = frozenset(registry(default_sources()))
 
 
 class HttpSource(ArchiveReadingSource):
@@ -606,19 +841,32 @@ class HttpSource(ArchiveReadingSource):
         return super()._zip(outer, credentials)
 
 
-def parse_input(spec) -> tuple:
+def parse_input(spec, known=None) -> tuple:
     """``(kind, identifier)`` when ``spec`` names a remote input, else ``None``.
 
     Remote inputs are ``<kind>:<identifier>`` for a registered source (``idc:``,
     ``zenodo:``, ...) or a bare ``http(s)://`` URL. A local path is never a remote
     input, whatever it contains: Windows drive letters and paths with colons in
     their names are one or two characters before the colon, and every source
-    prefix is longer."""
+    prefix is longer *or* is one of the built-in prefixes - ``s3`` is two
+    characters and carries a digit, so the shape heuristic alone would read
+    ``s3:fcp-indi/...`` as a local path and try to open it as a file. ``known``
+    adds the prefixes a caller's own registry serves, which is how a source with
+    a short or digit-bearing prefix becomes reachable without loosening the
+    shape test for everyone."""
     text = str(spec)
     if text.startswith(("http://", "https://")):
         return "http", text
     kind, sep, ident = text.partition(":")
-    if sep and len(kind) >= 3 and kind.isalpha() and kind.islower() and ident and "/" not in kind:
+    if not sep or not ident or "/" in kind:
+        return None
+    if kind in _BUILTIN_PREFIXES or kind in (known or ()):
+        return kind, ident
+    # Anything else has to LOOK like a source rather than a path. Letters only,
+    # three or more: `sub_01:ses1`, `data_2024:merged.nii` and `study2:v1.nii.gz`
+    # are ordinary names in this field, and reading them as remote specs would be
+    # worse than making a caller name their own source (which `known` is for).
+    if len(kind) >= 3 and kind.isalpha() and kind.islower():
         return kind, ident
     return None
 
@@ -654,19 +902,18 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
     (IDC without obstore) refuses with the extra to install.
     """
     import hashlib
-    parsed = parse_input(spec)
+    reg = registry(sources) if sources is not None else registry(default_sources() + [HttpSource()])
+    parsed = parse_input(spec, known=reg)
     if parsed is None:
         return Path(spec)
     kind, ident = parsed
-    reg = registry(sources) if sources is not None else registry(default_sources() + [HttpSource()])
     src = reg.get("http" if kind == "https" else kind)
     if src is None:
         raise InputError(f"unknown input source {kind!r}; known: {', '.join(sorted(reg))} and http(s) URLs")
     if hasattr(src, "enabled") and not src.enabled():
         raise InputError(f"the {kind} source's runtime is not installed in this environment "
                          f"(a lean install?): uv pip install {'obstore' if kind == 'idc' else kind}")
-    if src.id_pattern and not re.fullmatch(src.id_pattern, ident):
-        raise InputError(f"{kind}:{ident} is not a valid {kind} identifier")
+    check_identifier(src, ident, credentials)
     root = Path(cache_dir) if cache_dir else default_input_cache()
     entry = root / kind / hashlib.sha1(ident.encode()).hexdigest()[:20]
     done = entry / ".done"

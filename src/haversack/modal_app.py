@@ -108,7 +108,8 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   # forwarded, its PUBLIC is False, the attribute never
                   # exists, and every request 303s while the runner crash-
                   # loops on AttributeError (hit live 2026-08-25).
-                  "HAVERSACK_PUBLIC", *_engines.engine_env_vars())
+                  "HAVERSACK_PUBLIC",
+                  *_engines.engine_env_vars())
 
 # Base image (the ASGI api container + the nnU-Net GPU Worker). uv-NATIVE: the nnU-Net
 # worker's deps come from pyproject extras - `torch` (torch/nnunetv2/scipy/scikit-image),
@@ -533,6 +534,42 @@ def _content_store():
                         lock=_INPUTS_LOCK)
 
 
+def _refresh_series(ctx, meta: dict, key: str, rep, already: set | None = None) -> None:
+    """Drop a cached input when the caller sent `Cache-Control: no-cache`.
+
+    The same rule the local server follows, for the same reason: `s3:` and
+    `github:` address bytes that can be replaced under one identifier, so a
+    forced recompute has to re-read the source or it answers the same wrong
+    thing again. Discarding refuses while another job holds a pin, and that is
+    reported rather than passed off as a refresh.
+    """
+    if not (meta or {}).get("refresh_input"):
+        return
+    if already is not None:
+        if key in already:
+            # two roles bound to ONE identifier: the second pass would see the
+            # first pass's fresh bytes cached and its own pin holding them, and
+            # report a skip for a key this job just refreshed
+            return
+        already.add(key)
+    read_ahead = getattr(ctx, "read_ahead", None)
+    if not ctx.series_cache.has(key):
+        if read_ahead is not None:
+            read_ahead.pop(key)
+        return                             # nothing cached: the fetch IS the refresh
+    if ctx.series_cache.discard(key):
+        if read_ahead is not None:
+            read_ahead.pop(key)            # the image read from those bytes is stale too
+        rep.stage("fetch", "refetching (no-cache)")
+        return
+    # refused: another job holds a pin, or a writer holds the claim. Leave its
+    # pre-read image alone, and record the skip on the job the way the local
+    # executor does - a caller that asked for fresh bytes and did not get them
+    # must be able to see that from either deployment.
+    rep.stage("fetch", "cached (no-cache could not refresh: input in use)")
+    _emit(meta.get("id"), {"input_refresh_skipped": True})
+
+
 def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
     """The engine-agnostic job body shared by every worker: fetch/stage/
     read, then ctx._ensure + ctx._compute (the engine), then save +
@@ -582,6 +619,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
             with ctx._vol_lock:
                 scratch_vol.reload()
             staged = {}
+            refreshed: set = set()     # one refresh per identifier, not per role
             for entry in entries:
                 role = entry.get("role") or "image"
                 kind = entry.get("kind", "upload")
@@ -594,6 +632,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
                     continue
                 ident = str(entry.get("id") or entry.get("crdc_series_uuid") or "")
                 key = f"{kind}:{ident}"
+                _refresh_series(ctx, meta, key, rep, refreshed)   # BEFORE our own pin
                 ctx.series_cache.pin(key)
                 pinned.append(key)
                 rep.stage("fetch", f"{role} {ident[:8]}")
@@ -612,6 +651,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
             rep = Reporter.of(on_progress, cancel=token)
             ident = src.get("id") or src.get("crdc_series_uuid")
             key = f"{kind}:{ident}"
+            _refresh_series(ctx, meta, key, rep)       # BEFORE our own pin
             ctx.series_cache.pin(key)
             pinned.append(key)
             if ctx.series_cache.has(key):
@@ -1224,7 +1264,9 @@ class ModalExecutor:
 
     def submit(self, jid, jdir, input_path, task, options, *, source=None,
                identity=(), no_cache: bool = False, source_tokens=None,
-               inputs: tuple = ()):
+               inputs: tuple = (), refresh_input: bool = False):
+        # `refresh_input` is recorded on the job meta and read by the worker's
+        # fetch (`_refresh_series`), the way the local executor's dispatcher does.
         # `inputs` (the role -> local path binding) is accepted for signature
         # parity with LocalExecutor and deliberately not forwarded: this executor
         # is stateless by construction, and the worker rebuilds the binding from
@@ -1251,6 +1293,7 @@ class ModalExecutor:
         meta = {"id": jid, "task": task, "options": options,
                 "source": list(source or [{"kind": "upload"}]),
                 "input_identity": list(identity), "cache_key": key,
+                "refresh_input": bool(refresh_input),
                 "state": "queued", "created": time.time()}
         jobs_dict[jid] = meta
         if key:
@@ -1293,7 +1336,10 @@ class ModalExecutor:
                 "progress", "error", "input_identity", "cached",
                 # the result handle and the options its URL form depends on -
                 # serve's job route turns these into `key` + `links`
-                "cache_key", "options")
+                "cache_key", "options",
+                # the caller asked for fresh bytes and did not get them; the
+                # local executor reports this, so this deployment must too
+                "input_refresh_skipped")
         d = {k: meta.get(k) for k in keys if meta.get(k) is not None}
         if meta.get("state") == "done" and meta.get("result") is not None:
             d["result"] = meta["result"]

@@ -112,7 +112,8 @@ ARTIFACT_PENDING_TTL = 900.0   # a pending marker older than this is a dead
                                # overlap thread's leavings (mirrors Modal's sweep)
 TERMINAL = ("done", "failed", "cancelled")
 RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default artifact
-from .sources import CRDC_RE, IDC_BUCKETS, registry as _source_registry  # noqa: E402
+from .sources import (CRDC_RE, IDC_BUCKETS, check_identifier as _check_identifier,  # noqa: E402
+                      registry as _source_registry)
 
 
 _ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack knows
@@ -299,6 +300,7 @@ class SeriesCache:
     tasks on the same image download the series once."""
 
     MARKER = ".done"
+    GRAVEYARD = ".graveyard"
 
     def __init__(self, root, fetch_fn, *, budget_bytes: int = 8 << 30,
                  claim_timeout: float = 180.0):
@@ -309,6 +311,15 @@ class SeriesCache:
         self.claim_timeout = float(claim_timeout)
         self._lock = threading.Lock()          # eviction + pin bookkeeping
         self._pins: dict = {}                  # entry name -> refcount
+        #: Where a dropped entry goes before deletion. A DIRECTORY, not a name
+        #: convention: an entry's name comes from its cache key, so any pattern
+        #: that means "discarded" to us can also be a real key - `s3:b/x.stale1`
+        #: is a legal object. Two bugs came from matching names in this namespace
+        #: (a glob that deleted live entries, then a narrowed regex that deleted
+        #: live *claims*), and a separate directory ends the class rather than
+        #: narrowing it again.
+        self.graveyard = self.root / self.GRAVEYARD
+        self.sweep_stale()                     # a crash between rename and delete
 
     def _entry(self, series: str) -> Path:
         # Keys become directory names. Filesystem-safe keys keep their readable
@@ -318,7 +329,12 @@ class SeriesCache:
         # or colons (every content digest) are safe by construction rather than
         # forbidden.
         name = safe_path_component(series)
-        if name not in (".", "..") and 0 < len(name) <= 200:
+        # ".graveyard" would BE the graveyard: the reclaim then renames that
+        # directory into itself, fails with EINVAL, and the single dispatcher
+        # thread loops forever. No production key can spell it (every one carries
+        # a ":" which escapes), but the namespace is shared with our own
+        # directory, so the reservation is explicit.
+        if name not in (".", "..", self.GRAVEYARD) and 0 < len(name) <= 200:
             return self.root / name
         import hashlib
         d = self.root / ("h_" + hashlib.sha256(series.encode()).hexdigest()[:32])
@@ -361,6 +377,24 @@ class SeriesCache:
         except OSError:
             pass
         return token
+
+    def _claim_is_fresh(self, entry: Path) -> bool:
+        """Whether an ownerless claim was made too recently to be a crash.
+
+        Used only when `.owner` cannot be read, which is the one case the owner
+        token cannot decide. Absent a readable timestamp, assume fresh: refusing
+        to reclaim costs a retry, reclaiming a live claim costs a mixed series."""
+        try:
+            return (time.time() - entry.stat().st_mtime) < self.claim_timeout
+        except OSError:
+            return True
+
+    def _owner_of(self, entry: Path) -> str | None:
+        """The claim's owner token, or None when it cannot be read."""
+        try:
+            return (entry / ".owner").read_text()
+        except OSError:
+            return None
 
     def _teardown_claim(self, entry: Path, token: str) -> None:
         """Remove a failed claim - only while this writer PROVABLY owns it.
@@ -428,8 +462,13 @@ class SeriesCache:
             if marker.exists():
                 try:
                     os.utime(marker)           # LRU touch
-                except OSError:                # evicted between check and touch
+                except FileNotFoundError:      # evicted between check and touch
                     continue                   # reclaim on the next pass
+                except OSError:
+                    pass                       # read-only cache, or another uid owns the
+                                               # marker: the LRU loses a touch, that is all.
+                                               # `continue` here spins the one dispatcher
+                                               # thread forever at 100% CPU.
                 return entry / "series"
             try:
                 entry.mkdir(parents=True)      # atomic claim: one writer per series
@@ -440,7 +479,21 @@ class SeriesCache:
                     if not entry.exists():
                         break                  # writer failed and cleaned up; reclaim
                     if time.time() > deadline:
-                        if self._writer_alive(entry):
+                        # read BEFORE the liveness check: _writer_alive walks a
+                        # staging tree that can hold thousands of files, so the
+                        # window between its verdict and the rename below is wide
+                        owner_before = self._owner_of(entry)
+                        # An ownerless claim is either a crash between the mkdir
+                        # and the owner write, or a SUCCESSOR inside that same
+                        # two-statement window. Comparing None to None could not
+                        # tell them apart and destroyed the live one. The
+                        # directory's own age can: a successor's is microseconds
+                        # old, a crashed claim's is older than the timeout.
+                        if owner_before is None and self._claim_is_fresh(entry):
+                            alive = True
+                        else:
+                            alive = self._writer_alive(entry)
+                        if alive:
                             if extensions < 3:
                                 # slow but alive: extend rather than destroy -
                                 # a timeout teardown of a LIVE writer aliases
@@ -459,17 +512,43 @@ class SeriesCache:
                                 # waiter's job fails retryably instead.
                                 raise ResourceError(
                                     f"staging of {series!r} has been held for "
-                                    f"{4 * self.claim_timeout:.0f}s by a writer "
-                                    "that is still alive; giving up rather "
-                                    "than risk a mixed series - retry later")
+                                    f"{4 * self.claim_timeout:.0f}s by a writer that is "
+                                    "still alive, or whose ownership cannot be proved; "
+                                    "giving up rather than risk a mixed series - retry later")
                         else:
                             # dead claim: rename to a graveyard name first so
                             # the old writer's paths stop aliasing the reclaim
-                            grave = entry.parent / f"{entry.name}.stale{int(time.time())}"
+                            # into the graveyard - but only if it is still the
+                            # SAME claim. Another process can reclaim in the
+                            # window above, re-mkdir the path and start fetching,
+                            # and renaming by bare path then drags a LIVE claim
+                            # into the graveyard and deletes it. That is the
+                            # failure the owner token was added for in
+                            # _teardown_claim; this is its other half.
+                            # Re-ask, immediately before the rename, whether this
+                            # is still the claim we judged dead. `_writer_alive`
+                            # walks a staging tree that can hold thousands of
+                            # files, so a successor can appear during the walk -
+                            # and for an ownerless claim the owner token cannot
+                            # see it, which is why the age is re-checked too.
+                            taken_over = (self._owner_of(entry) != owner_before
+                                          or (owner_before is None
+                                              and self._claim_is_fresh(entry)))
+                            if taken_over:
+                                # whoever holds it now is not who we judged, so
+                                # wait on them rather than destroy their work
+                                extensions += 1
+                                deadline = time.time() + self.claim_timeout
+                                continue
                             try:
+                                self.graveyard.mkdir(parents=True, exist_ok=True)
+                                # pid and nanoseconds, like discard(): a one-second
+                                # stamp collides when two processes reclaim together
+                                grave = self.graveyard / (f"{entry.name}-{os.getpid()}"
+                                                          f"-{time.time_ns()}")
                                 entry.rename(grave)
                             except OSError:
-                                pass
+                                break      # cannot move it aside; let the wait retry
                             shutil.rmtree(grave, ignore_errors=True)
                             break
                     if check is not None:
@@ -531,11 +610,57 @@ class SeriesCache:
         (entry / self.MARKER).write_text(str(size))
         self._evict(keep={entry.name})
 
+    def discard(self, series: str) -> bool:
+        """Drop a committed, unpinned entry so the next fetch re-reads the source.
+
+        Refuses in the two cases where dropping it would break someone: a PIN
+        means a job is reading those bytes right now - the pin exists for exactly
+        this - and a missing marker means another writer holds the claim and owns
+        the directory. Returns whether it dropped anything, so a caller can say so
+        rather than assume.
+
+        Callers discard BEFORE taking their own pin. Doing it after would make a
+        job refuse its own refresh, since the pin count cannot say who holds it.
+        """
+        entry = self._entry(series)
+        with self._lock:
+            if entry.name in self._pins:
+                return False               # someone is reading it
+            if not (entry / self.MARKER).exists():
+                return False               # a claim in flight, or nothing there
+            try:
+                self.graveyard.mkdir(parents=True, exist_ok=True)
+                aside = self.graveyard / f"{entry.name}-{os.getpid()}-{time.time_ns()}"
+                os.replace(entry, aside)
+            except OSError:
+                # a read-only cache root, or the entry moved under us. discard()
+                # answers a question - "did anything get dropped" - and must not
+                # raise out of it, which would fail the job.
+                return False
+        shutil.rmtree(aside, ignore_errors=True)
+        return True
+
+    def sweep_stale(self) -> None:
+        """Empty the graveyard: entries a crash left between the rename and the
+        delete. They carry no marker, so the LRU skips them forever."""
+        # Everything under the graveyard, and NOTHING outside it. No name in the
+        # entry namespace is inspected, because no name there can be trusted to
+        # mean "discarded": entry names come from cache keys. An earlier build's
+        # leftovers (`<entry>.stale<digits>`) are deliberately not swept - the
+        # predicate that would find them, "has no .done marker", is also the exact
+        # definition of a claim another process is fetching into right now.
+        if not self.graveyard.is_dir():
+            return
+        for d in self.graveyard.iterdir():
+            shutil.rmtree(d, ignore_errors=True) if d.is_dir() else d.unlink(missing_ok=True)
+
     def _evict(self, keep) -> None:
         with self._lock:
             protected = set(keep) | set(self._pins)
             entries, kept_bytes = [], 0
             for e in self.root.iterdir():
+                if e == self.graveyard:
+                    continue                   # ours, not an entry
                 m = e / self.MARKER
                 if not m.exists():
                     continue                   # a writer mid-flight: never touch
@@ -987,6 +1112,15 @@ class JobRecord:
     cancel_token: CancelToken = field(default_factory=CancelToken)
     subscribers: list = field(default_factory=list)   # (event_loop, asyncio.Queue)
     source_tokens: dict | None = None             # credentials in transit: never serialized
+    #: `Cache-Control: no-cache` asked for a recompute. Carried to the FETCH as
+    #: well as the result lookup: for a source whose identity is not
+    #: version-pinned (`s3:`, `github:`), recomputing from a stale cached input
+    #: answers the same wrong thing again, only slower.
+    refresh_input: bool = False
+    #: Set when a refresh was asked for and could not happen (the input was in
+    #: use). Surfaced on the job so a caller can retry rather than trust a result
+    #: computed from bytes it asked not to reuse.
+    input_refresh_skipped: bool = False
 
 
 class _PrepareDone(Exception):
@@ -1066,6 +1200,8 @@ class LocalExecutor:
                 "input_path": str(rec.input_path) if rec.input_path else None,
                 "input_paths": [[r, str(p) if p else None] for r, p in rec.input_paths],
                 "labels_path": str(rec.labels_path) if rec.labels_path else None,
+                "refresh_input": bool(rec.refresh_input),
+                "input_refresh_skipped": bool(rec.input_refresh_skipped),
                 "needed_credentials": bool(rec.source_tokens)}
 
     def _persist(self, rec: JobRecord) -> None:
@@ -1106,7 +1242,9 @@ class LocalExecutor:
                             input_identity=tuple(r.get("input_identity") or ()),
                             input_paths=tuple((a, Path(b) if b else None)
                                               for a, b in (r.get("input_paths") or [])),
-                            cache_key=r.get("cache_key"), created=r.get("created") or time.time())
+                            cache_key=r.get("cache_key"), created=r.get("created") or time.time(),
+                            refresh_input=bool(r.get("refresh_input")),
+                            input_refresh_skipped=bool(r.get("input_refresh_skipped")))
             self._jobs[rec.id] = rec
             self._pending.append(rec.id)
             # the single-flight marker, oldest first: without it a re-ask for the same
@@ -1150,10 +1288,12 @@ class LocalExecutor:
 
     def submit(self, jid: str, jdir: Path, input_path, task: str, options: dict,
                *, source=None, identity: tuple = (), no_cache: bool = False,
-               source_tokens: dict | None = None, inputs: tuple = ()) -> JobRecord:
+               source_tokens: dict | None = None, inputs: tuple = (),
+               refresh_input: bool = False) -> JobRecord:
         rec = JobRecord(id=jid, task=task, options=options, dir=jdir, input_path=input_path,
                         source=list(source or [{"kind": "upload"}]), input_identity=tuple(identity),
-                        input_paths=tuple(inputs), source_tokens=source_tokens or None)
+                        input_paths=tuple(inputs), source_tokens=source_tokens or None,
+                        refresh_input=bool(refresh_input))
         if self.cache is not None and identity:
             rec.cache_key = result_key(identity, task, options,
                                        weights_versions_of(self.segmenter, task))
@@ -1347,6 +1487,40 @@ class LocalExecutor:
             self._emit(rec)
 
     # -- the dispatcher ------------------------------------------------------
+    def _refresh_input(self, rec, key: str, reporter, already: set | None = None) -> None:
+        """Drop a cached input, and any image already read from it, when the
+        caller asked for a recompute.
+
+        Both halves are needed. Dropping the cached bytes alone re-downloads the
+        series and then segments the pre-read image anyway, because the read-ahead
+        is keyed by series and nothing else invalidates it - so `no-cache` would
+        pay for a download and return the stale answer regardless. Called BEFORE
+        this job takes its own pin, since a pin is what makes a discard refuse.
+        """
+        if not getattr(rec, "refresh_input", False):
+            return
+        if already is not None:
+            if key in already:
+                # A multi-input task may bind two roles to ONE identifier. The
+                # second pass would see the first pass's fresh bytes cached and
+                # its own pin holding them, and report "could not refresh" for a
+                # key this very job just refreshed.
+                return
+            already.add(key)
+        if not self.series_cache.has(key):
+            self.read_ahead.pop(key)
+            return                         # nothing cached: the fetch below IS the refresh
+        if self.series_cache.discard(key):
+            self.read_ahead.pop(key)       # the image read from those bytes is stale too
+            reporter.stage("fetch", "refetching (no-cache)")
+            return
+        # Another job is reading those bytes, or a writer holds the claim, so the
+        # cached input stands. Say so rather than publish a result computed from
+        # bytes the caller explicitly asked not to reuse - and leave the read-ahead
+        # alone, because it belongs to the job that is still using it.
+        rec.input_refresh_skipped = True
+        reporter.stage("fetch", "cached (no-cache could not refresh: input in use)")
+
     def _from_store(self, entry, pinned: list):
         """Resolve an ``input`` source: content this server already holds.
 
@@ -1374,6 +1548,7 @@ class LocalExecutor:
         pinned series cache as a single-input job.
         """
         staged = {}
+        refreshed: set = set()             # one refresh per identifier, not per role
         by_role = {e.get("role"): e for e in entries}
         for role, path in rec.input_paths:
             entry = by_role.get(role) or {}
@@ -1386,6 +1561,7 @@ class LocalExecutor:
                 continue
             ident = str(entry.get("id") or entry.get("crdc_series_uuid") or "")
             key = f"{kind}:{ident}"
+            self._refresh_input(rec, key, reporter, refreshed)   # BEFORE our own pin
             self.series_cache.pin(key)
             pinned.append(key)
             reporter.stage("fetch", f"{role} {ident[:8]}")
@@ -1438,6 +1614,7 @@ class LocalExecutor:
                     elif kind != "upload":
                         ident = src.get("id") or src.get("crdc_series_uuid")
                         key = f"{kind}:{ident}"
+                        self._refresh_input(rec, key, reporter)   # BEFORE our own pin
                         self.series_cache.pin(key)
                         pinned.append(key)
                         if self.series_cache.has(key):
@@ -1450,7 +1627,15 @@ class LocalExecutor:
                             key, check=reporter.check,
                             credentials=(rec.source_tokens or {}).get(kind))
                         reporter.check()
+                        # A job that asked for fresh bytes must not use a pre-read
+                        # image at all. Popping it in _refresh_input is not enough:
+                        # the prefetch thread refills that slot with no
+                        # synchronisation, and a refill landing after the pop
+                        # reinstalls the stale image - the fetch is paid for and
+                        # the stale answer returned anyway.
                         preread = self.read_ahead.pop(key)
+                        if getattr(rec, "refresh_input", False):
+                            preread = None
                         if preread is not None:
                             reporter.stage("read", "preread")
                             inp = preread
@@ -1682,6 +1867,8 @@ class LocalExecutor:
              "finished": r.get("finished"), "input_identity": r.get("input_identity") or [],
              "options": r.get("options") or {}, "cached": bool(r.get("cached")),
              "evicted": True, "result_available": not gone}
+        if r.get("input_refresh_skipped"):
+            d["input_refresh_skipped"] = True
         if r.get("error"):
             d["error"] = r["error"]
         if r.get("result"):
@@ -1717,6 +1904,9 @@ class LocalExecutor:
             d["progress"] = rec.progress
         if rec.error is not None:
             d["error"] = rec.error
+        if getattr(rec, "input_refresh_skipped", False):
+            # the caller asked for a recompute from fresh bytes and did not get one
+            d["input_refresh_skipped"] = True
         if not brief and rec.input_identity:
             d["input_identity"] = list(rec.input_identity)
         if not brief:
@@ -2417,6 +2607,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # a forced recompute. Popped before keying: a cache directive is not part of
         # what identifies a result, or every forced run would land in its own entry.
         no_cache = bool(opts.pop("no_cache", False)) or wants_no_cache(request)
+        # What the CALLER asked for, kept apart from the engine policy applied
+        # below. An engine that declines result caching (VoxTell) forces
+        # `no_cache` true for every job, and reading that as "re-fetch the input"
+        # would re-download the series for each prompt and evict the copy the
+        # others share - so the input refresh follows the caller alone.
+        caller_asked_no_cache = no_cache
         for entry in src:                  # every source, not just the first
             kind = entry.get("kind", "upload")
             if kind == "input":
@@ -2460,7 +2656,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # Modal /scratch is a persistent Volume, so those were permanent.
         try:
             return await _accept(request, jid, jdir, binding, task, opts, src,
-                                 file, no_cache, executor, seg)
+                                 file, no_cache, executor, seg,
+                                 caller_asked_no_cache)
         except QueueFull as e:
             _discard(jdir)
             raise HTTPException(429, str(e), headers={"Retry-After": "30"}) from e
@@ -2475,7 +2672,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise
 
     async def _accept(request, jid, jdir, binding, task, opts, src, file,
-                      no_cache, executor, seg):
+                      no_cache, executor, seg, caller_asked_no_cache=False):
         multi = len(binding) > 1
         # Only a multi-input job needs to look past the declared `file` part;
         # re-parsing the form for the single case would change nothing and
@@ -2595,10 +2792,18 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             if not ident:
                 need = "crdc_series_uuid" if kind == "idc" else "id"
                 raise HTTPException(422, f"a {kind!r} source needs {need}")
-            if not re.fullmatch(sources[kind].id_pattern, ident):
+            # Everything the source can refuse WITHOUT I/O, refused here: the
+            # grammar, an allowlist, a credential it does not accept. Deferring
+            # any of it to the worker turns a bad request into an accepted job
+            # that fails minutes later - and on Modal, into a GPU container
+            # started for a request that was never going to run.
+            try:
+                _check_identifier(sources[kind], ident,
+                                  (source_tokens_of(request) or {}).get(kind))
+            except InputError as e:
                 hint = (" (expected 8-4-4-4-12 hex; a dotted value would be a DICOM "
                         "SeriesInstanceUID, which needs /v1/resolve)") if kind == "idc" else ""
-                raise HTTPException(422, f"{ident!r} is not a valid {kind} identifier" + hint)
+                raise HTTPException(422, str(e) + hint) from None
             src_entry["id"] = ident
             staged.append((role, None))
             idents.append(sources[kind].identity(ident))
@@ -2618,6 +2823,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                             # image, and that must mean channel 0 either way
                             source=[e for _, e in binding],
                             identity=identity, no_cache=no_cache,
+                            refresh_input=caller_asked_no_cache,
                             source_tokens=source_tokens_of(request),
                             inputs=tuple(staged) if multi else ())
         # the executor may have joined this ask to an identical flight already
@@ -2907,10 +3113,25 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     # POST /v1/jobs would still run from here. Before
                     # new_job_dir(), so a refusal allocates nothing.
                     _validate_request(seg, task, [srcdict], dict(gopts))
+                    # ...and the source's own door check: the allowlist a bucket
+                    # must be on, and a credential the source does not take. Both
+                    # are decidable with no I/O, and leaving them to the worker
+                    # costs a queue slot here and a GPU container on Modal.
+                    try:
+                        _check_identifier(srcobj, ident,
+                                          (source_tokens_of(request) or {}).get(prefix))
+                    except InputError as e:
+                        raise HTTPException(422, str(e)) from None
                     jid, jdir = executor.new_job_dir()
                     try:
                         executor.submit(jid, jdir, None, task, dict(gopts),
                                         no_cache=skip,      # the same skip the lookup used
+                                        # ...but the INPUT refresh follows the CALLER only:
+                                        # `skip` also carries the engine's cache policy, and
+                                        # a VoxTell-class task would then re-download its
+                                        # series on every request
+                                        refresh_input=(wants_no_cache(request)
+                                                       and authed(request)),
                                         source=[srcdict],
                                         identity=(srcobj.identity(ident),),
                                         source_tokens=source_tokens_of(request))
@@ -3086,11 +3307,20 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 # the same door check submit does - this surface initiates a
                 # compute too, and validating on only one door lets them disagree
                 _validate_request(seg, task, [srcdict], dict(opts))
+                try:
+                    _check_identifier(srcobj, ident,
+                                      (source_tokens_of(request) or {}).get(prefix))
+                except InputError as e:
+                    raise HTTPException(422, str(e)) from None
                 jid, jdir = executor.new_job_dir()
                 try:
                     executor.submit(jid, jdir, None, task, dict(opts),
                                     no_cache=((wants_no_cache(request) and authed(request))
                                               or not engine_serves_from_cache(task)),
+                                    # the CALLER's directive alone - an engine that
+                                    # declines result caching must not re-download
+                                    # every input as a side effect
+                                    refresh_input=(wants_no_cache(request) and authed(request)),
                                     source=[srcdict],
                                     identity=(srcobj.identity(ident),),
                                     source_tokens=source_tokens_of(request))

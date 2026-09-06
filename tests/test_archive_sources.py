@@ -10,8 +10,9 @@ from pathlib import Path
 import pytest
 
 from haversack.errors import InputError
-from haversack.sources import (ArchiveReadingSource, HuggingFaceSource, RangeFile,
-                           ZenodoSource, registry)
+from haversack import sources
+from haversack.sources import (ArchiveReadingSource, GitHubReleaseSource, HuggingFaceSource,
+                           RangeFile, S3Source, ZenodoSource, registry)
 
 
 class _RangeHandler(http.server.BaseHTTPRequestHandler):
@@ -19,6 +20,11 @@ class _RangeHandler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(self.payload)))
+        self.end_headers()
 
     def do_GET(self):
         rng = self.headers.get("Range")
@@ -382,3 +388,127 @@ def test_redirect_strips_auth_on_scheme_downgrade():
     new = h.redirect_request(mk("https://h/a"), None, 302, "", {},
                              "https://evil/b")
     assert not any(k.lower() == "authorization" for k in new.headers)
+
+
+# --- the two sources added 2026-09-05: a bucket allowlist and a release tag ---
+
+def test_s3_builds_its_url_from_the_allowlist_and_never_from_the_identifier(monkeypatch):
+    """The bucket is the operator's choice, the key is the client's. An
+    unlisted bucket is refused by name before anything is fetched, and the
+    per-bucket region decides the endpoint (a dotted bucket cannot be
+    virtual-hosted without breaking TLS, so these are path-style)."""
+    seen = {}
+
+    class _Resp:
+        headers = {"Content-Length": "123"}
+
+        def __enter__(self): return self
+
+        def __exit__(self, *a): return False
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            seen["url"], seen["method"] = req.full_url, req.get_method()
+            return _Resp()
+
+    monkeypatch.setattr(sources, "_OPENER", _Opener())
+    src = S3Source()
+    assert src.resolve("fcp-indi/data/x.nii.gz") == (
+        "https://s3.amazonaws.com/fcp-indi/data/x.nii.gz", 123)
+    assert seen["method"] == "HEAD"
+    # a bucket the allowlist gives a region gets that region's endpoint
+    assert src.resolve("msd-for-monai/Task09_Spleen.tar")[0].startswith(
+        "https://s3.us-west-2.amazonaws.com/msd-for-monai/")
+    with pytest.raises(InputError, match="not one this server fetches from"):
+        src.resolve("some-private-bucket/secret.nii.gz")
+    # an operator may serve a different set; the identifier still cannot add one
+    assert S3Source({"my-bucket": None}).resolve("my-bucket/a.nii.gz")[0] == (
+        "https://s3.amazonaws.com/my-bucket/a.nii.gz")
+
+
+def test_github_source_reads_one_member_of_a_release_asset(range_server, tmp_path):
+    url, _size = range_server
+    port = url.rsplit(":", 1)[1].split("/")[0]
+
+    class _Local(GitHubReleaseSource):
+        HOST = f"http://127.0.0.1:{port}"
+
+    src = _Local()
+    # the URL is assembled from owner/repo@tag/asset, and stays the stable
+    # github.com one - the signed CDN URL a HEAD redirects to expires
+    resolved, size = src.resolve("owner/repo@v1.0.0/archive.zip")
+    assert resolved == f"http://127.0.0.1:{port}/owner/repo/releases/download/v1.0.0/archive.zip"
+    assert size > 0
+    d = src.fetch("owner/repo@v1.0.0/archive.zip!case1/ct.nii.gz", tmp_path)
+    assert (d / "ct.nii.gz").read_bytes().startswith(b"\x1f\x8bCT")
+    with pytest.raises(InputError, match="no asset name"):
+        src.resolve("owner/repo@v1.0.0")
+
+
+def test_new_source_grammars_pin_the_identity():
+    import re
+    reg = registry(None)
+    assert {"s3", "github"} <= set(reg)
+    s3 = reg["s3"].id_pattern
+    assert re.fullmatch(s3, "fcp-indi/data/Projects/ABIDE/sub-01_T1w.nii.gz")
+    assert re.fullmatch(s3, "openneuro.org/ds000114/x.zip!inner/a.nii.gz")
+    assert not re.fullmatch(s3, "UPPER/x.nii.gz")            # bucket syntax is AWS's
+    assert not re.fullmatch(s3, "bucket")                    # a bucket alone is not an object
+    g = reg["github"].id_pattern
+    assert re.fullmatch(g, "robert-graf/VibeSegmentator@v1.0.0/100.zip")
+    assert re.fullmatch(g, "o/r@v1.0.0/a.zip!inner/b.nii.gz")
+    assert not re.fullmatch(g, "o/r/a.zip")                  # a tag is required
+    # `..` must be refused by the dot-dot lookahead, not merely by the leading
+    # character class - so the cases here are ones that START with a real
+    # segment. `bucket/../x` would be rejected either way and proves nothing.
+    for bad in ("fcp-indi/a/../../etc/passwd", "fcp-indi/a/..", "fcp-indi/../x"):
+        assert not re.fullmatch(s3, bad), bad
+    for bad in ("o/r@v1.0.0/a/../../x.zip", "o/../r@v1.0.0/a.zip"):
+        assert not re.fullmatch(g, bad), bad
+
+
+def test_the_anonymous_sources_refuse_a_credential_rather_than_sending_it():
+    """`s3` and `github` read public data only. A token must not reach either:
+    S3 answers one with 400, github.com redirects to a host that rejects it, and
+    a private asset fetched with a caller's token would be cached where every
+    reader of the cache can ask for it."""
+    for src in (S3Source(), GitHubReleaseSource()):
+        assert src._headers() == {}
+        with pytest.raises(InputError, match="no credentials"):
+            src._headers("SEKRET")
+        with pytest.raises(InputError, match="no credentials"):
+            src.resolve("fcp-indi/x.nii.gz" if src.prefix == "s3" else "o/r@v1/x.zip",
+                        credentials="SEKRET")
+
+
+def test_the_grammar_is_enforced_even_for_a_source_with_a_do_nothing_check():
+    """`check_identifier` deferred to a source's own `check` when it had one -
+    and a stand-in's attributes are all callable, so a Mock skipped validation
+    entirely. The pattern is checked here, always, and the hook runs after."""
+    from unittest import mock
+    from haversack.sources import check_identifier
+
+    stub = mock.Mock()
+    stub.prefix = "tst"
+    stub.id_pattern = r"[a-z]+"
+    stub.description = "letters only"
+    check_identifier(stub, "abc")                      # accepted, and the hook ran
+    assert stub.check.called
+    with pytest.raises(InputError, match="not a valid tst identifier"):
+        check_identifier(stub, "NOT-LETTERS")
+
+    class _Plain:                                      # no check at all
+        prefix, id_pattern, description = "old", r"[0-9]+", "digits"
+
+    check_identifier(_Plain(), "123")
+    with pytest.raises(InputError):
+        check_identifier(_Plain(), "abc")
+
+
+def test_the_canonical_s3_url_spelling_is_answered_with_the_one_this_takes():
+    """`s3://bucket/key` is what every AWS tool prints. The identifier IS the
+    cache key, so accepting both spellings would split it - the refusal names the
+    one this source takes instead of a bare grammar error."""
+    from haversack.sources import S3Source, check_identifier
+    with pytest.raises(InputError, match="drop the slashes.*s3:fcp-indi/x.nii.gz"):
+        check_identifier(S3Source(), "//fcp-indi/x.nii.gz")

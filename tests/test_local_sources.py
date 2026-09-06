@@ -35,6 +35,12 @@ def test_parse_input_tells_remote_from_local():
     assert sources.parse_input("idc:0123abcd-0000-0000-0000-000000000000") == ("idc", "0123abcd-0000-0000-0000-000000000000")
     assert sources.parse_input("zenodo:7262581/amos22.zip!amos22/imagesVa/amos_0575.nii.gz")[0] == "zenodo"
     assert sources.parse_input("https://example.org/a.nii.gz") == ("http", "https://example.org/a.nii.gz")
+    # a registered prefix is recognized even when it does not fit the "three or
+    # more letters" shape a local path is told apart by: s3 is two characters
+    # and carries a digit
+    assert sources.parse_input("s3:fcp-indi/data/sub-01_T1w.nii.gz") == (
+        "s3", "fcp-indi/data/sub-01_T1w.nii.gz")
+    assert sources.parse_input("github:o/r@v1.0.0/a.zip!b.nii.gz")[0] == "github"
     for local in ("scan.nii.gz", "/abs/path/ct.nrrd", "C:\\data\\ct.nii", "./series", "a:b"):
         assert sources.parse_input(local) is None, local
 

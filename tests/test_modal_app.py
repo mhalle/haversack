@@ -1,4 +1,7 @@
 """The Modal deployment module is import-safe and shaped as create_app expects."""
+import pathlib
+import re
+
 import pytest
 
 modal = pytest.importorskip("modal")
@@ -281,3 +284,14 @@ def test_volume_attach_preflight_fails_with_the_remedy(monkeypatch, tmp_path):
     import pytest
     with pytest.raises(RuntimeError, match="HAVERSACK_SNAPSHOT=0"):
         m._check_volumes_attached()
+
+
+def test_a_skipped_input_refresh_reaches_a_modal_caller():
+    """The worker records that a requested no-cache refresh could not happen; a
+    fixed key whitelist then dropped it, so a caller got a result computed from
+    bytes it asked not to reuse with no indication. The local executor reports
+    it, so this deployment must too."""
+    from haversack import modal_app
+    src = pathlib.Path(modal_app.__file__).read_text()
+    keys = src.split("keys = (")[1].split(")")[0]
+    assert '"input_refresh_skipped"' in keys

@@ -151,7 +151,9 @@ revalidation earns its keep.
 `GET /v1/sources` lists what this server can fetch for itself and the identifier grammar of
 each: `idc` (NCI Imaging Data Commons, by crdc_series_uuid), `tcia` (by SeriesInstanceUID),
 `openneuro` (`ds<number>/<file path>`), `zenodo` (`<record>/<file>`, `!member` for a file
-inside a zip), and `hf` (Hugging Face, `<owner>/<repo>@<revision>/<path>`). A fetch happens
+inside a zip), `hf` (Hugging Face, `<owner>/<repo>@<revision>/<path>`), `s3` (`<bucket>/<key>`,
+where the bucket must be one the server serves - the response lists them) and `github`
+(`<owner>/<repo>@<tag>/<asset>`, the tag required). A fetch happens
 at dispatch, as a visible "fetch" progress stage, so submits stay small and a full queue
 never wastes an upload. Fetched series live in a bounded cache in the work directory.
 

@@ -201,12 +201,26 @@ the same identifier - or the same identifier twice - downloads it only once.
 | `zenodo:` | `<record id>/<filename>` on a Zenodo record | `zenodo:7262581/amos22.zip` |
 | `tcia:` | a TCIA series | `tcia:<series-uid>` |
 | `openneuro:` | an OpenNeuro dataset file | `openneuro:ds000114/.../sub-01_T1w.nii.gz` |
-| `hf:` | a file in a Hugging Face repo | `hf:<org>/<repo>/<path>` |
+| `hf:` | a file in a Hugging Face repo, at a commit | `hf:<org>/<repo>@<commit-sha>/<path>` |
+| `s3:` | `<bucket>/<key>` in a public bucket the server serves | `s3:fcp-indi/data/Projects/.../sub-01_T1w.nii.gz` |
+| `github:` | `<owner>/<repo>@<tag>/<asset>` on a GitHub release | `github:Slicer/SlicerTestingData@SHA256/<digest>` |
 | `http://`, `https://` | any URL (command line only, never a server) | `https://example.org/scan.nii.gz` |
 
 Add `!member` to read one file out of a remote **zip** by HTTP range, without downloading the
 archive - `zenodo:7262581/amos22.zip!amos22/imagesVa/amos_0575.nii.gz`. The trailing-slash
 form (`...zip!amos22/imagesVa/`) extracts every member under a prefix.
+
+`s3:` reaches a fixed list of public buckets - `fcp-indi` (ABIDE, ADHD-200, CoRR, NKI-Rockland),
+`openneuro.org`, `msd-for-monai` (the Medical Segmentation Decathlon mirror) and the IDC
+buckets - because a source that took any bucket a caller named would fetch from anywhere.
+`msd-for-monai` holds `.tar` archives rather than zips, so `!member` does not apply to it;
+its objects come down whole, and they are large.
+`github:` requires the release tag; a branch or `latest` is refused. A tag makes the
+reference readable, but not immutable - an asset can be replaced under a published tag, and
+a tag can be moved - so this identity is only as stable as the publisher's discipline, like
+`tcia:` and unlike `hf:`'s commit sha or `zenodo:`'s record id. Neither `s3:` nor `github:`
+accepts a credential: both read public data, and a private file fetched with your token
+would be cached where every reader of that cache can ask for it.
 
 `idc:` needs the `idc` extra's runtime (`obstore`), which is part of the normal install; the
 others use the standard library. The hosted prefixes are exactly the sources a `haversack

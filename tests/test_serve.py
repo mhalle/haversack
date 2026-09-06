@@ -6,6 +6,8 @@ in milliseconds. The real pipeline behind the same seam is exercised by the CUDA
 harness, not here.
 """
 import hashlib
+import types
+import pathlib
 import itertools
 import json
 import threading
@@ -20,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from haversack.errors import Cancelled
 from haversack.progress import Reporter
+from haversack import serve as serve_mod
 from haversack.serve import LocalExecutor, QueueFull, create_app
 
 
@@ -119,7 +122,7 @@ def make(tmp_path, **kw):
 _SUBMIT_N = itertools.count(1)
 
 
-def submit(client, task="total_fast", options=None, fill=None):
+def submit(client, task="total_fast", options=None, fill=None, headers=None):
     """Distinct content per call by default.
 
     Identical bytes are now the SAME input - one digest, one entry, and a second
@@ -129,7 +132,8 @@ def submit(client, task="total_fast", options=None, fill=None):
                     files={"file": ("scan.nii.gz",
                                     volume_bytes(next(_SUBMIT_N) if fill is None
                                                  else fill))},
-                    data={"task": task, "options": json.dumps(options or {})})
+                    data={"task": task, "options": json.dumps(options or {})},
+                    headers=headers or {})
     assert r.status_code == 202, r.text
     return r.json()["id"]
 
@@ -3664,3 +3668,485 @@ def test_describe_takes_catalog_names_only_and_never_echoes_the_resolver(tmp_pat
     assert client.get("/v1/tasks/..%5c..%5cetc").status_code == 404 and seen == []
     r = client.get("/v1/tasks/nope")
     assert r.status_code == 404 and "/secret" not in r.text   # the resolver's words stay inside
+
+
+# -- the sources whose identifiers are not flat uuids -------------------------
+# The path surface, and submit-time validation, had only ever been exercised with
+# `idc`, whose identifier is a bare uuid - the one shape that cannot exercise a
+# slash, an `@`, or a `!member`. These pin the rest.
+
+def test_s3_and_github_identifiers_survive_the_path_surface(tmp_path):
+    _seg, _ex, client = make(tmp_path)
+    cases = [
+        ("s3", "fcp-indi/data/Projects/ABIDE/sub-01_T1w.nii.gz"),      # slashes
+        ("s3", "openneuro.org/ds000114/x.zip!inner/a.nii.gz"),         # a dotted bucket, !member
+        ("github", "robert-graf/VibeSegmentator@v1.0.0/100.zip"),      # an @tag
+        ("github", "o/r@v1.0.0/a.zip!cfg/dataset.json"),               # both, with a dotted member
+        # identifiers ENDING in the artifact names the same route has to parse
+        ("s3", "fcp-indi/labels.seg.nrrd"),
+        ("s3", "fcp-indi/a/meta.json"),
+        ("s3", "fcp-indi/a/labels_res-1mm.seg.nrrd"),
+    ]
+    for kind, ident in cases:
+        r = client.get(f"/v1/{kind}/{ident}/total_fast/labels.seg.nrrd")
+        # nothing is cached, so 404 either way - but a ROUTED request says so in
+        # the cache's words, while an unrouted one is FastAPI's bare "Not Found"
+        assert r.status_code == 404, (kind, ident, r.status_code)
+        assert "not materialized" in str(r.json()["detail"]), (kind, ident, r.json())
+    # the discriminator itself: an unknown prefix does NOT reach the cache
+    unknown = client.get("/v1/nosuchsource/x/total_fast/labels.seg.nrrd")
+    assert unknown.status_code == 404 and "not materialized" not in str(unknown.json())
+
+
+def test_a_source_refusal_that_needs_no_network_happens_at_submit(tmp_path):
+    """An unlisted bucket and a credential the source does not take are both
+    decidable with no I/O. Accepting the job and failing on the worker would cost
+    a queue slot here and a GPU container on Modal, and answers 502 - which reads
+    as an upstream outage rather than a bad request."""
+    _seg, _ex, client = make(tmp_path)
+    r = client.post("/v1/jobs", data={"task": "total_fast",
+                                      "source": '[{"kind":"s3","id":"evil-bucket/x.nii.gz"}]'})
+    assert r.status_code == 422 and "not one this server fetches from" in str(r.json()["detail"])
+
+    r = client.post("/v1/jobs", data={"task": "total_fast",
+                                      "source": '[{"kind":"github","id":"o/r/a.zip"}]'})
+    assert r.status_code == 422 and "not a valid github identifier" in str(r.json()["detail"])
+
+    r = client.post("/v1/jobs",
+                    data={"task": "total_fast", "source": '[{"kind":"s3","id":"fcp-indi/x.nii.gz"}]'},
+                    headers={"Haversack-Source-Token": "s3=secret"})
+    assert r.status_code == 422 and "no credentials" in str(r.json()["detail"])
+
+
+def test_the_sources_endpoint_lists_the_buckets_it_will_read(tmp_path):
+    _seg, _ex, client = make(tmp_path)
+    by_prefix = {s["prefix"]: s for s in client.get("/v1/sources").json()["sources"]}
+    assert {"s3", "github"} <= set(by_prefix)
+    assert "fcp-indi" in by_prefix["s3"]["buckets"]      # an operator's list, discoverable
+
+
+def test_no_cache_refetches_an_input_whose_bytes_can_change(tmp_path):
+    """`Cache-Control: no-cache` has to reach the INPUT, not only the result.
+
+    Every source but two pins its identity - an IDC uuid, a Zenodo record id, an
+    hf commit sha - so a cached input could never be stale. `s3:` and `github:`
+    address bytes that can be replaced under the same identifier, and recomputing
+    a result from a stale cached input just answers the same wrong thing again.
+
+    Driven through the sequence the executor actually uses - `_refresh_input`,
+    then pin, then fetch - because that is where the behaviour lives; an earlier
+    version of this test called a `refresh=` argument no production code passed.
+    """
+    upstream = {"bytes": b"first version"}
+    fetched = []
+
+    def fetch(series, entry):
+        fetched.append(series)
+        out = entry / "series"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "scan.nii.gz").write_bytes(upstream["bytes"])
+        return out
+
+    _seg, ex, _client = make(tmp_path)
+    ex.series_cache = serve_mod.SeriesCache(tmp_path / "series2", fetch)
+    key = "s3:fcp-indi/data/scan.nii.gz"
+
+    class _Rep:
+        def __init__(self):
+            self.stages = []
+
+        def stage(self, *a):
+            self.stages.append(a)
+
+    plain = types.SimpleNamespace(refresh_input=False)
+    assert (ex.series_cache.get_or_fetch(key) / "scan.nii.gz").read_bytes() == b"first version"
+    upstream["bytes"] = b"second version"                  # replaced under one key
+    ex._refresh_input(plain, key, _Rep())                  # no directive: keep the cache
+    assert (ex.series_cache.get_or_fetch(key) / "scan.nii.gz").read_bytes() == b"first version"
+    assert fetched == [key]
+
+    asked = types.SimpleNamespace(refresh_input=True, input_refresh_skipped=False)
+    rep = _Rep()
+    ex._refresh_input(asked, key, rep)                     # what no-cache does
+    assert (ex.series_cache.get_or_fetch(key) / "scan.nii.gz").read_bytes() == b"second version"
+    assert fetched == [key, key]
+    assert asked.input_refresh_skipped is False
+    assert any("refetching" in str(a) for a in rep.stages)
+    assert not list((tmp_path / "series2" / ".graveyard").iterdir())   # not leaked
+
+
+def test_a_refresh_is_not_repeated_for_two_roles_bound_to_one_input(tmp_path):
+    """A multi-input task may bind two roles to one identifier. The second pass
+    sees the first pass's fresh bytes cached and its own pin holding them, and
+    would report "could not refresh" for a key this very job just refreshed."""
+    _seg, ex, _client = make(tmp_path)
+    key = "s3:fcp-indi/a/scan.nii.gz"
+    rec = types.SimpleNamespace(refresh_input=True, input_refresh_skipped=False)
+
+    class _Rep:
+        def stage(self, *a):
+            pass
+
+    def fetch(series, entry):
+        out = entry / "series"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "a.bin").write_bytes(b"bytes")
+        return out
+
+    ex.series_cache = serve_mod.SeriesCache(tmp_path / "roles", fetch)
+    ex.series_cache.get_or_fetch(key)           # cached, so the discard is reached
+    seen: set = set()
+    ex._refresh_input(rec, key, _Rep(), seen)   # role A: drops it
+    ex.series_cache.get_or_fetch(key)           # re-fetched, as the loop would
+    ex.series_cache.pin(key)                    # role A now holds it
+    ex._refresh_input(rec, key, _Rep(), seen)   # role B, same identifier
+    assert rec.input_refresh_skipped is False, "the job's own refresh was reported as a skip"
+    # and without the set, the same second call DOES report a skip
+    other = types.SimpleNamespace(refresh_input=True, input_refresh_skipped=False)
+    ex._refresh_input(other, key, _Rep())
+    assert other.input_refresh_skipped is True
+
+
+def test_a_refresh_never_evicts_an_input_a_running_job_is_reading(tmp_path):
+    """The pin exists precisely to stop an input being dropped mid-read, and the
+    LRU respects it. A `no-cache` job discarding the same series must respect it
+    too - one missing file fails the job that was reading."""
+    from haversack.serve import SeriesCache
+    gen = itertools.count(1)
+
+    def fetch(series, entry):
+        out = entry / "series"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "a.bin").write_bytes(f"gen{next(gen)}".encode())
+        return out
+
+    cache = SeriesCache(tmp_path / "series", fetch)
+    held = cache.get_or_fetch("s1")
+    cache.pin("s1")
+    assert cache.discard("s1") is False                 # refused: someone is reading
+    assert (held / "a.bin").read_bytes() == b"gen1"     # and it is still there
+    cache.unpin("s1")
+    assert cache.discard("s1") is True                  # once released, it goes
+    assert (cache.get_or_fetch("s1") / "a.bin").read_bytes() == b"gen2"
+
+
+def test_a_refresh_also_drops_the_image_already_read_from_that_input(tmp_path):
+    """Dropping the cached bytes alone is not enough: the read-ahead is keyed by
+    series, so a no-cache job would re-download the input and then segment the
+    pre-read copy anyway - paying for the fetch and returning the stale answer."""
+    seg, ex, _client = make(tmp_path)
+    key = "s3:fcp-indi/a/scan.nii.gz"
+    ex.read_ahead._key, ex.read_ahead._image = key, "STALE-IMAGE"
+    rec = types.SimpleNamespace(refresh_input=True)
+
+    class _Rep:
+        def stage(self, *a): pass
+
+    def fetch(series, entry):
+        out = entry / "series"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "a.bin").write_bytes(b"bytes")
+        return out
+
+    ex.series_cache = serve_mod.SeriesCache(tmp_path / "ra", fetch)
+    ex.series_cache.get_or_fetch(key)                  # CACHED: the discard branch
+    ex.read_ahead._key, ex.read_ahead._image = key, "STALE-IMAGE"
+    ex._refresh_input(rec, key, _Rep())
+    assert ex.read_ahead.pop(key) is None               # the stale image is gone
+    # and a job that did NOT ask for a refresh keeps its pre-read image
+    ex.read_ahead._key, ex.read_ahead._image = key, "FRESH-IMAGE"
+    ex._refresh_input(types.SimpleNamespace(refresh_input=False), key, _Rep())
+    assert ex.read_ahead.pop(key) == "FRESH-IMAGE"
+
+
+def test_an_engines_cache_policy_does_not_force_an_input_refetch(tmp_path, monkeypatch):
+    """`no_cache` is overwritten a few lines later with the engine's own policy -
+    permanently true for an engine that declines result caching (VoxTell). Reading
+    that as "re-fetch the input" would re-download the series for every prompt and
+    evict the copy the other jobs share, so the input refresh follows the CALLER.
+
+    Behavioural on purpose: the same claim as a source-text assertion still passed
+    when the conflation was written back in as a prefix of the captured line.
+    """
+    from haversack import serve as serve_mod
+    _seg, ex, client = make(tmp_path)
+    monkeypatch.setattr(serve_mod, "engine_serves_from_cache", lambda task: False)
+
+    jid = submit(client, fill=1)                       # no Cache-Control header
+    rec = ex._jobs[jid]
+    assert rec.refresh_input is False, "the engine's cache policy forced an input refetch"
+
+    # and the caller's own directive still gets through
+    jid2 = submit(client, fill=2, headers={"Cache-Control": "no-cache"})
+    assert ex._jobs[jid2].refresh_input is True
+
+
+def test_a_no_cache_job_still_asks_for_a_refetch_after_a_restart(tmp_path):
+    """The flag decides whether a queued job re-fetches its input, and a restart
+    re-queues that job - so it has to survive the job store."""
+    from haversack.serve import JobRecord
+    _seg, ex, _client = make(tmp_path)
+    rec = JobRecord(id="j1", task="total_fast", options={}, dir=tmp_path, input_path=None,
+                    refresh_input=True)
+    view = ex._persisted(rec)
+    assert view["refresh_input"] is True
+    ex.jobs_db.put(view)
+    assert [r.get("refresh_input") for r in ex.jobs_db.reconcile()] == [True]
+    # and it survives an actual restart, which is what re-queues the job
+    ex2 = LocalExecutor(_seg, workdir=tmp_path)
+    restored = ex2._jobs.get("j1")
+    assert restored is not None and restored.refresh_input is True
+    assert bool({"id": "old"}.get("refresh_input")) is False      # an older payload defaults off
+
+
+def test_a_cache_marker_that_cannot_be_touched_does_not_spin_the_dispatcher(tmp_path):
+    """The LRU touch is best-effort. Treating every OSError as "evicted, try
+    again" turns a read-only cache, or a marker owned by another user, into a
+    tight uncancellable loop on the one dispatcher thread."""
+    from unittest import mock
+    from haversack.serve import SeriesCache
+
+    def fetch(series, entry):
+        out = entry / "series"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "a.bin").write_bytes(b"x")
+        return out
+
+    cache = SeriesCache(tmp_path / "series", fetch)
+    cache.get_or_fetch("s1")
+    with mock.patch("os.utime", side_effect=PermissionError("read-only")):
+        done = []
+        t = threading.Thread(target=lambda: done.append(cache.get_or_fetch("s1")), daemon=True)
+        t.start()
+        t.join(timeout=5)
+        assert done, "get_or_fetch spun instead of returning"
+
+
+def test_discard_refuses_an_entry_another_writer_is_still_claiming(tmp_path):
+    """A directory with no `.done` marker is a claim in flight - another writer
+    owns it. Renaming that aside orphans its staging, and the LRU skips
+    markerless entries, so nothing would ever reclaim what is left."""
+    from haversack.serve import SeriesCache
+    cache = SeriesCache(tmp_path / "series", lambda s, e: e / "series")
+    entry = cache._entry("s1")
+    entry.mkdir(parents=True)                      # a claim, uncommitted
+    assert cache.discard("s1") is False
+    assert entry.is_dir()
+
+
+def test_the_sweep_empties_the_graveyard_and_touches_nothing_else(tmp_path):
+    """A discarded entry goes into its own directory, and the sweep empties that
+    directory. It inspects no name in the entry namespace, because no name there
+    can be trusted to mean "discarded": entry names come from cache keys, and an
+    S3 key may say anything.
+
+    Two bugs came from matching names here. A `*.stale*` glob deleted the live
+    input for `s3:b/x.stale1.nii.gz` at every server start. Narrowing it to
+    `<name>.stale<digits>` with "and has no .done marker" then deleted live
+    CLAIMS, because markerless is the definition of a fetch in flight."""
+    from haversack.serve import SeriesCache
+
+    def fetch(series, entry):
+        out = entry / "series"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "a.bin").write_bytes(b"live")
+        return out
+
+    root = tmp_path / "series"
+    cache = SeriesCache(root, fetch)
+    keys = ("s3:b/x.stale1.nii.gz", "s3:b/archive.stale.zip", "s3:b/thing.stale7", "idc:abc")
+    live = [cache._entry(k) for k in keys]
+    for key in keys:
+        cache.get_or_fetch(key)
+    # a claim another process is fetching into: a directory with no .done marker
+    claim = cache._entry("s3:b/being-fetched.stale9")
+    claim.mkdir(parents=True)
+    (claim / ".key").write_text("s3:b/being-fetched.stale9")
+    # and real graveyard content, from a crash between the rename and the delete
+    cache.graveyard.mkdir(parents=True, exist_ok=True)
+    abandoned = cache.graveyard / "idc%3Aold-1234-5678"
+    abandoned.mkdir()
+    (abandoned / "payload").write_bytes(b"x" * 16)
+
+    SeriesCache(root, fetch)                        # a restart sweeps
+    assert not abandoned.exists()
+    assert claim.is_dir(), "a claim in flight was swept"
+    for entry in live:
+        assert (entry / "series" / "a.bin").read_bytes() == b"live", entry.name
+
+
+def test_the_path_surface_refuses_what_submit_refuses(tmp_path):
+    """Both surfaces initiate a compute, so both must apply the source's own door
+    check - the bucket allowlist and the credential refusal. Validating on one of
+    them let a request refused with 422 at POST /v1/jobs be accepted with 202
+    here, costing a queue slot locally and a GPU container on Modal."""
+    _seg, _ex, client = make(tmp_path)
+    cases = [
+        ({}, "/v1/s3/evil-bucket/secret.nii.gz/total_fast/labels.seg.nrrd",
+         "not one this server fetches from"),
+        ({"Haversack-Source-Token": "s3=secret"},
+         "/v1/s3/fcp-indi/a/scan.nii.gz/total_fast/labels.seg.nrrd", "no credentials"),
+        ({"Haversack-Source-Token": "github=ghp_x"},
+         "/v1/github/o/r@v1.0.0/a.zip/total_fast/labels.seg.nrrd", "no credentials"),
+    ]
+    for headers, path, expected in cases:
+        r = client.get(path, headers={**headers, "Prefer": "wait=0"})
+        assert r.status_code == 422, (path, r.status_code, r.text[:200])
+        assert expected in str(r.json()["detail"]), path
+    # and a well-formed request on an allowlisted bucket still initiates
+    ok = client.get("/v1/s3/fcp-indi/a/scan.nii.gz/total_fast/labels.seg.nrrd",
+                    headers={"Prefer": "wait=0"})
+    assert ok.status_code == 202, ok.text[:200]
+
+
+def test_a_reclaim_refuses_a_claim_that_changed_hands_underneath_it(tmp_path):
+    """`_writer_alive` walks a staging tree that can hold thousands of files, so
+    the window between its verdict and the rename is wide. Another process can
+    reclaim in it, re-create the path and start fetching - and renaming by bare
+    path then drags a LIVE claim into the graveyard and deletes it. That is the
+    failure the owner token was added for on the teardown side."""
+    cache = serve_mod.SeriesCache(tmp_path / "series", lambda s, e: e / "series",
+                                  claim_timeout=0.3)
+    entry = cache._entry("s3:b/x")
+    entry.mkdir(parents=True)
+    cache._claim_owner(entry)
+    (entry / "partial.bin").write_bytes(b"in flight")
+
+    successor = {}
+    real_alive = cache._writer_alive
+
+    def alive_then_handover(e):
+        verdict = real_alive(e)
+        successor["token"] = cache._claim_owner(e)     # someone else reclaims
+        return verdict
+
+    cache._writer_alive = alive_then_handover
+    done = []
+    t = threading.Thread(target=lambda: done.append(cache.get_or_fetch("s3:b/x")), daemon=True)
+    t.start()
+    t.join(timeout=8)
+    assert (entry / "partial.bin").read_bytes() == b"in flight", \
+        "the successor's in-flight claim was reclaimed and deleted"
+    assert not list(cache.graveyard.iterdir()) if cache.graveyard.is_dir() else True
+
+
+def test_a_cache_key_cannot_name_the_cache_s_own_directory(tmp_path):
+    """`.graveyard` as an entry name IS the graveyard, and the reclaim then
+    renames that directory into itself, fails, and loops forever on the single
+    dispatcher thread. No production key can spell it, but the entry namespace
+    is shared with our own directory so the reservation is explicit."""
+    cache = serve_mod.SeriesCache(tmp_path / "series", lambda s, e: e / "series")
+    assert cache._entry(".graveyard") != cache.graveyard
+    assert cache._entry("..") != cache.root
+
+
+def test_the_evictor_does_not_count_or_delete_the_graveyard(tmp_path):
+    from haversack.serve import SeriesCache
+
+    def fetch(series, entry):
+        out = entry / "series"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "a.bin").write_bytes(b"x" * 4096)
+        return out
+
+    cache = SeriesCache(tmp_path / "series", fetch, budget_bytes=1)
+    cache.get_or_fetch("idc:a")
+    cache.graveyard.mkdir(parents=True, exist_ok=True)
+    (cache.graveyard / "leftover").mkdir()
+    cache._evict(keep=set())
+    assert cache.graveyard.is_dir()          # ours, never an eviction candidate
+
+
+def test_the_path_surface_refresh_follows_the_caller_not_the_engine(tmp_path, monkeypatch):
+    """Both path-surface initiations must use the caller's directive alone. The
+    labels route once passed the variable that also carries the engine's cache
+    policy, so a VoxTell-class task re-downloaded its series on every request."""
+    src = (pathlib.Path(__file__).resolve().parents[1] / "src/haversack/serve.py").read_text()
+    assert src.count("refresh_input=(wants_no_cache(request)\n") + \
+           src.count("refresh_input=(wants_no_cache(request) and authed(request))") >= 2
+    assert "refresh_input=skip" not in src
+
+
+
+def test_an_ownerless_claim_is_told_apart_from_a_successor_by_its_age(tmp_path):
+    """The one case the owner token cannot decide. A claim with no owner file is
+    either a crash between the mkdir and the owner write, or a SUCCESSOR inside
+    that same two-statement window. Comparing absent to absent called them equal
+    and deleted the live one; the directory's own age tells them apart."""
+    import shutil
+
+    def fetch(series, entry):
+        out = entry / "series"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "a.bin").write_bytes(b"ok")
+        return out
+
+    root = tmp_path / "series"
+    cache = serve_mod.SeriesCache(root, fetch, claim_timeout=0.3)
+    entry = cache._entry("s3:b/x")
+    entry.mkdir(parents=True)                       # a crashed, ownerless claim
+    time.sleep(0.5)                                 # older than the timeout
+
+    other = serve_mod.SeriesCache(root, fetch, claim_timeout=0.3)
+    real_alive = other._writer_alive
+
+    def hand_over(e):                               # a successor appears mid-walk
+        verdict = real_alive(e)
+        shutil.rmtree(e, ignore_errors=True)
+        e.mkdir(parents=True, exist_ok=True)
+        (e / "partial.bin").write_bytes(b"successor in flight")
+        return verdict
+
+    other._writer_alive = hand_over
+    t = threading.Thread(target=lambda: other.get_or_fetch("s3:b/x"), daemon=True)
+    t.start()
+    t.join(timeout=8)
+    assert (entry / "partial.bin").read_bytes() == b"successor in flight"
+
+
+def test_a_genuinely_crashed_claim_is_still_reclaimed(tmp_path):
+    """The other half: refusing to reclaim an ownerless claim outright would wedge
+    a key forever after a crash between the mkdir and the owner write."""
+    def fetch(series, entry):
+        out = entry / "series"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "a.bin").write_bytes(b"ok")
+        return out
+
+    cache = serve_mod.SeriesCache(tmp_path / "series", fetch, claim_timeout=0.2)
+    (cache.root / "dead").mkdir()
+    time.sleep(0.3)
+    assert cache.get_or_fetch("dead").exists()
+
+
+def test_a_read_only_cache_root_does_not_fail_the_job(tmp_path):
+    """`discard` answers a question - did anything get dropped - and must not
+    raise out of it. The graveyard mkdir was the one unguarded call on this path,
+    where before this change there was no mkdir here at all."""
+    import os
+
+    def fetch(series, entry):
+        out = entry / "series"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "a.bin").write_bytes(b"ok")
+        return out
+
+    cache = serve_mod.SeriesCache(tmp_path / "series", fetch)
+    cache.get_or_fetch("idc:a")
+    os.chmod(cache.root, 0o500)
+    try:
+        assert cache.discard("idc:a") is False
+    finally:
+        os.chmod(cache.root, 0o700)
+
+
+def test_a_no_cache_job_never_uses_a_pre_read_image(tmp_path):
+    """Dropping the pre-read image in _refresh_input is not enough: the prefetch
+    thread refills that slot with no synchronisation, so a refill landing after
+    the drop reinstalls the stale image and the job segments it - the fetch paid
+    for, the stale answer returned. A job that asked for fresh bytes uses none."""
+    src = (pathlib.Path(__file__).resolve().parents[1] / "src/haversack/serve.py").read_text()
+    i = src.index("preread = self.read_ahead.pop(key)")
+    following = src[i:i + 400]
+    assert 'if getattr(rec, "refresh_input", False):' in following
+    assert "preread = None" in following

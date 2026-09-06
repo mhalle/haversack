@@ -181,7 +181,8 @@ def _run(argv=None) -> int:
     s.add_argument("input", nargs="+",
                    help="one or more inputs; several = batch mode. Each is a NIfTI / NRRD / MetaImage file, a DICOM "
                    "series directory, an http(s) URL (!member reads one file out of a remote zip), or a hosted "
-                   "identifier: idc:<crdc_series_uuid>, zenodo:<recid>/<file>[!member], tcia:..., openneuro:..., hf:...")
+                   "identifier: idc:<crdc_series_uuid>, zenodo:<recid>/<file>[!member], tcia:..., openneuro:..., "
+                   "hf:<org>/<repo>@<sha>/<path>, s3:<bucket>/<key>, github:<owner>/<repo>@<tag>/<asset>")
     s.add_argument("--task", required=True,
                    help="what to segment: a name from `haversack tasks` (total_fast, total, fastsurfer:brain, ...), "
                         "or a path to a stock nnU-Net model folder")
@@ -220,7 +221,8 @@ def _run(argv=None) -> int:
   haversack get idc:<crdc_series_uuid> -o raw_dicom/         the raw DICOM series directory""")
     g.add_argument("source", nargs="+",
                    help="one or more remote inputs (several = batch): idc:<uuid>, zenodo:<recid>/<file>[!member], "
-                   "tcia:, openneuro:, hf:, or an http(s) URL")
+                   "tcia:, openneuro:, hf:<org>/<repo>@<sha>/<path>, s3:<bucket>/<key>[!member], "
+                   "github:<owner>/<repo>@<tag>/<asset>[!member], or an http(s) URL")
     g.add_argument("-o", "--output", default=None, help="where to put it: a directory (raw copy) or a file (converted by extension)")
     g.add_argument("--format", default=None, help="output format (nifti, nrrd, seg.nrrd, mha): convert, and name by it into a directory")
     g.add_argument("--no-cache", action="store_true", help="do not keep the raw data in the cache (only with -o)")
