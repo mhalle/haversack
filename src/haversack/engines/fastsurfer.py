@@ -280,7 +280,7 @@ def ensure_checkpoints(directory=None, *, progress=None) -> Path:
             tmp.unlink(missing_ok=True)
             from ..errors import ResourceError
             raise ResourceError(f"checkpoint {name}: sha256 {got} != expected {sha}")
-        tmp.rename(dest)
+        tmp.replace(dest)              # rename() refuses an existing target on Windows
         say.finished(f"{name} installed")
     return d
 

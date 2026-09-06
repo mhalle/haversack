@@ -541,7 +541,7 @@ class ClaimStatesThatWereUntested(unittest.TestCase):
         so under umask 077 the claim is mode 0600 and os.link preserves it - any
         second uid on a shared cache root hits this.
         """
-        if os.geteuid() == 0:
+        if getattr(os, "geteuid", lambda: 1)() == 0:   # no geteuid on Windows
             self.skipTest("root can read a 0000 file")
         with tempfile.TemporaryDirectory() as td:
             cache = self._cache(pathlib.Path(td))
@@ -559,7 +559,7 @@ class ClaimStatesThatWereUntested(unittest.TestCase):
     def test_waiting_on_an_unreadable_claim_does_not_spin(self):
         """The same defect, end to end: the wait loop must not retake the claim
         in a tight loop when it cannot read the owner."""
-        if os.geteuid() == 0:
+        if getattr(os, "geteuid", lambda: 1)() == 0:   # no geteuid on Windows
             self.skipTest("root can read a 0000 file")
         with tempfile.TemporaryDirectory() as td:
             cache = self._cache(pathlib.Path(td), claim_timeout=30.0)

@@ -164,6 +164,13 @@ Two data sources and two model catalogs, each on the extension seam that already
   the handler then returned "not claimed" with the token still linked: a claim nobody held,
   reported as staging, and the key unusable until the timeout reclaimed it. The heartbeat also
   named the claim file by its literal spelling rather than the constant.
+- **The per-model install lock now holds on Windows.** It was a bare `flock`, and where that
+  could not be imported the install ran with no lock at all - so two installs of one model
+  there could still delete each other's weights, the bug the lock exists to stop. A small
+  `haversack.filelock` module locks through `fcntl` or `msvcrt`, and the ranked store's
+  one-writer lock uses it too. Two other Windows-hostile spots fixed on the way: a download
+  temp file was unlinked while still open, and a checkpoint move used `rename` where the
+  target may exist.
 - **Retention and terminal job states agree across deployments by construction.** The local
   server decides in SQL and the Modal deployment in Python, so they cannot share code; a test
   now drives both over the same cases instead of asserting in a comment that they match.

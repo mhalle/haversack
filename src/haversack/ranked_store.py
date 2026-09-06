@@ -176,9 +176,9 @@ def _replace_dir(src: Path, dst: Path) -> None:
 
 
 class _Lock:
-    """One writer per store: an advisory ``flock`` on a ``<store>.lock`` file beside the
-    target, held for the life of the handle. A second writer is refused at open, not
-    discovered as an interleaved archive at close."""
+    """One writer per store: an advisory lock (:mod:`haversack.filelock`) on a
+    ``<store>.lock`` file beside the target, held for the life of the handle. A second
+    writer is refused at open, not discovered as an interleaved archive at close."""
 
     def __init__(self, path: Path):
         self.path = path
@@ -188,16 +188,10 @@ class _Lock:
     def acquire(cls, target: Path) -> "_Lock":
         lock = cls(target.with_name(target.name + ".lock"))
         lock.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            import fcntl
-        except ImportError:                       # no advisory locks on this platform
-            lock.fd = os.open(lock.path, os.O_CREAT | os.O_RDWR, 0o644)
-            return lock
+        from . import filelock
         for _ in range(20):
             fd = os.open(lock.path, os.O_CREAT | os.O_RDWR, 0o644)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
+            if not filelock.lock(fd, blocking=False):
                 os.close(fd)
                 raise InputError(f"{target}: another process is writing this store "
                                  f"(lock {lock.path.name}); wait for it, or remove the lock "
@@ -223,6 +217,18 @@ class _Lock:
             os.unlink(self.path)
         except FileNotFoundError:
             pass
+        except PermissionError:
+            # Windows: an open file cannot be unlinked. Release and close first;
+            # acquire()'s inode re-check covers the window that opens.
+            from . import filelock
+            filelock.unlock(self.fd)
+            os.close(self.fd)
+            self.fd = None
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+            return
         os.close(self.fd)
         self.fd = None
 

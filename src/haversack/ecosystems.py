@@ -469,33 +469,34 @@ class ZipManifestEcosystem(ModelEcosystem):
 
         The lock is per model folder, so two different tasks in one bucket still
         install in parallel (they touch disjoint names, which is what
-        ``expect_top`` guarantees). Advisory ``flock``; where it is unavailable
-        the install proceeds unlocked rather than refusing, which is no worse
+        ``expect_top`` guarantees). An advisory lock through
+        :mod:`haversack.filelock` - ``flock``, or ``msvcrt`` on Windows, where
+        this used to fall back to no lock at all. Only where the lock file itself
+        cannot be opened does the install proceed unlocked, which is no worse
         than before.
         """
+        from . import filelock
         bucket = Path(root).expanduser() / self.bucket
         bucket.mkdir(parents=True, exist_ok=True)
         entry = manifest_entry(self._entries, task, what=f"{self.name} task {task!r}",
                                generator=self.generator)
         stem = str(entry["folder"]).replace("/", "_")
-        handle = None
+        fd = None
         try:
-            import fcntl
-            handle = open(bucket / f".lock-{stem}", "w")
-            fcntl.flock(handle, fcntl.LOCK_EX)
-        except (ImportError, OSError):
-            if handle is not None:
-                handle.close()             # opened but not locked: do not leak the fd
-            handle = None
+            fd = os.open(bucket / f".lock-{stem}", os.O_CREAT | os.O_RDWR, 0o644)
+            filelock.lock(fd)
+        except OSError:
+            if fd is not None:
+                os.close(fd)               # opened but not locked: do not leak the fd
+            fd = None
         try:
             yield
         finally:
-            if handle is not None:
+            if fd is not None:
                 try:
-                    import fcntl
-                    fcntl.flock(handle, fcntl.LOCK_UN)
+                    filelock.unlock(fd)
                 finally:
-                    handle.close()
+                    os.close(fd)
 
     def ensure(self, task: str, root, progress=None, version=None) -> None:
         with self._install_lock(task, root):
@@ -1059,6 +1060,7 @@ def _download_and_extract_zip(url: str, dest_parent: Path, *, progress=None,
             # BaseException: a Ctrl-C here used to leak the part-downloaded file,
             # and these are 100 MB - 1 GB, so a few interrupted attempts strand
             # gigabytes that nothing sweeps.
+            tmp.close()                    # Windows cannot unlink an open file
             tmp_path.unlink(missing_ok=True)
             from .errors import Cancelled
             if isinstance(e, (Cancelled, KeyboardInterrupt, SystemExit)):
