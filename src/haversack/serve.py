@@ -105,7 +105,7 @@ from . import content
 from .content import ContentStore, is_digest
 from .jobstore import JobStore
 from .errors import Cancelled, InputError, HaversackError, ResourceError
-from .jobpolicy import (fill_read_ahead, prefetchable, take_pre_read, refresh_cached_input,
+from .jobpolicy import (fill_read_ahead, prefetchable, record_inputs, take_pre_read, refresh_cached_input,
                         source_cache_key)
 from .progress import CancelToken, Reporter
 
@@ -116,6 +116,7 @@ ARTIFACT_PENDING_TTL = 900.0   # a pending marker older than this is a dead
 from .jobpolicy import TERMINAL  # noqa: E402
 RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default artifact
 from .sources import (CRDC_RE, IDC_BUCKETS, check_identifier as _check_identifier,  # noqa: E402
+                      fetch_recording_rights as _fetch_recording_rights,
                       registry as _source_registry)
 
 
@@ -378,6 +379,10 @@ class SeriesCache:
     def path(self, series: str) -> Path:
         """Content directory of a committed entry (valid only when has())."""
         return self._entry(series) / "series"
+
+    def entry(self, series: str) -> Path:
+        """The entry directory itself - where a fetch's sidecars live."""
+        return self._entry(series)
 
     def pin(self, series: str) -> None:
         """Protect an in-use entry from LRU eviction - the marker mtime ages
@@ -1429,9 +1434,7 @@ class LocalExecutor:
         prefix, ident = key.split(":", 1)
         if prefix == "idc":
             return self._fetch_idc(ident, entry)
-        if credentials is not None:
-            return self.sources[prefix].fetch(ident, entry, credentials=credentials)
-        return self.sources[prefix].fetch(ident, entry)
+        return _fetch_recording_rights(self.sources[prefix], ident, entry, credentials)
 
     # -- intake --------------------------------------------------------------
     def new_job_dir(self) -> tuple[str, Path]:
@@ -1792,6 +1795,10 @@ class LocalExecutor:
                             inp = rec.input_path
                 seg = self._segment(inp, rec.task, progress=reporter,
                                     cancel=rec.cancel_token, **rec.options)
+                # what the result was computed FROM, and under what terms - the
+                # rights each fetch recorded beside its bytes, or "not
+                # determined" for an upload; the same rule the Modal worker applies
+                record_inputs(seg, entries, rec.input_identity, self.series_cache)
                 rec.labels_path = Path(seg.save(rec.dir / RESULT_NAME))
                 rec.result = result_payload(seg, rec.labels_path)
                 (rec.dir / "result.json").write_text(json.dumps(rec.result))
@@ -2100,9 +2107,10 @@ def _idc_enabled() -> bool:
 
 
 def _fetch_idc_series(series: str, jobdir: Path) -> Path:
-    """Fetch one IDC series (see haversack.sources.IDCSource for the mechanics)."""
+    """Fetch one IDC series (see haversack.sources.IDCSource for the mechanics),
+    recording its collection and license beside it."""
     from .sources import IDCSource
-    return IDCSource().fetch(series, jobdir)
+    return _fetch_recording_rights(IDCSource(), series, jobdir)
 
 def _version() -> str:
     try:

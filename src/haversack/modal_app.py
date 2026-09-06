@@ -598,7 +598,7 @@ def _bound_jobs_store(current_jid: str) -> None:
 
 
 from haversack.jobpolicy import (TERMINAL as _TERMINAL,  # noqa: E402
-                                 fill_read_ahead, prefetchable,
+                                 fill_read_ahead, prefetchable, record_inputs,
                                  refresh_cached_input, source_cache_key,
                                  take_pre_read)
 
@@ -784,6 +784,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
                 input_path = next(jdir.glob("input_*"))
         from haversack.serve import RESULT_NAME, ResultCache, reference_input
         s = ctx._compute(input_path, meta, on_progress, token)
+        record_inputs(s, entries, meta.get("input_identity") or [], ctx.series_cache)
         with ctx._vol_lock:
             s.save(jdir / RESULT_NAME)
             scratch_vol.commit()
@@ -885,14 +886,12 @@ class _WorkerBase:
         _pkg_dir()
         _check_volumes_attached()
         from haversack.serve import ReadAhead, SeriesCache
-        from haversack.sources import registry
+        from haversack.sources import fetch_recording_rights, registry
         self._sources = registry(None)
 
         def fetch_source(key, entry, credentials=None):
             prefix, ident = key.split(":", 1)
-            if credentials is not None:
-                return self._sources[prefix].fetch(ident, entry, credentials=credentials)
-            return self._sources[prefix].fetch(ident, entry)
+            return fetch_recording_rights(self._sources[prefix], ident, entry, credentials)
 
         self.series_cache = SeriesCache(Path("/dev/shm/series_cache"), fetch_source,
                                         budget_bytes=int(SHM_CACHE_GB * (1 << 30)))

@@ -213,3 +213,57 @@ def take_pre_read(read_ahead, key: str, *, fresh_bytes_wanted: bool):
     """
     image = read_ahead.pop(key)
     return None if fresh_bytes_wanted else image
+
+
+def input_rights(sources, identities, series_cache) -> list:
+    """What a result was computed from, and under what terms: one record per
+    input, in the order the job bound them.
+
+    A remote input's rights were looked up when it was fetched and recorded
+    beside its bytes (``sources.fetch_recording_rights``); this reads them back
+    from the series cache. An upload has no origin haversack can know, and says
+    so. Written once because both deployments must answer identically - a
+    result cached from either is read by both.
+
+    :param sources: the job's ``source`` entries.
+    :param identities: the job's ``input_identity`` list, in the same order
+        (``ROLE=identity`` strings for a multi-input job).
+    """
+    from .sources import read_rights
+    out = []
+    entries = list(sources or [{"kind": "upload"}])
+    ids = list(identities or [])
+    for i, entry in enumerate(entries):
+        ident = ids[i] if i < len(ids) else None
+        ident = ident.partition("=")[2] if ident and "=" in ident else ident
+        kind = entry.get("kind", "upload")
+        rec = {"kind": kind, "identity": ident, "rights": None}
+        if entry.get("role"):
+            rec["role"] = entry["role"]
+        sk = source_cache_key(entry)
+        if sk is None:
+            rec["note"] = ("uploaded by the caller; its origin and license are not known "
+                           "to haversack" if kind == "upload"
+                           else "content the caller stored; its origin is not known to haversack")
+        else:
+            side = read_rights(series_cache.entry(sk.key)) or {}
+            rec["rights"] = side.get("rights")
+            if side.get("error"):
+                rec["rights_error"] = side["error"]
+            if rec["rights"] is None and "rights_error" not in rec:
+                rec["note"] = "the source could not determine this input's license"
+        out.append(rec)
+    return out
+
+
+def record_inputs(seg, sources, identities, series_cache) -> None:
+    """Write :func:`input_rights` into a finished result's provenance, in place.
+
+    In place, because ``Segmentation`` is a frozen dataclass: assigning the
+    field raises, and the test doubles that stand in for it are not frozen, so
+    that slip passed every server test and failed on the first real run. The
+    dict inside is mutable, and every engine builds one.
+    """
+    prov = getattr(seg, "provenance", None)
+    if isinstance(prov, dict):
+        prov["inputs"] = input_rights(sources, identities, series_cache)

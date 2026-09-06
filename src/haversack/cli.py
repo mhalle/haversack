@@ -302,6 +302,18 @@ def _run(argv=None) -> int:
     ci.add_argument("task", help="a task name, in any accepted form")
     ci.add_argument("--json", action="store_true", help="the full attribution record")
 
+    ri = sub.add_parser("rights", formatter_class=Fmt, help="the license and citation of a remote input, without fetching it",
+                        description="What governs reuse of one input, as its repository states it: the license, the "
+                                    "collection or dataset it belongs to, and the citation its publisher asks for. "
+                                    "Metadata only - nothing is downloaded. The same record is written beside every "
+                                    "fetched input and into every result's provenance as `inputs`.",
+                        epilog="""examples:
+  haversack rights idc:19ecafc9-d05a-4c6c-8727-ce1a78190d11   the NLST collection, CC BY 4.0, its DOI
+  haversack rights zenodo:7262581/amos22.zip                 the record's license, creators and DOI
+  haversack rights openneuro:ds000114/x.nii.gz               CC0, by OpenNeuro's policy""")
+    ri.add_argument("input", help="a remote input: idc:, tcia:, zenodo:, openneuro:, hf:, s3:, gs:, github:")
+    ri.add_argument("--json", action="store_true", help="the record as JSON")
+
     w = sub.add_parser("weights", formatter_class=Fmt, help="download model weights ahead of time, or see what can be",
                        description="Weights download on first use; these commands do it ahead of time, or report "
                                    "what the manifest can provision (some TotalSegmentator tasks are behind its license).")
@@ -522,6 +534,34 @@ def _run(argv=None) -> int:
             else:
                 print(f"job ended {final['state']}", file=sys.stderr)
                 return 1
+        return 0
+    if args.cmd == "rights":
+        import json
+        from .errors import InputError
+        from .sources import HttpSource, check_identifier, default_sources, parse_input, registry
+        reg = registry(default_sources() + [HttpSource()])
+        parsed = parse_input(args.input, known=reg)
+        if parsed is None:
+            raise InputError(f"{args.input}: a local file; haversack cannot know its origin or license")
+        kind, ident = parsed
+        src = reg["http" if kind == "https" else kind]
+        check_identifier(src, ident)
+        rights = src.rights(ident)
+        record = {"identity": f"{kind}:{ident}", "rights": rights}
+        if args.json:
+            print(json.dumps(record, indent=2, ensure_ascii=False))
+        elif rights is None:
+            print(f"{kind}:{ident}\n  rights: not determined - the {kind} source cannot say what "
+                  "license this input is under")
+        else:
+            print(f"{kind}:{ident}")
+            for k, v in rights.items():
+                if isinstance(v, dict):
+                    v = "; ".join(f"{a}: {b}" for a, b in v.items() if b)
+                elif isinstance(v, list):
+                    v = ", ".join(str(x) for x in v)
+                if v:
+                    print(f"  {k + ':':<20}{v}")
         return 0
     if args.cmd == "cite":
         import json
@@ -780,6 +820,14 @@ def _run(argv=None) -> int:
             return spec
 
         def run_one(spec):
+            r = _run_one(spec)
+            from .sources import input_record
+            prov = getattr(r, "provenance", None)      # in place: Segmentation is frozen
+            if isinstance(prov, dict):
+                prov["inputs"] = [input_record(spec)]
+            return r
+
+        def _run_one(spec):
             img = resolve(spec)
             if engine_task:
                 from .segmenter import Segmenter

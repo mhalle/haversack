@@ -74,11 +74,11 @@ def _build_opener() -> urllib.request.OpenerDirector:
 _opener: urllib.request.OpenerDirector | None = None
 
 
-def request(url: str, *, method: str | None = None, headers: dict | None = None
-            ) -> urllib.request.Request:
+def request(url: str, *, method: str | None = None, headers: dict | None = None,
+            data: bytes | None = None) -> urllib.request.Request:
     """A ``Request`` that already names the client. Caller headers win, so a
     source that must send a different agent still can."""
-    return urllib.request.Request(url, method=method,
+    return urllib.request.Request(url, method=method, data=data,
                                   headers={"User-Agent": user_agent(), **(headers or {})})
 
 
@@ -91,14 +91,23 @@ def urlopen(req, timeout: float | None = None):
 
 
 def open(url, *, timeout: float = 60, method: str | None = None,   # noqa: A001 - reads as fetchlib.open
-         headers: dict | None = None):
+         headers: dict | None = None, data: bytes | None = None):
     """Open ``url`` (a string, or a ready ``Request``) and return the response,
     a context manager. ``timeout`` is per call and deliberately has no "forever"
     default: a download that hangs must fail, not hold a claim on a series
     cache until someone notices."""
     req = url if isinstance(url, urllib.request.Request) else request(
-        url, method=method, headers=headers)
+        url, method=method, headers=headers, data=data)
     return urlopen(req, timeout=timeout)
+
+
+def post_json(url: str, body, *, timeout: float = 60, headers: dict | None = None):
+    """POST a JSON body, return the JSON answer."""
+    import json
+    with open(url, timeout=timeout, method="POST", data=json.dumps(body).encode(),
+              headers={"Content-Type": "application/json", "Accept": "application/json",
+                       **(headers or {})}) as r:
+        return json.load(r)
 
 
 def head_status(url: str, *, timeout: float = 60, headers: dict | None = None) -> int:

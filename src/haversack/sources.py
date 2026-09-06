@@ -129,6 +129,21 @@ class DataSource:
         """The result-cache identity token for one identifier."""
         return f"{self.prefix}:{identifier}"
 
+    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        """What governs reuse of this input, as its repository states it: the
+        license, the collection or dataset it belongs to, and the citation its
+        publisher asks for. ``None`` means *not determined* - never a guess.
+
+        Metadata only: it must not download the data (``haversack rights`` calls
+        it without fetching), and it may use ``fetched`` - the path a fetch just
+        produced - when the answer is in the files. Called once per fetch and
+        recorded beside the bytes (:func:`fetch_recording_rights`), so a result
+        computed from a CC BY-NC series can say so in its provenance. Best
+        effort: a failure here is recorded as undetermined, never raised into a
+        fetch that has already succeeded.
+        """
+        return None
+
     def describe(self) -> dict:
         return {"prefix": self.prefix, "id_pattern": self.id_pattern,
                 "enabled": self.enabled(), "description": self.description}
@@ -143,13 +158,31 @@ class UrlTemplateSource(DataSource):
     the URL anywhere the operator did not choose.
     """
 
-    def __init__(self, prefix: str, id_pattern: str, url_template: str, *,
+    def __init__(self, prefix: str, id_pattern: str, url_template: str, *, policy_rights=None,
                  filename: str | None = None, description: str = ""):
         if "{id}" not in url_template:
             raise ValueError("url_template needs an {id} placeholder")
         self.prefix, self.id_pattern = prefix, id_pattern
         self.url_template, self.filename = url_template, filename
         self.description = description or f"single-file fetch from {url_template}"
+        self.policy_rights = policy_rights
+
+
+    #: Rights that hold for every identifier of this source by the publisher's
+    #: policy (OpenNeuro publishes everything CC0), with ``{id}`` and ``{dataset}``
+    #: substituted. None means the source cannot say.
+    policy_rights: dict | None = None
+
+    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        if not self.policy_rights:
+            return None
+        dataset = identifier.split("/", 1)[0]
+        out = {}
+        for k, v in self.policy_rights.items():
+            out[k] = ({kk: vv.format(id=identifier, dataset=dataset) if isinstance(vv, str) else vv
+                       for kk, vv in v.items()} if isinstance(v, dict)
+                      else v.format(id=identifier, dataset=dataset) if isinstance(v, str) else v)
+        return out
 
     def _filename(self, identifier: str) -> str:
         """The saved name defaults to the identifier's basename so the format
@@ -174,6 +207,112 @@ class UrlTemplateSource(DataSource):
         except Exception as e:
             raise InputError(f"fetch of {self.prefix}:{identifier} failed: {e}") from e
         return dest
+
+
+#: The Creative Commons names the repositories use, to the license text. A name
+#: not here is passed through with no URL rather than mapped to a wrong one.
+CC_LICENSE_URLS = {
+    "CC BY 4.0": "https://creativecommons.org/licenses/by/4.0/",
+    "CC BY 3.0": "https://creativecommons.org/licenses/by/3.0/",
+    "CC BY-NC 4.0": "https://creativecommons.org/licenses/by-nc/4.0/",
+    "CC BY-NC 3.0": "https://creativecommons.org/licenses/by-nc/3.0/",
+    "CC BY-SA 4.0": "https://creativecommons.org/licenses/by-sa/4.0/",
+    "CC BY-NC-SA 4.0": "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+    "CC0": "https://creativecommons.org/publicdomain/zero/1.0/",
+    "CC0-1.0": "https://creativecommons.org/publicdomain/zero/1.0/",
+}
+
+
+def _license(name, url=None) -> dict | None:
+    if not name:
+        return None
+    key = str(name).strip()
+    spdx = key.lower().replace(" ", "-")            # "cc-by-4.0" as Zenodo spells it
+    out = {"name": key}
+    url = url or CC_LICENSE_URLS.get(key) or next(
+        (u for n, u in CC_LICENSE_URLS.items() if n.lower().replace(" ", "-") == spdx), None)
+    if url:
+        out["url"] = url
+    return out
+
+
+RIGHTS_SIDECAR = ".rights.json"
+
+
+def fetch_recording_rights(src, identifier: str, entry, credentials=None):
+    """``src.fetch(...)``, then the source's :meth:`DataSource.rights` recorded
+    beside the bytes as ``.rights.json`` - one door for every fetch that lands in
+    a series cache (the local server, the Modal worker, ``haversack get``), so
+    the record exists wherever the bytes do. The lookup is best effort: an
+    input whose rights could not be determined says so, and a failure never
+    undoes a fetch that succeeded."""
+    import json
+    import time
+    entry = Path(entry)
+    fetched = (src.fetch(identifier, entry, credentials=credentials) if credentials is not None
+               else src.fetch(identifier, entry))
+    identity = getattr(src, "identity", None)   # sources are duck-typed (registry())
+    record = {"source": src.prefix, "identifier": identifier,
+              "identity": identity(identifier) if callable(identity) else f"{src.prefix}:{identifier}",
+              "rights": None, "checked": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    try:
+        rights = getattr(src, "rights", None)
+        record["rights"] = rights(identifier, fetched, credentials) if callable(rights) else None
+    except Exception as e:                      # noqa: BLE001 - undetermined, not fatal
+        record["error"] = f"{type(e).__name__}: {e}"
+    try:
+        (entry / RIGHTS_SIDECAR).write_text(json.dumps(record, indent=1, ensure_ascii=False))
+    except OSError:
+        pass                                    # a read-only cache: the fetch still stands
+    return fetched
+
+
+def read_rights(entry) -> dict | None:
+    """The record :func:`fetch_recording_rights` left, or None when there is none."""
+    import json
+    try:
+        return json.loads((Path(entry) / RIGHTS_SIDECAR).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+IDC_API = "https://api.imaging.datacommons.cancer.gov/v3"
+
+
+def _idc_rights(crdc_series_uuid: str) -> dict | None:
+    """One series' collection, license and citation from IDC's own API.
+
+    The license belongs to the SERIES in IDC - 39 of its collections carry more
+    than one - so it is asked per series, by the uuid, through the API's SQL
+    endpoint over the same index idc-index ships (``license_short_name``,
+    ``collection_id``). The citation endpoint answers the dataset's own citation
+    and IDC's acknowledgment (Fedorov et al. 2023), which IDC asks for on every
+    use. Read 2026-09-06 against API 3.0.0b3; no authentication."""
+    rows = fetchlib.post_json(f"{IDC_API}/sql", {
+        "sql": "SELECT collection_id, license_short_name, SeriesInstanceUID FROM index "
+               f"WHERE crdc_series_uuid = '{crdc_series_uuid}'"}, timeout=30).get("rows") or []
+    if not rows:
+        return None
+    row = rows[0]
+    out = {"collection": row.get("collection_id"),
+           "license": _license(row.get("license_short_name")),
+           "series_instance_uid": row.get("SeriesInstanceUID"),
+           "determined_by": "IDC API v3 (index by crdc_series_uuid)"}
+    try:
+        cit = fetchlib.post_json(f"{IDC_API}/citations", {
+            "filters": {"terms": {"SeriesInstanceUID": [row.get("SeriesInstanceUID")]}}}, timeout=30)
+        texts = [re.sub(r"<[^>]+>", "", c) for c in cit.get("citations") or []]
+        if texts:
+            out["citation"] = texts[0]
+            doi = re.search(r"10\.\d{4,9}/\S+", texts[0])
+            if doi:
+                out["citation_doi"] = doi.group(0).rstrip(".")
+        if cit.get("idc_acknowledgment"):
+            out["acknowledge"] = {"text": re.sub(r"\s+", " ", cit["idc_acknowledgment"]),
+                                  "doi": "10.1148/rg.230180"}
+    except Exception:                           # the license is the answer; the citation is a courtesy
+        pass
+    return out
 
 
 def _object_store(cloud: str, bucket: str, region: str | None = None):
@@ -272,6 +411,9 @@ class IDCSource(DataSource):
             return [("gcp", b) for b in IDC_GCS_BUCKETS] + aws
         return aws
 
+    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        return _idc_rights(identifier)
+
     def fetch(self, identifier: str, dest_dir: Path, *, credentials=None) -> Path:
         keys, store, probed = [], None, []
         for cloud, bucket in self.probe_order():
@@ -310,6 +452,21 @@ class TCIASource(DataSource):
     id_pattern = r"(?=.{10,64}$)[0-9]+(?:\.[0-9]+)+"   # DICOM UID: digits, dots, <=64
     description = "The Cancer Imaging Archive (NBIA), by SeriesInstanceUID"
     API = "https://services.cancerimagingarchive.net/nbia-api/services/v1/getImage"
+    SERIES_API = "https://services.cancerimagingarchive.net/nbia-api/services/v1/getSeries"
+
+    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        """NBIA's ``getSeries`` answers the collection and its license per series
+        (``LicenseName``, ``LicenseURI``, ``Collection``, ``CollectionURI``; read
+        2026-09-06). A series on a separate NBIA instance (NLST) answers nothing
+        here, and that is reported as undetermined rather than assumed."""
+        rows = fetchlib.get_json(f"{self.SERIES_API}?SeriesInstanceUID={identifier}", timeout=30)
+        if not rows:
+            return None
+        row = rows[0]
+        return {"collection": row.get("Collection"), "collection_url": row.get("CollectionURI"),
+                "license": _license(row.get("LicenseName"), row.get("LicenseURI")),
+                "released": row.get("DateReleased"),
+                "determined_by": "TCIA NBIA API getSeries"}
 
     def fetch(self, identifier: str, dest_dir: Path, *, credentials=None) -> Path:
         import shutil
@@ -361,7 +518,13 @@ def openneuro_source() -> UrlTemplateSource:
         "openneuro",
         r"(?!.*(?:^|/)\.\.(?:/|$))ds[0-9]{6}/[A-Za-z0-9][A-Za-z0-9._/-]{0,200}",
         "https://s3.amazonaws.com/openneuro.org/{id}",
-        description="OpenNeuro (CC0), by ds<number>/<file path>")
+        description="OpenNeuro (CC0), by ds<number>/<file path>",
+        # by policy, not per dataset: every published OpenNeuro dataset is CC0
+        policy_rights={
+            "license": {"name": "CC0-1.0", "url": "https://creativecommons.org/publicdomain/zero/1.0/"},
+            "dataset": "{dataset}", "dataset_url": "https://openneuro.org/datasets/{dataset}",
+            "determined_by": "OpenNeuro policy: every published dataset is released under CC0 "
+                             "(docs.openneuro.org/faq, read 2026-09-06)"})
 
 
 MAX_FETCH_BYTES = int(float(os.environ.get("HAVERSACK_MAX_FETCH_GB", "16")) * (1 << 30))
@@ -564,6 +727,25 @@ class ZenodoSource(ArchiveReadingSource):
     def __init__(self, *, allow_restricted: bool = False):
         self.allow_restricted = allow_restricted
 
+    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        """The record's own license, creators and DOI (every Zenodo record has
+        all three), and a citation in the form Zenodo suggests."""
+        recid = identifier.partition("/")[0]
+        rec = fetchlib.get_json(f"https://zenodo.org/api/records/{recid}", timeout=30,
+                                headers=self._headers(credentials))
+        meta = rec.get("metadata") or {}
+        lic = meta.get("license") or {}
+        creators = [c.get("name") for c in meta.get("creators") or [] if c.get("name")]
+        doi = rec.get("doi") or meta.get("doi")
+        out = {"dataset": meta.get("title"), "record": f"https://zenodo.org/records/{recid}",
+               "creators": creators, "doi": doi,
+               "license": _license(lic.get("id") or lic.get("title")),
+               "determined_by": "Zenodo record metadata"}
+        if creators and meta.get("title") and doi:
+            out["citation"] = (f"{', '.join(creators[:3])}{' et al.' if len(creators) > 3 else ''}. "
+                               f"{meta['title']}. Zenodo. https://doi.org/{doi}")
+        return out
+
     def resolve(self, outer: str, credentials=None) -> tuple:
         import json as _json
         recid, _, filename = outer.partition("/")
@@ -606,6 +788,22 @@ class HuggingFaceSource(ArchiveReadingSource):
 
     def __init__(self, *, allow_restricted: bool = False):
         self.allow_restricted = allow_restricted
+
+    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        """The dataset card's license (``cardData.license`` / a ``license:`` tag),
+        which is whatever the uploader declared - reported as such."""
+        repo = identifier.partition("@")[0]
+        card = fetchlib.get_json(f"https://huggingface.co/api/datasets/{repo}", timeout=30,
+                                 headers=self._headers(credentials))
+        lic = (card.get("cardData") or {}).get("license")
+        if isinstance(lic, list):
+            lic = ", ".join(str(x) for x in lic)
+        if not lic:
+            tags = [t.partition(":")[2] for t in card.get("tags") or [] if str(t).startswith("license:")]
+            lic = ", ".join(tags) or None
+        return {"dataset": repo, "dataset_url": f"https://huggingface.co/datasets/{repo}",
+                "author": card.get("author"), "license": _license(lic),
+                "determined_by": "Hugging Face dataset card (as declared by the uploader)"}
 
     def resolve(self, outer: str, credentials=None) -> tuple:
         repo, _, rest = outer.partition("@")
@@ -698,6 +896,16 @@ class ObjectStoreSource(ArchiveReadingSource):
 
     def _store(self, bucket: str):
         return _object_store(self.cloud, bucket, self.buckets[bucket])
+
+    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        """A bucket carries no license of its own ("the bucket name is not a
+        license label", IDC's own words). An IDC bucket's series prefix IS an
+        IDC series, and is asked about as one; anything else is undetermined."""
+        bucket, _, key = identifier.partition("!")[0].partition("/")
+        m = re.fullmatch(rf"({CRDC_RE})/?", key)
+        if bucket in IDC_BUCKETS + IDC_GCS_BUCKETS and m:
+            return _idc_rights(m.group(1))
+        return None
 
     def locate(self, outer: str, credentials=None) -> tuple:
         """``(store, key, size)`` for one object, after the allowlist."""
@@ -863,6 +1071,21 @@ class GitHubReleaseSource(ArchiveReadingSource):
         super().check(identifier, credentials)
         self._headers(credentials)
 
+    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        """The repository's declared license (GitHub's own detection of its
+        LICENSE file). A release asset need not be under it, and a repository
+        without one answers null - both reported as undetermined."""
+        repo = identifier.partition("@")[0]
+        info = fetchlib.get_json(f"https://api.github.com/repos/{repo}", timeout=30,
+                                 headers={"Accept": "application/vnd.github+json"})
+        lic = info.get("license") or {}
+        if not lic.get("spdx_id") or lic.get("spdx_id") == "NOASSERTION":
+            return None
+        return {"repository": f"https://github.com/{repo}",
+                "license": {"name": lic.get("spdx_id"), "url": lic.get("url")},
+                "determined_by": "GitHub API: the repository's detected license, which may not "
+                                 "cover a release asset"}
+
     def resolve(self, outer: str, credentials=None) -> tuple:
         headers = self._headers(credentials)       # refuse a token before any request
         repo, _, rest = outer.partition("@")
@@ -1021,6 +1244,23 @@ def parse_input(spec, known=None) -> tuple:
     return None
 
 
+def input_record(spec, *, cache_dir=None, sources=None) -> dict:
+    """What a result's provenance says about one input: its identity and, for a
+    remote input, the rights recorded when it was fetched. A local file is its
+    path and nothing more - haversack cannot know where it came from."""
+    reg = registry(sources) if sources is not None else registry(default_sources() + [HttpSource()])
+    parsed = parse_input(spec, known=reg)
+    if parsed is None:
+        return {"kind": "file", "identity": str(spec), "rights": None,
+                "note": "a local file; its origin and license are not known to haversack"}
+    kind, ident = parsed
+    import hashlib
+    root = Path(cache_dir) if cache_dir else default_input_cache()
+    rec = read_rights(root / kind / hashlib.sha1(ident.encode()).hexdigest()[:20]) or {}
+    return {"kind": kind, "identity": f"{kind}:{ident}", "rights": rec.get("rights"),
+            **({"rights_error": rec["error"]} if rec.get("error") else {})}
+
+
 def default_input_cache() -> Path:
     from .cache_admin import cache_root      # ONE root: HAVERSACK_CACHE_DIR, expanded, else XDG
     return cache_root() / "inputs"
@@ -1074,7 +1314,7 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
         entry.mkdir(parents=True)
         if progress:
             progress(f"fetching {ident if kind == 'http' else f'{kind}:{ident}'}")
-        src.fetch(ident, entry, credentials=credentials)
+        fetch_recording_rights(src, ident, entry, credentials)
         done.write_text(f"{kind}:{ident}\n")
     content = entry / "series"
     if not content.is_dir():
