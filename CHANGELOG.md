@@ -107,6 +107,15 @@ Two data sources and two model catalogs, each on the extension seam that already
   answer. (The same model is also `dentalsegmentator:base`, installed from its original
   Zenodo record and md5-verified; the MOOSE copy is checked against nothing, like the other
   23.)
+- **Three MOOSE models that were never offered now are: `moose:clin_ct_ALPACA`,
+  `moose:clin_ct_PUMA` and `moose:clin_ct_PUMA4`.** The generator's name pattern was
+  lowercase-only, so these and `clin_mr_FVM` fell through it without a word - 21 of 25 models
+  offered and nothing said so. The three are ordinary single-channel CT checkpoints (7, 24 and
+  23 structures) and are offered as such. `clin_mr_FVM` is not: its zip unpacks to
+  `clin_mr_FVM/` with `Dataset501_FVM` a level down, which haversack's installer refuses and
+  moosez's own extractor cannot find either. The manifest records that reason, and the
+  generator checks it against the archive on every run and refuses to run when a registry
+  entry fails to parse, so the next silent omission is an error instead.
 - **An archive that would replace another task's weights is refused.** Unpacking replaces a
   directory of the archive's own top-level name, so with a stale manifest one task's download
   could overwrite another's model and leave it silently running the wrong network. The names
