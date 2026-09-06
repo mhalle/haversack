@@ -114,7 +114,10 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   # whose plans permute the axes are listed, described, accepted,
                   # and then refused inside the GPU worker - the exact
                   # unreachability the flag was added to end.
-                  "HAVERSACK_ALLOW_TRANSPOSE", *_engines.engine_env_vars())
+                  "HAVERSACK_ALLOW_TRANSPOSE",
+                  # Which cloud the idc: source fetches from first; a deployment
+                  # in Google Cloud sets gcp and reads IDC's mirror without egress.
+                  "HAVERSACK_IDC_CLOUD", *_engines.engine_env_vars())
 
 # Base image (the ASGI api container + the nnU-Net GPU Worker). uv-NATIVE: the nnU-Net
 # worker's deps come from pyproject extras - `torch` (torch/nnunetv2/scipy/scikit-image),

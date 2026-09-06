@@ -207,7 +207,8 @@ the same identifier - or the same identifier twice - downloads it only once.
 | `tcia:` | a TCIA series | `tcia:<series-uid>` |
 | `openneuro:` | an OpenNeuro dataset file | `openneuro:ds000114/.../sub-01_T1w.nii.gz` |
 | `hf:` | a file in a Hugging Face repo, at a commit | `hf:<org>/<repo>@<commit-sha>/<path>` |
-| `s3:` | `<bucket>/<key>` in a public bucket the server serves | `s3:fcp-indi/data/Projects/.../sub-01_T1w.nii.gz` |
+| `s3:` | `<bucket>/<key>` in a public bucket the server serves, or `<bucket>/<prefix>/` for every object under a prefix | `s3:fcp-indi/data/Projects/.../sub-01_T1w.nii.gz` |
+| `gs:` | the same on Google Cloud Storage | `gs:idc-open-data/<crdc_series_uuid>/` |
 | `github:` | `<owner>/<repo>@<tag>/<asset>` on a GitHub release | `github:Slicer/SlicerTestingData@SHA256/<digest>` |
 | `http://`, `https://` | any URL (command line only, never a server) | `https://example.org/scan.nii.gz` |
 
@@ -219,7 +220,12 @@ form (`...zip!amos22/imagesVa/`) extracts every member under a prefix.
 `openneuro.org`, `msd-for-monai` (the Medical Segmentation Decathlon mirror) and the IDC
 buckets - because a source that took any bucket a caller named would fetch from anywhere.
 `msd-for-monai` holds `.tar` archives rather than zips, so `!member` does not apply to it;
-its objects come down whole, and they are large.
+its objects come down whole, and they are large. A trailing slash names every object under a
+prefix - a DICOM series laid out in a bucket - and fetches them in parallel, the way `idc:`
+does; `gs:` reads the same way from Google Cloud Storage, today from IDC's mirror bucket.
+`idc:` itself fetches from AWS unless `HAVERSACK_IDC_CLOUD=gcp`, which prefers the GCS mirror
+(it holds the main bucket only; a series that lives elsewhere still comes from AWS) - for a
+machine in Google Cloud, that is the difference between paying egress and not.
 `github:` requires the release tag; a branch or `latest` is refused. A tag makes the
 reference readable, but not immutable - an asset can be replaced under a published tag, and
 a tag can be moved - so this identity is only as stable as the publisher's discipline, like
@@ -227,7 +233,7 @@ a tag can be moved - so this identity is only as stable as the publisher's disci
 accepts a credential: both read public data, and a private file fetched with your token
 would be cached where every reader of that cache can ask for it.
 
-`idc:` needs the `idc` extra's runtime (`obstore`), which is part of the normal install; the
+`idc:`, `s3:` and `gs:` need `obstore`, which is part of the normal install; the
 others use the standard library. The hosted prefixes are exactly the sources a `haversack
 serve` accepts; bare URLs are local-only, because a server must not be pointed at arbitrary
 hosts.

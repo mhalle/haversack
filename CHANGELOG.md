@@ -6,6 +6,21 @@ Two data sources and two model catalogs, each on the extension seam that already
 
 ### Sources
 
+- **`s3:` and the new `gs:` read through obstore, and a trailing slash fetches a whole
+  prefix.** The `s3:` source built path-style URLs by hand from a bucket-to-region map and
+  read by HTTP Range; it now goes through the same object-store client `idc:` has always
+  used, and `gs:` is the same source over Google Cloud Storage with its own allowlist (IDC's
+  mirror bucket today). What that buys: `<bucket>/<prefix>/` downloads every object under a
+  prefix in parallel, by basename - a DICOM series laid out in a bucket, which is what `idc:`
+  does for its own buckets and what no HTTP source could do at all. One object and `!member`
+  behave as before (the member read is the same remote-zip extraction over the store's
+  ranged reads). Both stay anonymous and allowlisted; the cap is checked against the listing
+  before any byte moves.
+- **`idc:` can fetch from IDC's Google Cloud mirror.** `HAVERSACK_IDC_CLOUD=gcp` probes
+  `gs://idc-open-data` first and falls back to the AWS buckets, because the mirror holds the
+  main bucket only (`-two` and `-cr` do not exist on GCS). The identity is unchanged - the
+  same uuid names the same bytes on both clouds - so cached results are unaffected. Forwarded
+  to Modal containers like the other deploy-time knobs.
 - **`s3:<bucket>/<key>[!member]`** reaches a fixed list of public buckets - `fcp-indi` (ABIDE,
   ADHD-200, CoRR, NKI-Rockland), `openneuro.org`, `msd-for-monai` and the IDC buckets. The
   bucket is an operator allowlist, not something the identifier chooses, because a source that

@@ -30,7 +30,8 @@ from . import fetchlib
 from .errors import InputError
 
 __all__ = ["DataSource", "UrlTemplateSource", "IDCSource", "GitHubReleaseSource",
-           "S3Source", "default_sources", "IDC_BUCKETS", "PUBLIC_S3_BUCKETS", "CRDC_RE"]
+           "ObjectStoreSource", "S3Source", "GCSSource", "default_sources", "IDC_BUCKETS",
+           "IDC_GCS_BUCKETS", "PUBLIC_S3_BUCKETS", "PUBLIC_GCS_BUCKETS", "CRDC_RE"]
 
 CRDC_RE = r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
 
@@ -39,6 +40,11 @@ CRDC_RE = r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
 # upgrade path is resolving per series via idc-index (`series_aws_url`), which we
 # take when /v1/resolve lands.
 IDC_BUCKETS = ("idc-open-data", "idc-open-data-two", "idc-open-data-cr")
+# IDC's Google Cloud mirror holds the main bucket only: `-two` and `-cr` answer
+# NoSuchBucket on GCS (checked 2026-09-06). So HAVERSACK_IDC_CLOUD=gcp means
+# "prefer GCS", and a series that lives only in the other two is still fetched
+# from AWS - see IDCSource.probe_order.
+IDC_GCS_BUCKETS = ("idc-open-data",)
 
 
 # The S3 buckets a server may be pointed at, and the region each answers in
@@ -55,6 +61,23 @@ PUBLIC_S3_BUCKETS = {
     "idc-open-data-two": None,
     "idc-open-data-cr": None,
 }
+
+# The same allowlist for Google Cloud Storage; `gs:` reads these anonymously.
+PUBLIC_GCS_BUCKETS = {
+    "idc-open-data": None,          # IDC's GCS mirror of its main bucket
+}
+
+
+def idc_cloud() -> str:
+    """Which cloud the ``idc:`` source fetches from first: ``aws`` (default) or
+    ``gcp`` (``HAVERSACK_IDC_CLOUD``). A deployment that runs in Google Cloud
+    pays egress and latency for the AWS buckets and none for the mirror. The
+    identity is the same either way - ``idc:<uuid>`` names the same bytes on
+    both clouds - so the result cache does not care which served them."""
+    cloud = (os.environ.get("HAVERSACK_IDC_CLOUD") or "aws").strip().lower()
+    if cloud not in ("aws", "gcp"):
+        raise InputError(f"HAVERSACK_IDC_CLOUD={cloud!r}: choose aws or gcp")
+    return cloud
 
 
 class DataSource:
@@ -153,12 +176,80 @@ class UrlTemplateSource(DataSource):
         return dest
 
 
+def _object_store(cloud: str, bucket: str, region: str | None = None):
+    """An anonymous obstore store on a public bucket: the one place the two
+    clouds' anonymous configurations are spelled. Imported at call time so a
+    lean install without obstore still imports this module, and so tests can
+    stand a fake in for the store classes."""
+    if cloud == "aws":
+        from obstore.store import S3Store
+        config = {"aws_skip_signature": "true",
+                  # path-style: a dotted bucket name (openneuro.org) cannot be
+                  # virtual-hosted without breaking TLS
+                  "aws_virtual_hosted_style_request": "false"}
+        if region:
+            config["aws_region"] = region
+        return S3Store.from_url(f"s3://{bucket}", config=config)
+    if cloud == "gcp":
+        from obstore.store import GCSStore
+        return GCSStore.from_url(f"gs://{bucket}", skip_signature=True)
+    raise ValueError(f"unknown cloud {cloud!r}")
+
+
+def _list_objects(store, prefix: str) -> list:
+    """``[(key, size)]`` under ``prefix``, in listing order."""
+    out = []
+    for page in store.list(prefix=prefix):
+        for o in page:
+            if isinstance(o, dict):
+                out.append((str(o.get("path")), int(o.get("size") or 0)))
+            else:
+                out.append((str(o), 0))
+    return out
+
+
+def _fetch_objects(store, keys: list, dest: Path, *, what: str, cap: int,
+                   threads: int = 32) -> int:
+    """Download every listed object into ``dest`` by basename, in parallel -
+    the IDC mechanism (obstore beat s5cmd in every measured quadrant), shared
+    by every prefix fetch. The cap is checked against the listing's sizes
+    BEFORE any byte moves; returns how many files were written."""
+    import obstore
+    from concurrent.futures import ThreadPoolExecutor
+    total = sum(size for _, size in keys)
+    if total > cap:
+        raise InputError(f"{what}: {len(keys)} objects total {total} bytes, over the "
+                         f"{cap}-byte fetch cap (HAVERSACK_MAX_FETCH_GB)")
+    wanted = [k for k, _ in keys if k.rsplit("/", 1)[-1] not in ("", ".", "..")]
+
+    def one(key):                          # a bucket pseudo-directory key is skipped above
+        with open(dest / key.rsplit("/", 1)[-1], "wb") as f:
+            f.write(bytes(obstore.get(store, key).bytes()))
+
+    with ThreadPoolExecutor(threads) as ex:
+        list(ex.map(one, wanted))
+    return len(wanted)
+
+
+def _stream_object(store, key: str, out: Path, *, what: str, cap: int) -> int:
+    """One object to disk in 1 MiB chunks, with the same hard ceiling the HTTP
+    downloads have: a listing that lied about a size cannot fill the disk."""
+    import obstore
+    n = 0
+    with open(out, "wb") as f:
+        for chunk in obstore.get(store, key).stream(min_chunk_size=1 << 20):
+            n += len(chunk)
+            if n > cap:
+                raise InputError(f"{what}: exceeded the {cap}-byte fetch cap")
+            f.write(chunk)
+    return n
+
+
 class IDCSource(DataSource):
     """NCI Imaging Data Commons: DICOM series by ``crdc_series_uuid`` from the
-    public open-data buckets, anonymously, 32 threads (obstore beat s5cmd in
-    every measured quadrant). The uuid names a version-pinned series; the
-    bucket prefix is probed across the three known buckets rather than
-    assumed."""
+    public open-data buckets, anonymously, 32 threads. The uuid names a
+    version-pinned series; the bucket is probed across the known ones rather
+    than assumed, on the cloud ``HAVERSACK_IDC_CLOUD`` prefers first."""
 
     prefix = "idc"
     id_pattern = CRDC_RE
@@ -171,34 +262,34 @@ class IDCSource(DataSource):
         except ImportError:
             return False
 
-    def fetch(self, identifier: str, dest_dir: Path, *, credentials=None) -> Path:
-        from concurrent.futures import ThreadPoolExecutor
+    @staticmethod
+    def probe_order(cloud: str | None = None) -> list:
+        """``[(cloud, bucket)]`` in the order a series is looked for. GCS first
+        when asked, then every AWS bucket - the mirror is partial, and a series
+        that lives only in ``-two`` or ``-cr`` must still be found."""
+        aws = [("aws", b) for b in IDC_BUCKETS]
+        if (cloud or idc_cloud()) == "gcp":
+            return [("gcp", b) for b in IDC_GCS_BUCKETS] + aws
+        return aws
 
-        from obstore.store import S3Store
-        keys, store = [], None
-        for bucket in IDC_BUCKETS:
-            store = S3Store.from_url(f"s3://{bucket}", config={"aws_skip_signature": "true"})
-            keys = [(o.get("path") if isinstance(o, dict) else str(o))
-                    for b in store.list(prefix=f"{identifier}/") for o in b]
+    def fetch(self, identifier: str, dest_dir: Path, *, credentials=None) -> Path:
+        keys, store, probed = [], None, []
+        for cloud, bucket in self.probe_order():
+            probed.append(f"{'gs' if cloud == 'gcp' else 's3'}://{bucket}")
+            store = _object_store(cloud, bucket)
+            keys = _list_objects(store, f"{identifier}/")
             if keys:
                 break
         if not keys:
             raise InputError(f"no objects under {identifier!r}/ in any probed IDC bucket "
-                             f"({', '.join(IDC_BUCKETS)}); if the series exists, IDC may "
+                             f"({', '.join(probed)}); if the series exists, IDC may "
                              "have added a bucket this server does not know")
         dest = Path(dest_dir) / "series"
         dest.mkdir(exist_ok=True)
-
-        def one(k):
-            base = k.rsplit("/", 1)[-1]
-            if not base or base in (".", ".."):
-                return                     # bucket pseudo-dir key; skip
-            with open(dest / base, "wb") as f:
-                f.write(bytes(store.get(k).bytes()))
-
         try:
-            with ThreadPoolExecutor(32) as ex:
-                list(ex.map(one, keys))
+            _fetch_objects(store, keys, dest, what=f"idc:{identifier}", cap=MAX_FETCH_BYTES)
+        except InputError:
+            raise
         except Exception as e:
             raise InputError(f"fetch of idc:{identifier} failed: {e}") from e
         return dest
@@ -291,10 +382,15 @@ class RangeFile:
     from the stdlib. Redirects are followed per request (CDN URLs expire)."""
 
     def __init__(self, url: str, size: int, *, headers=None, block: int = 1 << 22,
-                 max_blocks: int = 64):
+                 max_blocks: int = 64, reader=None):
         import collections
         self.url, self.size, self.pos = url, int(size), 0
         self.headers = dict(headers or {})
+        #: ``reader(lo, hi) -> bytes`` for the inclusive byte range. HTTP Range
+        #: by default; an object store supplies its own (``get_range``), and the
+        #: block cache, the short-read check and zipfile's random access are
+        #: the same over either.
+        self.reader = reader or self._http_range
         self.block_size, self.max_blocks = int(block), int(max_blocks)
         self._blocks = collections.OrderedDict()
         self.requests = 0
@@ -313,12 +409,12 @@ class RangeFile:
     def tell(self):
         return self.pos
 
-    def _block(self, i: int) -> bytes:
-        if i in self._blocks:
-            self._blocks.move_to_end(i)
-            return self._blocks[i]
-        lo = i * self.block_size
-        hi = min(self.size, lo + self.block_size) - 1
+    @classmethod
+    def over(cls, reader, size: int, **kw) -> "RangeFile":
+        """A RangeFile with no URL at all: every read goes to ``reader``."""
+        return cls("", size, reader=reader, **kw)
+
+    def _http_range(self, lo: int, hi: int) -> bytes:
         with fetchlib.open(self.url, timeout=300,
                            headers={**self.headers, "Range": f"bytes={lo}-{hi}"}) as r:
             if r.status != 206:
@@ -328,7 +424,15 @@ class RangeFile:
                 raise InputError(
                     f"range request not honored (status {r.status}) by "
                     f"{self.url}; server does not support HTTP Range")
-            data = r.read()
+            return r.read()
+
+    def _block(self, i: int) -> bytes:
+        if i in self._blocks:
+            self._blocks.move_to_end(i)
+            return self._blocks[i]
+        lo = i * self.block_size
+        hi = min(self.size, lo + self.block_size) - 1
+        data = self.reader(lo, hi)
         want = hi - lo + 1
         if len(data) != want:
             raise InputError(f"short/over range read from {self.url}: got "
@@ -525,56 +629,62 @@ class HuggingFaceSource(ArchiveReadingSource):
         return url, size
 
 
-class S3Source(ArchiveReadingSource):
-    """Public S3 buckets, one object per identifier: ``<bucket>/<key>[!member]``.
+class ObjectStoreSource(ArchiveReadingSource):
+    """Public object-store buckets through obstore, anonymously.
 
-    The bucket is checked against :data:`PUBLIC_S3_BUCKETS` before anything is
-    fetched, so a client picks a key inside a bucket the *operator* chose and
-    never the bucket itself - the same containment the other sources get from a
-    fixed host. Reads go over anonymous HTTPS (path-style, which is what a
-    dotted bucket name like ``openneuro.org`` needs: it cannot appear in a
-    virtual-hosted name without breaking TLS), so this needs no obstore and no
-    credentials, and inherits ``!member`` zip reading from the base.
+    Three identifier shapes: ``<bucket>/<key>`` downloads one object;
+    ``<bucket>/<key>!<member>`` reads a member of a remote zip by ranged reads;
+    ``<bucket>/<prefix>/`` (trailing slash) downloads every object under the
+    prefix in parallel, by basename - a DICOM series laid out in a bucket, which
+    is exactly what ``idc:`` does for its own buckets and what no HTTP source
+    can do at all. The bucket is chosen by the operator (an ALLOWLIST, per
+    cloud); the identifier only picks inside one. That is the SSRF boundary.
 
-    NOT version-pinned, like ``tcia`` and unlike ``idc``: a bucket key can be
-    overwritten in place, so the same identity can resolve to different bytes
-    across dataset releases. Whole DICOM *series* have their own doors (``idc``,
-    ``tcia``) - this one addresses a single object.
+    Anonymous only, on purpose. The buckets are public; a token could only
+    turn a working fetch into a failing one, and a private object fetched with
+    a caller's credential would be cached where every cache reader can ask
+    for it. A credential is refused rather than dropped, because a caller who
+    set one meant it to be used.
+
+    NOT version-pinned: an object can be overwritten in place, so the same
+    identity can resolve to different bytes across dataset releases (which is
+    what ``Cache-Control: no-cache`` is for).
     """
 
-    prefix = "s3"
-    # <bucket>/<key>[!member]. Bucket syntax is AWS's own (3-63 chars, lowercase
-    # alphanumerics, dots and hyphens); membership in the allowlist is checked in
-    # resolve(), because a rejected bucket deserves a message naming the ones served.
-    id_pattern = (r"(?!.*(?:^|/)\.\.(?:/|!|$))"
-                  r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9][A-Za-z0-9._/-]{0,300}"
-                  r"(?:![A-Za-z0-9._ /-]+)?")
-    description = "public S3 buckets, by bucket/key (!member for zip contents)"
+    #: ``aws`` or ``gcp`` - what :func:`_object_store` builds.
+    cloud: str = ""
+    #: ``{bucket: region-or-None}``; subclasses set the default allowlist.
+    default_buckets: dict = {}
+    #: The URL scheme people type by habit (``s3://``), refused with a hint.
+    scheme: str = ""
 
     def __init__(self, buckets=None):
-        self.buckets = dict(PUBLIC_S3_BUCKETS if buckets is None else buckets)
+        self.buckets = dict(self.default_buckets if buckets is None else buckets)
+
+    def enabled(self) -> bool:
+        try:
+            import obstore  # noqa: F401
+            return True
+        except ImportError:
+            return False
 
     def describe(self) -> dict:
         return {**super().describe(), "buckets": sorted(self.buckets)}
 
     def _headers(self, credentials=None) -> dict:
-        """Anonymous only. The allowlisted buckets are public, and S3 answers a
-        bearer token with ``400 InvalidArgument`` - so a token could only turn a
-        working fetch into a failing one. Refused rather than dropped, because a
-        caller who set one meant it to be used."""
         if credentials:
-            raise InputError("s3: this source reads public buckets anonymously and takes "
-                             "no credentials; a bearer token is refused by S3 itself")
+            raise InputError(f"{self.prefix}: this source reads public buckets anonymously "
+                             "and takes no credentials")
         return {}
 
     def explain_refusal(self, identifier: str) -> None:
-        """`s3://bucket/key` is the spelling every AWS tool uses and the first
-        thing anyone types here. The identifier IS the cache key, so accepting
-        both spellings would split it - name the one this takes instead."""
+        """``s3://bucket/key`` is the spelling every cloud tool prints and the
+        first thing anyone types here. The identifier IS the cache key, so
+        accepting both spellings would split it - name the one this takes."""
         if identifier.startswith("//"):
             bare = identifier.lstrip("/")
-            raise InputError(f"s3://{bare}: drop the slashes - this source takes "
-                             f"s3:{bare}, so that one object has one identity")
+            raise InputError(f"{self.scheme}://{bare}: drop the slashes - this source takes "
+                             f"{self.prefix}:{bare}, so that one object has one identity")
 
     def check(self, identifier: str, credentials=None) -> None:
         self.explain_refusal(identifier)
@@ -583,23 +693,121 @@ class S3Source(ArchiveReadingSource):
         bucket = identifier.partition("!")[0].partition("/")[0]
         if bucket not in self.buckets:
             raise InputError(
-                f"s3 bucket {bucket!r} is not one this server fetches from; "
+                f"{self.prefix} bucket {bucket!r} is not one this server fetches from; "
                 f"served buckets: {', '.join(sorted(self.buckets))}")
 
-    def resolve(self, outer: str, credentials=None) -> tuple:
+    def _store(self, bucket: str):
+        return _object_store(self.cloud, bucket, self.buckets[bucket])
+
+    def locate(self, outer: str, credentials=None) -> tuple:
+        """``(store, key, size)`` for one object, after the allowlist."""
+        import obstore
         self.check(outer, credentials)         # allowlist and token, before any request
         bucket, _, key = outer.partition("/")
-        region = self.buckets[bucket]
-        host = "s3.amazonaws.com" if region is None else f"s3.{region}.amazonaws.com"
-        url = f"https://{host}/{bucket}/{key}"
+        store = self._store(bucket)
         try:
-            with fetchlib.open(url, method="HEAD", timeout=60) as r:
-                size = int(r.headers.get("Content-Length") or 0)
+            size = int(obstore.head(store, key)["size"])
         except Exception as e:
-            raise InputError(f"s3:{outer}: HEAD failed: {e}") from e
-        if size <= 0:
-            raise InputError(f"s3:{outer}: the bucket gives no Content-Length")
-        return url, size
+            raise InputError(f"{self.prefix}:{outer}: not found or unreadable: {e}") from e
+        return store, key, size
+
+    def resolve(self, outer: str, credentials=None) -> tuple:
+        """``(url, size)`` in the cloud's own spelling, for anyone who asks;
+        the fetch itself goes through the store, not this URL."""
+        _store, key, size = self.locate(outer, credentials)
+        return f"{self.scheme}://{outer.partition('/')[0]}/{key}", size
+
+    def _zip(self, outer: str, credentials=None):
+        """The remote zip over the store's ranged reads instead of HTTP Range."""
+        import obstore
+        import zipfile
+        cache = self.__dict__.setdefault("_archives", {})
+        z = cache.get(outer)
+        if z is None:
+            store, key, size = self.locate(outer, credentials)
+
+            def read_range(lo, hi):
+                return bytes(obstore.get_range(store, key, start=lo, end=hi + 1))
+
+            z = zipfile.ZipFile(RangeFile.over(read_range, size))
+            cache[outer] = z
+            while len(cache) > 4:
+                cache.pop(next(iter(cache)))
+        return z
+
+    def fetch(self, identifier: str, dest_dir: Path, *, credentials=None) -> Path:
+        outer, _, member = identifier.partition("!")
+        if _has_dotdot(outer):
+            raise InputError(f"{self.prefix}:{identifier}: '..' path segment refused")
+        if outer.endswith("/"):                    # every object under a prefix
+            if member:
+                raise InputError(f"{self.prefix}:{identifier}: a prefix fetch takes no !member")
+            self.check(outer, credentials)
+            bucket, _, prefix = outer.partition("/")
+            store = self._store(bucket)
+            dest = Path(dest_dir) / "series"
+            dest.mkdir(exist_ok=True)
+            try:
+                keys = _list_objects(store, prefix)
+                if not keys:
+                    raise InputError(f"{self.prefix}:{identifier}: no objects under that prefix")
+                _fetch_objects(store, keys, dest, what=f"{self.prefix}:{identifier}",
+                               cap=MAX_FETCH_BYTES)
+            except InputError:
+                raise
+            except Exception as e:
+                raise InputError(f"fetch of {self.prefix}:{identifier} failed: {e}") from e
+            return dest
+        if member:                                 # a zip member: the shared extractor
+            return super().fetch(identifier, dest_dir, credentials=credentials)
+        store, key, size = self.locate(outer, credentials)
+        if size > MAX_FETCH_BYTES:
+            raise InputError(f"{self.prefix}:{identifier}: {size} bytes, over the "
+                             f"{MAX_FETCH_BYTES}-byte fetch cap")
+        dest = Path(dest_dir) / "series"
+        dest.mkdir(exist_ok=True)
+        name = Path(key).name or "image"
+        try:
+            _stream_object(store, key, dest / name, what=f"{self.prefix}:{identifier}",
+                           cap=MAX_FETCH_BYTES)
+        except InputError:
+            raise
+        except Exception as e:
+            raise InputError(f"fetch of {self.prefix}:{identifier} failed: {e}") from e
+        return dest
+
+
+class S3Source(ObjectStoreSource):
+    """Public S3 buckets: ``<bucket>/<key>[!member]`` or ``<bucket>/<prefix>/``.
+    See :class:`ObjectStoreSource`; the buckets are :data:`PUBLIC_S3_BUCKETS`."""
+
+    prefix = "s3"
+    cloud = "aws"
+    scheme = "s3"
+    default_buckets = PUBLIC_S3_BUCKETS
+    # <bucket>/<key>[!member]. Bucket syntax is AWS's own (3-63 chars, lowercase
+    # alphanumerics, dots and hyphens); membership in the allowlist is checked in
+    # check(), because a rejected bucket deserves a message naming the ones served.
+    id_pattern = (r"(?!.*(?:^|/)\.\.(?:/|!|$))"
+                  r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9][A-Za-z0-9._/-]{0,300}"
+                  r"(?:![A-Za-z0-9._ /-]+)?")
+    description = ("public S3 buckets, by bucket/key (!member for zip contents; "
+                   "a trailing / fetches every object under a prefix)")
+
+
+class GCSSource(ObjectStoreSource):
+    """Public Google Cloud Storage buckets, the same way: ``gs:<bucket>/<key>``.
+    The buckets are :data:`PUBLIC_GCS_BUCKETS` - today IDC's mirror, so a
+    deployment in Google Cloud can address one object or a whole series prefix
+    (``gs:idc-open-data/<crdc_series_uuid>/``) without leaving the cloud."""
+
+    prefix = "gs"
+    cloud = "gcp"
+    scheme = "gs"
+    default_buckets = PUBLIC_GCS_BUCKETS
+    id_pattern = S3Source.id_pattern            # GCS bucket names follow the same rules
+    description = ("public Google Cloud Storage buckets, by bucket/key (!member for zip "
+                   "contents; a trailing / fetches every object under a prefix)")
 
 
 class GitHubReleaseSource(ArchiveReadingSource):
@@ -716,7 +924,7 @@ def check_identifier(src, identifier: str, credentials=None) -> None:
 def default_sources() -> list:
     """The sources a server carries unless told otherwise."""
     return [IDCSource(), TCIASource(), openneuro_source(), ZenodoSource(),
-            HuggingFaceSource(), S3Source(), GitHubReleaseSource()]
+            HuggingFaceSource(), S3Source(), GCSSource(), GitHubReleaseSource()]
 
 
 #: The prefixes the built-in sources declare. Read from the sources themselves so

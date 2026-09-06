@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from haversack.errors import InputError
-from haversack.sources import (ArchiveReadingSource, GitHubReleaseSource, HuggingFaceSource,
+from haversack.sources import (ArchiveReadingSource, GCSSource, GitHubReleaseSource, HuggingFaceSource,
                            RangeFile, S3Source, ZenodoSource, registry)
 
 
@@ -391,39 +391,171 @@ def test_redirect_strips_auth_on_scheme_downgrade():
 
 # --- the two sources added 2026-09-05: a bucket allowlist and a release tag ---
 
-def test_s3_builds_its_url_from_the_allowlist_and_never_from_the_identifier(monkeypatch):
+class _FakeStore:
+    """An obstore stand-in: objects by key, with the four calls the sources make."""
+
+    def __init__(self, objects):
+        self.objects = dict(objects)
+        self.calls = []
+
+    def list(self, prefix=None):
+        self.calls.append(("list", prefix))
+        yield [{"path": k, "size": len(v)} for k, v in self.objects.items()
+               if k.startswith(prefix or "")]
+
+
+class _FakeObstore:
+    """The module-level obstore functions, against a _FakeStore."""
+
+    class _Get:
+        def __init__(self, data): self._d = data
+        def bytes(self): return self._d
+        def stream(self, min_chunk_size=1 << 20):
+            for i in range(0, len(self._d), min_chunk_size):
+                yield self._d[i:i + min_chunk_size]
+
+    @staticmethod
+    def head(store, key):
+        if key not in store.objects:
+            raise FileNotFoundError(key)
+        return {"size": len(store.objects[key])}
+
+    @staticmethod
+    def get(store, key):
+        store.calls.append(("get", key))
+        return _FakeObstore._Get(store.objects[key])
+
+    @staticmethod
+    def get_range(store, key, start, end):
+        store.calls.append(("get_range", key, start, end))
+        return store.objects[key][start:end]
+
+
+@pytest.fixture
+def fake_cloud(monkeypatch):
+    """Route _object_store to fakes and record (cloud, bucket, region) per call."""
+    import sys
+    import types
+    from haversack import sources as srcmod
+    built, stores = [], {}
+    fake_mod = types.SimpleNamespace(head=_FakeObstore.head, get=_FakeObstore.get,
+                                     get_range=_FakeObstore.get_range)
+    monkeypatch.setitem(sys.modules, "obstore", fake_mod)
+
+    def factory(cloud, bucket, region=None):
+        built.append((cloud, bucket, region))
+        return stores.setdefault((cloud, bucket), _FakeStore({}))
+
+    monkeypatch.setattr(srcmod, "_object_store", factory)
+    return built, stores
+
+
+def test_s3_reads_only_from_the_allowlist_and_passes_each_buckets_region(fake_cloud):
     """The bucket is the operator's choice, the key is the client's. An
-    unlisted bucket is refused by name before anything is fetched, and the
-    per-bucket region decides the endpoint (a dotted bucket cannot be
-    virtual-hosted without breaking TLS, so these are path-style)."""
-    seen = {}
-
-    class _Resp:
-        headers = {"Content-Length": "123"}
-
-        def __enter__(self): return self
-
-        def __exit__(self, *a): return False
-
-    class _Opener:
-        def open(self, req, timeout=None):
-            seen["url"], seen["method"] = req.full_url, req.get_method()
-            return _Resp()
-
-    from haversack import fetchlib
-    monkeypatch.setattr(fetchlib, "urlopen", _Opener().open)
+    unlisted bucket is refused by name before any store is built, and the
+    per-bucket region reaches the store (msd-for-monai lives in us-west-2)."""
+    built, stores = fake_cloud
+    stores[("aws", "fcp-indi")] = _FakeStore({"data/x.nii.gz": b"x" * 123})
+    stores[("aws", "msd-for-monai")] = _FakeStore({"Task09_Spleen.tar": b"t"})
     src = S3Source()
-    assert src.resolve("fcp-indi/data/x.nii.gz") == (
-        "https://s3.amazonaws.com/fcp-indi/data/x.nii.gz", 123)
-    assert seen["method"] == "HEAD"
-    # a bucket the allowlist gives a region gets that region's endpoint
-    assert src.resolve("msd-for-monai/Task09_Spleen.tar")[0].startswith(
-        "https://s3.us-west-2.amazonaws.com/msd-for-monai/")
+    assert src.resolve("fcp-indi/data/x.nii.gz") == ("s3://fcp-indi/data/x.nii.gz", 123)
+    assert built[-1] == ("aws", "fcp-indi", None)
+    src.resolve("msd-for-monai/Task09_Spleen.tar")
+    assert built[-1] == ("aws", "msd-for-monai", "us-west-2")
     with pytest.raises(InputError, match="not one this server fetches from"):
         src.resolve("some-private-bucket/secret.nii.gz")
+    assert not any(b == "some-private-bucket" for _, b, _ in built)
     # an operator may serve a different set; the identifier still cannot add one
-    assert S3Source({"my-bucket": None}).resolve("my-bucket/a.nii.gz")[0] == (
-        "https://s3.amazonaws.com/my-bucket/a.nii.gz")
+    stores[("aws", "my-bucket")] = _FakeStore({"a.nii.gz": b"a"})
+    assert S3Source({"my-bucket": None}).resolve("my-bucket/a.nii.gz")[0] == "s3://my-bucket/a.nii.gz"
+
+
+def test_an_object_streams_down_through_the_store(fake_cloud, tmp_path):
+    built, stores = fake_cloud
+    stores[("aws", "fcp-indi")] = _FakeStore({"data/x.nii.gz": b"y" * (3 << 20)})
+    got = S3Source().fetch("fcp-indi/data/x.nii.gz", tmp_path)
+    assert (got / "x.nii.gz").read_bytes() == b"y" * (3 << 20)
+    assert ("get", "data/x.nii.gz") in stores[("aws", "fcp-indi")].calls
+
+
+def test_a_trailing_slash_fetches_every_object_under_the_prefix(fake_cloud, tmp_path):
+    """The idc: mechanism for any allowlisted bucket: a DICOM series laid out in
+    a bucket comes down in parallel, by basename, pseudo-directory keys skipped."""
+    built, stores = fake_cloud
+    stores[("gcp", "idc-open-data")] = _FakeStore({
+        "abc/": b"", "abc/1.dcm": b"one", "abc/2.dcm": b"two", "abd/3.dcm": b"not mine"})
+    got = GCSSource().fetch("idc-open-data/abc/", tmp_path)
+    assert sorted(p.name for p in got.iterdir()) == ["1.dcm", "2.dcm"]
+    assert (got / "2.dcm").read_bytes() == b"two"
+    assert built[-1] == ("gcp", "idc-open-data", None)
+    (tmp_path / "b").mkdir()
+    with pytest.raises(InputError, match="no objects under"):
+        GCSSource().fetch("idc-open-data/zzz/", tmp_path / "b")
+    with pytest.raises(InputError, match="takes no !member"):
+        GCSSource().fetch("idc-open-data/abc/!x", tmp_path / "b")
+
+
+def test_a_prefix_over_the_cap_is_refused_before_any_object_moves(fake_cloud, tmp_path, monkeypatch):
+    from haversack import sources as srcmod
+    built, stores = fake_cloud
+    store = stores[("aws", "fcp-indi")] = _FakeStore({"big/a": b"x" * 600, "big/b": b"x" * 600})
+    monkeypatch.setattr(srcmod, "MAX_FETCH_BYTES", 1000)
+    with pytest.raises(InputError, match="over the 1000-byte fetch cap"):
+        S3Source().fetch("fcp-indi/big/", tmp_path)
+    assert not any(c[0] == "get" for c in store.calls), "bytes moved before the cap was checked"
+
+
+def test_a_zip_member_is_read_by_ranged_reads_on_the_store(fake_cloud, tmp_path):
+    """The same remote-zip extraction as the HTTP sources, with the store's
+    get_range under RangeFile instead of an HTTP Range request."""
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("inner/scan.nii.gz", b"\x1f\x8b" + b"z" * 5000)
+        z.writestr("inner/other.txt", b"o")
+    built, stores = fake_cloud
+    store = stores[("aws", "fcp-indi")] = _FakeStore({"data/a.zip": buf.getvalue()})
+    got = S3Source().fetch("fcp-indi/data/a.zip!inner/scan.nii.gz", tmp_path)
+    assert (got / "scan.nii.gz").read_bytes() == b"\x1f\x8b" + b"z" * 5000
+    ranged = [c for c in store.calls if c[0] == "get_range"]
+    assert ranged and not any(c[0] == "get" for c in store.calls), "the whole zip was pulled"
+
+
+def test_gs_is_a_served_source_with_its_own_allowlist_and_spelling_hint():
+    from haversack.sources import check_identifier
+    reg = registry()
+    assert "gs" in reg and reg["gs"].enabled() in (True, False)
+    assert reg["gs"].describe()["buckets"] == ["idc-open-data"]
+    with pytest.raises(InputError, match="drop the slashes.*gs:idc-open-data/x"):
+        check_identifier(GCSSource(), "//idc-open-data/x")
+    with pytest.raises(InputError, match="not one this server fetches from"):
+        GCSSource().check("fcp-indi/x.nii.gz")
+
+
+def test_idc_prefers_the_mirror_when_asked_and_falls_back_to_aws(fake_cloud, tmp_path, monkeypatch):
+    """The GCS mirror holds the main bucket only, so gcp means prefer, not only:
+    a series that lives in -two is still found, on AWS, after the mirror miss."""
+    from haversack.sources import IDCSource
+    built, stores = fake_cloud
+    uuid = "0be27d1c-9410-47ff-9c9f-a44b26a4bd55"
+    stores[("aws", "idc-open-data-two")] = _FakeStore({f"{uuid}/1.dcm": b"d"})
+    monkeypatch.setenv("HAVERSACK_IDC_CLOUD", "gcp")
+    assert IDCSource.probe_order() == [("gcp", "idc-open-data"), ("aws", "idc-open-data"),
+                                       ("aws", "idc-open-data-two"), ("aws", "idc-open-data-cr")]
+    got = IDCSource().fetch(uuid, tmp_path)
+    assert (got / "1.dcm").read_bytes() == b"d"
+    assert [(c, b) for c, b, _ in built] == [("gcp", "idc-open-data"), ("aws", "idc-open-data"),
+                                             ("aws", "idc-open-data-two")]
+    monkeypatch.setenv("HAVERSACK_IDC_CLOUD", "aws")
+    assert IDCSource.probe_order()[0] == ("aws", "idc-open-data")
+    monkeypatch.setenv("HAVERSACK_IDC_CLOUD", "azure")
+    with pytest.raises(InputError, match="choose aws or gcp"):
+        IDCSource.probe_order()
+    monkeypatch.setenv("HAVERSACK_IDC_CLOUD", "gcp")
+    (tmp_path / "x").mkdir()
+    with pytest.raises(InputError, match="gs://idc-open-data.*s3://idc-open-data-cr"):
+        IDCSource().fetch("0be27d1c-0000-0000-0000-000000000000", tmp_path / "x")
 
 
 def test_github_source_reads_one_member_of_a_release_asset(range_server, tmp_path):

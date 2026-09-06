@@ -377,6 +377,13 @@ def test_volume_attach_preflight_fails_with_the_remedy(monkeypatch, tmp_path):
         m._check_volumes_attached()
 
 
+def test_the_idc_cloud_knob_is_forwarded_to_the_container():
+    """A worker in Google Cloud reads HAVERSACK_IDC_CLOUD at fetch time; a deploy
+    shell variable does not exist in the container unless it is forwarded."""
+    from haversack import modal_app
+    assert "HAVERSACK_IDC_CLOUD" in modal_app._RUNTIME_KNOBS
+
+
 def test_the_transpose_knob_is_forwarded_to_the_container():
     """The Worker reads HAVERSACK_ALLOW_TRANSPOSE at construction, but the
     container gets only what _RUNTIME_KNOBS forwards at deploy. Unforwarded, the
