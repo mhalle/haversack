@@ -213,6 +213,13 @@ five, and fewer than that means a reload per part.
 
 ## Engines
 
+`--allow-transpose` serves the tasks whose plans permute the axes
+(`dentalsegmentator:base`, `totalvibe:vibe_sagittal`, `totalvibe:pancreas`). They are refused
+by default because that path has not been confirmed against an outside implementation for
+each model. It is deployment policy, not a request parameter, so a client cannot ask for it;
+without it those tasks are listed and described but refuse to run. On Modal the same switch is
+`HAVERSACK_ALLOW_TRANSPOSE=1` at deploy.
+
 The nnU-Net engine is always on. The others are switched on per deployment by environment
 variable, `HAVERSACK_FASTSURFER=1`, `HAVERSACK_SYNTHSTRIP=1`, `HAVERSACK_VOXTELL=1`,
 `HAVERSACK_MONAI=1`, and each needs its runtime installed in the environment the server runs

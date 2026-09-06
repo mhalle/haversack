@@ -52,11 +52,15 @@ def test_spacing_and_shape_agree_through_the_permute():
 
 
 def test_gate_message_names_the_opt_in(tmp_path):
-    """The gate is re-armed pending oracle confirmation: the refusal must
-    name allow_transpose so the caller knows the path exists."""
+    """The gate is armed pending oracle confirmation, and the refusal must name a
+    way through it at EVERY door - it once named only the Python keyword argument,
+    which no command-line or HTTP caller can pass, so three tasks were unreachable
+    from everywhere but the API."""
     import inspect
 
     from haversack import network
     src = inspect.getsource(network)
-    assert "pending confirmation" in src or "not yet confirmed" in src
+    assert "pending confirmation" in src
     assert "allow_transpose=True" in src
+    assert "--allow-transpose" in src            # the command line
+    assert "serve --allow-transpose" in src      # and the server

@@ -109,7 +109,12 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   # exists, and every request 303s while the runner crash-
                   # loops on AttributeError (hit live 2026-08-25).
                   "HAVERSACK_PUBLIC",
-                  *_engines.engine_env_vars())
+                  # Read by the Worker at construction (allow_transpose). Without
+                  # it forwarded the container's copy is unset, so the three tasks
+                  # whose plans permute the axes are listed, described, accepted,
+                  # and then refused inside the GPU worker - the exact
+                  # unreachability the flag was added to end.
+                  "HAVERSACK_ALLOW_TRANSPOSE", *_engines.engine_env_vars())
 
 # Base image (the ASGI api container + the nnU-Net GPU Worker). uv-NATIVE: the nnU-Net
 # worker's deps come from pyproject extras - `torch` (torch/nnunetv2/scipy/scikit-image),
@@ -870,7 +875,13 @@ class Worker(_WorkerBase):
     def _engine_setup(self):
         os.environ["TOTALSEG_WEIGHTS_PATH"] = WEIGHTS_ROOT
         from haversack import Segmenter
-        self.seg = Segmenter(device="cuda", weights=WEIGHTS_ROOT, cache_models=5)
+        self.seg = Segmenter(device="cuda", weights=WEIGHTS_ROOT, cache_models=5,
+                             # the same deployment policy `haversack serve` takes as a
+                             # flag: a transposed model runs only where the operator
+                             # said so, and a request can never ask for it
+                             allow_transpose=(os.environ.get("HAVERSACK_ALLOW_TRANSPOSE")
+                                              or "").strip().lower()
+                             not in ("0", "false", "no", "off", ""))
 
     _gpu_setup = _engine_setup          # legacy name used by the snapshot path
 

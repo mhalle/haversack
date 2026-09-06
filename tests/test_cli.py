@@ -120,8 +120,13 @@ def test_tasks_with_a_name_prints_its_structures(tmp_path):
     code = f"import haversack.cli as c; raise SystemExit(c.main(['tasks', 'total_fast', '--model-root', {str(tmp_path)!r}]))"
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
-    names = r.stdout.split()
-    assert len(names) == 117 and "liver" in names and names[0] != "ts:total_fast"
+    # one `<label>\t<name>` per line, in LABEL order - the only way to read a
+    # result whose labels are neither contiguous nor alphabetical
+    rows = [ln.split("\t") for ln in r.stdout.splitlines() if ln.strip()]
+    labels = [int(k) for k, _ in rows]
+    names = [n for _, n in rows]
+    assert len(rows) == 117 and "liver" in names and names[0] != "ts:total_fast"
+    assert labels == sorted(labels) and labels[0] == 1
 
 
 def test_serve_refuses_contradictory_token_flags(capsys):
@@ -239,3 +244,119 @@ def test_the_cache_root_is_one_root(tmp_path, monkeypatch):
     assert trainer_shim_dir() == root / "trainer_shims"
     assert {s["name"] for s in stores()} >= {"inputs", "results", "checkpoints", "trainer_shims", "serve"}
     assert all(str(s["path"]).startswith(str(root)) for s in stores() if s["name"] != "weights")
+
+
+# -- the weights commands, which had no tests and rewrite a destructive path ---
+
+def _installed(root, bucket, dataset, config="nnUNetTrainer__nnUNetPlans__3d_fullres"):
+    d = root / bucket / dataset / config if bucket else root / dataset / config
+    (d / "fold_0").mkdir(parents=True)
+    (d / "dataset.json").write_text('{"channel_names":{"0":"CT"},"labels":{"background":0,"a":1},'
+                                    '"numTraining":1,"file_ending":".nii.gz"}')
+    (d / "fold_0" / "checkpoint_final.pth").write_bytes(b"w" * 32)
+    return d.parent
+
+
+def test_weights_list_sees_the_ecosystem_catalogs_not_only_the_root(tmp_path, capsys):
+    """A catalog installs under <root>/<ecosystem>/Dataset*; scanning only the top
+    level reported "0 dataset(s)" for a root two models had just been used from,
+    and left no way to remove them."""
+    _installed(tmp_path, None, "Dataset297_total")               # a TotalSegmentator model
+    _installed(tmp_path, "totalvibe", "Dataset278")              # a catalog's
+    _installed(tmp_path, "dentalsegmentator", "Dataset112_Dental")
+    assert cli.main(["weights", "list", "--root", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "Dataset297_total" in out
+    assert "totalvibe/Dataset278" in out                         # named by where it lives
+    assert "dentalsegmentator/Dataset112_Dental" in out
+    assert "3 dataset(s)" in out
+
+
+def test_weights_remove_needs_confirmation_and_names_what_it_would_delete(tmp_path, capsys):
+    folder = _installed(tmp_path, "totalvibe", "Dataset278")
+    assert cli.main(["weights", "remove", "278", "--root", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "totalvibe/Dataset278" in err and "--yes" in err
+    assert folder.is_dir()                                       # nothing deleted without --yes
+    assert cli.main(["weights", "remove", "278", "--root", str(tmp_path), "--yes"]) == 0
+    assert not folder.exists()
+
+
+def test_weights_remove_does_not_match_a_longer_dataset_id(tmp_path, capsys):
+    """`remove 27` must not take Dataset278 with it."""
+    keep = _installed(tmp_path, "totalvibe", "Dataset278")
+    assert cli.main(["weights", "remove", "27", "--root", str(tmp_path), "--yes"]) != 0
+    assert "no installed weights match" in capsys.readouterr().err
+    assert keep.is_dir()
+
+
+def test_weights_remove_says_where_to_look_when_nothing_matches(tmp_path, capsys):
+    _installed(tmp_path, "totalvibe", "Dataset278")
+    assert cli.main(["weights", "remove", "999", "--root", str(tmp_path), "--yes"]) != 0
+    assert "weights list" in capsys.readouterr().err
+
+
+def test_weights_remove_refuses_a_pattern_a_bucket_and_anything_outside_the_root(tmp_path, capsys):
+    """The id reaches a glob and then an rmtree. `remove '*'` deleted every
+    dataset; `remove moose` deleted a whole ecosystem bucket - which the new
+    "listed as <ecosystem>/Dataset<id>" hint makes a natural thing to type; and a
+    symlink under the root put real data elsewhere within reach of rmtree."""
+    keep = _installed(tmp_path / "root", "moose", "Dataset001_a")
+    outside = tmp_path / "outside" / "Dataset999_precious"
+    outside.mkdir(parents=True)
+    (outside / "weights.pth").write_bytes(b"someone else's data")
+    (tmp_path / "root" / "mybackup").symlink_to(tmp_path / "outside")
+
+    for bad in ("*", "Dataset[01]*", "/etc", "..", "moose"):
+        assert cli.main(["weights", "remove", bad, "--root", str(tmp_path / "root"), "--yes"]) != 0
+        capsys.readouterr()
+    assert keep.is_dir()                                   # the bucket is untouched
+    # and the symlinked tree is not even listed, let alone removable
+    assert cli.main(["weights", "remove", "999", "--root", str(tmp_path / "root"), "--yes"]) != 0
+    assert (outside / "weights.pth").read_bytes() == b"someone else's data"
+    capsys.readouterr()
+    # the real thing still works
+    assert cli.main(["weights", "remove", "1", "--root", str(tmp_path / "root"), "--yes"]) == 0
+    assert not keep.exists()
+
+
+def test_the_dataset_scan_never_descends_a_symlink(tmp_path):
+    """Pinned on its own, because the containment check downstream masks it: with
+    both guards removed the destructive test fails, with either one removed it
+    passes. `weights remove` rmtree's what this yields, and rmtree follows a
+    symlinked final component through to real data."""
+    from haversack.cli import _installed_datasets
+    root = tmp_path / "root"
+    (root / "moose").mkdir(parents=True)
+    (root / "moose" / "Dataset001_a").mkdir()
+    outside = tmp_path / "outside"
+    (outside / "Dataset999_precious").mkdir(parents=True)
+    (root / "mybackup").symlink_to(outside)
+    (root / "Dataset500_link").symlink_to(outside / "Dataset999_precious")
+
+    found = _installed_datasets(root)
+    assert [d.name for d in found] == ["Dataset001_a"]
+    for d in found:
+        assert outside not in d.parents and d != outside
+
+
+def test_remove_refuses_a_match_that_resolves_outside_the_root(tmp_path, capsys):
+    """The containment check, pinned on its own path.
+
+    The bucket scan skips symlinks, but the id glob that runs first does not - it
+    globs `Dataset<id>_*` at the root and returns whatever matches, symlink or
+    not. So a root-level link named like a dataset reaches the delete with no
+    other guard in front of it, and containment is what refuses it."""
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside" / "Dataset999_precious"
+    outside.mkdir(parents=True)
+    (outside / "weights.pth").write_bytes(b"data")
+    (root / "Dataset999_precious").symlink_to(outside)
+
+    from haversack.tasks import _dataset_dirs
+    assert [d.name for d in _dataset_dirs(root, "999")] == ["Dataset999_precious"], \
+        "the glob branch no longer reaches this; re-point the test at what does"
+    assert cli.main(["weights", "remove", "999", "--root", str(root), "--yes"]) != 0
+    assert "resolves outside" in capsys.readouterr().err
+    assert (outside / "weights.pth").read_bytes() == b"data"

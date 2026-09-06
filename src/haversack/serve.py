@@ -2488,6 +2488,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 try:
                     i = dict(cat.info(t))
                     i.pop("structures", None)   # describe() carries the full list
+                    i.pop("label_map", None)     # and the mapping, which is the same
+                                                 # information again - this endpoint is
+                                                 # one line per task and stays that way
                     detail[t] = i
                 except Exception:
                     pass
@@ -3476,6 +3479,11 @@ def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
     return create_app(ex, read_only=True)
 
 
+def _truthy_env(name: str) -> bool:
+    """Case-insensitive, so `HAVERSACK_ALLOW_TRANSPOSE=False` means what it says."""
+    return (os.environ.get(name) or "").strip().lower() not in ("0", "false", "no", "off", "")
+
+
 def main_serve(args) -> int:
     """`haversack serve` - build a Segmenter from the CLI arguments and run uvicorn."""
     try:
@@ -3488,7 +3496,9 @@ def main_serve(args) -> int:
     from .segmenter import Segmenter
 
     seg = Segmenter(device=args.device, dtype=args.dtype, weights=args.model_root,
-                    cache_models=args.cache_models)
+                    cache_models=args.cache_models,
+                    allow_transpose=bool(getattr(args, "allow_transpose", False)
+                                         or _truthy_env("HAVERSACK_ALLOW_TRANSPOSE")))
     from .cache_admin import check_cache_root
     check_cache_root()                     # the token file lives under it whatever else does
     workdir = args.workdir or Path(tempfile.gettempdir()) / "haversack-serve"

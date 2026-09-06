@@ -4067,6 +4067,19 @@ def test_the_path_surface_refresh_follows_the_caller_not_the_engine(tmp_path, mo
     assert "refresh_input=skip" not in src
 
 
+def test_an_env_flag_spelled_False_is_not_true(tmp_path):
+    """`HAVERSACK_ALLOW_TRANSPOSE=False` read as true, because only the lowercase
+    spellings were refused."""
+    import os
+    from haversack.serve import _truthy_env
+    for falsey in ("0", "false", "False", "FALSE", "no", "No", "off", "OFF", "", "  "):
+        os.environ["HAVERSACK_TEST_FLAG"] = falsey
+        assert _truthy_env("HAVERSACK_TEST_FLAG") is False, falsey
+    for truthy in ("1", "true", "yes", "on"):
+        os.environ["HAVERSACK_TEST_FLAG"] = truthy
+        assert _truthy_env("HAVERSACK_TEST_FLAG") is True, truthy
+    del os.environ["HAVERSACK_TEST_FLAG"]
+
 
 def test_an_ownerless_claim_is_told_apart_from_a_successor_by_its_age(tmp_path):
     """The one case the owner token cannot decide. A claim with no owner file is

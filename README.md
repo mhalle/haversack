@@ -1,8 +1,9 @@
 # haversack
 
 `haversack` runs nnU-Net-family segmentation models on PyTorch - TotalSegmentator, MOOSE,
-MRSegmentator, and any stock nnU-Net v2 model folder - on an Apple Silicon GPU (MPS), a CUDA
-card, or the CPU. It is a library with a command line and a small REST server on top.
+MRSegmentator, DentalSegmentator, TotalVibeSegmentator, and any stock nnU-Net v2
+model folder - on an Apple Silicon GPU (MPS), a CUDA card, or the CPU. It is a library
+with a command line and a small REST server on top.
 
 This page is what a new user needs to run it. The design record is in `docs/` and the
 workspace it lives in; the API is documented in the docstrings.
@@ -85,7 +86,10 @@ download the same model twice:
 | command line | `--model-root DIR` |
 
 They download on first use: TotalSegmentator models from the TotalSegmentator GitHub releases
-(with the sha256 the manifest records), MOOSE and MRSegmentator from their own hosting. To
+(with the sha256 the manifest records), MOOSE, MRSegmentator, DentalSegmentator and
+TotalVibeSegmentator from their own hosting, each checked against whatever digest its
+publisher states - Zenodo publishes md5, GitHub sha256. Three TotalVibeSegmentator assets are
+published with no digest at all and so are checked against nothing; the manifest names them. To
 provision ahead of time:
 
 ```bash
@@ -149,6 +153,7 @@ still), and `total` runs the five 1.5 mm models. Useful options:
 | `--device mps|cuda|cpu` | default `auto` |
 | `--dtype fp16|bf16|fp32` | default `fp16` (the network runs fp16 on MPS) |
 | `--envelope 20` | restrict inference to the body plus this margin in mm; `0` for the whole volume |
+| `--allow-transpose` | run a model whose plans permute the axes; refused by default |
 | `--accumulate device|host` | force the sliding-window accumulator's placement; `auto` decides from free memory |
 
 What to expect on an M2 for `total_fast` on a 709 x 768 x 768 chest CT, one run per process:

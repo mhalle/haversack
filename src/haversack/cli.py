@@ -82,6 +82,43 @@ def _need_inference_stack(task=None) -> None:
 GUIDES = {"user": ("data/GUIDE.md", "README.md"), "server": ("data/SERVER.md", "SERVER.md")}
 
 
+def _installed_datasets(root) -> list:
+    """Every installed nnU-Net dataset folder under a weights root.
+
+    Two levels, because that is how the weights are actually laid out: TS and
+    stock models sit directly under the root, while every ecosystem catalog
+    (moose, mrsegmentator, dentalsegmentator, totalvibe) installs under its own
+    ``<root>/<ecosystem>/`` bucket. Scanning only the top level - which is what
+    this did - reported "0 dataset(s)" for a root holding a working catalog
+    install, and left no way to remove one.
+    """
+    import re as _re
+    from pathlib import Path
+    root = Path(root).expanduser()
+
+    def real_children(d):
+        """Entries that are really inside ``d`` - a symlink is not descended.
+
+        This list feeds `weights remove`, which rmtree's what it matches, and
+        rmtree follows a symlinked *final component* through to real data. A
+        `mybackup -> /elsewhere` link under the weights root would otherwise put
+        /elsewhere within reach of `weights remove <id>`.
+        """
+        try:
+            return [c for c in sorted(d.iterdir()) if not c.is_symlink() and c.is_dir()]
+        except OSError:
+            return []                      # unreadable: not ours to list, never fatal
+
+    if not root.is_dir():
+        return []
+    is_dataset = _re.compile(r"Dataset\d+").match
+    out = [c for c in real_children(root) if is_dataset(c.name)]
+    for sub in real_children(root):        # one level of ecosystem buckets
+        if not sub.name.startswith(".") and not is_dataset(sub.name):
+            out.extend(c for c in real_children(sub) if is_dataset(c.name))
+    return out
+
+
 def guide_text(which: str = "user") -> str:
     """A guide's Markdown: the file shipped inside the wheel, or, in a checkout (editable
     install), the repository's own file - one source of truth. ``which`` is ``user`` (the
@@ -205,6 +242,11 @@ def _run(argv=None) -> int:
     s.add_argument("--model-root", default=None,
                    help="where model weights live (default: TOTALSEG_WEIGHTS_PATH, nnUNet_results, "
                         "or ~/.totalsegmentator/nnunet/results)")
+    s.add_argument("--allow-transpose", action="store_true",
+                   help="run a model whose plans permute the axes (transpose_forward). Refused by "
+                        "default because the transposed path had not been checked against an "
+                        "outside implementation; dentalsegmentator:base, totalvibe:vibe_sagittal "
+                        "and totalvibe:pancreas need it")
     s.add_argument("--quiet", action="store_true", help="no progress or timings on stderr")
 
     g = sub.add_parser("get", formatter_class=Fmt, help="fetch source data (idc:/zenodo:/http...) into the cache, or out to a file",
@@ -239,7 +281,10 @@ def _run(argv=None) -> int:
   haversack tasks --json                 full records: name, ecosystem, engine, modality, structures, installed;
                                          `materialized` = the task's definition is known here without a download,
                                          `task_spec` = it is an nnU-Net model (false for FastSurfer, SynthStrip, ...)""")
-    tl.add_argument("task", nargs="?", default=None, help="a task name: print its structures instead of the list")
+    tl.add_argument("task", nargs="?", default=None,
+                    help="a task name: print its structures instead of the list. An nnU-Net "
+                         "task prints `<label>\t<name>` in label order; an engine task, whose "
+                         "labels are its own, prints names only")
     tl.add_argument("--model-root", default=None, help="weights root to check for installed models")
     tl.add_argument("--installed", action="store_true", help="only tasks whose weights are already on disk")
     tl.add_argument("--json", action="store_true", help="the full per-task info records")
@@ -250,13 +295,16 @@ def _run(argv=None) -> int:
     wsub = w.add_subparsers(dest="wcmd", required=True, metavar="action", help="what to do with the weights")
     wf = wsub.add_parser("fetch", help="download everything a task needs")
     wf.add_argument("task", help="a task name from `haversack tasks`; every model it needs is fetched")
-    wf.add_argument("--root", default=None, help="weights root (default: the ecosystem's location)")
+    wf.add_argument("--root", "--model-root", dest="root", default=None,
+                    help="weights root (default: the ecosystem's location)")
     wsub.add_parser("coverage", help="which catalog tasks the manifest can provision")
     wl = wsub.add_parser("list", help="installed model weights on disk, with sizes")
-    wl.add_argument("--root", default=None, help="weights root (default: the ecosystem's location)")
+    wl.add_argument("--root", "--model-root", dest="root", default=None,
+                    help="weights root (default: the ecosystem's location)")
     wrm = wsub.add_parser("remove", help="delete one dataset's installed weights")
     wrm.add_argument("weights_id", help="a dataset id, e.g. 297 (see `weights list`)")
-    wrm.add_argument("--root", default=None, help="weights root (default: the ecosystem location)")
+    wrm.add_argument("--root", "--model-root", dest="root", default=None,
+                     help="weights root (default: the ecosystem location)")
     wrm.add_argument("--yes", action="store_true", help="do not prompt")
     wr = wsub.add_parser("refresh", formatter_class=Fmt, help="merge newly published weights into the manifest",
                          description="Reads TotalSegmentator's GitHub releases and records new datasets and versions. "
@@ -300,6 +348,11 @@ def _run(argv=None) -> int:
     sv.add_argument("--no-result-cache", action="store_true", help="compute every request; keep nothing durable")
     sv.add_argument("--token", default=None,
                     help="the bearer token that gates computation (reads stay open); generated when omitted")
+    sv.add_argument("--allow-transpose", action="store_true",
+                    help="serve tasks whose plans permute the axes (dentalsegmentator:base, "
+                         "totalvibe:vibe_sagittal, totalvibe:pancreas). Deployment policy, so "
+                         "it cannot come from a request; without it those tasks are listed and "
+                         "described but refuse to run")
     sv.add_argument("--no-token", action="store_true",
                     help="run WITHOUT a token: anything that can reach the port can compute, a proxy or "
                          "tunnel in front included. No guards of any kind - a machine you trust end to end")
@@ -468,13 +521,28 @@ def _run(argv=None) -> int:
             names = info.get("structures") or []
             if not names:
                 from .errors import InputError
+                if info.get("unresolved"):
+                    # installed, but not runnable as it stands - `weights fetch`
+                    # would do nothing, so say what actually helps
+                    raise InputError(f"{info['name']}: {info['unresolved']}")
                 raise InputError(f"{info['name']}: no structure list until its model is installed "
                                  f"(haversack weights fetch {args.task})")
             if args.json:
-                print(json.dumps({"name": info["name"], "structures": list(names)}, indent=2))
+                out = {"name": info["name"], "structures": list(names)}
+                if info.get("label_map"):
+                    out["label_map"] = info["label_map"]   # what a JSON consumer needs most
+                print(json.dumps(out, indent=2))
             else:
-                for n in names:
-                    print(n)
+                # label order, with the label - which is what a caller needs to read
+                # a result, and the only way to make sense of a catalog whose
+                # checkpoints name their structures with numbers
+                labels = info.get("label_map")
+                if labels:
+                    for k in sorted(labels, key=int):
+                        print(f"{k}\t{labels[k]}")
+                else:
+                    for n in names:
+                        print(n)
             return 0
 
         def installed(info) -> bool:
@@ -690,13 +758,15 @@ def _run(argv=None) -> int:
             img = resolve(spec)
             if engine_task:
                 from .segmenter import Segmenter
-                return Segmenter(device=args.device, weights=args.model_root, batch_size=bs).segment(
+                return Segmenter(device=args.device, weights=args.model_root, batch_size=bs,
+                                 allow_transpose=args.allow_transpose).segment(
                     img, args.task, progress=progress)
             from .pipeline import segment
             return segment(img, args.task, weights=args.model_root, device=args.device, dtype=args.dtype,
                            grid=args.spacing if args.spacing else "input", interp=args.interp,
                            accumulate=args.accumulate, batch_size=bs,
-                           envelope_mm=args.envelope if args.envelope > 0 else None, progress=progress)
+                           envelope_mm=args.envelope if args.envelope > 0 else None,
+                           allow_transpose=args.allow_transpose, progress=progress)
 
         def report(r, where):
             if args.quiet:
@@ -756,34 +826,91 @@ def _run(argv=None) -> int:
         from . import weights_fetch as wfm
         say = lambda m: print(m, file=sys.stderr, flush=True)
         if args.wcmd == "fetch":
-            from .tasks import weights_root
-            root = args.root or weights_root("ts")
-            paths = wfm.ensure_task_weights(args.task, root, progress=lambda m: say(f"  {m}"))
-            print(f"{len(paths)} model(s) under {root}")
+            # through the ecosystem catalog, not TotalSegmentator's manifest: every
+            # catalog installs its own weights, and `tasks` sends people here for
+            # any of them. TS still ends up in ensure_task_weights - via its own
+            # ecosystem - so nothing about that path changes.
+            from .ecosystems import EcosystemCatalog
+            from .weights import WeightsStore
+            store = WeightsStore(args.root, fetch=False)
+            cat = EcosystemCatalog(root=store.root)
+            info = cat.prepare(args.task, progress=lambda m: say(f"  {m}"))
+            # No count. `weights_installed` is only populated by engine ecosystems,
+            # and the spec's own weights_ids omits the crop_from_task chains a
+            # cascade installs - ts:teeth pulls three models and either number
+            # says one. `weights list` reports what is actually on disk.
+            if info.get("task_spec", True):
+                print(f"{info['name']}: weights ready under {store.root}")
+            else:
+                # an engine's weights ship inside its image; nothing was installed
+                # here and nothing is under this root
+                print(f"{info['name']}: runs on the {info.get('engine')} engine, whose weights "
+                      "ship with it - nothing to fetch")
         elif args.wcmd == "list":
-            from .tasks import weights_root, _dataset_dirs
+            from .tasks import weights_root
             from .cache_admin import _du, _human
-            root = Path(args.root or weights_root("ts"))
+            root = Path(args.root or weights_root("ts")).expanduser()
             if not root.exists():
                 print(f"no weights installed under {root}"); return 0
-            import re as _re
-            datasets = sorted((d for d in root.iterdir() if d.is_dir() and _re.match(r"Dataset\d+", d.name)),
-                              key=lambda d: d.name)
+            datasets = _installed_datasets(root)
             total = 0
             for d in datasets:
                 _, b = _du(d); total += b
                 ver = (wfm.installed_version(d) or {}).get("tag", "")
-                print(f"  {d.name:52s} {_human(b):>10s}  {ver}")
+                shown = str(d.relative_to(root))      # <bucket>/Dataset* for a catalog
+                print(f"  {shown:52s} {_human(b):>10s}  {ver}")
             print(f"{len(datasets)} dataset(s), {_human(total)} under {root}")
             return 0
         elif args.wcmd == "remove":
+            import re
             import shutil
             from .tasks import weights_root, _dataset_dirs
             from .errors import InputError
-            root = Path(args.root or weights_root("ts"))
-            dirs = _dataset_dirs(root, args.weights_id)
+            root = Path(args.root or weights_root("ts")).expanduser()
+            wanted = str(args.weights_id)
+            # The id reaches a glob and then an rmtree. `weights remove '*'` matched
+            # and deleted every dataset; `weights remove moose` deleted a whole
+            # ecosystem bucket - and the "listed as <ecosystem>/Dataset<id>" hint
+            # makes typing the bucket name the natural mistake.
+            seg = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+            if not re.fullmatch(rf"{seg}(?:/{seg})?", wanted):
+                raise InputError(
+                    f"{wanted!r} is not a dataset id - give an id, or the name "
+                    "`haversack weights list` prints (`Dataset297_total`, or "
+                    "`totalvibe/Dataset278` for a catalog's)")
+            # `_dataset_dirs` falls back to globbing the id, which matches a
+            # bucket directory by name: `weights remove moose` deleted the whole
+            # ecosystem. Only a Dataset folder is a thing this command removes.
+            dirs = [d for d in _dataset_dirs(root, wanted)
+                    if re.match(r"Dataset\d+", d.name)]
+            if not dirs:                       # the ecosystem catalogs' own subtrees
+                def names(d):
+                    """The spellings that identify one installed dataset folder:
+                    its own name, its `<bucket>/<name>` path as `weights list`
+                    prints it, and the dataset id with or without zero padding
+                    (`Dataset001_x` answers to 1, 001 and Dataset001_x)."""
+                    yield d.name
+                    yield str(d.relative_to(root))
+                    m = re.match(r"Dataset(\d+)", d.name)
+                    if m:
+                        yield m.group(1)
+                        yield str(int(m.group(1)))
+                        yield f"Dataset{m.group(1)}"
+
+                dirs = [d for d in _installed_datasets(root)
+                        if wanted in set(names(d))
+                        or d.name.startswith(f"Dataset{wanted}_")]
             if not dirs:
-                raise InputError(f"no installed weights match {args.weights_id!r} under {root}")
+                raise InputError(
+                    f"no installed weights match {wanted!r} under {root} - `haversack weights "
+                    "list` names what is there - give a name exactly as it prints it, "
+                    "including the <ecosystem>/ prefix, since one dataset id can appear "
+                    "in more than one catalog")
+            # nothing outside the root, whatever the match was
+            base = root.resolve()
+            for d in dirs:
+                if not d.resolve().is_relative_to(base):
+                    raise InputError(f"{d} resolves outside {root}; refusing to delete it")
             for d in dirs:
                 print(f"  {d}", file=sys.stderr)
             if not args.yes:

@@ -364,14 +364,18 @@ class TorchModel:
         self.spacing_zyx = canonical_spacing(p.configuration_manager.spacing,
                                              self.transpose_forward)
         if self.transpose_forward != (0, 1, 2) and not allow_transpose:
-            # The transposed path is implemented and spec-tested, but not yet confirmed
-            # against an external oracle (e.g. moosez output on the same case). Opt in
-            # deliberately rather than getting a silently-unvalidated geometry path.
+            # The transposed path is implemented and spec-tested. It has since been
+            # checked against nnU-Net's own predictor on ONE model
+            # (dentalsegmentator:base: 99.86 % of voxels, Dice 0.999 on the large
+            # structures, in both stored orientations), which is evidence for that
+            # model rather than confirmation of the path - so the gate stays and the
+            # opt-in is per run. Do not remove it on the strength of one model.
             raise UnsupportedModel(
                 f"{self.folder.name}: plans set transpose_forward={self.transpose_forward}. "
-                "haversack implements transposed models but has not yet confirmed them against "
-                "an external oracle - pass allow_transpose=True to run this model, and "
-                "treat the output as pending confirmation.")
+                "haversack implements transposed models but confirms them one at a time "
+                "against an external oracle - pass allow_transpose=True (CLI: "
+                "--allow-transpose; server: haversack serve --allow-transpose) to run this "
+                "model, and treat the output as pending confirmation.")
         self.fold_params = list(p.list_of_parameters)
         # Everything up to here is CPU work (checkpoint read, architecture build, surgery) and
         # safe to do on a helper thread. The device move is deliberately separate: a helper

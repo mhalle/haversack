@@ -1,5 +1,130 @@
 # Changelog
 
+## [Unreleased]
+
+Two data sources and two model catalogs, each on the extension seam that already existed.
+
+### Sources
+
+- **`s3:<bucket>/<key>[!member]`** reaches a fixed list of public buckets - `fcp-indi` (ABIDE,
+  ADHD-200, CoRR, NKI-Rockland), `openneuro.org`, `msd-for-monai` and the IDC buckets. The
+  bucket is an operator allowlist, not something the identifier chooses, because a source that
+  fetched whatever bucket a caller named would fetch from anywhere. `msd-for-monai` holds tar
+  archives, so `!member` does not apply there and its objects come down whole.
+- **`github:<owner>/<repo>@<tag>/<asset>[!member]`** reaches release assets. Both are
+  `ArchiveReadingSource` subclasses built around one `resolve()`, inheriting whole-file fetch,
+  zip-member reading by HTTP range, the decompression cap and the member flattening that makes
+  zip-slip impossible. Neither needs obstore, so both work in a lean install.
+- **A release tag is readable, not immutable.** An asset can be replaced under a published tag
+  and a tag can be moved, so `github:` identities are the `tcia:` kind rather than the `hf:`
+  kind, and a result cached under one can outlive the bytes it describes. `s3:` keys are
+  mutable the same way.
+- **Neither accepts a credential.** Both read public data, a private asset fetched with a
+  caller's token would be cached where every reader of that cache can ask for it, and a token
+  cannot work in either case: S3 answers one with `400 InvalidArgument`, and github.com
+  redirects an authenticated download to a host that rejects it. A supplied token is refused
+  with that explanation rather than dropped.
+- **`Cache-Control: no-cache` now reaches the input.** It skipped the result cache but not the
+  fetched-series cache, so a forced recompute re-segmented stale bytes - and the read-ahead
+  image was not dropped either, so the re-download was paid for and then discarded. Both are
+  invalidated now, on the local dispatcher and on the Modal worker. A discard refuses while
+  another job is reading those bytes, and that refusal is reported on the job as
+  `input_refresh_skipped` from either deployment rather than passed off as a refresh. This
+  only became necessary because these are the first two sources whose identity is not
+  version-pinned.
+- **A refusal that needs no network happens at submit.** An unlisted bucket, or a credential a
+  source does not take, was refused inside the worker: the server answered 202 and then failed,
+  or 502, which reads as an upstream outage rather than a bad request - and on Modal a GPU
+  container had already started. `DataSource.check` is the seam and both doors call it.
+- **`parse_input` knows the built-in prefixes**, computed once at import from the sources
+  themselves. **This fixes a pre-existing bug:** `hf` is two characters and the old shape test
+  needed three, so *every* `hf:` input was treated as a local filename by the command line and
+  by `haversack get`. They work now.
+
+### Catalogs
+
+- **DentalSegmentator** (`dentalsegmentator:base`, weights CC BY 4.0): dento-maxillo-facial
+  CBCT and CT - upper skull, mandible, upper and lower teeth, mandibular canal. Its plans
+  permute the axes, so it needs the transpose opt-in below. The reference Slicer extension also
+  removes connected components under 60 mm3, which haversack does not, so its output carries
+  speckle that tool would have cleaned.
+- **TotalVibeSegmentator** (`totalvibe:*`, Apache-2.0): whole-torso VIBE MRI (`vibe`, 72
+  structures, and `vibe_sagittal`), CT bone models (`ct_bones`, `feet_bones`), `body_regions`,
+  `vertebrae` and `pancreas`. The release publishes nineteen models and the manifest accounts
+  for every one: seven offered, twelve excluded with a reason each - multi-channel (three,
+  which the nnU-Net path does not carry), published without metadata (two), or single-channel
+  but never exercised here (seven). The generator checks each reason against the asset and
+  refuses to run if the release grows a model in neither list. `feet_bones` keeps nnU-Net's
+  label integers where upstream renumbers them into 99-117; the names are unchanged and
+  correctly paired, but a numerical diff against an upstream volume will not line up.
+- **`base` is now an ambiguous short name**, since MRSegmentator already had one. That is the
+  documented behavior for a collision, but it will break a script that says `task="base"`.
+- **One install for three packagings, `ZipManifestEcosystem`.** MOOSE, DentalSegmentator and
+  TotalVibeSegmentator all publish bare nnU-Net checkpoints as zips and all read their labels
+  from the installed checkpoint, so the manifest loading, the version-pin rule, the install and
+  the sidecar live once. A catalog declares data and overrides one method for a real difference
+  in packaging: TotalVibeSegmentator's archives have no `Dataset<id>` parent, so that catalog
+  says where the zip unpacks and nothing else. MRSegmentator deliberately stays off the base -
+  its zips are flat, so the unit that must land atomically is different. (The pin rule compares
+  the tag the install sidecar recorded, not a hash of the bytes; what it rules out is trusting
+  the *manifest's* tag for a folder already on disk.)
+- **The orientation a model needs is read, not hardcoded.** TotalVibeSegmentator reorients per
+  model - RAS for the whole-body and CT models, LPS for the body-region, vertebra and pancreas
+  ones - while the plans still declare a reader that does not reorient. That is the
+  MRSegmentator LPS trap, except upstream states the answer in each checkpoint's own
+  `dataset.json`. Anything that is not three letters naming each anatomical axis once is
+  ignored rather than passed to `DICOMOrient`, and the generator refuses a model that declares
+  none, because a missing one degrades silently into a left/right mirror.
+- **`checkpoint_best.pth` is a fallback.** A published model may ship either; `body_regions`
+  and `vertebrae` ship only `best`. `final` is still preferred, so every model that already ran
+  is byte-identical, and one name is used across every requested fold.
+- **Digests are whichever the publisher states** - Zenodo publishes md5, GitHub sha256, and
+  the install sidecar records the one it verified under that name. Three
+  TotalVibeSegmentator assets are published with no digest at all and are checked against
+  nothing; the manifest records which and why. So are all 21 MOOSE assets, which predates this
+  change and is not something it fixes.
+- **An archive that would replace another task's weights is refused.** Unpacking replaces a
+  directory of the archive's own top-level name, so with a stale manifest one task's download
+  could overwrite another's model and leave it silently running the wrong network. The names
+  are checked before anything is moved. This was true before these catalogs existed.
+- **Installs of one model folder are serialized**, across threads and processes, by an advisory
+  lock. Two callers wanting one task at once is ordinary - two prepares, a prepare racing an
+  on-demand install, two workers on a shared volume - and unlocked they interleave a
+  destroy-then-move; the second caller now finds the work done and fetches nothing.
+- "Installed" means a model folder nnU-Net could load, not any `dataset.json` found underneath,
+  so an interrupted unpack is never mistaken for a finished one. It is deliberately not the
+  stricter `resolve_model_folder`: a folder shipping several configurations and no preferred
+  one is a real install and must not be re-downloaded.
+- macOS zip litter (`__MACOSX/`, `.DS_Store`, `._*`) is dropped on unpack - the DentalSegmentator
+  asset is zipped that way - and interrupted installs no longer strand their part-downloaded
+  archive, which for these models is 100 MB to 1 GB at a time.
+
+### Command line and server
+
+- **`--allow-transpose`** on `haversack segment` and `haversack serve`, and
+  `HAVERSACK_ALLOW_TRANSPOSE` for the Modal worker. Models whose plans permute the axes are
+  refused by default, and the refusal named a Python keyword argument no command line or HTTP
+  client could pass - so `dentalsegmentator:base`, `totalvibe:vibe_sagittal` and
+  `totalvibe:pancreas` were unreachable from every door but the API. It is deployment policy,
+  so it is an operator flag rather than a request parameter.
+- **The weights commands see every catalog.** `weights fetch` went through TotalSegmentator's
+  manifest alone and rejected every moose, mrsegmentator, dentalsegmentator and totalvibe task,
+  while `tasks` told users to run exactly that. `weights list` and `weights remove` now scan the
+  per-ecosystem directories too, so a catalog's models can be listed and deleted rather than
+  needing `rm -rf`, and all three accept `--model-root` as well as `--root`. (`weights
+  coverage` is still TotalSegmentator-only.)
+- **`tasks <name>` prints label order with the label**, and `--json` carries the mapping. It
+  printed names alphabetically, which for a numerically-labelled model gives 1, 10, 11, 2.
+  `describe()` carries `label_map` for the same reason: a caller reading a result cannot
+  assume the labels are 1..N - `feet_bones` uses 1-17 and 99-117 - or that the names sort
+  meaningfully, since several checkpoints name their structures with numbers. **This changes
+  `haversack tasks --json` for existing tasks too**: `structures` is in label order rather
+  than alphabetical for 51 of the 75 tasks a default catalog lists, so a script that relied
+  on the old ordering will see different output.
+- `tools/zippeek.py`: the range-based remote zip reader the manifest generators share, so
+  describing a 1 GB asset costs a few kilobytes and the zip64 parsing exists once. New
+  generators `tools/gen_dentalsegmentator_manifest.py` and `tools/gen_totalvibe_manifest.py`.
+
 ## [0.6.1] - 2026-09-05
 
 Fixes from five adversarial reviews of 0.6.0 (the library, the store path, an outsider's

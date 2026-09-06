@@ -286,6 +286,22 @@ def test_volume_attach_preflight_fails_with_the_remedy(monkeypatch, tmp_path):
         m._check_volumes_attached()
 
 
+def test_the_transpose_knob_is_forwarded_to_the_container():
+    """The Worker reads HAVERSACK_ALLOW_TRANSPOSE at construction, but the
+    container gets only what _RUNTIME_KNOBS forwards at deploy. Unforwarded, the
+    three tasks whose plans permute the axes are listed, described, accepted, and
+    then refused inside the GPU worker - the exact unreachability the flag ends."""
+    from haversack import modal_app
+    assert "HAVERSACK_ALLOW_TRANSPOSE" in modal_app._RUNTIME_KNOBS
+    # every env var the worker reads at runtime must be in the forwarded set,
+    # or the container's copy is simply unset
+    src = pathlib.Path(modal_app.__file__).read_text()
+    worker = src.split("class Worker")[1].split("\nclass ")[0]
+    read_at_runtime = set(re.findall(r'os\.environ(?:\.get)?[(\[]\s*"(HAVERSACK_[A-Z_]+)"', worker))
+    missing = read_at_runtime - set(modal_app._RUNTIME_KNOBS)
+    assert not missing, f"read by the Worker but never forwarded: {sorted(missing)}"
+
+
 def test_a_skipped_input_refresh_reaches_a_modal_caller():
     """The worker records that a requested no-cache refresh could not happen; a
     fixed key whitelist then dropped it, so a caller got a result computed from
