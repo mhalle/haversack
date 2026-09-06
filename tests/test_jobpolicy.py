@@ -235,15 +235,21 @@ class PolicyHasOneHome(unittest.TestCase):
                     callers.append(f"{path.name}:{node.lineno}")
         self.assertEqual(callers, [], f"an unpinned pre-read came back: {callers}")
 
+    #: The last commit whose serve.py carried the bug: two unpinned
+    #: `self.read_ahead.fill(...)` calls. A fixed sha, not a branch name - this
+    #: was first pinned to `main`, which meant the guard's evidence vanished the
+    #: moment the fix was merged there, and the test failed for being right.
+    BUGGY_REVISION = "ad9ca38"
+
     def test_that_guard_catches_the_regression_it_was_written_for(self):
-        """Pin the guard to the code it exists to reject: main's serve.py, which
-        contains two unpinned `self.read_ahead.fill(...)` calls."""
+        """Pin the guard to the code it exists to reject."""
         import subprocess
-        old = subprocess.run(["git", "show", "main:src/haversack/serve.py"],
+        old = subprocess.run(["git", "show", f"{self.BUGGY_REVISION}:src/haversack/serve.py"],
                              capture_output=True, text=True,
                              cwd=SRC.parents[1]).stdout
         if not old:
-            self.skipTest("no `main` to compare against")
+            self.skipTest(f"revision {self.BUGGY_REVISION} is not in this clone "
+                          "(a shallow checkout)")
         found = [n.lineno for n in ast.walk(ast.parse(old))
                  if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                  and n.func.attr == "fill"
