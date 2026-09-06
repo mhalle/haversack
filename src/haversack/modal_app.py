@@ -1171,6 +1171,15 @@ def _spawn_worker(task: str, jid: str, source_tokens=None):
 class ModalExecutor:
     """The :func:`haversack.serve.create_app` executor protocol over Modal primitives."""
 
+    #: Supplied by :func:`api` after construction - the API container builds a
+    #: catalog-only Segmenter (device is cosmetic there; jobs run on the Worker).
+    #: Declared here because `submit` reads it through `weights_versions_of`, so
+    #: it is part of this class's contract rather than a field `api` happens to
+    #: attach: an executor constructed without it fails at submit, not at import.
+    #: tests/test_executor_contract.py checks the declared surface against what
+    #: create_app actually touches, and an undeclared slot reads as a gap.
+    segmenter = None
+
     # One lock per API container: a scratch_vol.reload() here discards other
     # requests' uncommitted upload writes (the api function runs many inputs
     # concurrently), so every reload and every upload-write+commit serialize
