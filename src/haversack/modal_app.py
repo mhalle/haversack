@@ -333,6 +333,8 @@ def _clear_own_artifacts_marker(jid: str, meta: dict) -> None:
 
 
 def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock) -> None:
+    from haversack.jobpolicy import fill_read_ahead
+
     """Best-effort CPU downloader, parallel to this GPU job: watch the shared
     jobs Dict for the oldest OTHER queued idc job and stage its series into the
     /dev/shm series cache. Scans every 2 s for the length of the run - a single
@@ -384,7 +386,8 @@ def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock) -> None:
                         print(f"[prefetch] {series[:13]} staged in {time.time() - t_f:.1f}s "
                               f"(parallel to {current_jid})", flush=True)
                     t_r = time.time()
-                    if read_ahead.fill(series, cache.path(series)):
+                    if fill_read_ahead(series, cache=cache,
+                                       read_ahead=read_ahead):
                         print(f"[read-ahead] {series[:13]} read in {time.time() - t_r:.1f}s "
                               f"(parallel to {current_jid})", flush=True)
                     return                     # one-ahead only
@@ -409,7 +412,8 @@ def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock) -> None:
                     if local is None:
                         stop.wait(2.0)         # upload not visible yet; retry
                         continue
-                    if read_ahead.fill(njid, local):
+                    if fill_read_ahead(njid, read_ahead=read_ahead,
+                                       path=local):
                         print(f"[read-ahead] upload {njid} read in {time.time() - t_r:.1f}s "
                               f"(parallel to {current_jid})", flush=True)
                         return                 # one-ahead only

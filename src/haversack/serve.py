@@ -105,7 +105,7 @@ from . import content
 from .content import ContentStore, is_digest
 from .jobstore import JobStore
 from .errors import Cancelled, InputError, HaversackError, ResourceError
-from .jobpolicy import refresh_cached_input
+from .jobpolicy import fill_read_ahead, refresh_cached_input
 from .progress import CancelToken, Reporter
 
 ACTIVE = ("queued", "running")
@@ -321,6 +321,13 @@ class SeriesCache:
         #: narrowing it again.
         self.graveyard = self.root / self.GRAVEYARD
         self.sweep_stale()                     # a crash between rename and delete
+        #: Debris only appears when a process dies between the rename into the
+        #: graveyard and the delete, so sweeping at construction cleaned up after
+        #: the LAST crash - and a server that stays up for weeks never swept
+        #: again, letting its own crashes accumulate unbounded. _evict re-sweeps
+        #: on this interval instead: no thread, no timer, just the eviction pass
+        #: that already runs after commits.
+        self._last_sweep = time.monotonic()
 
     def _entry(self, series: str) -> Path:
         # Keys become directory names. Filesystem-safe keys keep their readable
@@ -615,10 +622,17 @@ class SeriesCache:
         """Drop a committed, unpinned entry so the next fetch re-reads the source.
 
         Refuses in the two cases where dropping it would break someone: a PIN
-        means a job is reading those bytes right now - the pin exists for exactly
-        this - and a missing marker means another writer holds the claim and owns
-        the directory. Returns whether it dropped anything, so a caller can say so
-        rather than assume.
+        means someone is reading those bytes right now, and a missing marker means
+        another writer holds the claim and owns the directory. Returns whether it
+        dropped anything, so a caller can say so rather than assume.
+
+        "Someone is reading" covers the read-ahead only because
+        :func:`haversack.jobpolicy.fill_read_ahead` pins for the duration of its
+        read. It did not always: a committed entry is unpinned between the writer
+        releasing its claim and the job that wants it taking one, the read-ahead
+        read in exactly that window, and this method would happily rename a DICOM
+        series into the graveyard and delete it while ImageSeriesReader was still
+        walking the directory. The guarantee here is only as good as that pin.
 
         Callers discard BEFORE taking their own pin. Doing it after would make a
         job refuse its own refresh, since the pin count cannot say who holds it.
@@ -655,7 +669,21 @@ class SeriesCache:
         for d in self.graveyard.iterdir():
             shutil.rmtree(d, ignore_errors=True) if d.is_dir() else d.unlink(missing_ok=True)
 
+    #: How often _evict re-sweeps the graveyard. Long, because debris is
+    #: crash-only: the cost of sweeping late is bounded disk, and the cost of
+    #: sweeping often is an iterdir on every eviction pass.
+    SWEEP_INTERVAL = 300.0
+
+    def _maybe_sweep(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_sweep < self.SWEEP_INTERVAL:
+                return
+            self._last_sweep = now         # claimed under the lock: one sweeper
+        self.sweep_stale()                 # outside it: rmtree must not block readers
+
     def _evict(self, keep) -> None:
+        self._maybe_sweep()
         with self._lock:
             protected = set(keep) | set(self._pins)
             entries, kept_bytes = [], 0
@@ -1771,14 +1799,15 @@ class LocalExecutor:
 
             def work():
                 if self.series_cache.has(key) or self.series_cache.prefetch(key):
-                    self.read_ahead.fill(key, self.series_cache.path(key))
+                    fill_read_ahead(key, cache=self.series_cache,
+                                    read_ahead=self.read_ahead)
         else:                                  # upload: bytes are local, hide the read
             key, path = nxt.id, nxt.input_path
             if self.read_ahead.has(key):
                 return
 
             def work():
-                self.read_ahead.fill(key, path)
+                fill_read_ahead(key, read_ahead=self.read_ahead, path=path)
 
         threading.Thread(target=work, name="haversack-prefetch", daemon=True).start()
 

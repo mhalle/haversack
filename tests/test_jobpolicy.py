@@ -11,9 +11,10 @@ These tests cover the rule once, and then assert it still has only one home.
 import ast
 import inspect
 import pathlib
+import tempfile
 import unittest
 
-from haversack.jobpolicy import refresh_cached_input
+from haversack.jobpolicy import fill_read_ahead, refresh_cached_input
 
 SRC = pathlib.Path(inspect.getsourcefile(__import__("haversack"))).parent
 
@@ -115,6 +116,83 @@ class RefreshPolicy(unittest.TestCase):
         self.assertEqual(cache.discard_calls, ["s1"])
 
 
+class PreReadPin(unittest.TestCase):
+    """A committed entry is unpinned between the writer releasing its claim and
+    the job that wants it taking one - and the read-ahead reads in exactly that
+    window. Both deployments used to read there without a pin."""
+
+    def _cache(self, root):
+        from haversack.serve import SeriesCache
+
+        def fetch(series, dest):
+            # the cache addresses an entry's `series/` subdirectory, and a real
+            # series is a DIRECTORY of DICOM files that the reader walks one by one
+            (dest / "series").mkdir(parents=True, exist_ok=True)
+            for i in range(3):
+                (dest / "series" / f"{i:04d}.dcm").write_bytes(b"x" * 64)
+        return SeriesCache(root, fetch)
+
+    def test_a_concurrent_discard_refuses_while_the_pre_read_is_running(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache = self._cache(pathlib.Path(td))
+            self.assertTrue(cache.prefetch("idc:abc"))
+            seen = {}
+
+            class _ReadingReadAhead:
+                def fill(self, key, path):
+                    # what a no-cache job on the same series does, mid-read
+                    seen["discard_won"] = cache.discard(key)
+                    seen["files"] = len(list(pathlib.Path(path).iterdir()))
+                    return True
+
+            fill_read_ahead("idc:abc", cache=cache, read_ahead=_ReadingReadAhead())
+            self.assertFalse(seen["discard_won"],
+                             "discard deleted the series while it was being read")
+            self.assertEqual(seen["files"], 3, "the series vanished mid-read")
+
+    def test_the_pin_is_released_afterwards(self):
+        """Held forever it would be a leak that makes every later no-cache fail."""
+        with tempfile.TemporaryDirectory() as td:
+            cache = self._cache(pathlib.Path(td))
+            cache.prefetch("idc:abc")
+
+            class _RA:
+                def fill(self, key, path):
+                    return True
+
+            fill_read_ahead("idc:abc", cache=cache, read_ahead=_RA())
+            self.assertTrue(cache.discard("idc:abc"))
+
+    def test_the_pin_survives_a_failing_read(self):
+        """A read that raises must still unpin, or one bad input wedges the key."""
+        with tempfile.TemporaryDirectory() as td:
+            cache = self._cache(pathlib.Path(td))
+            cache.prefetch("idc:abc")
+
+            class _Boom:
+                def fill(self, key, path):
+                    raise RuntimeError("unreadable")
+
+            with self.assertRaises(RuntimeError):
+                fill_read_ahead("idc:abc", cache=cache, read_ahead=_Boom())
+            self.assertTrue(cache.discard("idc:abc"), "the pin leaked")
+
+    def test_local_bytes_need_no_pin(self):
+        """An upload already sits on local disk; nothing can evict it."""
+        with tempfile.TemporaryDirectory() as td:
+            f = pathlib.Path(td) / "up.nii.gz"
+            f.write_bytes(b"z")
+            got = {}
+
+            class _RA:
+                def fill(self, key, path):
+                    got["path"] = path
+                    return True
+
+            self.assertTrue(fill_read_ahead("j1", read_ahead=_RA(), path=f))
+            self.assertEqual(got["path"], f)
+
+
 class PolicyHasOneHome(unittest.TestCase):
     """The drift guard. Text search could not see the old duplication, so these
     assert the structural property instead: the decision has exactly one call
@@ -132,6 +210,21 @@ class PolicyHasOneHome(unittest.TestCase):
         self.assertEqual([c.split(":")[0] for c in callers], ["jobpolicy.py"],
                          f"a second place decides to discard a cached input: {callers}")
 
+    def test_only_jobpolicy_fills_the_read_ahead(self):
+        """The pin that makes a pre-read safe lives in fill_read_ahead. A call
+        straight to read_ahead.fill is the unpinned window coming back."""
+        callers = []
+        for path in sorted(SRC.glob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text())):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr == "fill"
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id in ("read_ahead", "_read_ahead")):
+                    callers.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(sorted({c.split(":")[0] for c in callers}), ["jobpolicy.py"],
+                         f"an unpinned pre-read came back: {callers}")
+
     def test_both_deployments_delegate_rather_than_reimplement(self):
         for module in ("serve.py", "modal_app.py"):
             src = (SRC / module).read_text()
@@ -141,3 +234,41 @@ class PolicyHasOneHome(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GraveyardSweep(unittest.TestCase):
+    """Debris is crash-only - a process dying between the rename into the
+    graveyard and the delete. Sweeping only at construction therefore cleaned up
+    after the LAST crash and never again, so a server that stays up for weeks
+    accumulated its own."""
+
+    def _cache(self, root):
+        from haversack.serve import SeriesCache
+        return SeriesCache(root, lambda series, dest: None)
+
+    def test_eviction_re_sweeps_the_graveyard_after_the_interval(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache = self._cache(pathlib.Path(td))
+            debris = cache.graveyard / "idc%3Aabc-999-123"
+            debris.mkdir(parents=True)
+            (debris / "0000.dcm").write_bytes(b"x")
+
+            cache._evict(keep=set())
+            self.assertTrue(debris.exists(), "swept before the interval elapsed")
+
+            cache._last_sweep -= cache.SWEEP_INTERVAL + 1
+            cache._evict(keep=set())
+            self.assertFalse(debris.exists(), "a long-lived server never re-sweeps")
+
+    def test_the_sweep_never_reaches_outside_the_graveyard(self):
+        """Entry names come from cache keys, so no pattern in that namespace can
+        be trusted to mean 'discarded' - `s3:b/x.stale1` is a legal object. Two
+        bugs came from matching names there."""
+        with tempfile.TemporaryDirectory() as td:
+            cache = self._cache(pathlib.Path(td))
+            live = cache.root / "s3%3Ab%2Fx.stale1"
+            live.mkdir(parents=True)
+            (live / ".done").write_text("")
+            cache._last_sweep -= cache.SWEEP_INTERVAL + 1
+            cache._evict(keep=set())
+            self.assertTrue(live.exists(), "the sweep deleted a live entry")

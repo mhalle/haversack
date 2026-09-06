@@ -70,3 +70,30 @@ def refresh_cached_input(key: str, *, wanted: bool, cache, reporter, on_skipped,
     reporter.stage("fetch", "cached (no-cache could not refresh: input in use)")
     on_skipped()
     return False
+
+
+def fill_read_ahead(key: str, *, read_ahead, cache=None, path=None) -> bool:
+    """Pre-read an input into the read-ahead, holding a pin for the whole read.
+
+    The pin is the point. A committed cache entry is unpinned between the writer
+    releasing its claim and the job that wants it taking one, and the read-ahead
+    reads in exactly that window - so without this a concurrent ``discard`` (a
+    ``no-cache`` on the same series) or an LRU ``_evict`` under budget pressure
+    renames the entry into the graveyard and deletes it *while this read is
+    walking it*.
+
+    A DICOM series is a directory that ``ImageSeriesReader`` opens file by file,
+    so the failure is not a clean error on one handle: it is a partial read of a
+    series that no longer exists. Both deployments had this window, which is why
+    it is fixed here rather than twice.
+
+    ``path`` is for bytes that are already local (an upload): nothing to pin,
+    because nothing else can evict them.
+    """
+    if path is not None:
+        return read_ahead.fill(key, path)
+    cache.pin(key)
+    try:
+        return read_ahead.fill(key, cache.path(key))
+    finally:
+        cache.unpin(key)
