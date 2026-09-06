@@ -16,6 +16,36 @@ decision, with its collaborators passed in. Both callers stay thin, and
 """
 from __future__ import annotations
 
+from typing import NamedTuple
+
+#: The job protocol's terminal states - the one place they are written.
+#:
+#: They had five independent definitions: serve.TERMINAL, jobstore.TERMINAL,
+#: modal_app._TERMINAL, an inline literal inside modal_app._purgeable, and a
+#: local in client.wait. Adding a sixth state would have needed five edits, and
+#: missing one fails silently and asymmetrically - a client that polls forever,
+#: a purge that never collects, a cancel that a progress update resurrects.
+TERMINAL = ("done", "failed", "cancelled")
+
+
+def purgeable(meta, now: float, ttl_s: float) -> bool:
+    """May this job record be dropped?
+
+    Terminal and older than the TTL. Queued and running records are NEVER purged
+    by age: a stale active record is a symptom to surface, not to tidy away.
+    Garbage that is not a record at all is purgeable.
+
+    The sqlite jobstore cannot call this - it decides in SQL, over rows it never
+    loads - so ``reap`` states the same rule as a WHERE clause built from the
+    same TERMINAL tuple, and tests/test_jobpolicy.py checks the two agree case
+    by case rather than trusting that they read alike.
+    """
+    if not isinstance(meta, dict):
+        return True
+    if meta.get("state") not in TERMINAL:
+        return False
+    return (now - float(meta.get("finished") or meta.get("created") or now)) > ttl_s
+
 
 def refresh_cached_input(key: str, *, wanted: bool, cache, reporter, on_skipped,
                          read_ahead=None, already: set | None = None) -> bool:
@@ -97,3 +127,34 @@ def fill_read_ahead(key: str, *, read_ahead, cache=None, path=None) -> bool:
         return read_ahead.fill(key, cache.path(key))
     finally:
         cache.unpin(key)
+
+
+class SourceKey(NamedTuple):
+    """How one job input is addressed in the series cache."""
+    kind: str
+    ident: str
+    key: str
+
+
+def source_cache_key(source) -> SourceKey | None:
+    """The series-cache identity of one job input, or None when it has none.
+
+    Six places built this key by hand - three in serve, three in modal_app - and
+    the prefetcher had to agree with the dispatcher on every one of them or it
+    warmed a slot nothing ever looked up. That failure is silent: no error, just
+    a download paid for twice and a cache that never hits.
+
+    They also did not quite agree. The multi-input paths coerced a missing
+    identifier with ``str(... or "")`` and the single-input paths did not, so the
+    same absent id produced ``"idc:"`` on one path and the literal ``"idc:None"``
+    on the other. This settles on the coercing spelling.
+
+    Returns None for inputs that are not series-cached at all: an ``upload`` is
+    local bytes, and an ``input`` is resolved through the content store.
+    """
+    src = source or {}
+    kind = src.get("kind", "upload")
+    if kind in ("upload", "input"):
+        return None
+    ident = str(src.get("id") or src.get("crdc_series_uuid") or "")
+    return SourceKey(kind, ident, f"{kind}:{ident}")

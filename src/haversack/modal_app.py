@@ -333,7 +333,6 @@ def _clear_own_artifacts_marker(jid: str, meta: dict) -> None:
 
 
 def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock) -> None:
-    from haversack.jobpolicy import fill_read_ahead
 
     """Best-effort CPU downloader, parallel to this GPU job: watch the shared
     jobs Dict for the oldest OTHER queued idc job and stage its series into the
@@ -357,10 +356,9 @@ def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock) -> None:
             if m.get("state") != "queued" or m.get("kind") == "prepare":
                 continue                       # prepare has no input to stage
             src = (m.get("source") or [{"kind": "upload"}])[0]
-            kind = src.get("kind", "upload")
-            ident = src.get("id") or src.get("crdc_series_uuid")
-            if kind != "upload" and ident:
-                cands.append((m.get("created", 0), kind, f"{kind}:{ident}", m["id"]))
+            sk = source_cache_key(src)
+            if sk is not None and sk.ident:
+                cands.append((m.get("created", 0), sk.kind, sk.key, m["id"]))
             else:
                 cands.append((m.get("created", 0), "upload", None, m["id"]))
         return min(cands)[1:] if cands else None
@@ -427,14 +425,11 @@ def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock) -> None:
 
 
 def _purgeable(meta: dict, now: float, ttl_s: float) -> bool:
-    """A job record may be purged when it is terminal and its ``finished``
-    stamp is older than the TTL. Queued/running records are never purged by
-    age - a stale active record is a symptom to surface, not tidy away."""
-    if not isinstance(meta, dict):
-        return True
-    if meta.get("state") not in ("done", "failed", "cancelled"):
-        return False
-    return (now - float(meta.get("finished") or meta.get("created") or now)) > ttl_s
+    """The shared retention rule - see :func:`haversack.jobpolicy.purgeable`.
+    Kept as a name here because the module's callers and tests use it."""
+    from haversack.jobpolicy import purgeable
+
+    return purgeable(meta, now, ttl_s)
 
 
 def _bound_jobs_store(current_jid: str) -> None:
@@ -494,7 +489,9 @@ def _bound_jobs_store(current_jid: str) -> None:
         print(f"[purge] failed: {e}", flush=True)
 
 
-_TERMINAL = ("done", "failed", "cancelled")
+from haversack.jobpolicy import (TERMINAL as _TERMINAL,  # noqa: E402
+                                 fill_read_ahead, refresh_cached_input,
+                                 source_cache_key)
 
 
 def _emit(jid: str, update: dict) -> None:
@@ -552,8 +549,6 @@ def _refresh_series(ctx, meta: dict, key: str, rep, already: set | None = None) 
     the local executor sets a field on its job record, this emits into the Modal
     jobs dict.
     """
-    from haversack.jobpolicy import refresh_cached_input
-
     refresh_cached_input(key,
                          wanted=bool((meta or {}).get("refresh_input")),
                          cache=ctx.series_cache,
@@ -624,8 +619,8 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
                     staged[role] = ctx.content.resolve(
                         str(entry.get("id") or entry.get("sha256") or ""))
                     continue
-                ident = str(entry.get("id") or entry.get("crdc_series_uuid") or "")
-                key = f"{kind}:{ident}"
+                sk = source_cache_key(entry)
+                ident, key = sk.ident, sk.key
                 _refresh_series(ctx, meta, key, rep, refreshed)   # BEFORE our own pin
                 ctx.series_cache.pin(key)
                 pinned.append(key)
@@ -643,8 +638,8 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
         elif kind != "upload":
             src = entries[0]
             rep = Reporter.of(on_progress, cancel=token)
-            ident = src.get("id") or src.get("crdc_series_uuid")
-            key = f"{kind}:{ident}"
+            sk = source_cache_key(src)
+            ident, key = sk.ident, sk.key
             _refresh_series(ctx, meta, key, rep)       # BEFORE our own pin
             ctx.series_cache.pin(key)
             pinned.append(key)

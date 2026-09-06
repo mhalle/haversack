@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 
 from .errors import InputError, HaversackError
+from .jobpolicy import TERMINAL
 
 
 class RemoteError(HaversackError):
@@ -153,14 +154,13 @@ class RemoteClient:
     def wait(self, job_id: str, *, on_status=None, poll_interval: float = 0.5) -> dict:
         """Block until the job is terminal; returns the final status. Prefers SSE,
         falls back to polling on any stream problem."""
-        terminal = ("done", "failed", "cancelled")
         last = None
         try:
             for snap in self.events(job_id):
                 last = snap
                 if on_status:
                     on_status(snap)
-                if snap["state"] in terminal:
+                if snap["state"] in TERMINAL:
                     return snap
         except Exception:
             pass                                   # stream unavailable - poll instead
@@ -169,7 +169,7 @@ class RemoteClient:
             if snap != last and on_status:
                 on_status(snap)
             last = snap
-            if snap["state"] in terminal:
+            if snap["state"] in TERMINAL:
                 return snap
             time.sleep(poll_interval)
 

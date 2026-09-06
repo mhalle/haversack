@@ -105,13 +105,15 @@ from . import content
 from .content import ContentStore, is_digest
 from .jobstore import JobStore
 from .errors import Cancelled, InputError, HaversackError, ResourceError
-from .jobpolicy import fill_read_ahead, refresh_cached_input
+from .jobpolicy import (fill_read_ahead, refresh_cached_input,
+                        source_cache_key)
 from .progress import CancelToken, Reporter
 
 ACTIVE = ("queued", "running")
 ARTIFACT_PENDING_TTL = 900.0   # a pending marker older than this is a dead
                                # overlap thread's leavings (mirrors Modal's sweep)
-TERMINAL = ("done", "failed", "cancelled")
+#: Defined in jobpolicy; imported here so the wire vocabulary has one source.
+from .jobpolicy import TERMINAL  # noqa: E402
 RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default artifact
 from .sources import (CRDC_RE, IDC_BUCKETS, check_identifier as _check_identifier,  # noqa: E402
                       registry as _source_registry)
@@ -1619,8 +1621,8 @@ class LocalExecutor:
             if kind == "input":
                 staged[role] = self._from_store(entry, pinned)
                 continue
-            ident = str(entry.get("id") or entry.get("crdc_series_uuid") or "")
-            key = f"{kind}:{ident}"
+            sk = source_cache_key(entry)
+            ident, key = sk.ident, sk.key
             self._refresh_input(rec, key, reporter, refreshed)   # BEFORE our own pin
             self.series_cache.pin(key)
             pinned.append(key)
@@ -1672,8 +1674,8 @@ class LocalExecutor:
                     if kind == "input":
                         rec.input_path = inp = self._from_store(src, pinned)
                     elif kind != "upload":
-                        ident = src.get("id") or src.get("crdc_series_uuid")
-                        key = f"{kind}:{ident}"
+                        sk = source_cache_key(src)
+                        ident, key = sk.ident, sk.key
                         self._refresh_input(rec, key, reporter)   # BEFORE our own pin
                         self.series_cache.pin(key)
                         pinned.append(key)
@@ -1837,10 +1839,9 @@ class LocalExecutor:
             # it, and a pre-read nobody claims is pure waste.
             return
         src = nxt.source[0] if nxt.source else {"kind": "upload"}
-        kind = src.get("kind", "upload")
-        ident = src.get("id") or src.get("crdc_series_uuid")
-        if kind != "upload" and ident:
-            key = f"{kind}:{ident}"
+        sk = source_cache_key(src)
+        if sk is not None and sk.ident:
+            key = sk.key
             if self.series_cache.staging(key) or self.read_ahead.has(key):
                 return                         # another writer, or already read
 

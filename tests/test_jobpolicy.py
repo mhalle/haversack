@@ -333,3 +333,128 @@ class ClaimIsAtomicWithItsIdentity(unittest.TestCase):
             (entry / cache.CLAIM).unlink()      # an entry committed with no claim left
             self.assertIsNone(cache._claim(entry),
                               "claimed an already-committed entry")
+
+
+class RetentionAgreesAcrossSubstrates(unittest.TestCase):
+    """One retention rule, two substrates that cannot share code.
+
+    The Modal deployment evaluates `purgeable` over records loaded from its job
+    dict; the local server decides in SQL over rows it never loads. `reap`'s
+    docstring used to simply assert the two agreed - "the same policy Modal's
+    jobs store already runs" - and nothing checked it. This drives both over the
+    same cases instead.
+    """
+
+    CASES = [
+        ("done, long past the ttl",        {"state": "done", "finished": -7200}, True),
+        ("failed, long past the ttl",      {"state": "failed", "finished": -7200}, True),
+        ("cancelled, long past the ttl",   {"state": "cancelled", "finished": -7200}, True),
+        ("done, still inside the ttl",     {"state": "done", "finished": -60}, False),
+        ("done, exactly at the boundary",  {"state": "done", "finished": -3600}, False),
+        ("queued since forever",           {"state": "queued", "created": -10 ** 6}, False),
+        ("running since forever",          {"state": "running", "started": -10 ** 6}, False),
+        ("terminal with no finished stamp", {"state": "done", "created": -7200}, True),
+    ]
+    TTL = 3600.0
+
+    def test_sql_and_python_reach_the_same_verdict(self):
+        from haversack.jobpolicy import purgeable
+        from haversack.jobstore import JobStore
+
+        now = 1_000_000.0
+        with tempfile.TemporaryDirectory() as td:
+            store = JobStore(pathlib.Path(td) / "jobs.db")
+            expected = {}
+            for i, (label, fields, want) in enumerate(self.CASES):
+                jid = f"j{i}"
+                rec = {"id": jid, "task": "ts:total", "kind": "segment",
+                       "cache_key": None, "state": fields["state"],
+                       "created": now + fields.get("created", -10),
+                       "started": None,
+                       "finished": (now + fields["finished"]
+                                    if "finished" in fields else None)}
+                store.put(rec)
+                meta = {k: v for k, v in rec.items() if v is not None}
+                self.assertEqual(purgeable(meta, now, self.TTL), want,
+                                 f"python verdict wrong for {label}")
+                expected[jid] = want
+
+            reaped = set(store.reap(self.TTL, now=now))
+            for jid, want in expected.items():
+                label = self.CASES[int(jid[1:])][0]
+                self.assertEqual(jid in reaped, want,
+                                 f"sql and python disagree on {label}")
+
+    def test_garbage_that_is_not_a_record_is_purgeable(self):
+        from haversack.jobpolicy import purgeable
+        self.assertTrue(purgeable(None, 1000.0, 60.0))
+        self.assertTrue(purgeable("not a dict", 1000.0, 60.0))
+
+
+class TerminalStatesHaveOneDefinition(unittest.TestCase):
+    """They had five: serve.TERMINAL, jobstore.TERMINAL, modal_app._TERMINAL, an
+    inline literal inside _purgeable, and a local in client.wait. A sixth state
+    would have needed five edits, and a missed one fails silently and
+    asymmetrically - a client polling forever, a purge that never collects."""
+
+    def test_nothing_else_spells_the_set_out(self):
+        spellings = []
+        for path in sorted(SRC.glob("*.py")):
+            if path.name == "jobpolicy.py":
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+                    vals = [e.value for e in node.elts
+                            if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+                    if set(vals) == {"done", "failed", "cancelled"}:
+                        spellings.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(spellings, [],
+                         f"the terminal set is written again at {spellings}")
+
+    def test_every_module_that_needs_them_gets_the_same_object(self):
+        from haversack import jobpolicy, jobstore, serve
+        from haversack.modal_app import _TERMINAL
+        self.assertIs(serve.TERMINAL, jobpolicy.TERMINAL)
+        self.assertIs(jobstore.TERMINAL, jobpolicy.TERMINAL)
+        self.assertIs(_TERMINAL, jobpolicy.TERMINAL)
+
+
+class SourceKeysAreDerivedOnce(unittest.TestCase):
+    """Six places built the series-cache key by hand - three in serve, three in
+    modal_app - and the prefetcher had to agree with the dispatcher on every one
+    or it warmed a slot nothing looked up. That miss is silent: no error, just a
+    download paid for twice."""
+
+    def test_the_shapes_a_source_can_take(self):
+        from haversack.jobpolicy import source_cache_key as k
+        self.assertIsNone(k({"kind": "upload"}))
+        self.assertIsNone(k({"kind": "input", "id": "sha256:ab"}))
+        self.assertIsNone(k(None))                   # missing source == upload
+        self.assertIsNone(k({}))
+
+        sk = k({"kind": "idc", "crdc_series_uuid": "abc-123"})
+        self.assertEqual((sk.kind, sk.ident, sk.key), ("idc", "abc-123", "idc:abc-123"))
+        sk = k({"kind": "s3", "id": "fcp-indi/x.nii.gz"})
+        self.assertEqual(sk.key, "s3:fcp-indi/x.nii.gz")
+
+    def test_a_source_with_no_identifier_does_not_become_the_string_None(self):
+        """The single-input paths used to build "idc:None" from an absent id
+        while the multi-input paths built "idc:" for the same source. Two
+        spellings of one derivation, disagreeing on the case that matters."""
+        from haversack.jobpolicy import source_cache_key
+        sk = source_cache_key({"kind": "idc"})
+        self.assertEqual(sk.ident, "")
+        self.assertNotIn("None", sk.key)
+
+    def test_nothing_builds_the_key_by_hand_any_more(self):
+        # Only the two job substrates: sources.py builds a string of the same
+        # shape for a progress message and a .done marker, which is a different
+        # thing that happens to read alike.
+        pattern = '{kind}:{ident}'
+        offenders = []
+        for path in (SRC / "serve.py", SRC / "modal_app.py"):
+            for i, line in enumerate(path.read_text().splitlines(), 1):
+                if pattern in line:
+                    offenders.append(f"{path.name}:{i}")
+        self.assertEqual(offenders, [],
+                         f"a hand-built cache key came back at {offenders}")

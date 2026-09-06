@@ -41,7 +41,7 @@ import warnings
 import time
 from pathlib import Path
 
-TERMINAL = ("done", "failed", "cancelled")
+from .jobpolicy import TERMINAL
 LIVE = ("queued", "running")
 
 #: Columns that are queried or ordered on live in their own fields; everything
@@ -158,8 +158,14 @@ class JobStore:
     # -- lifecycle ----------------------------------------------------------
     def reap(self, ttl_s: float, now: float | None = None) -> list:
         """Drop terminal records older than the TTL; returns their ids so the
-        caller can remove the directories they own. The same policy Modal's
-        jobs store already runs, so the two substrates agree."""
+        caller can remove the directories they own.
+
+        This decides in SQL, over rows it never loads, so it cannot call
+        :func:`haversack.jobpolicy.purgeable` - but it must agree with it, since
+        the Modal substrate runs that one over its own job dict. The WHERE
+        clause is built from the shared TERMINAL tuple, and a differential test
+        drives both implementations over the same cases rather than trusting
+        that they read alike."""
         now = now if now is not None else time.time()
         with self._lock:
             rows = self._db.execute(
