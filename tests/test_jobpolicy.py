@@ -272,3 +272,64 @@ class GraveyardSweep(unittest.TestCase):
             cache._last_sweep -= cache.SWEEP_INTERVAL + 1
             cache._evict(keep=set())
             self.assertTrue(live.exists(), "the sweep deleted a live entry")
+
+
+class ClaimIsAtomicWithItsIdentity(unittest.TestCase):
+    """The property the linked claim buys, under contention rather than by
+    inspection: many threads racing one key, exactly one writer, and never a
+    moment where a claim exists without naming someone."""
+
+    def test_one_writer_wins_and_the_claim_is_never_anonymous(self):
+        import threading
+        from haversack.serve import SeriesCache
+
+        with tempfile.TemporaryDirectory() as td:
+            cache = SeriesCache(pathlib.Path(td), lambda s, e: e / "series")
+            entry = cache._entry("s3:b/x")
+            tokens, anonymous, stop = [], [], threading.Event()
+
+            def watcher():
+                """Poll the claim throughout the race. If claiming were still two
+                operations this is what would catch the window."""
+                while not stop.is_set():
+                    if (entry / cache.CLAIM).exists() and cache._owner_of(entry) is None:
+                        anonymous.append(True)
+
+            w = threading.Thread(target=watcher, daemon=True)
+            w.start()
+            barrier = threading.Barrier(8)
+
+            def claimer():
+                barrier.wait()
+                tokens.append(cache._claim(entry))
+
+            threads = [threading.Thread(target=claimer) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            stop.set()
+            w.join(timeout=2)
+
+            won = [t for t in tokens if t is not None]
+            self.assertEqual(len(won), 1, f"{len(won)} writers claimed one series")
+            self.assertEqual(cache._owner_of(entry), won[0])
+            self.assertEqual(anonymous, [], "a claim existed without an owner")
+
+    def test_a_committed_entry_is_never_re_claimed(self):
+        """A writer racing a commit must not re-fetch over finished bytes."""
+        from haversack.serve import SeriesCache
+
+        with tempfile.TemporaryDirectory() as td:
+            def fetch(series, entry):
+                out = entry / "series"
+                out.mkdir(parents=True, exist_ok=True)
+                (out / "a.bin").write_bytes(b"ok")
+                return out
+
+            cache = SeriesCache(pathlib.Path(td), fetch)
+            cache.get_or_fetch("s3:b/x")
+            entry = cache._entry("s3:b/x")
+            (entry / cache.CLAIM).unlink()      # an entry committed with no claim left
+            self.assertIsNone(cache._claim(entry),
+                              "claimed an already-committed entry")

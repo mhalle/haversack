@@ -292,13 +292,26 @@ def safe_path_component(key: str) -> str:
 
 class SeriesCache:
     """Series-keyed staging for fetched inputs: one directory per series under
-    ``root``, claimed by atomic mkdir, committed by a ``.done`` marker holding
-    the entry's byte count, evicted least-recently-used past ``budget_bytes``.
-    One writer per series ever; readers wait on the marker. A directory without
-    the marker is a writer mid-flight and is never read; a claim whose writer
-    died (directory removed) ends the wait immediately; a claim stuck past
-    ``claim_timeout`` is torn down and re-fetched. This is what lets several
-    tasks on the same image download the series once."""
+    ``root``, committed by a ``.done`` marker holding the entry's byte count,
+    evicted least-recently-used past ``budget_bytes``. One writer per series
+    ever; readers wait on the marker. This is what lets several tasks on the
+    same image download the series once.
+
+    Two files carry all the meaning, and the DIRECTORY carries none:
+
+    ``.owner``   the claim, published by one ``os.link`` so it names its owner
+                 from the instant it exists (see :meth:`_claim`). Present
+                 without ``.done`` means a writer is mid-flight, and the entry
+                 is never read.
+    ``.done``    committed, and readable.
+
+    A bare directory with neither is abandoned scaffolding that the next writer
+    simply claims inside. That used to be an *ownerless claim* - the one state
+    the protocol could not identify, and the reason it grew an mtime-based
+    freshness heuristic, an owner re-read immediately before the reclaim rename,
+    and an extension counter. A claim whose writer died is reclaimed after
+    ``claim_timeout``; a claim whose writer is still alive is never reclaimed,
+    because two writers on one path produce a mixed series."""
 
     MARKER = ".done"
     GRAVEYARD = ".graveyard"
@@ -373,46 +386,94 @@ class SeriesCache:
             else:
                 self._pins[name] = n
 
-    def _claim_owner(self, entry: Path) -> str:
-        """Stamp a fresh claim with an owner token. A writer may only tear
-        down a claim it still owns: after a false-dead reclaim (graveyard
-        rename + re-claim), the ORIGINAL writer's path names the successor's
-        claim, and deleting by bare path destroyed the successor's staging
-        (adversarial round, 2026-08-25)."""
+    #: The claim. Its presence means "a writer holds this entry"; its CONTENT is
+    #: that writer's identity. Both arrive in one operation - see :meth:`_claim`.
+    CLAIM = ".owner"
+
+    def _claim(self, entry: Path, *, marker=None) -> str | None:
+        """Take the claim on ``entry``, or None if another writer holds it.
+
+        The claim and its identity arrive TOGETHER. The token is written to a
+        private temp file inside the entry first, and one ``os.link`` publishes
+        it; link is atomic and fails with EEXIST when the claim is taken, so the
+        instant a claim becomes visible it already names its owner.
+
+        That is the whole point. The old protocol claimed by ``mkdir`` and wrote
+        ``.owner`` afterwards, leaving a window where a claim existed that nobody
+        could identify - and ``_owner_of`` returning None could not tell a writer
+        that crashed before naming itself from a successor two statements in.
+        Every guard around the reclaim path existed to paper over that window:
+        an mtime-based freshness heuristic, a re-read of the owner immediately
+        before the rename, an extension counter. The window is now gone rather
+        than guarded, so the directory's own existence carries no meaning at all -
+        only this file and ``.done`` do.
+
+        ``os.link`` is used rather than ``os.symlink``, which has the same
+        atomic-create-with-payload property, because symlinks need Developer Mode
+        or SeCreateSymbolicLinkPrivilege on Windows while hard links do not. The
+        temp file lives inside the entry so it cannot land on another filesystem,
+        which a hard link may not cross.
+        """
+        entry.mkdir(parents=True, exist_ok=True)
+        claim = entry / self.CLAIM
         token = uuid.uuid4().hex
+        tmp = entry / f".owner.tmp.{token}"
         try:
-            (entry / ".owner").write_text(token)
+            tmp.write_text(token)
+            try:
+                os.link(tmp, claim)
+            except FileExistsError:
+                return None                # another writer got there first
+            except OSError:
+                # A filesystem with no hard links (FAT32, some network mounts).
+                # Degrade to exclusive-create then write: still one writer, but
+                # the token lands a syscall late, so an EMPTY claim is possible.
+                # `_owner_of` treats that as a live claim being established and
+                # refuses to reclaim it - failing safe costs a retry, the other
+                # way costs a mixed series.
+                try:
+                    fd = os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                except FileExistsError:
+                    return None
+                except OSError:
+                    return None            # read-only cache root: never claim
+                with os.fdopen(fd, "w") as f:
+                    f.write(token)
+            if (marker or (entry / self.MARKER)).exists():
+                # Committed under us between the caller's marker check and this
+                # claim. Release it: re-fetching over a finished entry would
+                # replace good bytes and reset their LRU age for nothing.
+                claim.unlink(missing_ok=True)
+                return None
+            return token
         except OSError:
-            pass
-        return token
-
-    def _claim_is_fresh(self, entry: Path) -> bool:
-        """Whether an ownerless claim was made too recently to be a crash.
-
-        Used only when `.owner` cannot be read, which is the one case the owner
-        token cannot decide. Absent a readable timestamp, assume fresh: refusing
-        to reclaim costs a retry, reclaiming a live claim costs a mixed series."""
-        try:
-            return (time.time() - entry.stat().st_mtime) < self.claim_timeout
-        except OSError:
-            return True
+            return None                    # cannot write into the entry at all
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def _owner_of(self, entry: Path) -> str | None:
-        """The claim's owner token, or None when it cannot be read."""
+        """The claim's owner, or None when there is NO claim.
+
+        The distinction the old layout could not draw: None now means unclaimed,
+        never "claimed by someone we cannot name". The one exception is the
+        no-hard-link fallback in :meth:`_claim`, where an empty file is a claim
+        mid-establishment; it reads as a live claim so nothing reclaims it.
+        """
         try:
-            return (entry / ".owner").read_text()
+            return (entry / self.CLAIM).read_text() or "<establishing>"
         except OSError:
             return None
 
     def _teardown_claim(self, entry: Path, token: str) -> None:
-        """Remove a failed claim - only while this writer PROVABLY owns it.
-        Unprovable (unreadable/absent .owner) means refuse: the successor's
-        claim exists ownerless between its mkdir and its .owner write, and a
-        writer whose own .owner write failed must not stay licensed to
-        delete whatever later occupies the path. An abandoned claim costs
-        one claim_timeout - the reclaim path collects it."""
+        """Remove a failed claim - only while this writer still owns it.
+
+        An absent or different claim means someone else reclaimed the path, and
+        deleting by bare path would destroy THEIR staging. Under the linked claim
+        a missing file can no longer mean "our own owner write failed", because
+        the token is written before the claim exists at all: it means the claim
+        is not ours any more. Refuse either way."""
         try:
-            if (entry / ".owner").read_text() != token:
+            if (entry / self.CLAIM).read_text() != token:
                 return                     # reclaimed by a successor: not ours
         except OSError:
             return                         # cannot prove ownership: never delete
@@ -449,8 +510,13 @@ class SeriesCache:
         return (time.time() - newest) < self.claim_timeout
 
     def staging(self, series: str) -> bool:
+        """Is a writer mid-flight on this series?
+
+        The CLAIM answers it, not the directory: a bare directory with neither
+        claim nor marker is abandoned scaffolding that anyone may take over.
+        """
         e = self._entry(series)
-        return e.exists() and not (e / self.MARKER).exists()
+        return (e / self.CLAIM).exists() and not (e / self.MARKER).exists()
 
     def get_or_fetch(self, series: str, *, check=None, credentials=None,
                      fetch=None) -> Path:
@@ -478,76 +544,55 @@ class SeriesCache:
                                                # `continue` here spins the one dispatcher
                                                # thread forever at 100% CPU.
                 return entry / "series"
-            try:
-                entry.mkdir(parents=True)      # atomic claim: one writer per series
-            except FileExistsError:
+            token = self._claim(entry, marker=marker)
+            if token is None:
+                # Another writer holds it. Wait on the MARKER, and let the owner
+                # tell us what is happening - it is always readable now, so the
+                # states are exact rather than inferred: a claim that is present
+                # and unchanged, a claim that changed hands, or no claim at all.
                 deadline = time.time() + self.claim_timeout
                 extensions = 0
                 while not marker.exists():
-                    if not entry.exists():
-                        break                  # writer failed and cleaned up; reclaim
+                    owner_before = self._owner_of(entry)
+                    if owner_before is None:
+                        break                  # claim released: retake it on the next pass
                     if time.time() > deadline:
-                        # read BEFORE the liveness check: _writer_alive walks a
-                        # staging tree that can hold thousands of files, so the
-                        # window between its verdict and the rename below is wide
-                        owner_before = self._owner_of(entry)
-                        # An ownerless claim is either a crash between the mkdir
-                        # and the owner write, or a SUCCESSOR inside that same
-                        # two-statement window. Comparing None to None could not
-                        # tell them apart and destroyed the live one. The
-                        # directory's own age can: a successor's is microseconds
-                        # old, a crashed claim's is older than the timeout.
-                        if owner_before is None and self._claim_is_fresh(entry):
-                            alive = True
-                        else:
-                            alive = self._writer_alive(entry)
-                        if alive:
+                        # Read the owner BEFORE the liveness check, which walks a
+                        # staging tree that can hold thousands of files - the
+                        # window between its verdict and the rename below is wide.
+                        if self._writer_alive(entry):
                             if extensions < 3:
-                                # slow but alive: extend rather than destroy -
-                                # a timeout teardown of a LIVE writer aliases
-                                # two writers onto one path and they destroy
-                                # each other's work
+                                # slow but alive: extend rather than destroy. A
+                                # timeout teardown of a LIVE writer aliases two
+                                # writers onto one path and they destroy each
+                                # other's work.
                                 extensions += 1
                                 deadline = time.time() + self.claim_timeout
                             else:
                                 # STILL alive after 4x claim_timeout: give up
-                                # loudly. A live writer is NEVER reclaimed -
-                                # the owner token guards teardown, not
-                                # _commit, and a round-4 probe showed the
-                                # reclaim committing a MIXED series (two
-                                # writers' slices in one entry) as complete.
-                                # One writer per series is the invariant; the
-                                # waiter's job fails retryably instead.
+                                # loudly. A live writer is NEVER reclaimed - a
+                                # round-4 probe showed the reclaim committing a
+                                # MIXED series (two writers' slices in one entry)
+                                # as complete. One writer per series is the
+                                # invariant; the waiter fails retryably instead.
                                 raise ResourceError(
                                     f"staging of {series!r} has been held for "
                                     f"{4 * self.claim_timeout:.0f}s by a writer that is "
-                                    "still alive, or whose ownership cannot be proved; "
-                                    "giving up rather than risk a mixed series - retry later")
+                                    "still alive; giving up rather than risk a mixed "
+                                    "series - retry later")
+                        elif self._owner_of(entry) != owner_before:
+                            # It changed hands while we were walking the tree.
+                            # Whoever holds it now is not who we judged dead, so
+                            # wait on them rather than destroy their work. This
+                            # comparison is now decisive: under the old layout a
+                            # successor was ownerless for two statements and read
+                            # as None on both sides of the check.
+                            extensions += 1
+                            deadline = time.time() + self.claim_timeout
                         else:
-                            # dead claim: rename to a graveyard name first so
-                            # the old writer's paths stop aliasing the reclaim
-                            # into the graveyard - but only if it is still the
-                            # SAME claim. Another process can reclaim in the
-                            # window above, re-mkdir the path and start fetching,
-                            # and renaming by bare path then drags a LIVE claim
-                            # into the graveyard and deletes it. That is the
-                            # failure the owner token was added for in
-                            # _teardown_claim; this is its other half.
-                            # Re-ask, immediately before the rename, whether this
-                            # is still the claim we judged dead. `_writer_alive`
-                            # walks a staging tree that can hold thousands of
-                            # files, so a successor can appear during the walk -
-                            # and for an ownerless claim the owner token cannot
-                            # see it, which is why the age is re-checked too.
-                            taken_over = (self._owner_of(entry) != owner_before
-                                          or (owner_before is None
-                                              and self._claim_is_fresh(entry)))
-                            if taken_over:
-                                # whoever holds it now is not who we judged, so
-                                # wait on them rather than destroy their work
-                                extensions += 1
-                                deadline = time.time() + self.claim_timeout
-                                continue
+                            # Dead, and still the same claim. Rename aside first
+                            # so the old writer's paths stop aliasing our reclaim,
+                            # then delete.
                             try:
                                 self.graveyard.mkdir(parents=True, exist_ok=True)
                                 # pid and nanoseconds, like discard(): a one-second
@@ -563,7 +608,6 @@ class SeriesCache:
                         check()
                     time.sleep(0.2)
                 continue
-            token = self._claim_owner(entry)
             hb = self._hb_start(entry)
             try:
                 fn = fetch or self.fetch
@@ -581,13 +625,11 @@ class SeriesCache:
         """Claim + fetch + commit without blocking on other writers. False if
         already present, claimed elsewhere, or the fetch failed."""
         entry = self._entry(series)
-        if entry.exists():
-            return False
-        try:
-            entry.mkdir(parents=True)
-        except FileExistsError:
-            return False
-        token = self._claim_owner(entry)
+        if (entry / self.MARKER).exists():
+            return False                       # already here
+        token = self._claim(entry)
+        if token is None:
+            return False                       # claimed elsewhere, or just committed
         hb = self._hb_start(entry)
         try:
             self.fetch(series, entry)
@@ -603,12 +645,17 @@ class SeriesCache:
                 token: str | None = None) -> None:
         if token is not None:
             try:
-                if (entry / ".owner").read_text() != token:
+                if (entry / self.CLAIM).read_text() != token:
                     raise ResourceError(
                         f"claim for {key or entry.name!r} was reclaimed while "
                         "fetching; discarding this writer's result")
             except OSError:
-                pass                       # unprovable = our own failed write
+                # Under the linked claim this is no longer "our own write failed"
+                # - the token exists before the claim does. The claim is gone,
+                # so this entry was reclaimed and these bytes are orphaned.
+                raise ResourceError(
+                    f"claim for {key or entry.name!r} no longer exists; "
+                    "discarding this writer's result") from None
         # budget = content bytes; bookkeeping dotfiles (.owner/.key/.done)
         # stay out of the arithmetic
         size = sum(f.stat().st_size for f in entry.rglob("*")

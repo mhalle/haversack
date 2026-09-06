@@ -2561,15 +2561,13 @@ def test_claim_teardown_respects_ownership(tmp_path):
     from haversack.serve import SeriesCache
     sc = SeriesCache(tmp_path / "sc", fetch_fn=lambda *a: None)
     entry = sc._entry("s1")
-    entry.mkdir(parents=True)
-    token_a = sc._claim_owner(entry)       # writer 1's claim
+    token_a = sc._claim(entry)             # writer 1's claim (mkdir + link, one call)
     # reclaim: graveyard rename + re-claim by writer 2
     import shutil as _sh
     grave = entry.parent / (entry.name + ".stale0")
     entry.rename(grave)
     _sh.rmtree(grave)
-    entry.mkdir(parents=True)
-    token_b = sc._claim_owner(entry)
+    token_b = sc._claim(entry)
     (entry / "series").mkdir()
     (entry / "series" / "f").write_bytes(b"x")
     sc._teardown_claim(entry, token_a)     # writer 1's late cleanup
@@ -2581,8 +2579,7 @@ def test_claim_teardown_respects_ownership(tmp_path):
     # heartbeat: a fetch that writes nothing still reads as alive
     sc.claim_timeout = 0.6
     e2 = sc._entry("s2")
-    e2.mkdir(parents=True)
-    sc._claim_owner(e2)
+    sc._claim(e2)
     hb = sc._hb_start(e2)
     try:
         time.sleep(0.9)                    # > claim_timeout, zero writes
@@ -4007,17 +4004,22 @@ def test_a_reclaim_refuses_a_claim_that_changed_hands_underneath_it(tmp_path):
     failure the owner token was added for on the teardown side."""
     cache = serve_mod.SeriesCache(tmp_path / "series", lambda s, e: e / "series",
                                   claim_timeout=0.3)
+    import shutil as _sh
     entry = cache._entry("s3:b/x")
-    entry.mkdir(parents=True)
-    cache._claim_owner(entry)
-    (entry / "partial.bin").write_bytes(b"in flight")
+    cache._claim(entry)                                # writer 1, then it dies
 
     successor = {}
     real_alive = cache._writer_alive
 
     def alive_then_handover(e):
+        # A real reclaim by another process, landing inside the wide window
+        # _writer_alive leaves open: it moves the dead entry aside and takes a
+        # FRESH claim, so the owner token on the path is no longer the one our
+        # reclaim judged.
         verdict = real_alive(e)
-        successor["token"] = cache._claim_owner(e)     # someone else reclaims
+        _sh.rmtree(e, ignore_errors=True)
+        successor["token"] = cache._claim(e)
+        (e / "partial.bin").write_bytes(b"in flight")
         return verdict
 
     cache._writer_alive = alive_then_handover
@@ -4081,40 +4083,51 @@ def test_an_env_flag_spelled_False_is_not_true(tmp_path):
     del os.environ["HAVERSACK_TEST_FLAG"]
 
 
-def test_an_ownerless_claim_is_told_apart_from_a_successor_by_its_age(tmp_path):
-    """The one case the owner token cannot decide. A claim with no owner file is
-    either a crash between the mkdir and the owner write, or a SUCCESSOR inside
-    that same two-statement window. Comparing absent to absent called them equal
-    and deleted the live one; the directory's own age tells them apart."""
-    import shutil
+def test_a_claim_always_names_its_owner(tmp_path):
+    """The ambiguity the age heuristic used to paper over cannot arise any more.
 
+    The old protocol claimed by mkdir and wrote `.owner` afterwards, so a claim
+    existed for two statements that nobody could identify - and `_owner_of`
+    returning None could not tell a crashed writer from a successor inside that
+    window. Comparing absent to absent called them equal and deleted the live
+    one. The claim and its token now arrive in ONE os.link, so a claim that
+    exists always names someone.
+    """
+    cache = serve_mod.SeriesCache(tmp_path / "series", lambda s, e: e / "series")
+    entry = cache._entry("s3:b/x")
+    assert cache._owner_of(entry) is None              # no claim at all
+    token = cache._claim(entry)
+    assert token and cache._owner_of(entry) == token   # never an unnamed claim
+    assert (entry / cache.CLAIM).read_text() == token
+
+    # a second writer cannot take it, and learns that from the claim itself
+    assert cache._claim(entry) is None
+    assert cache._owner_of(entry) == token
+
+
+def test_a_bare_directory_is_not_a_claim(tmp_path):
+    """A crash before the claim leaves scaffolding, not ownership.
+
+    Under the old layout this directory WAS a claim - an ownerless one - and
+    cost a full claim_timeout plus a liveness walk plus a graveyard rename to
+    clear. Now the directory carries no meaning and the next writer simply
+    claims inside it.
+    """
     def fetch(series, entry):
         out = entry / "series"
         out.mkdir(parents=True, exist_ok=True)
         (out / "a.bin").write_bytes(b"ok")
         return out
 
-    root = tmp_path / "series"
-    cache = serve_mod.SeriesCache(root, fetch, claim_timeout=0.3)
+    cache = serve_mod.SeriesCache(tmp_path / "series", fetch, claim_timeout=30.0)
     entry = cache._entry("s3:b/x")
-    entry.mkdir(parents=True)                       # a crashed, ownerless claim
-    time.sleep(0.5)                                 # older than the timeout
+    entry.mkdir(parents=True)                          # crashed before claiming
+    assert not cache.staging("s3:b/x"), "scaffolding read as a live writer"
 
-    other = serve_mod.SeriesCache(root, fetch, claim_timeout=0.3)
-    real_alive = other._writer_alive
-
-    def hand_over(e):                               # a successor appears mid-walk
-        verdict = real_alive(e)
-        shutil.rmtree(e, ignore_errors=True)
-        e.mkdir(parents=True, exist_ok=True)
-        (e / "partial.bin").write_bytes(b"successor in flight")
-        return verdict
-
-    other._writer_alive = hand_over
-    t = threading.Thread(target=lambda: other.get_or_fetch("s3:b/x"), daemon=True)
-    t.start()
-    t.join(timeout=8)
-    assert (entry / "partial.bin").read_bytes() == b"successor in flight"
+    t0 = time.time()
+    out = cache.get_or_fetch("s3:b/x")                 # must NOT wait out a timeout
+    assert (out / "a.bin").read_bytes() == b"ok"
+    assert time.time() - t0 < 5.0, "a bare directory still cost a claim timeout"
 
 
 def test_a_genuinely_crashed_claim_is_still_reclaimed(tmp_path):
