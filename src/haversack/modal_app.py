@@ -540,39 +540,24 @@ def _content_store():
 
 
 def _refresh_series(ctx, meta: dict, key: str, rep, already: set | None = None) -> None:
-    """Drop a cached input when the caller sent `Cache-Control: no-cache`.
+    """Drop a cached input when the caller sent ``Cache-Control: no-cache``.
 
-    The same rule the local server follows, for the same reason: `s3:` and
-    `github:` address bytes that can be replaced under one identifier, so a
-    forced recompute has to re-read the source or it answers the same wrong
-    thing again. Discarding refuses while another job holds a pin, and that is
-    reported rather than passed off as a refresh.
+    The same rule the local server follows, from the same place - it lives in
+    :func:`haversack.jobpolicy.refresh_cached_input` rather than being restated
+    here, which is how the two copies used to drift. Only the recording differs:
+    the local executor sets a field on its job record, this emits into the Modal
+    jobs dict.
     """
-    if not (meta or {}).get("refresh_input"):
-        return
-    if already is not None:
-        if key in already:
-            # two roles bound to ONE identifier: the second pass would see the
-            # first pass's fresh bytes cached and its own pin holding them, and
-            # report a skip for a key this job just refreshed
-            return
-        already.add(key)
-    read_ahead = getattr(ctx, "read_ahead", None)
-    if not ctx.series_cache.has(key):
-        if read_ahead is not None:
-            read_ahead.pop(key)
-        return                             # nothing cached: the fetch IS the refresh
-    if ctx.series_cache.discard(key):
-        if read_ahead is not None:
-            read_ahead.pop(key)            # the image read from those bytes is stale too
-        rep.stage("fetch", "refetching (no-cache)")
-        return
-    # refused: another job holds a pin, or a writer holds the claim. Leave its
-    # pre-read image alone, and record the skip on the job the way the local
-    # executor does - a caller that asked for fresh bytes and did not get them
-    # must be able to see that from either deployment.
-    rep.stage("fetch", "cached (no-cache could not refresh: input in use)")
-    _emit(meta.get("id"), {"input_refresh_skipped": True})
+    from haversack.jobpolicy import refresh_cached_input
+
+    refresh_cached_input(key,
+                         wanted=bool((meta or {}).get("refresh_input")),
+                         cache=ctx.series_cache,
+                         read_ahead=getattr(ctx, "read_ahead", None),
+                         reporter=rep,
+                         on_skipped=lambda: _emit(meta.get("id"),
+                                                  {"input_refresh_skipped": True}),
+                         already=already)
 
 
 def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:

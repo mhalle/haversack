@@ -105,6 +105,7 @@ from . import content
 from .content import ContentStore, is_digest
 from .jobstore import JobStore
 from .errors import Cancelled, InputError, HaversackError, ResourceError
+from .jobpolicy import refresh_cached_input
 from .progress import CancelToken, Reporter
 
 ACTIVE = ("queued", "running")
@@ -1488,38 +1489,22 @@ class LocalExecutor:
 
     # -- the dispatcher ------------------------------------------------------
     def _refresh_input(self, rec, key: str, reporter, already: set | None = None) -> None:
-        """Drop a cached input, and any image already read from it, when the
-        caller asked for a recompute.
+        """Drop a cached input when this job asked for a recompute.
 
-        Both halves are needed. Dropping the cached bytes alone re-downloads the
-        series and then segments the pre-read image anyway, because the read-ahead
-        is keyed by series and nothing else invalidates it - so `no-cache` would
-        pay for a download and return the stale answer regardless. Called BEFORE
-        this job takes its own pin, since a pin is what makes a discard refuse.
+        The rule itself lives in :func:`haversack.jobpolicy.refresh_cached_input`,
+        because the Modal worker has to apply exactly the same one and used to
+        carry its own copy of it. All that differs here is where the skip is
+        recorded: a field on the job record, against an emit into the Modal jobs
+        dict.
         """
-        if not getattr(rec, "refresh_input", False):
-            return
-        if already is not None:
-            if key in already:
-                # A multi-input task may bind two roles to ONE identifier. The
-                # second pass would see the first pass's fresh bytes cached and
-                # its own pin holding them, and report "could not refresh" for a
-                # key this very job just refreshed.
-                return
-            already.add(key)
-        if not self.series_cache.has(key):
-            self.read_ahead.pop(key)
-            return                         # nothing cached: the fetch below IS the refresh
-        if self.series_cache.discard(key):
-            self.read_ahead.pop(key)       # the image read from those bytes is stale too
-            reporter.stage("fetch", "refetching (no-cache)")
-            return
-        # Another job is reading those bytes, or a writer holds the claim, so the
-        # cached input stands. Say so rather than publish a result computed from
-        # bytes the caller explicitly asked not to reuse - and leave the read-ahead
-        # alone, because it belongs to the job that is still using it.
-        rec.input_refresh_skipped = True
-        reporter.stage("fetch", "cached (no-cache could not refresh: input in use)")
+        def mark_skipped():
+            rec.input_refresh_skipped = True
+
+        refresh_cached_input(key,
+                             wanted=bool(getattr(rec, "refresh_input", False)),
+                             cache=self.series_cache, read_ahead=self.read_ahead,
+                             reporter=reporter, on_skipped=mark_skipped,
+                             already=already)
 
     def _from_store(self, entry, pinned: list):
         """Resolve an ``input`` source: content this server already holds.
