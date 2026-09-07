@@ -72,30 +72,41 @@ def _open(store):
     return store, store.root, False
 
 
-def _array_geometry(arr) -> rf.Geometry:
-    """The stored array's own placement, from its duckn attributes - rankfield's
-    reader, not a copy of it.
+def _places_a_part(env) -> bool:
+    """Whether ``env`` is an envelope this reader can actually place a part with.
 
-    This module held a verbatim duplicate of ``rankfield.store.array_geometry``
-    (the LPS flip table, the direction-cosine assembly, the origin) and, being a
-    copy, had already fallen behind: it did not read format 0.4's per-temperature
-    tails and did not accept an envelope written as ``{"start": ...}``. The whole
-    decode is rankfield's; the placement is too.
+    duckn's inclusive six-bound list, or the earlier ``{"start": ...}`` dict.
+    Anything else - absent, None, a scalar, a string, a ``{lower, upper}`` dict,
+    or the oldest ``envelope_start_zyx`` form with no ``envelope`` key at all -
+    is refused here, because ``rankfield.store.read_parts`` places such a part at
+    the ORIGIN by default. This module used to raise on every one of those; after
+    it began delegating (3cf89c2) `haversack restore` exited 0 on a legacy store
+    and wrote misplaced labels. Found 2026-09-07 by review. `tools/ranked_verify.py`
+    requires `envelope` too, so this is the same contract, enforced where a
+    restore will actually read.
     """
-    try:
-        return rfstore.array_geometry(arr)
-    except ValueError as e:
-        raise InputError(str(e)) from None          # haversack's one-line error contract
+    return ((isinstance(env, (list, tuple)) and len(env) == 6)
+            or (isinstance(env, dict) and "start" in env))
 
 
 def parts_of(root) -> list[rf.Part]:
     """The store's parts in paint order. ``rankfield.store.read_parts`` does the
-    reading - including the version gate and the ``part_order`` block, which it
-    looks for under a ``haversack`` key as well as its own."""
+    reading - the version gate, the geometry, the planes, and the ``part_order``
+    block, which it looks for under a ``haversack`` key as well as its own. What
+    is checked here is the one thing that reader is deliberately lenient about;
+    see :func:`_places_a_part`."""
+    for i in rfstore.part_indices(root):
+        m = (root[f"parts/{i}"].attrs.asdict().get("duckn", {})
+             .get("extensions", {}).get("ranked") or {})
+        if m and not _places_a_part(m.get("envelope")):
+            raise InputError(
+                f"parts/{i}: envelope {m.get('envelope')!r} is not a form this reader can "
+                "place a part with - the store predates the current layout; upgrade it with "
+                "tools/ranked_align_parts.py")
     try:
         return rfstore.read_parts(root)
     except ValueError as e:
-        raise InputError(str(e)) from None
+        raise InputError(str(e)) from None          # haversack's one-line error contract
 
 
 def resolve_grid(store, grid="input"):

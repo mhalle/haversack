@@ -135,7 +135,8 @@ def test_a_frameless_store_takes_its_geometry_from_the_array(run, monkeypatch):
     _, path = run["linear"]
     from haversack import ranked_store as rs
     with rs.open_store(path) as st:
-        geo = rr._array_geometry(st.root["parts/0/ranks"])
+        from rankfield import store as rfstore
+        geo = rfstore.array_geometry(st.root["parts/0/ranks"])
     real = rr.parts_of
     def frameless(root, **kw):
         out = real(root, **kw)
@@ -177,12 +178,17 @@ def test_an_absurd_spacing_is_refused_before_anything_is_allocated(run):
         rr.restore(path, grid=3.0, device="banana")
 
 
-def test_the_format_we_write_is_one_we_can_read():
-    """The bug rankfield 0.2.0 exposed: `ranked.py` stamps whatever the library calls
-    current, while this reader restated ("0.2", "0.3") by hand - so haversack wrote
-    format 0.4 stores and refused to read them, and every ranked test went red at once.
-    The reader now takes the list from rankfield; this pins the two ends together, so the
-    next format bump is caught here rather than by 25 failures across five files."""
+def test_no_module_restates_the_format_list_rankfield_owns():
+    """rankfield owns the format version and the list of readable ones. Three places
+    here used to restate one or the other, and when rankfield cut 0.4 haversack wrote
+    stores its own reader refused - 25 failures across five files, none of them naming
+    the cause. This asserts the three aliases still defer rather than restate.
+
+    It does NOT catch a rankfield format bump (FORMAT_VERSION and KNOWN_VERSIONS move
+    together, so the first two assertions hold by construction); the reader's behaviour
+    against an unknown version is pinned by
+    ``test_a_version_this_reader_does_not_know_is_refused_as_an_input_error``.
+    """
     import rankfield as rf
     from rankfield.store import KNOWN_VERSIONS
 
@@ -198,3 +204,64 @@ def test_the_format_we_write_is_one_we_can_read():
     rv = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(rv)
     assert rv.RANKED_VERSIONS == KNOWN_VERSIONS
+
+
+def _meta_of(root, i=0):
+    return dict(root[f"parts/{i}"].attrs.asdict()["duckn"]["extensions"]["ranked"])
+
+
+def _rewrite_meta(root, i, meta):
+    attrs = root[f"parts/{i}"].attrs.asdict()
+    attrs["duckn"]["extensions"]["ranked"] = meta
+    root[f"parts/{i}"].attrs.put(attrs)
+
+
+def test_a_version_this_reader_does_not_know_is_refused_as_an_input_error(run):
+    """The whole reason parts_of wraps rankfield's ValueError: haversack's callers
+    catch InputError, and the CLI turns it into exit 2 rather than a traceback.
+    Nothing exercised the wrapper - a store with an unreadable version was never built."""
+    from haversack import ranked_store as rs
+    _, path = run["linear"]
+    with rs.open_store(path, "a") as st:
+        m = _meta_of(st.root)
+        m["version"] = "9.9"
+        _rewrite_meta(st.root, 0, m)
+        with pytest.raises(rr.InputError, match="9.9.*this reader knows"):
+            rr.parts_of(st.root)
+
+
+@pytest.mark.parametrize("bad", [None, 0, "1,11,0,10,0,13", {"lower": [0, 0, 0], "upper": [1, 1, 1]}],
+                         ids=["none", "scalar", "string", "wrong-dict"])
+def test_an_envelope_this_reader_cannot_place_is_refused_not_defaulted(run, bad):
+    """rankfield's reader places a part with no usable envelope at the ORIGIN. This
+    module raised on every such store before it delegated; afterwards `haversack
+    restore` exited 0 on a legacy store and wrote misplaced labels. The oldest form
+    carries `envelope_start_zyx` and no `envelope` at all, which tools/ranked_align_parts.py
+    still reads - so these stores exist."""
+    from haversack import ranked_store as rs
+    _, path = run["linear"]
+    with rs.open_store(path, "a") as st:
+        m = _meta_of(st.root)
+        if bad is None:
+            m.pop("envelope", None)             # the legacy envelope_start_zyx shape
+            m["envelope_start_zyx"] = [1, 0, 0]
+        else:
+            m["envelope"] = bad
+        _rewrite_meta(st.root, 0, m)
+        with pytest.raises(rr.InputError, match="not a form this reader can place"):
+            rr.parts_of(st.root)
+
+
+def test_the_envelope_forms_this_reader_does_place_still_work(run):
+    """The half-open {"start": ...} dict is the form the delegation was FOR; it must
+    still read, and place the part where it says."""
+    from haversack import ranked_store as rs
+    _, path = run["linear"]                 # the fixture is parameterized whole/cropped
+    with rs.open_store(path, "a") as st:
+        flat = _meta_of(st.root)["envelope"]
+        want = tuple(int(v) for v in flat[0::2])
+        assert rr.parts_of(st.root)[0].envelope_start == want
+        m = _meta_of(st.root)
+        m["envelope"] = {"start": list(want), "stop": [v + 1 for v in flat[1::2]]}
+        _rewrite_meta(st.root, 0, m)
+        assert rr.parts_of(st.root)[0].envelope_start == want

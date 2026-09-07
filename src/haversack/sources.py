@@ -262,6 +262,36 @@ def sole_file(directory) -> Path | None:
     return files[0] if len(files) == 1 else None
 
 
+def _dicom_facts(directory) -> dict | None:
+    """The identifiers a DICOM series carries in its own files, or None.
+
+    Read from the DIRECTORY the files sit in, whichever number of them there is.
+    This lived inside the many-files branch, so a series stored as ONE file - an
+    enhanced multiframe volume, or any of IDC's 85k single-instance series - lost
+    exactly the identifiers that pin a result whose source identity is not
+    cache-grade (`tcia:` is not version-pinned; its SeriesInstanceUID is the
+    durable fact). Found 2026-09-07 by review.
+    """
+    try:
+        from . import io as nio
+        d = Path(directory)
+        uids = nio.dicom_series_ids(d)
+        if not uids:
+            return None
+        files = sorted(f for f in d.iterdir() if f.is_file() and not f.name.startswith("."))
+        out = {"series_instance_uid": uids[0] if len(uids) == 1 else uids}
+        reader = nio._sitk().ImageFileReader()
+        reader.SetFileName(str(files[0]))
+        reader.ReadImageInformation()
+        for key, tag in (("study_instance_uid", "0020|000d"), ("modality", "0008|0060"),
+                         ("series_description", "0008|103e")):
+            if reader.HasMetaDataKey(tag) and reader.GetMetaData(tag).strip():
+                out[key] = reader.GetMetaData(tag).strip()
+        return out
+    except Exception:                           # not DICOM, or unreadable: the digest stands
+        return None
+
+
 def _content_facts(fetched) -> dict | None:
     """What the fetched bytes ARE: their digest (the content store's own
     function, so a fetched series and a stored one hash alike), size, file
@@ -272,30 +302,21 @@ def _content_facts(fetched) -> dict | None:
         return None
     from .content import digest_dir, digest_file
     p = Path(fetched)
-    if p.is_dir():
-        p = sole_file(p) or p                   # one file is a file: see sole_file
-    if p.is_file():
-        return {"digest": digest_file(p), "bytes": p.stat().st_size, "files": 1}
-    if not p.is_dir():
+    # The directory the bytes sit in, kept whatever the digest turns out to
+    # describe: the DICOM identifiers are read from it either way.
+    holder = p if p.is_dir() else p.parent
+    one = sole_file(p) if p.is_dir() else (p if p.is_file() else None)
+    if one is not None:                         # one file is a file: see sole_file
+        out = {"digest": digest_file(one), "bytes": one.stat().st_size, "files": 1}
+    elif p.is_dir():
+        files = [f for f in p.rglob("*") if f.is_file()]
+        out = {"digest": digest_dir(p), "bytes": sum(f.stat().st_size for f in files),
+               "files": len(files)}
+    else:
         return None
-    files = [f for f in p.rglob("*") if f.is_file()]
-    out = {"digest": digest_dir(p), "bytes": sum(f.stat().st_size for f in files),
-           "files": len(files)}
-    try:
-        from . import io as nio
-        uids = nio.dicom_series_ids(p)
-        if uids:
-            dicom = {"series_instance_uid": uids[0] if len(uids) == 1 else uids}
-            reader = nio._sitk().ImageFileReader()
-            reader.SetFileName(str(sorted(files)[0]))
-            reader.ReadImageInformation()
-            for key, tag in (("study_instance_uid", "0020|000d"), ("modality", "0008|0060"),
-                             ("series_description", "0008|103e")):
-                if reader.HasMetaDataKey(tag) and reader.GetMetaData(tag).strip():
-                    dicom[key] = reader.GetMetaData(tag).strip()
-            out["dicom"] = dicom
-    except Exception:                           # not DICOM, or unreadable: the digest stands
-        pass
+    dicom = _dicom_facts(holder)
+    if dicom:
+        out["dicom"] = dicom
     return out
 
 

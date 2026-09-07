@@ -145,12 +145,14 @@ class TheFetchDoorRecordsIt(unittest.TestCase):
     class _Src:
         prefix = "toy"
 
-        def __init__(self, said=None, raise_=False, dicom=False):
+        def __init__(self, said=None, raise_=False, dicom=False, slices=3):
             self._said, self._raise, self._dicom = said, raise_, dicom
+            self._slices = slices
 
         def fetch(self, ident, dest_dir):
             if self._dicom:
-                return _dicom_dir(dest_dir)
+                uid = self._dicom if isinstance(self._dicom, str) else "1.2.3.4"
+                return _dicom_dir(dest_dir, n=self._slices, uid=uid)
             d = pathlib.Path(dest_dir) / "series"
             d.mkdir(exist_ok=True)
             (d / "x.bin").write_bytes(b"x" * 10)
@@ -177,15 +179,47 @@ class TheFetchDoorRecordsIt(unittest.TestCase):
             self.assertEqual(rec["license"]["name"], "CC BY 4.0")
 
     def test_a_dicom_series_reports_what_its_files_say(self):
+        """A distinctive UID, not the fixture default: the assertion has to fail if
+        the identifier is a constant rather than read from the files."""
         with tempfile.TemporaryDirectory() as td:
-            sources.fetch_recording_origin(self._Src(None, dicom=True), "a", td)
+            sources.fetch_recording_origin(self._Src(None, dicom="1.2.826.0.1.77"), "a", td)
             rec = sources.read_input_record(td)
             self.assertEqual(rec["content"]["files"], 3)
-            self.assertEqual(rec["content"]["dicom"]["series_instance_uid"], "1.2.3.4")
+            self.assertEqual(rec["content"]["dicom"]["series_instance_uid"], "1.2.826.0.1.77")
             self.assertEqual(rec["content"]["dicom"]["study_instance_uid"], "9.8.7")
             self.assertEqual(rec["content"]["dicom"]["modality"], "MR")
             self.assertEqual(rec["content"]["dicom"]["series_description"], "T1w")
             self.assertIn("could not determine", rec["note"])   # the source said nothing
+
+    def test_a_one_file_series_keeps_its_identifiers(self):
+        """An enhanced multiframe volume, or any of IDC's 85k single-instance series,
+        is ONE file. The digest rightly became a blob digest, but the DICOM probe lived
+        inside the many-files branch, so exactly those series lost the identifiers that
+        pin a result whose source identity is not version-pinned (`tcia:`)."""
+        from haversack.content import digest_file
+        with tempfile.TemporaryDirectory() as td:
+            sources.fetch_recording_origin(self._Src(None, dicom="1.2.826.0.1.99", slices=1), "a", td)
+            c = sources.read_input_record(td)["content"]
+            self.assertEqual(c["files"], 1)
+            self.assertTrue(c["digest"].startswith("sha256:"))      # one file is a file
+            self.assertEqual(c["dicom"]["series_instance_uid"], "1.2.826.0.1.99")
+            self.assertEqual(c["dicom"]["modality"], "MR")
+            sole = next((pathlib.Path(td) / "series").iterdir())
+            self.assertEqual(c["digest"], digest_file(sole))
+
+    def test_the_sidecar_is_not_content(self):
+        """`.input.json` lands in the entry beside `series/`, but a dotfile anywhere in
+        the content must not make a one-file entry look like two. Nothing pinned the
+        filter, and the fetch path never has one present when the digest is taken."""
+        with tempfile.TemporaryDirectory() as td:
+            d = pathlib.Path(td) / "series"
+            d.mkdir()
+            (d / "scan.nii.gz").write_bytes(b"\x1f\x8b" + b"z" * 40)
+            (d / ".DS_Store").write_bytes(b"junk")
+            self.assertEqual(sources.sole_file(d).name, "scan.nii.gz")
+            facts = sources._content_facts(d)
+            self.assertEqual(facts["files"], 1)
+            self.assertTrue(facts["digest"].startswith("sha256:"))
 
     def test_a_failed_lookup_never_undoes_a_fetch(self):
         with tempfile.TemporaryDirectory() as td:
@@ -221,8 +255,11 @@ class TheResultSaysWhatItWasComputedFrom(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             cache = Cache(td)
+            # a DIFFERENT identity in the sidecar, so "the job's binding wins" is not
+            # compared against itself - a cache entry can be reached by more than one
+            # spelling, and the record must say what THIS job bound
             (cache.entry("s3:b/k") / sources.INPUT_SIDECAR).write_text(json.dumps(
-                {"kind": "s3", "identity": "s3:b/k", "content": {"digest": "sha256:aa"},
+                {"kind": "s3", "identity": "s3:stale/spelling", "content": {"digest": "sha256:aa"},
                  "origin": {"collection": "c"}, "license": {"name": "CC BY 4.0"}, "cite": []}))
             (cache.entry("zenodo:1/x") / sources.INPUT_SIDECAR).write_text(json.dumps(
                 {"kind": "zenodo", "identity": "zenodo:1/x", "content": None, "origin": None,
@@ -286,6 +323,10 @@ class TheResultSaysWhatItWasComputedFrom(unittest.TestCase):
                 self.assertIsNone(up["license"])
                 self.assertTrue(up["content"]["digest"].startswith("sha256:"))
                 self.assertIn("uploaded", up["note"])
+                # the commit's actual claim: the same bytes fetched and uploaded are
+                # ONE identity. volume_bytes() is deterministic, and the toy source
+                # writes exactly it.
+                self.assertEqual(inp["content"]["digest"], up["content"]["digest"])
             finally:
                 ex.close()
 
@@ -345,17 +386,107 @@ class TheResultSaysWhatItWasComputedFrom(unittest.TestCase):
         self.assertEqual(seg.provenance["inputs"][0]["identity"], "sha256:1")
         jobpolicy.record_inputs(object(), [], [], Cache())          # no provenance: no error
 
-    def test_both_job_bodies_and_the_cli_write_it(self):
-        import ast
-        import inspect
-        import textwrap
+    def test_the_modal_worker_writes_it_by_running_the_job_body(self):
+        """`_execute_job` is the Modal worker's whole job body and had NO runtime
+        coverage - the only guard was an AST walk for the string "record_inputs",
+        which a call inside `if False:` satisfies (demonstrated by review). It runs
+        here against fakes, so a NameError or a dropped call in that body fails in
+        CI rather than on a deployed worker."""
+        pytest.importorskip("modal")
+        import threading
 
-        from haversack import cli, modal_app, serve
-        for fn in (serve.LocalExecutor._dispatch, modal_app._execute_job):
-            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
-            calls = {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
-            self.assertIn("record_inputs", calls, fn.__qualname__)
-        self.assertIn("input_record", inspect.getsource(cli._run))
+        from haversack import modal_app as m
+        from haversack import serve as sv
+
+        class Seg:
+            provenance = None
+
+            def __init__(self):
+                self.provenance = {"task": "t"}
+
+            def save(self, path):
+                pathlib.Path(path).write_bytes(b"labels")
+
+        class Cache:
+            def entry(self, key):
+                return pathlib.Path("/nonexistent")
+
+            def unpin(self, key):
+                pass
+
+        class Ctx:
+            engine = "nnunetv2"
+            seg = None
+            series_cache = Cache()
+            read_ahead = type("RA", (), {"pop": staticmethod(lambda k: None)})()
+            _vol_lock = threading.Lock()
+
+            def _ensure(self, task):
+                pass
+
+            def _compute(self, input_path, meta, on_progress, token):
+                return seg
+
+        seg = Seg()
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            (td / "j1").mkdir()
+            (td / "j1" / "input_scan.nii.gz").write_bytes(b"vol")
+            fake = {"j1": {"id": "j1", "task": "total_fast", "state": "queued",
+                           "source": [{"kind": "upload"}],
+                           "input_identity": ["sha256:abcdef"], "created": 1.0}}
+            vol = type("V", (), {"reload": lambda s: None, "commit": lambda s: None})()
+            with mock.patch.multiple(m, jobs_dict=fake, SCRATCH_ROOT=str(td), scratch_vol=vol,
+                                     cache_vol=vol, _prefetch_next=lambda *a, **k: None,
+                                     _bound_jobs_store=lambda jid: None), \
+                 mock.patch.multiple(sv, result_payload=lambda s, p: {"names": {}},
+                                     reference_input=lambda x: x,
+                                     publish_completion=lambda **kw: (kw["mark_done"]() or ("K", None))):
+                m._execute_job(Ctx(), "j1")
+
+            self.assertEqual(fake["j1"]["state"], "done", fake["j1"].get("error"))
+            inputs = seg.provenance["inputs"]
+            self.assertEqual(inputs[0]["identity"], "sha256:abcdef")
+            self.assertIn("uploaded by the caller", inputs[0]["note"])
+            self.assertEqual(seg.provenance["task"], "t")      # merged, not replaced
+
+    def test_the_command_line_writes_it_by_running_a_segment(self):
+        """The CLI half was `assertIn("input_record", inspect.getsource(cli._run))` -
+        a substring a comment satisfies. This runs `haversack segment` with a stub
+        pipeline and reads the provenance off the saved result."""
+        from haversack import cli, pipeline
+
+        saved = {}
+
+        class R:
+            provenance = None
+            timings = {"total": 0.1}
+            grid = type("G", (), {"shape": (1, 1, 1)})()
+            schema = type("S", (), {"names": {1: "x"}})()
+
+            def __init__(self):
+                self.provenance = {"task": "t"}
+
+            def present(self):
+                return []
+
+            def save(self, path):
+                saved["provenance"] = self.provenance
+                pathlib.Path(path).write_bytes(b"labels")
+
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            src = td / "in.nii.gz"
+            src.write_bytes(b"\x1f\x8b" + b"v" * 60)
+            with mock.patch.object(pipeline, "segment", lambda *a, **k: R()):
+                rc = cli.main(["segment", str(src), "--task", "total_fast",
+                               "-o", str(td / "out.nii.gz"), "--quiet"])
+            self.assertEqual(rc, 0)
+            rec = saved["provenance"]["inputs"][0]
+            self.assertEqual(rec["kind"], "file")
+            self.assertEqual(rec["identity"], str(src))
+            self.assertTrue(rec["content"]["digest"].startswith("sha256:"))
+            self.assertIn("not known to haversack", rec["note"])
 
     def test_the_command_line_pins_a_local_file_and_names_it_for_what_it_is(self):
         from haversack.content import digest_file
