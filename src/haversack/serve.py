@@ -116,7 +116,7 @@ ARTIFACT_PENDING_TTL = 900.0   # a pending marker older than this is a dead
 from .jobpolicy import TERMINAL  # noqa: E402
 RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default artifact
 from .sources import (CRDC_RE, IDC_BUCKETS, check_identifier as _check_identifier,  # noqa: E402
-                      fetch_recording_rights as _fetch_recording_rights,
+                      fetch_recording_origin as _fetch_recording_origin,
                       registry as _source_registry)
 
 
@@ -1434,7 +1434,7 @@ class LocalExecutor:
         prefix, ident = key.split(":", 1)
         if prefix == "idc":
             return self._fetch_idc(ident, entry)
-        return _fetch_recording_rights(self.sources[prefix], ident, entry, credentials)
+        return _fetch_recording_origin(self.sources[prefix], ident, entry, credentials)
 
     # -- intake --------------------------------------------------------------
     def new_job_dir(self) -> tuple[str, Path]:
@@ -2110,7 +2110,7 @@ def _fetch_idc_series(series: str, jobdir: Path) -> Path:
     """Fetch one IDC series (see haversack.sources.IDCSource for the mechanics),
     recording its collection and license beside it."""
     from .sources import IDCSource
-    return _fetch_recording_rights(IDCSource(), series, jobdir)
+    return _fetch_recording_origin(IDCSource(), series, jobdir)
 
 def _version() -> str:
     try:

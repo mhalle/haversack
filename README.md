@@ -284,14 +284,16 @@ only - of every result's provenance, so a `.seg.nrrd` header says which license 
 TotalSegmentator's license-gated models say so here too. Everything in the record was read from
 each project's own README, LICENSE or documentation; a test fails if a catalog ships without one.
 
-The *input* has rights too. `haversack rights <input>` asks the input's own repository what
-governs its reuse - IDC answers per series (the license belongs to the series there, and 39
-collections carry more than one) with the dataset's citation and IDC's acknowledgment; TCIA per
-series; Zenodo per record; OpenNeuro is CC0 by policy; Hugging Face and GitHub report what the
-uploader declared. Nothing is downloaded. The same lookup runs once for every fetched input and
-is recorded beside the bytes, and every result's provenance carries an `inputs` list saying what
-it was computed from and under what terms - or that this could not be determined, for an upload
-or a bucket object, rather than guessing.
+The *input* has a provenance too. `haversack rights <input>` asks the input's own repository
+where it came from and what governs its reuse - IDC answers per series (the license belongs to
+the series there, and 39 collections carry more than one) with the collection, the data release,
+the dataset's citation and IDC's acknowledgment; TCIA per series; Zenodo per record; OpenNeuro is
+CC0 by policy; Hugging Face and GitHub report what the uploader declared. Nothing is downloaded.
+The same lookup runs once for every fetched input and is recorded beside the bytes together with
+the bytes' own digest (for a DICOM series, its UIDs too), and every result's provenance carries
+an `inputs` list - one record per input with `content`, `origin`, `license` and `cite`, the
+same shape as the model's `attribution` - saying what it was computed from and under what terms,
+or that this could not be determined, for an upload or a bucket object, rather than guessing.
 
 ## Managing the cache and weights
 

@@ -129,21 +129,27 @@ class DataSource:
         """The result-cache identity token for one identifier."""
         return f"{self.prefix}:{identifier}"
 
-    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
-        """What governs reuse of this input, as its repository states it: the
-        license, the collection or dataset it belongs to, and the citation its
-        publisher asks for. ``None`` means *not determined* - never a guess.
+    def describe_input(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        """What this repository says about one input: where it came from, under
+        what license, and what to cite. ``None`` means *not determined* - never
+        a guess. The shape is the one every result's ``provenance.inputs``
+        carries::
 
-        Metadata only: it must not download the data (``haversack rights`` calls
-        it without fetching), and it may use ``fetched`` - the path a fetch just
-        produced - when the answer is in the files. Called once per fetch and
-        recorded beside the bytes (:func:`fetch_recording_rights`), so a result
-        computed from a CC BY-NC series can say so in its provenance. Best
-        effort: a failure here is recorded as undetermined, never raised into a
-        fetch that has already succeeded.
+            {"origin":  {collection or dataset, uid, doi, url, creators, version,
+                         determined_by},
+             "license": {"name", "url"} or None,
+             "cite":    [{"text", "doi", "for"}, ...]}
+
+        Metadata only: it must not download the data (``haversack rights``
+        calls it without fetching), and it may use ``fetched`` - the path a
+        fetch just produced - when the answer is in the files. Called once per
+        fetch and recorded beside the bytes (:func:`fetch_recording_origin`),
+        with the content's own digest, so a result computed from a CC BY-NC
+        series can say so, and can say which bytes it saw. Best effort: a
+        failure here is recorded as undetermined, never raised into a fetch that
+        has already succeeded.
         """
         return None
-
     def describe(self) -> dict:
         return {"prefix": self.prefix, "id_pattern": self.id_pattern,
                 "enabled": self.enabled(), "description": self.description}
@@ -158,32 +164,31 @@ class UrlTemplateSource(DataSource):
     the URL anywhere the operator did not choose.
     """
 
-    def __init__(self, prefix: str, id_pattern: str, url_template: str, *, policy_rights=None,
+    def __init__(self, prefix: str, id_pattern: str, url_template: str, *, policy_record=None,
                  filename: str | None = None, description: str = ""):
         if "{id}" not in url_template:
             raise ValueError("url_template needs an {id} placeholder")
         self.prefix, self.id_pattern = prefix, id_pattern
         self.url_template, self.filename = url_template, filename
         self.description = description or f"single-file fetch from {url_template}"
-        self.policy_rights = policy_rights
+        self.policy_record = policy_record
 
 
-    #: Rights that hold for every identifier of this source by the publisher's
-    #: policy (OpenNeuro publishes everything CC0), with ``{id}`` and ``{dataset}``
-    #: substituted. None means the source cannot say.
-    policy_rights: dict | None = None
+    #: The record that holds for every identifier of this source by the
+    #: publisher's policy (OpenNeuro publishes everything CC0), with ``{id}`` and
+    #: ``{dataset}`` substituted. None means the source cannot say.
+    policy_record: dict | None = None
 
-    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
-        if not self.policy_rights:
+    def describe_input(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        if not self.policy_record:
             return None
         dataset = identifier.split("/", 1)[0]
-        out = {}
-        for k, v in self.policy_rights.items():
-            out[k] = ({kk: vv.format(id=identifier, dataset=dataset) if isinstance(vv, str) else vv
-                       for kk, vv in v.items()} if isinstance(v, dict)
-                      else v.format(id=identifier, dataset=dataset) if isinstance(v, str) else v)
-        return out
 
+        def fill(v):
+            if isinstance(v, dict):
+                return {k: fill(x) for k, x in v.items()}
+            return v.format(id=identifier, dataset=dataset) if isinstance(v, str) else v
+        return fill(self.policy_record)
     def _filename(self, identifier: str) -> str:
         """The saved name defaults to the identifier's basename so the format
         stays detectable (.nii.gz etc.); explicit ``filename`` overrides."""
@@ -236,42 +241,90 @@ def _license(name, url=None) -> dict | None:
     return out
 
 
-RIGHTS_SIDECAR = ".rights.json"
+INPUT_SIDECAR = ".input.json"
 
 
-def fetch_recording_rights(src, identifier: str, entry, credentials=None):
-    """``src.fetch(...)``, then the source's :meth:`DataSource.rights` recorded
-    beside the bytes as ``.rights.json`` - one door for every fetch that lands in
-    a series cache (the local server, the Modal worker, ``haversack get``), so
-    the record exists wherever the bytes do. The lookup is best effort: an
-    input whose rights could not be determined says so, and a failure never
-    undoes a fetch that succeeded."""
+def _content_facts(fetched) -> dict | None:
+    """What the fetched bytes ARE: their digest (the content store's own
+    function, so a fetched series and a stored one hash alike), size, file
+    count - and for a DICOM series the identifiers the files themselves carry.
+    This is what makes a result reproducible from an identity that is not
+    cache-grade (``s3:``, ``github:``, ``tcia:``): the record pins the bytes."""
+    if fetched is None:
+        return None
+    from .content import digest_dir, digest_file
+    p = Path(fetched)
+    if p.is_file():
+        return {"digest": digest_file(p), "bytes": p.stat().st_size, "files": 1}
+    if not p.is_dir():
+        return None
+    files = [f for f in p.rglob("*") if f.is_file()]
+    out = {"digest": digest_dir(p), "bytes": sum(f.stat().st_size for f in files),
+           "files": len(files)}
+    try:
+        from . import io as nio
+        uids = nio.dicom_series_ids(p)
+        if uids:
+            dicom = {"series_instance_uid": uids[0] if len(uids) == 1 else uids}
+            reader = nio._sitk().ImageFileReader()
+            reader.SetFileName(str(sorted(files)[0]))
+            reader.ReadImageInformation()
+            for key, tag in (("study_instance_uid", "0020|000d"), ("modality", "0008|0060"),
+                             ("series_description", "0008|103e")):
+                if reader.HasMetaDataKey(tag) and reader.GetMetaData(tag).strip():
+                    dicom[key] = reader.GetMetaData(tag).strip()
+            out["dicom"] = dicom
+    except Exception:                           # not DICOM, or unreadable: the digest stands
+        pass
+    return out
+
+
+def fetch_recording_origin(src, identifier: str, entry, credentials=None):
+    """``src.fetch(...)``, then what the bytes are and where they came from,
+    recorded beside them as ``.input.json`` - one door for every fetch that
+    lands in a series cache (the local server, the Modal worker, ``haversack
+    get``), so the record exists wherever the bytes do. The lookup is best
+    effort: an input whose origin could not be determined says so, and a
+    failure never undoes a fetch that succeeded."""
     import json
     import time
     entry = Path(entry)
     fetched = (src.fetch(identifier, entry, credentials=credentials) if credentials is not None
                else src.fetch(identifier, entry))
     identity = getattr(src, "identity", None)   # sources are duck-typed (registry())
-    record = {"source": src.prefix, "identifier": identifier,
+    record = {"kind": src.prefix,
               "identity": identity(identifier) if callable(identity) else f"{src.prefix}:{identifier}",
-              "rights": None, "checked": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+              "content": None, "origin": None, "license": None, "cite": []}
+    fetched_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     try:
-        rights = getattr(src, "rights", None)
-        record["rights"] = rights(identifier, fetched, credentials) if callable(rights) else None
+        record["content"] = _content_facts(fetched)
+    except Exception as e:                      # noqa: BLE001 - a digest is a courtesy
+        record["content_error"] = f"{type(e).__name__}: {e}"
+    try:
+        describe = getattr(src, "describe_input", None)
+        said = describe(identifier, fetched, credentials) if callable(describe) else None
+        if said:
+            record["origin"] = {**(said.get("origin") or {}), "fetched": fetched_at}
+            record["license"] = said.get("license")
+            record["cite"] = list(said.get("cite") or [])
+        else:
+            record["origin"] = {"fetched": fetched_at}
+            record["note"] = "the source could not determine this input's origin or license"
     except Exception as e:                      # noqa: BLE001 - undetermined, not fatal
+        record["origin"] = {"fetched": fetched_at}
         record["error"] = f"{type(e).__name__}: {e}"
     try:
-        (entry / RIGHTS_SIDECAR).write_text(json.dumps(record, indent=1, ensure_ascii=False))
+        (entry / INPUT_SIDECAR).write_text(json.dumps(record, indent=1, ensure_ascii=False))
     except OSError:
         pass                                    # a read-only cache: the fetch still stands
     return fetched
 
 
-def read_rights(entry) -> dict | None:
-    """The record :func:`fetch_recording_rights` left, or None when there is none."""
+def read_input_record(entry) -> dict | None:
+    """The record :func:`fetch_recording_origin` left, or None when there is none."""
     import json
     try:
-        return json.loads((Path(entry) / RIGHTS_SIDECAR).read_text())
+        return json.loads((Path(entry) / INPUT_SIDECAR).read_text())
     except (OSError, ValueError):
         return None
 
@@ -279,37 +332,43 @@ def read_rights(entry) -> dict | None:
 IDC_API = "https://api.imaging.datacommons.cancer.gov/v3"
 
 
-def _idc_rights(crdc_series_uuid: str) -> dict | None:
-    """One series' collection, license and citation from IDC's own API.
+def _idc_record(crdc_series_uuid: str) -> dict | None:
+    """One series' collection, IDC data release, license and citation from
+    IDC's own API.
 
     The license belongs to the SERIES in IDC - 39 of its collections carry more
     than one - so it is asked per series, by the uuid, through the API's SQL
-    endpoint over the same index idc-index ships (``license_short_name``,
-    ``collection_id``). The citation endpoint answers the dataset's own citation
-    and IDC's acknowledgment (Fedorov et al. 2023), which IDC asks for on every
-    use. Read 2026-09-06 against API 3.0.0b3; no authentication."""
+    endpoint over the same index idc-index ships. The citation endpoint answers
+    the dataset's own citation and IDC's acknowledgment (Fedorov et al. 2023),
+    which IDC asks for on every use. Read 2026-09-06 against API 3.0.0b3; no
+    authentication."""
     rows = fetchlib.post_json(f"{IDC_API}/sql", {
-        "sql": "SELECT collection_id, license_short_name, SeriesInstanceUID FROM index "
+        "sql": "SELECT collection_id, license_short_name, SeriesInstanceUID, "
+               "series_revised_idc_version FROM index "
                f"WHERE crdc_series_uuid = '{crdc_series_uuid}'"}, timeout=30).get("rows") or []
     if not rows:
         return None
     row = rows[0]
-    out = {"collection": row.get("collection_id"),
-           "license": _license(row.get("license_short_name")),
-           "series_instance_uid": row.get("SeriesInstanceUID"),
-           "determined_by": "IDC API v3 (index by crdc_series_uuid)"}
+    origin = {"collection": row.get("collection_id"), "uid": row.get("SeriesInstanceUID"),
+              "url": f"https://portal.imaging.datacommons.cancer.gov/explore/filters/"
+                     f"?collection_id={row.get('collection_id')}",
+              "determined_by": "IDC API v3 (index by crdc_series_uuid)"}
+    if row.get("series_revised_idc_version") is not None:
+        origin["version"] = f"IDC data release v{row['series_revised_idc_version']}"
+    out = {"origin": origin, "license": _license(row.get("license_short_name")), "cite": []}
     try:
         cit = fetchlib.post_json(f"{IDC_API}/citations", {
             "filters": {"terms": {"SeriesInstanceUID": [row.get("SeriesInstanceUID")]}}}, timeout=30)
-        texts = [re.sub(r"<[^>]+>", "", c) for c in cit.get("citations") or []]
-        if texts:
-            out["citation"] = texts[0]
-            doi = re.search(r"10\.\d{4,9}/\S+", texts[0])
+        for text in [re.sub(r"<[^>]+>", "", c) for c in cit.get("citations") or []]:
+            ref = {"text": text, "for": "dataset"}
+            doi = re.search(r"10\.\d{4,9}/\S+", text)
             if doi:
-                out["citation_doi"] = doi.group(0).rstrip(".")
+                ref["doi"] = doi.group(0).rstrip(".")
+                origin.setdefault("doi", ref["doi"])
+            out["cite"].append(ref)
         if cit.get("idc_acknowledgment"):
-            out["acknowledge"] = {"text": re.sub(r"\s+", " ", cit["idc_acknowledgment"]),
-                                  "doi": "10.1148/rg.230180"}
+            out["cite"].append({"text": re.sub(r"\s+", " ", cit["idc_acknowledgment"]),
+                                "doi": "10.1148/rg.230180", "for": "IDC"})
     except Exception:                           # the license is the answer; the citation is a courtesy
         pass
     return out
@@ -411,9 +470,8 @@ class IDCSource(DataSource):
             return [("gcp", b) for b in IDC_GCS_BUCKETS] + aws
         return aws
 
-    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
-        return _idc_rights(identifier)
-
+    def describe_input(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        return _idc_record(identifier)
     def fetch(self, identifier: str, dest_dir: Path, *, credentials=None) -> Path:
         keys, store, probed = [], None, []
         for cloud, bucket in self.probe_order():
@@ -454,7 +512,7 @@ class TCIASource(DataSource):
     API = "https://services.cancerimagingarchive.net/nbia-api/services/v1/getImage"
     SERIES_API = "https://services.cancerimagingarchive.net/nbia-api/services/v1/getSeries"
 
-    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+    def describe_input(self, identifier: str, fetched=None, credentials=None) -> dict | None:
         """NBIA's ``getSeries`` answers the collection and its license per series
         (``LicenseName``, ``LicenseURI``, ``Collection``, ``CollectionURI``; read
         2026-09-06). A series on a separate NBIA instance (NLST) answers nothing
@@ -463,11 +521,17 @@ class TCIASource(DataSource):
         if not rows:
             return None
         row = rows[0]
-        return {"collection": row.get("Collection"), "collection_url": row.get("CollectionURI"),
-                "license": _license(row.get("LicenseName"), row.get("LicenseURI")),
-                "released": row.get("DateReleased"),
-                "determined_by": "TCIA NBIA API getSeries"}
-
+        origin = {"collection": row.get("Collection"), "uid": identifier,
+                  "url": row.get("CollectionURI"), "released": row.get("DateReleased"),
+                  "determined_by": "TCIA NBIA API getSeries"}
+        cite = []
+        doi = re.search(r"10\.\d{4,9}/\S+", str(row.get("CollectionURI") or ""))
+        if doi:
+            origin["doi"] = doi.group(0)
+            cite.append({"text": f"{row.get('Collection')} (The Cancer Imaging Archive). "
+                                 f"https://doi.org/{doi.group(0)}", "doi": doi.group(0), "for": "dataset"})
+        return {"origin": origin, "license": _license(row.get("LicenseName"), row.get("LicenseURI")),
+                "cite": cite}
     def fetch(self, identifier: str, dest_dir: Path, *, credentials=None) -> Path:
         import shutil
         import zipfile
@@ -520,11 +584,12 @@ def openneuro_source() -> UrlTemplateSource:
         "https://s3.amazonaws.com/openneuro.org/{id}",
         description="OpenNeuro (CC0), by ds<number>/<file path>",
         # by policy, not per dataset: every published OpenNeuro dataset is CC0
-        policy_rights={
+        policy_record={
+            "origin": {"dataset": "{dataset}", "url": "https://openneuro.org/datasets/{dataset}",
+                       "determined_by": "OpenNeuro policy: every published dataset is released "
+                                        "under CC0 (docs.openneuro.org/faq, read 2026-09-06)"},
             "license": {"name": "CC0-1.0", "url": "https://creativecommons.org/publicdomain/zero/1.0/"},
-            "dataset": "{dataset}", "dataset_url": "https://openneuro.org/datasets/{dataset}",
-            "determined_by": "OpenNeuro policy: every published dataset is released under CC0 "
-                             "(docs.openneuro.org/faq, read 2026-09-06)"})
+            "cite": []})
 
 
 MAX_FETCH_BYTES = int(float(os.environ.get("HAVERSACK_MAX_FETCH_GB", "16")) * (1 << 30))
@@ -727,9 +792,10 @@ class ZenodoSource(ArchiveReadingSource):
     def __init__(self, *, allow_restricted: bool = False):
         self.allow_restricted = allow_restricted
 
-    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+    def describe_input(self, identifier: str, fetched=None, credentials=None) -> dict | None:
         """The record's own license, creators and DOI (every Zenodo record has
-        all three), and a citation in the form Zenodo suggests."""
+        all three), and a citation in the form Zenodo suggests. A record id IS a
+        version: new versions mint new ids."""
         recid = identifier.partition("/")[0]
         rec = fetchlib.get_json(f"https://zenodo.org/api/records/{recid}", timeout=30,
                                 headers=self._headers(credentials))
@@ -737,15 +803,16 @@ class ZenodoSource(ArchiveReadingSource):
         lic = meta.get("license") or {}
         creators = [c.get("name") for c in meta.get("creators") or [] if c.get("name")]
         doi = rec.get("doi") or meta.get("doi")
-        out = {"dataset": meta.get("title"), "record": f"https://zenodo.org/records/{recid}",
-               "creators": creators, "doi": doi,
-               "license": _license(lic.get("id") or lic.get("title")),
-               "determined_by": "Zenodo record metadata"}
+        origin = {"dataset": meta.get("title"), "url": f"https://zenodo.org/records/{recid}",
+                  "creators": creators, "doi": doi,
+                  "version": meta.get("version") or f"record {recid}",
+                  "determined_by": "Zenodo record metadata"}
+        cite = []
         if creators and meta.get("title") and doi:
-            out["citation"] = (f"{', '.join(creators[:3])}{' et al.' if len(creators) > 3 else ''}. "
-                               f"{meta['title']}. Zenodo. https://doi.org/{doi}")
-        return out
-
+            cite.append({"text": f"{', '.join(creators[:3])}{' et al.' if len(creators) > 3 else ''}. "
+                                 f"{meta['title']}. Zenodo. https://doi.org/{doi}",
+                         "doi": doi, "for": "dataset"})
+        return {"origin": origin, "license": _license(lic.get("id") or lic.get("title")), "cite": cite}
     def resolve(self, outer: str, credentials=None) -> tuple:
         import json as _json
         recid, _, filename = outer.partition("/")
@@ -789,10 +856,11 @@ class HuggingFaceSource(ArchiveReadingSource):
     def __init__(self, *, allow_restricted: bool = False):
         self.allow_restricted = allow_restricted
 
-    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+    def describe_input(self, identifier: str, fetched=None, credentials=None) -> dict | None:
         """The dataset card's license (``cardData.license`` / a ``license:`` tag),
-        which is whatever the uploader declared - reported as such."""
-        repo = identifier.partition("@")[0]
+        which is whatever the uploader declared - reported as such. The commit
+        sha in the identifier is the version."""
+        repo, _, rest = identifier.partition("@")
         card = fetchlib.get_json(f"https://huggingface.co/api/datasets/{repo}", timeout=30,
                                  headers=self._headers(credentials))
         lic = (card.get("cardData") or {}).get("license")
@@ -801,10 +869,10 @@ class HuggingFaceSource(ArchiveReadingSource):
         if not lic:
             tags = [t.partition(":")[2] for t in card.get("tags") or [] if str(t).startswith("license:")]
             lic = ", ".join(tags) or None
-        return {"dataset": repo, "dataset_url": f"https://huggingface.co/datasets/{repo}",
-                "author": card.get("author"), "license": _license(lic),
-                "determined_by": "Hugging Face dataset card (as declared by the uploader)"}
-
+        return {"origin": {"dataset": repo, "url": f"https://huggingface.co/datasets/{repo}",
+                           "author": card.get("author"), "version": rest.partition("/")[0] or None,
+                           "determined_by": "Hugging Face dataset card (as declared by the uploader)"},
+                "license": _license(lic), "cite": []}
     def resolve(self, outer: str, credentials=None) -> tuple:
         repo, _, rest = outer.partition("@")
         sha, _, path = rest.partition("/")
@@ -897,16 +965,15 @@ class ObjectStoreSource(ArchiveReadingSource):
     def _store(self, bucket: str):
         return _object_store(self.cloud, bucket, self.buckets[bucket])
 
-    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+    def describe_input(self, identifier: str, fetched=None, credentials=None) -> dict | None:
         """A bucket carries no license of its own ("the bucket name is not a
         license label", IDC's own words). An IDC bucket's series prefix IS an
         IDC series, and is asked about as one; anything else is undetermined."""
         bucket, _, key = identifier.partition("!")[0].partition("/")
         m = re.fullmatch(rf"({CRDC_RE})/?", key)
         if bucket in IDC_BUCKETS + IDC_GCS_BUCKETS and m:
-            return _idc_rights(m.group(1))
+            return _idc_record(m.group(1))
         return None
-
     def locate(self, outer: str, credentials=None) -> tuple:
         """``(store, key, size)`` for one object, after the allowlist."""
         import obstore
@@ -1071,21 +1138,22 @@ class GitHubReleaseSource(ArchiveReadingSource):
         super().check(identifier, credentials)
         self._headers(credentials)
 
-    def rights(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+    def describe_input(self, identifier: str, fetched=None, credentials=None) -> dict | None:
         """The repository's declared license (GitHub's own detection of its
-        LICENSE file). A release asset need not be under it, and a repository
-        without one answers null - both reported as undetermined."""
-        repo = identifier.partition("@")[0]
+        LICENSE file) and the release tag. A release asset need not be under the
+        repository's license, and a repository without one answers null - both
+        reported as undetermined."""
+        repo, _, rest = identifier.partition("@")
         info = fetchlib.get_json(f"https://api.github.com/repos/{repo}", timeout=30,
                                  headers={"Accept": "application/vnd.github+json"})
         lic = info.get("license") or {}
         if not lic.get("spdx_id") or lic.get("spdx_id") == "NOASSERTION":
             return None
-        return {"repository": f"https://github.com/{repo}",
-                "license": {"name": lic.get("spdx_id"), "url": lic.get("url")},
-                "determined_by": "GitHub API: the repository's detected license, which may not "
-                                 "cover a release asset"}
-
+        return {"origin": {"repository": f"https://github.com/{repo}", "url": f"https://github.com/{repo}",
+                           "version": rest.partition("/")[0] or None,
+                           "determined_by": "GitHub API: the repository's detected license, which may "
+                                            "not cover a release asset"},
+                "license": {"name": lic.get("spdx_id"), "url": lic.get("url")}, "cite": []}
     def resolve(self, outer: str, credentials=None) -> tuple:
         headers = self._headers(credentials)       # refuse a token before any request
         repo, _, rest = outer.partition("@")
@@ -1245,20 +1313,30 @@ def parse_input(spec, known=None) -> tuple:
 
 
 def input_record(spec, *, cache_dir=None, sources=None) -> dict:
-    """What a result's provenance says about one input: its identity and, for a
-    remote input, the rights recorded when it was fetched. A local file is its
-    path and nothing more - haversack cannot know where it came from."""
+    """What a result's provenance says about one input given on the command
+    line. A remote input: the record its fetch left beside the bytes. A local
+    file: its path and its digest - haversack cannot know where it came from,
+    but it can pin what it was."""
     reg = registry(sources) if sources is not None else registry(default_sources() + [HttpSource()])
     parsed = parse_input(spec, known=reg)
     if parsed is None:
-        return {"kind": "file", "identity": str(spec), "rights": None,
-                "note": "a local file; its origin and license are not known to haversack"}
+        rec = {"kind": "file", "identity": str(spec), "content": None, "origin": None,
+               "license": None, "cite": [],
+               "note": "a local file; its origin and license are not known to haversack"}
+        try:
+            rec["content"] = _content_facts(Path(spec))
+        except Exception:                       # unreadable, or gone: the path still names it
+            pass
+        return rec
     kind, ident = parsed
     import hashlib
     root = Path(cache_dir) if cache_dir else default_input_cache()
-    rec = read_rights(root / kind / hashlib.sha1(ident.encode()).hexdigest()[:20]) or {}
-    return {"kind": kind, "identity": f"{kind}:{ident}", "rights": rec.get("rights"),
-            **({"rights_error": rec["error"]} if rec.get("error") else {})}
+    rec = read_input_record(root / kind / hashlib.sha1(ident.encode()).hexdigest()[:20])
+    if rec is None:
+        return {"kind": kind, "identity": f"{kind}:{ident}", "content": None, "origin": None,
+                "license": None, "cite": [], "note": "no record of this fetch"}
+    rec["identity"] = f"{kind}:{ident}"
+    return rec
 
 
 def default_input_cache() -> Path:
@@ -1314,7 +1392,7 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
         entry.mkdir(parents=True)
         if progress:
             progress(f"fetching {ident if kind == 'http' else f'{kind}:{ident}'}")
-        fetch_recording_rights(src, ident, entry, credentials)
+        fetch_recording_origin(src, ident, entry, credentials)
         done.write_text(f"{kind}:{ident}\n")
     content = entry / "series"
     if not content.is_dir():

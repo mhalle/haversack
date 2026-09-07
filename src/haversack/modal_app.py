@@ -886,12 +886,12 @@ class _WorkerBase:
         _pkg_dir()
         _check_volumes_attached()
         from haversack.serve import ReadAhead, SeriesCache
-        from haversack.sources import fetch_recording_rights, registry
+        from haversack.sources import fetch_recording_origin, registry
         self._sources = registry(None)
 
         def fetch_source(key, entry, credentials=None):
             prefix, ident = key.split(":", 1)
-            return fetch_recording_rights(self._sources[prefix], ident, entry, credentials)
+            return fetch_recording_origin(self._sources[prefix], ident, entry, credentials)
 
         self.series_cache = SeriesCache(Path("/dev/shm/series_cache"), fetch_source,
                                         budget_bytes=int(SHM_CACHE_GB * (1 << 30)))

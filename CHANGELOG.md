@@ -6,7 +6,7 @@ Two data sources and two model catalogs, each on the extension seam that already
 
 ### Sources
 
-- **Every input's license and citation, from its own repository, into every result.** A model's
+- **Every input's provenance - the bytes, their origin, their license and what to cite - from its own repository, into every result.** A model's
   license is half the story: a segmentation of a CC BY-NC series inherits a constraint, and
   nothing said so. Each source now answers `rights(identifier)` from its repository's own
   metadata, without downloading the data: IDC per series through its v3 API (the license
@@ -15,9 +15,14 @@ Two data sources and two model catalogs, each on the extension seam that already
   creators, DOI), OpenNeuro by its CC0 policy, Hugging Face and GitHub as the uploader declared,
   and an IDC bucket prefix as the IDC series it is. `s3:`/`gs:` objects otherwise, uploads and
   stored content answer "not determined" - a bucket name is not a license label. The lookup
-  runs once per fetch on every substrate and is recorded beside the bytes; every result's
-  provenance carries `inputs`, one record per input, on the local server, on Modal and from the
-  command line alike; `haversack rights <input>` prints the record.
+  runs once per fetch on every substrate and is recorded beside the bytes together with the
+  bytes' own digest (the content store's, so a fetched series and a stored one hash alike; for
+  a DICOM series the UIDs, modality and description its files carry), the IDC data release or
+  Zenodo record that versions it, and when it was fetched. Every result's provenance carries
+  `inputs`, one record per input in binding order, each `content` / `origin` / `license` /
+  `cite` - the same shape as the model's `attribution` - on the local server, on Modal and from
+  the command line alike; a local file is pinned by its digest. `haversack rights <input>`
+  prints the record.
 - **`s3:` and the new `gs:` read through obstore, and a trailing slash fetches a whole
   prefix.** The `s3:` source built path-style URLs by hand from a bucket-to-region map and
   read by HTTP Range; it now goes through the same object-store client `idc:` has always

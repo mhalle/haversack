@@ -302,11 +302,12 @@ def _run(argv=None) -> int:
     ci.add_argument("task", help="a task name, in any accepted form")
     ci.add_argument("--json", action="store_true", help="the full attribution record")
 
-    ri = sub.add_parser("rights", formatter_class=Fmt, help="the license and citation of a remote input, without fetching it",
-                        description="What governs reuse of one input, as its repository states it: the license, the "
-                                    "collection or dataset it belongs to, and the citation its publisher asks for. "
-                                    "Metadata only - nothing is downloaded. The same record is written beside every "
-                                    "fetched input and into every result's provenance as `inputs`.",
+    ri = sub.add_parser("rights", formatter_class=Fmt, help="where a remote input comes from, its license, and what to cite - without fetching it",
+                        description="What one input's repository says about it: where it came from (the "
+                                    "collection or dataset, its identifier, DOI and version), under what license, "
+                                    "and the citation its publisher asks for. Metadata only - nothing is "
+                                    "downloaded. The same record, plus the bytes' own digest, is written beside "
+                                    "every fetched input and into every result's provenance as `inputs`.",
                         epilog="""examples:
   haversack rights idc:19ecafc9-d05a-4c6c-8727-ce1a78190d11   the NLST collection, CC BY 4.0, its DOI
   haversack rights zenodo:7262581/amos22.zip                 the record's license, creators and DOI
@@ -546,22 +547,25 @@ def _run(argv=None) -> int:
         kind, ident = parsed
         src = reg["http" if kind == "https" else kind]
         check_identifier(src, ident)
-        rights = src.rights(ident)
-        record = {"identity": f"{kind}:{ident}", "rights": rights}
+        said = src.describe_input(ident)
+        record = {"kind": kind, "identity": f"{kind}:{ident}",
+                  **(said or {"origin": None, "license": None, "cite": []})}
         if args.json:
             print(json.dumps(record, indent=2, ensure_ascii=False))
-        elif rights is None:
-            print(f"{kind}:{ident}\n  rights: not determined - the {kind} source cannot say what "
-                  "license this input is under")
-        else:
-            print(f"{kind}:{ident}")
-            for k, v in rights.items():
-                if isinstance(v, dict):
-                    v = "; ".join(f"{a}: {b}" for a, b in v.items() if b)
-                elif isinstance(v, list):
-                    v = ", ".join(str(x) for x in v)
-                if v:
-                    print(f"  {k + ':':<20}{v}")
+            return 0
+        print(f"{kind}:{ident}")
+        if said is None:
+            print(f"  not determined - the {kind} source cannot say where this input came "
+                  "from or what license it is under")
+            return 0
+        for k, v in (said.get("origin") or {}).items():
+            if v:
+                print(f"  {k + ':':<14}{', '.join(map(str, v)) if isinstance(v, list) else v}")
+        lic = said.get("license")
+        print("  license:      " + ((lic.get("name", "") + (f"  {lic['url']}" if lic.get("url") else ""))
+                                    if lic else "not stated"))
+        for ref in said.get("cite") or []:
+            print(f"  cite ({ref.get('for', '')}): {ref.get('text')}")
         return 0
     if args.cmd == "cite":
         import json
