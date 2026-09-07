@@ -272,10 +272,26 @@ class ContentStore:
         return digest
 
     def put_dir(self, staged, *, expect: str | None = None) -> str:
-        """Adopt a directory of files (a DICOM series) as one tree entry."""
+        """Adopt a directory of files (a DICOM series) as one tree entry - or as
+        a blob, when it holds exactly one file.
+
+        One file is a file however it arrived. This store's own rule is that an
+        entry "is a function of the CONTENT and nothing else - not of arrival
+        order, not of the names a zip happened to carry", and a one-member tree
+        broke it: the same bytes read `sha256-tree:` sent as a one-member zip or
+        `kind=tree`, and `sha256:` sent loose or fetched from a source, so a
+        lookup across those paths could never match. The grammar decided the
+        identity, which is what naming by content exists to prevent.
+
+        What the reader is handed follows: `resolve` gives back a FILE, which
+        `io.read_image` reads directly rather than through the DICOM series
+        reader over a directory of one - the same image, one fewer indirection.
+        """
         members = sorted(p for p in Path(staged).rglob("*") if p.is_file())
         if not members:
             raise FileNotFoundError(f"{staged} holds no files")
+        if len(members) == 1:
+            return self.put_file(members[0], expect=expect)
         per_member = [(p, digest_file(p)) for p in members]
         digest = tree_digest(d for _, d in per_member)
         if expect and expect != digest:

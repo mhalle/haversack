@@ -3085,6 +3085,30 @@ def test_a_zip_and_loose_parts_of_one_series_are_the_same_input(tmp_path):
     assert zipped["digest"] == loose["digest"]
 
 
+def test_one_file_has_one_identity_through_every_door(tmp_path):
+    """The transport rule taken to its end: a single volume sent loose, sent as a
+    one-member zip, and declared `kind=tree` are ONE input. They were two - the
+    zip and the declared tree hashed as `sha256-tree:` over one member while the
+    loose send (and every fetch from a source) hashed as `sha256:` - so a store
+    lookup across those paths could never match."""
+    import zipfile
+    _, _, client = make(tmp_path)
+    vol = volume_bytes()
+    loose = client.post("/v1/inputs", files={"f": ("scan.nii.gz", vol)}).json()
+    z = tmp_path / "one.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("study/scan.nii.gz", vol)         # nested on purpose
+    zipped = client.post("/v1/inputs", files={"archive": ("one.zip", z.read_bytes())}).json()
+    declared = client.post("/v1/inputs?kind=tree", files={"f": ("scan.nii.gz", vol)}).json()
+
+    assert loose["digest"] == zipped["digest"] == declared["digest"]
+    assert loose["digest"].startswith("sha256:")
+    for r in (loose, zipped, declared):
+        assert r["kind"] == "blob" and r["members"] == 1
+    # and the reader is handed a file, not a directory of one
+    assert client.get(f"/v1/inputs/{loose['digest']}").status_code == 200
+
+
 def test_a_mixed_folder_is_refused_and_names_the_series(tmp_path):
     """Two series in one drop means reading 'the' series is a choice, and
     choosing silently is how a plausible wrong result gets produced."""

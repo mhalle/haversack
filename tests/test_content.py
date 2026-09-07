@@ -60,12 +60,27 @@ def test_a_tree_digest_does_not_depend_on_order_or_filenames(tmp_path):
     assert digest_dir(a).startswith(TREE)
 
 
-def test_a_tree_and_a_blob_of_the_same_bytes_are_different_things(tmp_path, store):
-    """One member is still a tree if it was sent as one - the grammar says what
-    the reader gets handed, and a directory means DICOM series to SimpleITK."""
-    d = tmp_path / "one"; d.mkdir()
-    p = _real_volume(d, "only.nii.gz")
-    assert store.put_dir(d) != store.put_file(p)
+def test_one_file_is_one_identity_however_it_was_sent(tmp_path, store):
+    """This used to assert the opposite - that a one-member tree stays a tree
+    because "the grammar says what the reader gets handed". That let the same
+    bytes carry two identities: `sha256-tree:` as a one-member zip or
+    `kind=tree`, `sha256:` sent loose or fetched from a source, so no lookup
+    across those paths could match. The store's own rule is that an entry is a
+    function of the content alone, and these are the same content."""
+    import shutil
+    d = tmp_path / "one"
+    d.mkdir()
+    loose = _real_volume(tmp_path, "same.nii.gz")     # _real_volume is random per call:
+    shutil.copy2(loose, d / "only.nii.gz")            # copy, so these ARE the same bytes
+    assert store.put_dir(d) == store.put_file(loose)
+    assert store.put_dir(d).startswith("sha256:")
+    assert store.resolve(store.put_dir(d)).is_file()      # and the reader gets a file
+    # a real series is still a tree
+    many = tmp_path / "series"
+    many.mkdir()
+    _file(many, "IM0.dcm", b"a")
+    _file(many, "IM1.dcm", b"b")
+    assert store.put_dir(many).startswith("sha256-tree:")
 
 
 def test_resolve_hands_back_a_file_for_a_blob_and_a_directory_for_a_tree(tmp_path, store):

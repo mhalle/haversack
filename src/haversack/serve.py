@@ -2585,10 +2585,16 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     "message": f"these {len(files)} files hold {len(series)} DICOM "
                                "series; submit one series per input",
                     "series_instance_uids": sorted(series)})
-            digest = content.digest_dir(staged)
-            already = store.has(digest)         # honest about a no-op adopt
+            # What it IS, not what the request called it: `put_dir` stores a
+            # one-file directory as a blob, so that a one-member zip and the same
+            # bytes sent loose are one identity. Ask for the digest first so the
+            # `stored` flag is honest about a no-op adopt.
+            digest = (content.digest_file(files[0]) if len(files) == 1
+                      else content.digest_dir(staged))
+            already = store.has(digest)
             store.put_dir(staged, expect=expect)
-            return {"digest": digest, "kind": "tree", "members": len(files),
+            return {"digest": digest,
+                    "kind": "blob" if len(files) == 1 else "tree", "members": len(files),
                     "stored": not already,
                     "bytes": sum(p.stat().st_size for p in files),
                     "series_instance_uid": series[0] if series else None}

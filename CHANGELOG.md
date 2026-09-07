@@ -23,6 +23,14 @@ Two data sources and two model catalogs, each on the extension seam that already
   `cite` - the same shape as the model's `attribution` - on the local server, on Modal and from
   the command line alike; a local file is pinned by its digest. `haversack rights <input>`
   prints the record.
+- **One file is one identity, however it reached the server.** A single volume sent loose, sent
+  as a one-member zip, declared `kind=tree`, or fetched from a source used to carry two
+  different digests - `sha256-tree:` over a directory of one for the first two paths,
+  `sha256:` for the others - so a content-store lookup across them could never match. The
+  store now records a one-file directory as the file it is, which is what its own rule
+  ("an entry is a function of the content and nothing else") always implied, and `POST
+  /v1/inputs` reports the kind it stored rather than the kind the request named. A real
+  series is still a tree.
 - **`s3:` and the new `gs:` read through obstore, and a trailing slash fetches a whole
   prefix.** The `s3:` source built path-style URLs by hand from a bucket-to-region map and
   read by HTTP Range; it now goes through the same object-store client `idc:` has always
