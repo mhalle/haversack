@@ -20,15 +20,15 @@ from pathlib import Path
 
 import numpy as np
 import rankfield as rf
-from rankfield.store import KNOWN_VERSIONS
+from rankfield import store as rfstore
 
 from .errors import InputError
 
-# KNOWN_VERSIONS comes from rankfield, never restated here. Every byte of a part is
-# decoded by rankfield, so the formats this reader knows ARE the formats it knows -
-# and a hand-written copy drifts: this file said ("0.2", "0.3") while `ranked.py`
-# stamped whatever rankfield called current, so rankfield 0.2.0 (format 0.4) made
-# haversack write stores its own reader refused (2026-09-07).
+# Nothing about the stored form is restated here. rankfield reads it - the version
+# gate, the geometry, the planes - because rankfield decodes it. A copy of that
+# reading drifted twice in one day: the version list said ("0.2", "0.3") while
+# `ranked.py` stamped whatever rankfield called current, and the geometry copy
+# never learned format 0.4's tails (2026-09-07).
 
 
 @dataclass
@@ -72,56 +72,30 @@ def _open(store):
     return store, store.root, False
 
 
-_SPACE_TO_LPS = {"left-posterior-superior": (1.0, 1.0, 1.0), "right-anterior-superior": (-1.0, -1.0, 1.0),
-                 "left-anterior-superior": (1.0, -1.0, 1.0)}
-
-
 def _array_geometry(arr) -> rf.Geometry:
-    """The stored array's own placement, from its duckn attributes, in SimpleITK's terms."""
-    d = arr.attrs.asdict()["duckn"]
-    axes = [a for a in d["axes"] if a.get("space_direction")]
-    if len(axes) != 3:
-        raise InputError("ranks array: need three spatial axes with space_direction")
-    space = str(d.get("space", "left-posterior-superior")).replace("-time", "")
-    if space not in _SPACE_TO_LPS:
-        raise InputError(f"ranks array: space {space!r} is not one this reader places")
-    flip = np.asarray(_SPACE_TO_LPS[space])
-    dirs = [np.asarray(a["space_direction"], float) * flip for a in axes]      # z, y, x in LPS
-    spacing = [float(np.linalg.norm(v)) for v in dirs]
-    cos = [v / n for v, n in zip(dirs, spacing)]
-    D = np.stack([cos[2], cos[1], cos[0]], axis=1)                              # columns x, y, z
-    origin = np.asarray(d.get("space_origin", (0.0, 0.0, 0.0)), float) * flip
-    return rf.Geometry(spacing_zyx=tuple(spacing), shape_zyx=tuple(int(v) for v in arr.shape[1:]),
-                       origin_xyz=tuple(float(v) for v in origin),
-                       direction_xyz=tuple(float(v) for v in D.reshape(-1)))
+    """The stored array's own placement, from its duckn attributes - rankfield's
+    reader, not a copy of it.
+
+    This module held a verbatim duplicate of ``rankfield.store.array_geometry``
+    (the LPS flip table, the direction-cosine assembly, the origin) and, being a
+    copy, had already fallen behind: it did not read format 0.4's per-temperature
+    tails and did not accept an envelope written as ``{"start": ...}``. The whole
+    decode is rankfield's; the placement is too.
+    """
+    try:
+        return rfstore.array_geometry(arr)
+    except ValueError as e:
+        raise InputError(str(e)) from None          # haversack's one-line error contract
 
 
 def parts_of(root) -> list[rf.Part]:
-    """The store's parts in paint order, as the library sees them; the planes are the zarr
-    arrays themselves, read by the restore only where the output needs them."""
-    order = (root.attrs.asdict().get("duckn", {}).get("extensions", {}).get("haversack", {})
-             .get("part_order"))
-    idx = [p["index"] for p in order] if order else []
-    if not idx:
-        i = 0
-        while f"parts/{i}" in root:
-            idx.append(i)
-            i += 1
-    out = []
-    for i in idx:
-        g = root[f"parts/{i}"]
-        m = dict(g.attrs.asdict()["duckn"]["extensions"]["ranked"])
-        if str(m.get("version")) not in KNOWN_VERSIONS:
-            raise InputError(f"parts/{i}: ranked format {m.get('version')!r}; this reader knows "
-                             + ", ".join(KNOWN_VERSIONS))
-        env = m["envelope"]
-        field = rf.RankField(ranks=g["ranks"], support=g["support"],
-                             tail=g["tail"] if "tail" in g else None, meta=m,
-                             labels=[int(v) for v in m["labels"]], geometry=_array_geometry(g["ranks"]),
-                             frame=m.get("frame"))
-        out.append(rf.Part(field=field, envelope_start=tuple(int(a) for a in env[0::2]),
-                           name=str(m.get("part", i))))
-    return out
+    """The store's parts in paint order. ``rankfield.store.read_parts`` does the
+    reading - including the version gate and the ``part_order`` block, which it
+    looks for under a ``haversack`` key as well as its own."""
+    try:
+        return rfstore.read_parts(root)
+    except ValueError as e:
+        raise InputError(str(e)) from None
 
 
 def resolve_grid(store, grid="input"):

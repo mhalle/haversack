@@ -275,7 +275,9 @@ class TheResultSaysWhatItWasComputedFrom(unittest.TestCase):
                 self.assertEqual(inp["identity"], "toy:sp042")
                 self.assertEqual(inp["license"]["name"], "CC BY-NC 4.0")
                 self.assertEqual(inp["origin"]["collection"], "toyset")
-                self.assertTrue(inp["content"]["digest"].startswith("sha256-tree:"))
+                # ONE file: a blob digest, the same one the upload below gets for the
+                # same bytes. This asserted "sha256-tree:" while the two paths disagreed.
+                self.assertTrue(inp["content"]["digest"].startswith("sha256:"))
                 r = client.post("/v1/jobs", data={"task": "total_fast"},
                                 files={"file": ("v.nii.gz", volume_bytes(), "application/gzip")})
                 self.assertEqual(r.status_code, 202, r.text)
@@ -286,6 +288,45 @@ class TheResultSaysWhatItWasComputedFrom(unittest.TestCase):
                 self.assertIn("uploaded", up["note"])
             finally:
                 ex.close()
+
+    def test_the_same_bytes_fetched_and_uploaded_carry_the_same_digest(self):
+        """A fetch always writes a DIRECTORY, even for one object, so a single
+        fetched file read `sha256-tree:` over a directory of one while the same
+        bytes uploaded read `sha256:` - two identities for one input, and a
+        content-store lookup that could never match. `sole_file` is the rule
+        `materialize` already used to hand the pipeline that one file."""
+        from haversack.content import digest_file
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            payload = b"\x1f\x8b" + b"m" * 500
+
+            class One:
+                prefix = "toy"
+
+                def fetch(self, ident, dest_dir):
+                    d = pathlib.Path(dest_dir) / "series"
+                    d.mkdir(parents=True, exist_ok=True)
+                    (d / "mprage.nii.gz").write_bytes(payload)
+                    return d
+
+            entry = td / "fetched"
+            entry.mkdir()
+            sources.fetch_recording_origin(One(), "a", entry)
+            fetched = sources.read_input_record(entry)["content"]
+
+            loose = td / "mprage.nii.gz"
+            loose.write_bytes(payload)
+            uploaded = sources.input_record(str(loose), cache_dir=td)["content"]
+
+            self.assertEqual(fetched["digest"], uploaded["digest"])
+            self.assertEqual(fetched["digest"], digest_file(loose))
+            self.assertEqual(fetched["files"], 1)
+            # ...and a real series still hashes as the tree it is
+            multi = td / "multi"
+            multi.mkdir()
+            sources.fetch_recording_origin(TheFetchDoorRecordsIt._Src(None), "b", multi)
+            self.assertTrue(sources.read_input_record(multi)["content"]["digest"]
+                            .startswith("sha256-tree:"))
 
     def test_it_is_written_in_place_because_the_result_is_frozen(self):
         import dataclasses

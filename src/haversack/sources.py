@@ -244,6 +244,24 @@ def _license(name, url=None) -> dict | None:
 INPUT_SIDECAR = ".input.json"
 
 
+def sole_file(directory) -> Path | None:
+    """The one file an entry holds, or None when it holds several.
+
+    A fetch always produces a DIRECTORY - ``<entry>/series/`` - even for a single
+    object, and :func:`materialize` hands the pipeline that one file rather than
+    the directory when there is exactly one. So a one-file fetch IS a file, and
+    its digest has to say so: it read ``sha256-tree:`` over a directory of one
+    while the same bytes uploaded read ``sha256:``, and the two never matched.
+    Dotfiles are not content (the fetch's own ``.input.json`` lives beside them).
+    """
+    try:
+        files = [f for f in Path(directory).iterdir()
+                 if f.is_file() and not f.name.startswith(".")]
+    except OSError:
+        return None
+    return files[0] if len(files) == 1 else None
+
+
 def _content_facts(fetched) -> dict | None:
     """What the fetched bytes ARE: their digest (the content store's own
     function, so a fetched series and a stored one hash alike), size, file
@@ -254,6 +272,8 @@ def _content_facts(fetched) -> dict | None:
         return None
     from .content import digest_dir, digest_file
     p = Path(fetched)
+    if p.is_dir():
+        p = sole_file(p) or p                   # one file is a file: see sole_file
     if p.is_file():
         return {"digest": digest_file(p), "bytes": p.stat().st_size, "files": 1}
     if not p.is_dir():
@@ -1397,5 +1417,4 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
     content = entry / "series"
     if not content.is_dir():
         content = entry                      # a source that wrote directly under the entry
-    files = [f for f in content.iterdir() if f.is_file() and not f.name.startswith(".")]
-    return files[0] if len(files) == 1 else content
+    return sole_file(content) or content
