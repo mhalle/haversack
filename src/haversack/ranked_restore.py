@@ -20,8 +20,15 @@ from pathlib import Path
 
 import numpy as np
 import rankfield as rf
+from rankfield.store import KNOWN_VERSIONS
 
 from .errors import InputError
+
+# KNOWN_VERSIONS comes from rankfield, never restated here. Every byte of a part is
+# decoded by rankfield, so the formats this reader knows ARE the formats it knows -
+# and a hand-written copy drifts: this file said ("0.2", "0.3") while `ranked.py`
+# stamped whatever rankfield called current, so rankfield 0.2.0 (format 0.4) made
+# haversack write stores its own reader refused (2026-09-07).
 
 
 @dataclass
@@ -104,8 +111,9 @@ def parts_of(root) -> list[rf.Part]:
     for i in idx:
         g = root[f"parts/{i}"]
         m = dict(g.attrs.asdict()["duckn"]["extensions"]["ranked"])
-        if str(m.get("version")) not in ("0.2", "0.3"):
-            raise InputError(f"parts/{i}: ranked format {m.get('version')!r}; this reader knows 0.2 and 0.3")
+        if str(m.get("version")) not in KNOWN_VERSIONS:
+            raise InputError(f"parts/{i}: ranked format {m.get('version')!r}; this reader knows "
+                             + ", ".join(KNOWN_VERSIONS))
         env = m["envelope"]
         field = rf.RankField(ranks=g["ranks"], support=g["support"],
                              tail=g["tail"] if "tail" in g else None, meta=m,

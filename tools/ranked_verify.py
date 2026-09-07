@@ -27,12 +27,16 @@ import numpy as np
 from duckn import validate_seg_data
 
 from haversack.ranked_store import open_store, read_segmentation, validate_array
+from rankfield.store import KNOWN_VERSIONS as RANKED_VERSIONS   # never restated: see ranked_restore
 
 REQUIRED_RANKED = ("version", "mode", "classes", "depth", "clip", "gap_unit", "support_max",
                    "rank_sentinel", "labels", "part", "task", "model_grid", "envelope")
-RANKED_VERSIONS = ("0.2", "0.3")   # what this verifier (and every reader in the ecosystem) knows
 CURVE_KEYS_03 = ("gap_curve", "gap_range", "gap_origin", "keep")
-README_MUST_MENTION = {"0.3": "format 0.3"}     # formats whose bytes an older README misreads
+#: Formats whose BYTES an older README misreads - not every format. 0.4 is absent on
+#: purpose: with the default single tail (T=1, all haversack writes) its bytes are 0.3's,
+#: so a 0.4 part under the 0.3 README decodes correctly. A store carrying tails at other
+#: temperatures would need the README to document them; nothing here writes one yet.
+README_MUST_MENTION = {"0.3": "format 0.3"}
 
 
 class Report:

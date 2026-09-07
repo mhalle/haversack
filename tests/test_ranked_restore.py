@@ -124,7 +124,11 @@ def test_the_store_is_read_as_library_parts(run):
         parts = rr.parts_of(st.root)
     assert [p.name for p in parts] == ["first", "second"]
     assert parts[0].field.frame and parts[0].field.labels and parts[0].field.geometry is not None
-    assert parts[0].field.meta["version"] == "0.3" and parts[0].field.meta["keep"] == "shell"
+    # what the library calls current, never a literal: this line said "0.3" and went red
+    # the day rankfield cut format 0.4, though nothing about the store was wrong
+    import rankfield as rf
+    assert parts[0].field.meta["version"] == rf.FORMAT_VERSION
+    assert parts[0].field.meta["keep"] == "shell"
 
 
 def test_a_frameless_store_takes_its_geometry_from_the_array(run, monkeypatch):
@@ -171,3 +175,26 @@ def test_an_absurd_spacing_is_refused_before_anything_is_allocated(run):
         rr.restore(path, grid=0.0005, device="cpu")
     with pytest.raises(InputError, match="device"):
         rr.restore(path, grid=3.0, device="banana")
+
+
+def test_the_format_we_write_is_one_we_can_read():
+    """The bug rankfield 0.2.0 exposed: `ranked.py` stamps whatever the library calls
+    current, while this reader restated ("0.2", "0.3") by hand - so haversack wrote
+    format 0.4 stores and refused to read them, and every ranked test went red at once.
+    The reader now takes the list from rankfield; this pins the two ends together, so the
+    next format bump is caught here rather than by 25 failures across five files."""
+    import rankfield as rf
+    from rankfield.store import KNOWN_VERSIONS
+
+    from haversack.ranked import RANKED_VERSION
+    assert RANKED_VERSION == rf.FORMAT_VERSION          # the shim does not drift either
+    assert RANKED_VERSION in KNOWN_VERSIONS, (
+        f"haversack writes ranked format {RANKED_VERSION} but rankfield reads "
+        f"{KNOWN_VERSIONS}")
+    import importlib.util                               # the verifier agrees with the reader
+    import pathlib
+    tool = pathlib.Path(__file__).resolve().parents[1] / "tools" / "ranked_verify.py"
+    spec = importlib.util.spec_from_file_location("ranked_verify", tool)
+    rv = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rv)
+    assert rv.RANKED_VERSIONS == KNOWN_VERSIONS

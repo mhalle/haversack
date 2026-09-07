@@ -681,6 +681,22 @@ cannot be produced from 0.2 bytes (the shell's true gaps were never written), so
 stores stay 0.2, readable everywhere; new emits write 0.3.
 
 
+
+## Ranked format 0.4 (2026-09-07, rankfield 0.2.0)
+
+Tails at more than one temperature. The block is 0.3's, and **with the single tail every
+haversack store writes (T = 1) the bytes are 0.3's byte for byte** - a 0.4 part decodes
+correctly under the 0.3 rules above, which is why this section adds no decoding rule.
+
+What 0.4 allows is a part that also stores the tail measured at another temperature, beside
+the T = 1 plane, because a distillation at T needs the mass the encoding dropped at T and
+the T = 1 tail does not give it (at T = 4 a torso store drops 3.4 % of the mass on average).
+Such a plane is additional: a reader that wants only the argmax, the labels or the
+probabilities at T = 1 reads exactly what it read before and may ignore it. A reader that
+finds a temperature it was not given must refuse rather than renormalize with the wrong
+tail - `rankfield.tail_at` does.
+
+
 ## Restoring from the store
 
 `haversack.ranked_restore.restore(store, grid="input" | mm | Grid, interp="linear" | "nearest",
