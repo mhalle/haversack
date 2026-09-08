@@ -17,7 +17,8 @@ The server holds a `Segmenter` with warm models, a bounded job queue, a durable 
 and a result cache addressed by what was segmented rather than by which job did it. Every
 input resolves to a content identity (an upload to its sha256, an IDC series to its crdc
 UUID), and a result is keyed on that identity, the task and its options, the weights
-versions, and the haversack version. Ask twice, compute once.
+versions, and a cache epoch that moves only when a build would compute different bytes from
+the same inputs - not on every release. Ask twice, compute once.
 
 ## Quick start
 

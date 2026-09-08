@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+- **A release no longer throws the result cache away.** The key carried `__version__`, so every
+  version bump discarded every stored result - three times on 2026-09-08, for releases that
+  touched no model, no resampling and no encoding. What a stored result depends on is already
+  in the key: the input's identity, the task, the options and the weights versions. The build's
+  own component is now `serve.CACHE_EPOCH`, which moves only when the same inputs would compute
+  different bytes - the pipeline's resampling, framing or restore, the label mapping, an
+  engine's inference path. This change invalidates the cache once more, and then stops.
+
 ## [0.7.2] - 2026-09-08
 
 Three things CI was reporting while 0.7.0 and 0.7.1 went out without anyone reading it.

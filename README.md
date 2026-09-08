@@ -412,4 +412,7 @@ SynthStrip retries in fp16 before refusing.
 - VoxTell and the MONAI bundles have no in-process runner yet; they run on Modal.
   FastSurfer and SynthStrip run locally from their own environments (above).
 - Versioning: `haversack.__version__` is haversack's own number and is what the server reports; the
-  distribution's version belongs to the repository as a whole.
+  distribution's version belongs to the repository as a whole. It is deliberately NOT part of a
+  cached result's key: a release that changes no model, no resampling and no encoding leaves
+  stored results valid. `haversack.serve.CACHE_EPOCH` is what the key carries, and it moves only
+  when the same inputs would compute different bytes.

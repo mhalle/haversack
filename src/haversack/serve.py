@@ -123,18 +123,40 @@ from .sources import (CRDC_RE, IDC_BUCKETS, check_identifier as _check_identifie
 _ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack knows
 
 
-def result_key(identity, task, options, weights_versions, version=None) -> str:
+#: What the cache key carries for "this build could compute something different".
+#:
+#: It used to be ``__version__``, which meant every release threw the cache away -
+#: three times in one day for 0.7.0, 0.7.1 and 0.7.2, none of which touched a
+#: model, the pipeline or the encoding. A stored result costs GPU-minutes to make
+#: and is content-addressed by everything that actually determines it: the input's
+#: identity, the task, the options, and the weights versions. The build only needs
+#: its own component for what those four do NOT capture.
+#:
+#: **Bump it when a build would compute different bytes from the same inputs** -
+#: the pipeline's resampling, framing or restore; the label mapping; an engine's
+#: own inference path; anything in `docs/` "Geometry facts". Do NOT bump it for a
+#: release, a server change, a new source, a new catalog, or a bug fix that cannot
+#: reach the arithmetic. When in doubt, bump: a wrong hit serves bytes that were
+#: never computed from this build, and no one can tell by looking.
+#:
+#: 1 (2026-09-08): the first epoch. Everything before it was keyed on the release
+#: number, so this bump invalidates the cache once and for the last time.
+CACHE_EPOCH = "1"
+
+
+def result_key(identity, task, options, weights_versions, epoch=None) -> str:
     """The result-cache key: everything that determines the output bytes.
 
-    (input identity) x (task + options) x (weights versions) x (haversack version) -
-    the design's cache contract. Over-keying on an option that turns out inert
-    only costs hits; under-keying would serve wrong bytes, so all options count.
+    (input identity) x (task + options) x (weights versions) x (cache epoch) - the
+    design's cache contract. Over-keying on an option that turns out inert only
+    costs hits; under-keying would serve wrong bytes, so all options count. See
+    :data:`CACHE_EPOCH` for the last component and when it moves.
     """
     import hashlib
     payload = json.dumps({"identity": list(identity), "task": str(task),
                           "options": {k: options[k] for k in sorted(options)},
                           "weights": list(weights_versions),
-                          "haversack": version or _version()}, sort_keys=True)
+                          "haversack": epoch or CACHE_EPOCH}, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 

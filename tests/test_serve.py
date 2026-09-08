@@ -3071,6 +3071,30 @@ def test_a_dicom_series_is_stored_as_one_tree(tmp_path):
     assert ex.content.resolve(body["digest"]).is_dir()
 
 
+def test_a_release_does_not_throw_the_result_cache_away(monkeypatch):
+    """The key used to carry `__version__`, so every release discarded every stored
+    result - three times on 2026-09-08 alone, for releases that touched no model, no
+    pipeline and no encoding. A stored result costs GPU-minutes and is already keyed
+    on everything that determines it. What the build contributes is CACHE_EPOCH, which
+    moves only when the same inputs would compute different bytes."""
+    from haversack import serve as sv
+
+    args = (("idc:abc",), "total_fast", {"grid": 1.5}, ["ts=v2.4.0"])
+    before = sv.result_key(*args)
+    monkeypatch.setattr(sv, "_version", lambda: "9.9.9")     # a release, any release
+    assert sv.result_key(*args) == before, "a version bump moved the cache key"
+
+    # ...and the epoch still does, which is the whole point of having one
+    monkeypatch.setattr(sv, "CACHE_EPOCH", "2")
+    assert sv.result_key(*args) != before, "the epoch no longer reaches the key"
+
+    # everything that determines the bytes still keys
+    assert sv.result_key(("idc:other",), "total_fast", {"grid": 1.5}, ["ts=v2.4.0"]) != before
+    assert sv.result_key(("idc:abc",), "total", {"grid": 1.5}, ["ts=v2.4.0"]) != before
+    assert sv.result_key(("idc:abc",), "total_fast", {"grid": 2.0}, ["ts=v2.4.0"]) != before
+    assert sv.result_key(("idc:abc",), "total_fast", {"grid": 1.5}, ["ts=v2.5.0"]) != before
+
+
 def test_a_zip_and_loose_parts_of_one_series_are_the_same_input(tmp_path):
     """Transport must not change identity: the zip's timestamps, member order
     and nesting are its own business."""
