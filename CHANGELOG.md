@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.2] - 2026-09-08
+
+Three things CI was reporting while 0.7.0 and 0.7.1 went out without anyone reading it.
+
+- **Text files are read as UTF-8, not as the machine's locale.** `Path.read_text()` with no
+  encoding uses the locale's, which is ASCII under `LANG=C`; the store's own README has
+  carried an em-dash for months, so building a ranked store there raised `UnicodeDecodeError`.
+  Nothing about the data changed - the environment did, and any user with `LANG=C` would have
+  met the same thing. Every read and write of text in the package, the tools and the tests
+  names its encoding now, and a test refuses a bare `read_text()`.
+- **`typer` is no longer a dependency.** It was declared core and imported nowhere; the command
+  line is argparse. It comes out of the install, including the README's lean-install line.
+- CI installs `obstore`, which has been a core dependency since 0.6.x and was missing from its
+  hand-written list. It only began to matter when 0.7.0 moved `s3:` and `gs:` onto it, at which
+  point those sources reported themselves disabled there. A test now fails when the list drifts
+  from pyproject again - it found the `typer` entry immediately.
+
 ## [0.7.1] - 2026-09-07
 
 - **A disabled engine no longer costs an image build, or blocks a deploy.** The four engine
