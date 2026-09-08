@@ -271,6 +271,12 @@ class PolicyHasOneHome(unittest.TestCase):
             self.assertIn("refresh_cached_input", calls,
                           f"{module}:{fname} stopped delegating")
 
+def now_offset() -> float:
+    """The offset that puts a stamp exactly at the epoch, whatever `now` the
+    differential test uses - so the case says "finished == 0.0", not a magic number."""
+    return 1_000_000.0
+
+
 class RetentionAgreesAcrossSubstrates(unittest.TestCase):
     """One retention rule, two substrates that cannot share code.
 
@@ -291,6 +297,12 @@ class RetentionAgreesAcrossSubstrates(unittest.TestCase):
         ("running since forever",          {"state": "running", "created": -10 ** 5,
                                     "started": -10 ** 5}, False),
         ("terminal with no finished stamp", {"state": "done", "created": -7200}, True),
+        # The one value at which truthiness and COALESCE disagree: `finished or
+        # created` skips 0.0, `COALESCE(finished, created)` keeps it. The epoch is
+        # not a stamp time.time() produces, so this never fired - but the two rules
+        # have to READ alike, or the next reader trusts the wrong one.
+        ("terminal, finished at the epoch", {"state": "done", "finished": -now_offset(),
+                                             "created": -60}, True),
     ]
     TTL = 3600.0
 
@@ -683,9 +695,57 @@ class ClaimStatesThatWereUntested(unittest.TestCase):
             self.assertFalse((entry / cache.MARKER).exists(),
                              "committed a series whose claim it did not hold")
 
+    def test_the_fallback_on_a_filesystem_that_really_has_no_hard_links(self):
+        """The real thing, not a monkeypatch. A USB stick is FAT32 or exFAT, and a
+        cache root on one is an ordinary way to run this; both answer ENOTSUP to
+        os.link and both are case-INSENSITIVE, which is why cache keys escape
+        their uppercase (see safe_path_component).
+
+        Opt in by pointing HAVERSACK_TEST_NOLINK_ROOT at such a mount. On macOS::
+
+            hdiutil create -size 60m -fs MS-DOS -volname T -quiet /tmp/t.dmg
+            hdiutil attach /tmp/t.dmg -mountpoint /tmp/tmnt -nobrowse
+
+        Verified on both filesystems 2026-09-07: one writer of eight, no staged
+        token left behind, and two keys differing only in case kept apart.
+        """
+        root = os.environ.get("HAVERSACK_TEST_NOLINK_ROOT")
+        if not root:
+            self.skipTest("set HAVERSACK_TEST_NOLINK_ROOT to a FAT32/exFAT/network mount")
+        import shutil
+        base = pathlib.Path(root) / "haversack-claim-test"
+        shutil.rmtree(base, ignore_errors=True)
+        cache = self._cache(base)
+        entry = cache._entry("s3:bucket/Contended")
+        try:
+            os.link(__file__, str(base / "linkprobe"))
+            self.skipTest(f"{root} supports hard links; this test needs one that does not")
+        except OSError:
+            pass
+        tokens, barrier = [], threading.Barrier(8)
+
+        def claimer():
+            barrier.wait()
+            tokens.append(cache._claim(entry))
+
+        ts = [threading.Thread(target=claimer) for _ in range(8)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        won = [t for t in tokens if t is not None]
+        self.assertEqual(len(won), 1, f"{len(won)} writers won on {root}")
+        self.assertEqual(cache._owner_of(entry), won[0])
+        self.assertEqual(list(cache.claims.iterdir()), [], "the fallback leaked a staged token")
+        # and the case-insensitivity of such a volume must not merge two keys
+        a = cache.get_or_fetch("s3:bucket/Scan.nii.gz")
+        b = cache.get_or_fetch("s3:bucket/scan.nii.gz")
+        self.assertNotEqual(a, b)
+        shutil.rmtree(base, ignore_errors=True)
+
     def test_the_no_hard_link_fallback_still_admits_exactly_one_writer(self):
-        """os.link never fails on APFS, so this branch runs only on FAT32 or a
-        network mount - that is, only in production."""
+        """The same guarantee where os.link is monkeypatched, so it runs everywhere;
+        the test above is the real filesystem."""
         with tempfile.TemporaryDirectory() as td:
             cache = self._cache(pathlib.Path(td))
             entry = cache._entry("s3:b/x")

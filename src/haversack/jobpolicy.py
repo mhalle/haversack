@@ -44,7 +44,16 @@ def purgeable(meta, now: float, ttl_s: float) -> bool:
         return True
     if meta.get("state") not in TERMINAL:
         return False
-    return (now - float(meta.get("finished") or meta.get("created") or now)) > ttl_s
+    # COALESCE's rule, not truthiness: the sqlite side is
+     # `COALESCE(finished, created)`, which passes over NULL and NOT over 0.0.
+     # `finished or created` disagreed with it at exactly that value - the epoch,
+     # which no finish stamp is (they come from time.time()), so this was
+     # unreachable rather than wrong. Written the same way as the SQL so the two
+     # cannot be read as different rules.
+    stamp = meta.get("finished")
+    if stamp is None:
+        stamp = meta.get("created")
+    return (now - float(now if stamp is None else stamp)) > ttl_s
 
 
 def refresh_cached_input(key: str, *, wanted: bool, cache, reporter, on_skipped,
