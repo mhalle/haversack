@@ -1,6 +1,6 @@
 """Prove the CUDA (Triton) store-backed restore on Modal: bit-identical to the torch path.
 
-Runs on a GPU worker: random rankfield codes (format 0.3: shell keep, log byte) through
+Runs on a GPU worker: random rankfield codes (shell keep, log byte) through
 `rankfield.restore` on CUDA and on the CPU (torch), painted and not, on grids that stay
 inside and grids that leave the box; and the torso store if `HAVERSACK_RESTORE_STORE`
 names one, with timings.
@@ -70,7 +70,7 @@ def check(store_name: str | None) -> dict:
             d = ((zz - c[0]) ** 2 + (yy - c[1]) ** 2 + (xx - c[2]) ** 2).sqrt()
             lg.append(6.0 - 0.9 * d + 0.3 * torch.randn(shape, generator=rng))
         code = rf.encode(torch.stack(lg), depth=depth)
-        geo = rf.Geometry(spacing_zyx=(2.0, 2.0, 2.0), shape_zyx=tuple(shape))
+        geo = rf.Geometry.aligned(shape=tuple(shape), spacing=(2.0, 2.0, 2.0))
         return rf.RankField(ranks=code.ranks, support=code.support, tail=code.tail, meta=code.meta,
                             labels=labels, geometry=geo)
 
