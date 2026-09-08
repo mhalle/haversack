@@ -1,7 +1,11 @@
-# haversack — local working notes
+# haversack — working notes
 
-Local to this clone (`.git/info/exclude`), never committed. The README is the user guide and
-`SERVER.md` the server guide; this file is what an agent needs that neither says.
+The README is the user guide and `SERVER.md` the server guide; this file is what an agent
+needs that neither says. It is TRACKED, and it went 292 lines stale once because the
+working copy that gets edited in a session is `CLAUDE.md`, which is excluded from the repo
+(`.git/info/exclude`) - so everything learned about the 0.8.0 engine work existed only on
+one machine. Keep the two in step: whatever a session learns belongs here before the
+branch lands.
 
 ## What this is
 
@@ -20,11 +24,13 @@ is torch. MLX is oracle-only and this package never imports it.
   slicer-modal-design, segmentation-storage-and-duckn, monai-bundles).
 - `docs/` here: `dependency-discipline.md` (enforced by `tests/test_layering.py`) and the five
   `ranked-*.md` records with measured numbers.
-- Sibling repos pinned by git tag in pyproject: `../rankfield` (ranked encoding, format 0.3,
+- Sibling repos pinned by git tag in pyproject: `../rankfield` (ranked encoding, format 0.4,
   `docs/format.md`), `../duckn` (store metadata), `../synthstrip-torch`, `../fastsurfer-lean`.
   To develop one: `uv pip install -e ../rankfield` **after** `uv sync`, which otherwise
   reinstalls the tagged release. Bumping a tag means pyproject `[tool.uv.sources]` **and**
-  `.github/workflows/tests.yml` (CI hand-lists the git URLs).
+  `.github/workflows/tests.yml` (CI hand-lists the git URLs) - no longer on trust:
+  `test_ci_pins_the_same_git_refs_as_pyproject` fails when the two disagree on repository
+  or ref. rankfield and duckn are both at v0.3.2.
 - Oracle: `../medseg/nnunet-inference-mlx` at `main` ≥ `40ebe55`, plus its frozen fixtures.
 - `upstream/*` clones live in medseg and are other people's repos. Never push to their `origin`.
 
@@ -76,8 +82,22 @@ Two layers, enforced by `tests/test_layering.py`:
   zenodo/hf), `content` (content-addressed inputs), `preview`, `statistics`.
 - **Engines** — `engines/registry.py` is the static ecosystem→engine map (ts, moose,
   mrsegmentator, dentalsegmentator, totalvibe, custom → nnunetv2; fastsurfer, synthstrip,
-  voxtell, monai). Adding an engine = one Engine row + one extra + one `[tool.uv.sources]`
-  entry + a Modal worker class.
+  voxtell, monai). Deliberately NOT a plugin system, and the reason is now in the module
+  docstring: the torch-free import rule, Modal resolving `@app.cls` at import, and engines
+  living in conflicting environments each rule discovered plugins out on their own.
+  **Adding an engine really costs 7 files / 18 edit sites** to reach a green suite
+  (schemas, the engine module, registry ×5, ecosystems ×2, modal_app ×4, pyproject ×3,
+  attribution ×2) plus README/SERVER/CI/CHANGELOG. The old "one row plus a worker class"
+  line here was wrong by about 4× — measured 2026-09-08 by an agent that actually added one.
+  **The rule that keeps it from growing: when adding an engine needs an edit somewhere new,
+  add a FIELD to the Engine row, not a branch there.** `dist` (distributions, for
+  `/v1/version`), `label_names` (a thunk, for engines whose labels are in their own
+  namespace), and `cache_store` (subdir + env override, so `cache usage`/`clean` can see it)
+  all exist because a consumer was keeping its own copy and the copies drifted.
+  `tests/test_engine_completeness.py` is the checklist — one obligation per test, each
+  failing with the step it found missing. **Read its docstring before trusting it**: its
+  first version was substantially hollow (a broken sixth engine passed the whole suite),
+  and every rule in it now kills something a reviewer got past.
 - **Adding a catalog of nnU-Net weights** = a `ZipManifestEcosystem` subclass (data only:
   name, description, bucket, MANIFEST, generator) + a module-level `*_MANIFEST` path constant
   + a `tools/gen_*_manifest.py` using `tools/zippeek.py` + one line in `default_ecosystems()`
@@ -96,9 +116,17 @@ Two layers, enforced by `tests/test_layering.py`:
   the alternative — say plainly in the docstring that the identity is not cache-grade, so a
   stale cached result is a known cost rather than a surprise.
 - **Ranked store** — `ranked` (shim over rankfield + `RankedSpec`/`emit`/distance/junction
-  caches), `ranked_output`, `ranked_build`, `ranked_store`, `ranked_restore`, `duckn_io`,
+  caches), `ranked_output`, `ranked_build`, `ranked_store`, `ranked_restore` (the STORED
+  form is rankfield's: `rankfield.store.read_parts`/`array_geometry` and its version gate,
+  never restated here - two copies of it drifted in one day), `duckn_io`,
   `view`. INTERNAL and undocumented (not README, not CHANGELOG, not `--help`); `view` and
-  `restore` are unlisted CLI subcommands. Callers are `tools/ranked_*.py`.
+  `restore` are unlisted CLI subcommands. Callers are `tools/ranked_*.py`, which NO test
+  imports (they are `--no-project` scripts, several Modal- or GPU-only): a rankfield API
+  change is invisible to the suite, which is how the 0.3.0 `Geometry` migration left one
+  call site raising for a day. `tests/test_tools_rankfield_api.py` reads them instead -
+  every rankfield name must exist and every call must bind against the INSTALLED signature
+  (the sibling working tree in a dev clone, the pinned tag in CI). It is static only: it
+  says nothing about a call whose meaning changed while its shape did not.
 
 Key entry points: `pipeline.segment()` (the run), `Segmenter` (policy + warm `ModelCache`),
 `tasks._resolve_spec` (torch-free task resolution used by `describe()` and the server),
@@ -143,8 +171,11 @@ Key entry points: `pipeline.segment()` (the run), `Segmenter` (policy + warm `Mo
 
 Token computes, anonymous reads. Plain GET is a read; `Prefer: wait=N` / `respond-async` is
 the intent to compute. `Cache-Control: no-cache` recomputes and republishes under the same key.
-Results are keyed on content identity + task + options + weights versions + `__version__`
-— bumping `__version__` invalidates every cached result. VoxTell refuses cache serving.
+Results are keyed on content identity + task + options + weights versions + `serve.CACHE_EPOCH`
+— NOT `__version__`, which used to be there and threw the cache away on every release. Bump the
+epoch when a build would compute different bytes from the same inputs (resampling, framing,
+restore, label mapping, an engine's inference path); never for a release or a server change.
+VoxTell refuses cache serving.
 
 ## Release procedure
 
@@ -162,96 +193,158 @@ Results are keyed on content identity + task + options + weights versions + `__v
 - Deviations from what the user asked (accumulator moved to host, fp16 retry) are never
   silent: `note:` on the CLI, a progress stage on the server, `provenance.deviations` in the result.
 - Tests are `unittest` classes under pytest, with the device matrix fixture in `conftest.py`.
-- Don't commit this file, `data/`, `uv.lock`, or model weights. Don't vendor sibling repos.
+- Don't commit `CLAUDE.md` (the excluded working copy of this file), `data/`, `uv.lock`,
+  or model weights. Don't vendor sibling repos.
 
-## `protocol-and-shared-core` — merged to `main` 2026-09-06 (fast-forward, 851d240); NOT pushed. Trim this section once the unverified items below are closed.
+## Guards added 2026-09-08 — what they cover, so they are not re-litigated
 
-Six commits + a CHANGELOG entry, on top of `main`, which itself carries 5 unpushed commits
-from `sources-and-catalogs`. **Nothing is pushed to origin.** No version bump; everything
-sits under `[Unreleased]`.
+One fact written in two places, and the copies drift, is this repo's recurring defect. Each
+of these reconciles TWO INDEPENDENT sources; a check that compares a thing to itself always
+passes, which is how the first engine checklist came out hollow.
 
-What it does: one executor contract derived from `create_app`'s AST; a new `jobpolicy`
-module holding the decisions `serve` and `modal_app` both make; a pinned pre-read; and a
-claim protocol where the claim and its owner arrive in one `os.link` instead of two steps.
+- `test_ci_pins_the_same_git_refs_as_pyproject` — CI's hand-written installs vs
+  `[tool.uv.sources]`, repo and ref both. CI hand-lists because it installs CPU torch.
+- `test_tools_rankfield_api` — every rankfield name/call under `tools/` binds against the
+  INSTALLED rankfield. `tools/` is imported by no test, which is how the 0.3.0 `Geometry`
+  migration left one call site raising. Static only.
+- `test_engine_completeness` — the engine checklist (above). Modal obligations are STATIC
+  text checks, never `importorskip("modal")`, which deleted them in the per-engine venvs
+  where an author actually works. Also: git pins are non-placeholder offline, and resolve
+  upstream under `-m slow` (out of CI on purpose — CI installs no engine extra, so it never
+  resolves an engine source at all).
+- `test_fastsurfer` — the shipped LUT vs FastSurfer's own table (identical on all 78 ids;
+  upstream adds only id 0 Background). A verification done once by hand is a snapshot.
+- `test_server_docs` / `test_engine_completeness` — SERVER.md's flag list and
+  `haversack --help` must name every engine. `--help` had gone two engines stale.
+- `modal_app._wiring_problems()` — import-time: a missing module flag global, or a
+  `_WORKER_CLASSES` value naming no class. Both were silent and deploy-fatal; the existing
+  assert compares KEYS only.
 
-### Modal smoke (2026-09-06) — DONE; the first on this branch
+### Real defects these found (not hypotheticals)
 
-Deployed twice with `--no-proxy-auth`, torn down after. Exercised: idc cold fetch + cache
-hit, s3 no-cache idle, s3 no-cache queued behind a running job (the finding-1 case: now
-`refetching (no-cache)`, no `input_refresh_skipped`), a plain job queued behind a long one,
-upload, path surface (HEAD/meta/statistics). No tracebacks. Found and fixed a pre-existing
-Modal defect: five `queued` records orphaned by a `modal app stop` 76 h earlier starved the
-prefetcher (it warms the oldest queued job) and poisoned single-flight for their keys;
-`_reconcile_orphans` fails them via `FunctionCall.get(timeout=0)`. After the fix the
-prefetcher worked for the first time (`[prefetch] … staged`, next job `fetch cached` /
-`read preread`, 35.6 s → 8.4 s).
+- `ranked_build.named_groups` fell back to nnU-Net's `GROUP_CLAIMS` for any engine without
+  its own, so voxtell/monai/synthstrip stores emitted `g_lungs` with `exhaustive=True` — an
+  anatomical guarantee TotalSegmentator makes and they do not. `claims_for` returns nothing
+  now for an engine that declares nothing.
+- `/v1/version` hand-listed engine packages and had missed voxtell and monai since each was
+  added — the endpoint whose job is to say which rev is running, silent about the one engine
+  pinned to a git rev for exactly that reason.
 
-Second round, all five engines deployed: FastSurfer (95 structures, 33 s), SynthStrip,
-VoxTell (`lung`/`heart` on CT), MONAI spleen (bundle installed on the volume), BraTS
-multi-input with two roles uploaded and two bound to ONE `s3:` object under no-cache (the
-refresh deduped: no `input_refresh_skipped`), and the upload pre-read. Found and fixed: the
-prefetch scan had no engine filter, so with several workers each container warmed whichever
-job was oldest - the SynthStrip container pre-read the nnU-Net worker's upload. After the
-filter the nnU-Net worker pre-reads its own upload (`read preread`, verified live).
+## Known-benign lint, don't "fix" without reading this
 
-Third round (2026-09-07, ade4293): the worker records an input's rights at fetch time and
-writes `provenance.inputs` - an `idc:` job carried collection nlst / CC BY 4.0 / the NLST
-DOI / IDC's acknowledgment, an `s3:` object and an upload said "not determined" in words;
-the path surface's meta.json carries the same. No tracebacks. Re-run after the reshape
-(e3919a8): `inputs[i]` = content / origin / license / cite; the worker's tree digest of the
-NLST series equals the local run's (`sha256-tree:c1e472…`), so the pin is reproducible.
+CI runs NO linter and there is no ruff config, so `ruff check` uses defaults: 192 findings
+package-wide, 113 of them E702 (multiple statements on one line), which is house style.
+Wiring ruff into CI needs a config encoding the style first or it fails red on day one.
+All 9 F821 are false positives, checked 2026-09-08: 5 in `io.py` and 1 in `weights_fetch.py`
+are lazily-imported names used in string annotations (the call-time import discipline; `io.py`
+has `from __future__ import annotations`, so they never evaluate) — a `TYPE_CHECKING` block
+would silence them. The 3 in `ranked_build` are lambdas closing over `rk_all`/`su_all`, which
+are deleted later in the function; the consumer (`junction_sparse` → `_triple_tube`/
+`_junction_at`) has no yields, stores neither callable and returns plain arrays, so the
+closures never outlive the call. Real hazard class, not a real bug — it becomes one the day
+that routine is made lazy. Binding them as lambda defaults would remove both.
 
-What no smoke has touched: a VoxTell prompt outside the embedding bank (the 8 GB backbone
-download to the weights volume), `HAVERSACK_PUBLIC=1` (the anonymous twin), proxy-auth
-deployments (every smoke was `--no-proxy-auth`), a cancel mid-run, and anything on Windows.
+## Still unverified, as of 0.8.0
 
-### Review round 2 (2026-09-06), fixed in the working tree
+0.8.0 is tagged and pushed, with CI green BEFORE the tag this time (985 passed, 13 skipped,
+rankfield 0.3.2 resolved from the tag) - which is the whole lesson of 0.7.0 and 0.7.1, both
+tagged onto a red CI and then deleted from origin. What follows is what this work never
+proved, kept because it is still true.
 
-- Modal had not received two of ba2e1c1's no-cache fixes (prefetcher skipping
-  `refresh_input` jobs; never using a pre-read after a refresh). Both rules now live in
-  `jobpolicy.prefetchable` / `take_pre_read`; `modal_app._prefetch_candidate` is the
-  scan lifted to module level so it can be tested against a fake jobs dict.
-- `_claim` leaked a live claim when the stale-clear raised after the link; `_hb_start`
-  spelled `.owner` by hand. Both have behavioral tests.
-- Windows: `haversack.filelock` (fcntl / msvcrt) replaces the bare `flock` that silently
-  degraded to no lock; ranked_store's lock uses it too. Still never run on Windows.
-- Textual guard `test_a_no_cache_job_never_uses_a_pre_read_image` rewritten structurally.
+- **Engine venvs have not been run locally** (synthstrip, voxtell, monai, fastsurfer) since
+  the shared code moved. All four DID run on Modal (see below), which exercises the same
+  `_execute_job` body but not the per-venv install.
+- **CI's environment differs from this one** — it hand-installs CPU torch with
+  `PYTHONPATH=src` rather than `uv sync`, and several modules (`jobpolicy`, `fetchlib`,
+  `filelock`, `attribution`) are new on that path.
+- **`haversack.filelock`'s msvcrt branch has never run on Windows.** Written from the
+  documentation; the tests exercise whichever facility the host has.
+- Concurrency probes were mostly threads within one process; cross-process coverage is thinner.
 
-### Already verified — don't redo
+### What Modal HAS been shown to do (2026-09-06/07, three rounds, torn down after each)
 
-900 fast tests; ruff identical to the `main` baseline on every touched file; a real `s3:`
-fetch with two concurrent callers downloading once; a real MPS segmentation. Concurrency
-probes after the fixes: 0 false "writer is dead" verdicts under 112,276 competing claims
-(was 86/3000), and 1 claim attempt / 0% CPU against an unreadable claim (was 6,399 / 95% of
-a core). `jobpolicy`'s behavior and the claim/commit paths are mutation-tested.
+Cold fetch and cache hit; `no-cache` idle and queued behind a running job; the prefetcher
+and read-ahead, including one worker warming only its own engine's jobs; uploads and the
+upload pre-read; multi-input with two roles uploaded and two bound to one `s3:` object; all
+five engine workers (FastSurfer, SynthStrip, VoxTell, a MONAI bundle, nnU-Net); the path
+surface; and `provenance.inputs` carrying an IDC series' collection, licence and citation.
+Three pre-existing defects were found and fixed that way - orphaned queued records starving
+the prefetcher, the inflight-marker age rule, and the missing engine filter.
 
-### NOT verified — this is where fresh eyes are worth most
+Fourth round (2026-09-07) closed the rest: a cancel mid-run (DELETE on a running job returns
+cancelled and the record settles there), the anonymous twin under `HAVERSACK_PUBLIC=1`
+(serves labels, meta, statistics, preview, HEAD and the listing to nobody in particular;
+refuses to compute or mutate), a proxy-auth deployment (every route 401 without credentials,
+including with a bogus key/secret, while the twin stays open by design), and a VoxTell prompt
+outside the embedding bank - which pulls the ~8 GB text backbone to the weights volume and
+finished in 289 s. It also found the image-build defect fixed in the same commit.
 
-1. **Modal has never been deployed or smoke-tested from this branch.** Half the
-   consolidation exists to keep `modal_app` in step with `serve`, and `modal_app`'s changed
-   paths run only under the Modal runtime — a `NameError` there already slipped past the
-   whole suite once during this work. Highest-value gap by a distance.
-2. **Engine venvs were never run** (synthstrip, voxtell, monai, fastsurfer). Shared code moved.
-3. **CI's environment differs** — it hand-installs CPU torch with `PYTHONPATH=src` rather
-   than `uv sync`, and `jobpolicy` is a new module in that path.
-4. **The no-hard-link fallback** in `SeriesCache._claim` was only exercised by monkeypatching
-   `os.link`; never on a real FAT32 or network mount.
-5. **`_commit` now raises** where it used to pass, failing a job whose fetch had completed.
-   Deliberate and tested, but the interleaving that reaches it is rare — worth a second read.
-6. Probes were mostly threads within one process; cross-process coverage is thinner.
+Fifth round (2026-09-07) took the last two. With `HAVERSACK_MAX_CONTAINERS=2`: four distinct
+jobs ran with two containers genuinely overlapping in time, none of their identities crossed,
+and single flight held ACROSS containers - a second submission of an uncomputed key never
+started a compute of its own (`started` stayed null) and took the first's result under the
+same key. And a worker killed mid-compute (`modal app stop` while the job was in `fetch`,
+which leaves no terminal emit) is recovered by `_reconcile_orphans` on the next container's
+setup: `[reconcile] 1 orphaned job(s) failed`, the record moving to `failed` with a message
+telling the caller to resubmit. That is the code added in fab7706 doing deliberately what it
+first did by accident on records a `modal app stop` had orphaned 76 hours earlier.
 
-### Known open, deliberately
+Modal now has no untouched path this file knows of. What remains is judgement, not coverage:
+every smoke has been small and short, so nothing says how the queue behaves under sustained
+load or how a multi-hour job fares against the 3600 s function timeout.
+
+## Known open, deliberately
 
 - The two `_emit` functions are NOT consolidated: same name, different jobs (one merges
   persisted state terminal-wins, one pushes SSE snapshots). Merging them would invent a
   duplication. `_prefetch_next` and the inflight markers are still written twice.
-- `jobpolicy.purgeable` and `jobstore.reap` disagree when `finished == 0.0`. Unreachable
-  (a finish stamp is `time.time()`) and pre-existing.
+- A one-member zip and a loose upload of the same bytes are now one identity; what remains
+  is that a `.input.json` written before that change still records the old tree digest. It
+  is provenance only - the content digest never reaches `result_key` - and a `no-cache`
+  refetch rewrites it.
 - `docs/totalvibe-region-names.md` records deferred work: naming TotalVibe's 11 regions,
   which needs deriving from a `ts:total` overlap table, NOT reading them off upstream's JPEG.
 
-### Hazard when running review agents
+### Verified on a real filesystem (2026-09-07)
+
+A cache root on a USB stick is an ordinary way to run this, and FAT32 and exFAT both answer
+ENOTSUP to `os.link` and are case-INSENSITIVE. Both were mounted (`hdiutil create -fs
+MS-DOS` / `-fs ExFAT`) and the whole protocol run on them: the no-hard-link fallback admits
+exactly one writer of eight and leaves no staged token, two keys differing only in case stay
+apart (which is what the uppercase escaping in `safe_path_component` is for), and commit,
+discard and the graveyard rename all work. `tests/test_jobpolicy.py` carries it as an opt-in
+test - point `HAVERSACK_TEST_NOLINK_ROOT` at such a mount; the recipe is in its docstring.
+
+## Open on the engine/registry work — deliberately not done (2026-09-08)
+
+- **CI installs no engine extra**, so nothing about an engine is exercised there and no
+  engine git source is ever resolved. Adding one is a real cost (conflicting numpy ranges,
+  heavy trees); the `-m slow` pin check is the cheap half of the answer.
+- **README hand-lists engine families** in three places (`README.md:3/380/400/412`). Only
+  `--help` and SERVER.md are pinned by tests.
+- **`[tool.uv] conflicts` and the worker image's `uv_sync(extras=[...])` restate
+  `Engine.extra`.** Omitting the conflicts entry breaks `uv sync` for everyone — loud, but
+  only at sync time, never in the suite. Note `fastsurfer` is deliberately NOT in a
+  conflicts group (it installs into the main env).
+- `cache_admin.clean` addresses ONE path per category and `checkpoints` is a CLI category
+  name, so only one engine may declare `cache_store`. A test tripwires the second one.
+
+## Hazard when running review agents
 
 An agent told to mutation-test will temporarily rewrite source files and restore them. Do
 not edit those files while one is running, and verify findings against `git show HEAD:<path>`
-rather than the working tree — a reviewer in this session read a file mid-mutation.
+rather than the working tree — a reviewer in this session read a file mid-mutation. Their
+findings are worth the run: three agents on the 0.7.0 work found two real defects (a
+one-file DICOM series losing its identifiers, a legacy store restoring misplaced instead of
+failing) and proved two of my own guards hollow. Three more on the 0.8.0 engine work found a
+false anatomical claim shipping in stores, two silent deploy-fatal Modal wiring holes, and
+ten holes in a checklist that had just been "mutation-tested" with 8 kills.
+
+**Mutation harnesses lie when they break.** Three runs this session reported every mutant
+KILLED without executing the test once: an unquoted `$CMD` that zsh did not word-split, a
+wrong test class name (`-q` prints "no tests ran", exit 4), and a shell heredoc passing a
+literal `\n` so the anchor never matched. Rules: assert the anchor appears EXACTLY ONCE and
+treat a failed apply as a HARNESS ERROR, not a survivor; run the unmutated baseline FIRST and
+require it to pass; and prefer killing a mutant that the guard should NOT catch as a sanity
+check. Also: mutate the facts the test does NOT check — 8 easy kills said nothing about the
+gaps that mattered.

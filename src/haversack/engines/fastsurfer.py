@@ -250,12 +250,15 @@ def checkpoint_dir() -> Path:
     """Where haversack keeps the FastSurfer checkpoints: ``HAVERSACK_FASTSURFER_CHECKPOINTS``,
     else ``fastsurfer-checkpoints`` under the cache root (``HAVERSACK_CACHE_DIR``, else
     ``$XDG_CACHE_HOME/haversack``, i.e. ``~/.cache/haversack``). Permanent,
-    because the files are DOI-versioned - a download happens at most once per machine."""
-    env = os.environ.get("HAVERSACK_FASTSURFER_CHECKPOINTS")
-    if env:
-        return Path(env).expanduser()
-    from ..cache_admin import cache_root       # HAVERSACK_CACHE_DIR, else XDG, else ~/.cache
-    return cache_root() / "fastsurfer-checkpoints"
+    because the files are DOI-versioned - a download happens at most once per machine.
+
+    Both facts come from this engine's `cache_store` row in the registry, through the
+    same function `cache usage` and `cache clean` ask. They were written out here as
+    well until 2026-09-08, so the registry was authoritative for cache admin and not for
+    the downloads - a subdirectory changed there would have moved where `cache clean`
+    swept without moving what it was sweeping."""
+    from ..cache_admin import engine_store_dir
+    return engine_store_dir("fastsurfer")
 
 
 def ensure_checkpoints(directory=None, *, progress=None) -> Path:

@@ -106,3 +106,26 @@ def test_the_guide_documents_every_engine_enable_flag():
     missing = [v for v in engine_env_vars() if v not in text]
     assert missing == [], (f"the server guide never mentions {missing} - add the flag where "
                            "the other engine flags are listed, or an operator cannot enable it")
+
+
+def test_the_readme_names_every_engine():
+    """The README hand-lists the engine families in several places, and it is where a
+    user decides whether this runs what they have.
+
+    Same shape as the `--help` sentence that had gone two engines stale and the
+    `/v1/version` package list that had missed voxtell and monai since each was added:
+    one fact written in prose, in more than one place, none of it derived. Prose is
+    right here - the families are a mix of catalogs and engines - so the check is only
+    that no engine is missing from it, which is what actually goes wrong.
+    """
+    import pathlib
+
+    from haversack.engines.registry import ENGINES, NNUNETV2
+    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md")
+    if not readme.exists():
+        import pytest
+        pytest.skip("running against an installed copy, not the repository")
+    text = readme.read_text(encoding="utf-8").lower()
+    missing = [n for n in ENGINES if n != NNUNETV2 and n not in text]
+    assert missing == [], (f"the README never mentions {missing} - add them where the other "
+                           "engines are described, or nobody discovers the engine exists")

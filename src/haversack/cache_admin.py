@@ -65,30 +65,45 @@ def results_dir() -> Path:
     return cache_root() / "results"
 
 
+def engine_store_dir(engine: str) -> Path | None:
+    """Where ``engine`` keeps its files under the cache root, or None if it keeps none.
+
+    Reads `Engine.cache_store` - the subdirectory and its environment override - and
+    imports no engine module, so the light path stays light. This is THE answer to that
+    question: `stores()` asks it so `cache usage` and `cache clean` can see the store,
+    and the engine asks it so its downloads land where those two will look. The engine
+    used to restate both literals, so the registry became authoritative for cache admin
+    and not for the engine, and a change made through it would have moved `cache clean`
+    without moving the downloads (2026-09-08).
+    """
+    import os
+
+    from .engines.registry import ENGINES
+    eng = ENGINES.get(engine)
+    if eng is None or not eng.cache_store:
+        return None
+    sub, env_var = eng.cache_store
+    env = os.environ.get(env_var) if env_var else None
+    return Path(env).expanduser() if env else cache_root() / sub
+
+
 def stores() -> list[dict]:
     """Every store haversack keeps on disk: name, path, whether `cache clean` may sweep it."""
     from .sources import default_input_cache
     from .tasks import weights_root
 
     def checkpoint_dir() -> Path:
-        """The engine checkpoint store, read from the engine registry.
+        """The engine checkpoint store, from :func:`engine_store_dir`.
 
-        The subdirectory and its environment override used to be copied here by hand, with
-        a comment explaining that importing the engine module was the thing being avoided.
-        They are DATA on the Engine row now, so this reads the same fact the engine reads
-        and still imports no engine. `clean` addresses one path per category, so exactly one
-        engine may declare a store today; `test_engine_completeness` fails the day a second
-        one does, naming this function as what has to widen.
+        `clean` addresses one path per category and `checkpoints` is a user-facing
+        category name, so exactly one engine may declare a store today;
+        `test_engine_completeness` fails the day a second one does, naming this
+        function as what has to widen.
         """
-        import os
-
         from .engines.registry import ENGINES
-        for eng in ENGINES.values():
-            if not eng.cache_store:
-                continue
-            sub, env_var = eng.cache_store
-            env = os.environ.get(env_var) if env_var else None
-            return Path(env).expanduser() if env else cache_root() / sub
+        for name, eng in ENGINES.items():
+            if eng.cache_store:
+                return engine_store_dir(name)
         return cache_root() / "checkpoints"        # no engine declares one
 
     try:

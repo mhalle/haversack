@@ -248,13 +248,20 @@ def _monai_image():
 
 
 
-# Lean front-end image for the ASGI api/public functions. The api never runs inference -
-# only catalog/describe + orchestration + cache/publish - and `import haversack` + the whole
-# describe path are torch-free (lazy inference imports), so this image carries NO torch /
-# nnunetv2 / triton / CUDA: just serve-core (fastapi/uvicorn/matplotlib) + obstore + the
-# core deps (numpy/SimpleITK). It cold-starts in a fraction of the worker image's time
-# (the worker's ~16 s cold was the multi-GB image pull). The GPU work stays on the heavy
-# worker image; the api just spawns it.
+# Front-end image for the ASGI api/public functions. The api never RUNS inference - only
+# catalog/describe + orchestration + cache/publish - and `import haversack` plus the whole
+# describe path stay torch-free at runtime, which is what `tests/test_layering.py` enforces.
+#
+# It does not follow that the image is small, and the comment here claimed it was long
+# after it stopped being true. This said "carries NO torch / nnunetv2 / triton / CUDA" and
+# justified the image by cold-start time. Then the inference stack moved from the `torch`
+# extra into core `dependencies` (2026-09-03, so that `uvx ... haversack segment` works
+# from a bare install), and `uv_sync` installs core - so torch, nnunetv2, scipy and
+# scikit-image have been in here ever since, and the `torch` extra is now an empty alias.
+# What this image still avoids is the CUDA tier (triton, the CUDA restore backend) and the
+# engine extras. Whether it should get its leanness back - a `--no-deps` install of the
+# five names the README's "Lean install" lists - is an open question that wants a
+# cold-start measurement first, not a guess (2026-09-08).
 api_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")                       # uv sync resolves the whole lock (engine git sources)

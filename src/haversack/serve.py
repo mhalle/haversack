@@ -2715,12 +2715,26 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # added, so the endpoint that exists to say WHICH REV is running said nothing
         # about the one engine pinned to a git rev for exactly that reason. A package
         # absent from this environment is skipped, so naming every engine's is right.
+        #
+        # A package this process cannot see is reported as unknown rather than dropped.
+        # Dropping it made an enabled engine's absence indistinguishable from an engine
+        # nobody asked for - and on Modal that is the NORMAL case, not an edge one: the
+        # API runs in `api_image` and each optional engine's dependencies are installed
+        # only in that engine's own worker image, so their versions can never appear here
+        # however the deployment is configured. Saying so is the honest answer; a per-worker
+        # inventory is the complete one, and is not built yet.
         from .engines import registry as _engines
         pkgs = {}
-        for name in sorted({d for e in _engines.ENGINES.values() for d in e.dist}):
+        remote_only = {d: n for n, e in _engines.ENGINES.items() for d in e.dist}
+        for name in sorted(remote_only):
             info = _pkg_info(name)
             if info is not None:
                 pkgs[name] = info
+            elif _engines.enabled(remote_only[name]):
+                pkgs[name] = {"version": None,
+                              "note": f"not installed in this process; the "
+                                      f"{remote_only[name]} engine runs in its own "
+                                      "environment and reports its own build there"}
         weights: dict = {}
         cat = getattr(seg, "catalog", None)
         if hasattr(cat, "info"):

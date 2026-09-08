@@ -295,6 +295,39 @@ class EveryEngineIsCreditedAndReachable(unittest.TestCase):
                          + "; ".join(wrong))
 
 
+    def test_THE_TWO_ROUTING_DECLARATIONS_AGREE(self):
+        """The same fact is written in two places, and only one of them dispatches.
+
+        `ECOSYSTEM_ENGINE` is what `engine_for`/`engine_for_task` read, so it decides
+        which runtime a task actually runs on - in serve, cli, modal_app and segmenter.
+        `ModelEcosystem.engine` is what `describe()` publishes to clients, and it defaults
+        to the nnU-Net engine. An ecosystem that declares `engine="monai"` with no
+        `ECOSYSTEM_ENGINE` entry passes every other rule in this file: it is reachable
+        (the reachability test reads the class attribute), and every route names a real
+        ecosystem (that test iterates the dict's own keys). Meanwhile `/v1/tasks/{task}`
+        would answer monai while the job ran on nnU-Net.
+
+        Deriving one from the other is not on offer: `ecosystems` imports `registry`, so
+        the reverse import would be circular. Reconciling them is.
+        """
+        ecosystems = pytest.importorskip("haversack.ecosystems")
+        with mock.patch.dict("os.environ",
+                             {e.enabled_env: "1" for e in R.ENGINES.values() if e.enabled_env}):
+            built = ecosystems.default_ecosystems()
+        wrong = []
+        for eco in built:
+            declared = getattr(eco, "engine", R.NNUNETV2)
+            routed = R.ECOSYSTEM_ENGINE.get(eco.name, R.NNUNETV2)
+            if declared != routed:
+                wrong.append(f"{eco.name}: describe() says {declared!r}, "
+                             f"engine_for() routes to {routed!r}")
+        self.assertEqual([], wrong,
+                         "an ecosystem's declared engine and its dispatch route disagree:\n  "
+                         + "\n  ".join(wrong)
+                         + "\n  - add or correct the ECOSYSTEM_ENGINE entry in "
+                           "engines/registry.py")
+
+
 class EveryEngineCacheIsVisibleToCacheAdmin(unittest.TestCase):
     def test_every_declared_cache_store_is_reported_by_cache_admin(self):
         """`cache usage` and `cache clean` must see it, or the disk fills invisibly.
@@ -329,6 +362,36 @@ class EveryEngineCacheIsVisibleToCacheAdmin(unittest.TestCase):
                         self.assertIn(str(expected), reported,
                                       f"{name}: {expected} is not among the stores cache admin "
                                       f"reports ({sorted(reported)})")
+
+    def test_the_engine_ITSELF_reads_the_registry_for_its_store(self):
+        """Not just cache admin: the engine's own downloads have to land where
+        `cache usage` and `cache clean` look.
+
+        The registry became authoritative for one side and not the other - the engine
+        restated the subdirectory and the environment variable in its own module - so a
+        change made through `Engine.cache_store` would have redirected the sweeping
+        without redirecting what was swept, and the equality test below would still have
+        passed because both literals still agreed. Moving the registry value here is the
+        only way to tell those apart: it must move BOTH.
+        """
+        pytest.importorskip("haversack.engines.fastsurfer")
+        from dataclasses import replace
+
+        from haversack.cache_admin import stores
+        from haversack.engines import fastsurfer
+        moved = "review-checkpoints-probe"
+        with mock.patch.dict(R.ENGINES, {
+                "fastsurfer": replace(R.ENGINES["fastsurfer"],
+                                      cache_store=(moved, "HAVERSACK_FASTSURFER_CHECKPOINTS"))}):
+            with mock.patch.dict("os.environ", {}, clear=False):
+                os.environ.pop("HAVERSACK_FASTSURFER_CHECKPOINTS", None)
+                engine_says = fastsurfer.checkpoint_dir()
+                admin_says = {s["name"]: str(s["path"]) for s in stores()}["checkpoints"]
+        self.assertEqual(str(engine_says), admin_says,
+                         "the engine and cache admin disagree about where checkpoints live")
+        self.assertTrue(str(engine_says).endswith(moved),
+                        f"the engine ignored the registry and answered {engine_says} - it is "
+                        "restating the subdirectory instead of reading `Engine.cache_store`")
 
     def test_only_one_engine_declares_a_cache_store(self):
         """`cache_admin.clean` addresses ONE path per category, and `checkpoints` is a
@@ -514,6 +577,44 @@ class TheVersionEndpointDerivesItsPackageList(unittest.TestCase):
         self.assertEqual(set(), reported - known,
                          f"/v1/version reports {sorted(reported - known)}, which no engine's "
                          "`dist` claims - a hand-written list is being merged in")
+
+    def test_an_ENABLED_engine_is_never_SILENTLY_absent_from_the_report(self):
+        """An engine whose packages this process cannot see must say so, not vanish.
+
+        `_pkg_info` reads the distributions installed in the API PROCESS, and on Modal the
+        API runs in `api_image` while each optional engine's dependencies are installed only
+        in that engine's own worker image - so for four of the five engines those versions
+        can never appear there, however the deployment is configured. Dropping them made an
+        enabled engine's absence look exactly like an engine nobody asked for, in the
+        endpoint whose whole job is to say which build produced a result. This asserts the
+        report ACCOUNTS for every enabled engine's distributions, with a version or with a
+        reason.
+        """
+        pytest.importorskip("fastapi")
+        import tempfile
+
+        from test_serve import make
+
+        # an engine that is on but whose package is certainly not importable here
+        from dataclasses import replace
+        eng = next(iter(_optional_engines()))
+        with mock.patch.dict(R.ENGINES, {
+                eng: replace(R.ENGINES[eng], dist=("a-package-nobody-installed",))}):
+            with mock.patch.dict("os.environ", {R.ENGINES[eng].enabled_env: "1"}):
+                with tempfile.TemporaryDirectory() as td:
+                    _, ex, client = make(Path(td))
+                    try:
+                        body = client.get("/v1/version").json()
+                    finally:
+                        client.close()
+                        getattr(ex, "shutdown", lambda: None)()
+        pkgs = body.get("packages") or {}
+        self.assertIn("a-package-nobody-installed", pkgs,
+                      f"an enabled engine's distribution is missing from /v1/version "
+                      f"entirely: {sorted(pkgs)} - report it as unknown rather than dropping it")
+        self.assertIsNone(pkgs["a-package-nobody-installed"]["version"])
+        self.assertIn(eng, pkgs["a-package-nobody-installed"]["note"],
+                      "the note must name the engine whose environment holds it")
 
 
 if __name__ == "__main__":
