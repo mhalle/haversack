@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.1] - 2026-09-07
+
+- **A disabled engine no longer costs an image build, or blocks a deploy.** The four engine
+  images were built on every `haversack modal deploy` however the enable flags were set, so an
+  engine this deployment does not run could still stop it: Zenodo's file endpoint answered 504
+  for a while on 2026-09-07 and two deploys with FastSurfer switched off died fetching its
+  checkpoints. Each image is now built where its worker is defined, inside the flag's own
+  branch. `HAVERSACK_FASTSURFER_CHECKPOINTS` remains the way to bake a local copy instead of
+  fetching at build.
+- **The cache works on a USB drive.** FAT32 and exFAT have no hard links, so the claim falls
+  back to an exclusive create; that branch had only ever been exercised by monkeypatching
+  `os.link`. Both were mounted and the protocol run on them: one writer of eight racing
+  threads, nothing left staged, and commit, discard and eviction intact. Both are also
+  case-insensitive, which is what the uppercase escaping in cache keys is for - two keys
+  differing only in case stay apart there. Opt in with `HAVERSACK_TEST_NOLINK_ROOT`.
+- Retention is one rule again: the Python side read `finished or created` where the SQL reads
+  `COALESCE(finished, created)`, which differ at a finish stamp of exactly zero. No stamp is
+  the epoch, so nothing could reach it - but the two are meant to be read as one rule.
+
 ## [0.7.0] - 2026-09-07
 
 Four data sources and two model catalogs on the extension seams that already existed; one
