@@ -8,8 +8,11 @@ who only needs the fused restore). That property is easy to lose by accident and
 check, so it is checked here rather than trusted.
 """
 import ast
+import fnmatch
 import pathlib
 import unittest
+
+import pytest
 
 def _package_dir() -> pathlib.Path:
     """Locate the package by import, not by repo layout - the tests also run against a copy
@@ -61,7 +64,57 @@ def _imports(path: pathlib.Path, top_level_only: bool):
                 yield node.module.split(".")[0], node.lineno
 
 
+def _defines_tests(path: pathlib.Path) -> bool:
+    """Whether the file defines anything pytest would run, read from its AST rather
+    than from its name. The name is the OTHER source this is reconciled against."""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return False
+    return any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name.startswith("test")
+               for n in ast.walk(tree))
+
+
+def _test_modules() -> list[pathlib.Path]:
+    """Every file under tests/ that holds tests, found by CONTENT. Not by name: for six
+    files the name was exactly the problem (see the collection test below)."""
+    here = pathlib.Path(__file__).resolve().parent
+    return sorted(p for p in here.glob("*.py")
+                  if p.name != "conftest.py" and _defines_tests(p))
+
+
 class TestLayering(unittest.TestCase):
+    @pytest.fixture(autouse=True)
+    def _grab_config(self, pytestconfig):
+        """pytest's own live configuration, stashed where a TestCase method can read it.
+        A unittest class takes no funcargs, but an autouse fixture on it still runs."""
+        self._pytestconfig = pytestconfig
+
+    def test_every_file_holding_tests_is_one_PYTEST_ACTUALLY_COLLECTS(self):
+        """Reconciles two independent sources: which files define tests (their ASTs) and
+        which files pytest is configured to collect (its live `python_files`).
+
+        Six files failed this for the whole life of the repo. `kernel_test_grid.py` and
+        five siblings arrived already misnamed in f0d83dd, matching neither default
+        pattern - `test_*.py` wants the prefix, `*_test.py` the suffix, and
+        `kernel_test_grid.py` has neither - and `python_files` was never configured, so
+        98 kernel tests were never collected once: the grid, mapping, resample, backend
+        and MLX-oracle parity checks, all of them silently absent from every green run.
+        They cost 1.3 s. Renaming them to `test_kernel_*.py` on 2026-09-08 was the fix;
+        this is what stops the next one, because nothing else in the repo would notice.
+        The one place that DID know the old name read them as files, not as tests: the
+        MLX-import guard above globbed `kernel_test_*.py` by hand.
+        """
+        patterns = self._pytestconfig.getini("python_files")
+        self.assertTrue(patterns, "pytest reports no python_files patterns at all")
+        missed = [p.name for p in _test_modules()
+                  if not any(fnmatch.fnmatch(p.name, pat) for pat in patterns)]
+        self.assertEqual([], missed,
+                         f"these files define tests that pytest will never collect: {missed} - "
+                         f"rename them to match one of {patterns}, or add the pattern to "
+                         "[tool.pytest.ini_options] python_files in pyproject.toml")
+
     def test_every_module_is_classified(self):
         found = {p.stem for p in SRC.glob("*.py") if p.stem not in ("__init__", "__main__")}
         found |= {f"backends.{p.stem}" for p in (SRC / "backends").glob("*.py") if p.stem != "__init__"}
@@ -258,8 +311,7 @@ class TestLayering(unittest.TestCase):
         """The rules above cover src/haversack. The tests need the same property or CI cannot run
         them on Linux - test_frame once imported nnunet_inference_mlx.values.Geometry and
         broke the build."""
-        here = pathlib.Path(__file__).resolve().parent
-        for path in sorted(list(here.glob("test_*.py")) + list(here.glob("kernel_test_*.py"))):
+        for path in _test_modules():
             for mod, line in _imports(path, top_level_only=False):
                 self.assertNotIn(mod, FORBIDDEN_EVERYWHERE,
                                  f"{path.name}:{line} imports {mod!r}; the haversack tests must run "

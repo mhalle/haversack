@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import tomllib
 import unittest
@@ -181,24 +182,63 @@ class EveryGitSourceIsPinnedToSomethingReal(unittest.TestCase):
         Marked slow, therefore out of the fast suite and out of CI, which installs no engine
         extra and so never resolves an engine source at all - a bad rev reaches a developer's
         `uv sync` and nothing earlier. Run it deliberately: `uv run pytest -m slow -k pinned`.
+
+        A TAG is checked by listing: `git ls-remote URL <tag>` prints it or does not.
+
+        A REVISION cannot be checked that way, and the first version of this test tried.
+        `ls-remote`'s positional arguments are refname PATTERNS, so a sha matches nothing
+        unless a ref is literally named that; a fabricated sha and a real one both exit 0
+        with empty output, and this test then excused any 40-hex value outright. It proved
+        reachability of the repository and nothing about the pin - while three of the four
+        git sources here are pinned by `rev`, so almost every pin went unchecked. A review
+        demonstrated it by passing a sha that provably did not exist (2026-09-08).
+
+        So a revision is FETCHED. `git fetch --depth 1 URL <sha>` into a scratch repository
+        either brings the object down or refuses, and refusing is the answer we want. It
+        needs a positive control: a server that serves no object by hash at all would fail
+        a good pin the same way it fails a bad one. So each repository is first asked for
+        its own HEAD sha by hash, and one that cannot answer that is skipped rather than
+        failed.
         """
         import subprocess
+        import tempfile
+
+        def git(*args, cwd=None):
+            return subprocess.run(["git", *args], capture_output=True, text=True,
+                                  timeout=120, cwd=cwd)
+
+        def serves_by_hash(scratch, url, sha):
+            """Whether ``url`` will hand over the commit ``sha`` when asked for it by hash."""
+            return git("fetch", "--depth", "1", "--quiet", url, sha, cwd=scratch).returncode == 0
+
         sources = _pyproject()["tool"]["uv"]["sources"]
         problems = []
-        for name, spec in sources.items():
-            url, ref = spec.get("git"), spec.get("tag") or spec.get("rev")
-            if not url or not ref:
-                continue
-            try:
-                out = subprocess.run(["git", "ls-remote", url, ref, f"{ref}^{{}}"],
-                                     capture_output=True, text=True, timeout=60)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                self.skipTest(f"cannot reach {url}: {exc}")
-            if out.returncode != 0:
-                problems.append(f"{name}: git ls-remote failed - {out.stderr.strip()[:120]}")
-            elif not out.stdout.strip() and not re.fullmatch(r"[0-9a-f]{40}", ref):
-                # a tag must be listable; a bare sha is not, and cannot be checked this way
-                problems.append(f"{name}: {ref!r} is not a ref this repository publishes")
+        with tempfile.TemporaryDirectory() as scratch:
+            if git("init", "--quiet", scratch).returncode != 0:
+                self.skipTest("cannot create a scratch git repository")
+            for name, spec in sources.items():
+                url, tag, rev = spec.get("git"), spec.get("tag"), spec.get("rev")
+                if not url or not (tag or rev):
+                    continue
+                try:
+                    if tag:
+                        out = git("ls-remote", url, tag, f"{tag}^{{}}")
+                        if out.returncode != 0:
+                            self.skipTest(f"cannot reach {url}: {out.stderr.strip()[:120]}")
+                        if not out.stdout.strip():
+                            problems.append(f"{name}: tag {tag!r} is not published by {url}")
+                        continue
+                    # the positive control: this repository's own HEAD, asked for by hash
+                    head = git("ls-remote", url, "HEAD")
+                    if head.returncode != 0 or not head.stdout.strip():
+                        self.skipTest(f"cannot reach {url}: {head.stderr.strip()[:120]}")
+                    head_sha = head.stdout.split()[0]
+                    if not serves_by_hash(scratch, url, head_sha):
+                        self.skipTest(f"{url} serves no object by hash; {rev!r} unverifiable here")
+                    if not serves_by_hash(scratch, url, rev):
+                        problems.append(f"{name}: rev {rev!r} is not a commit {url} will serve")
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    self.skipTest(f"cannot reach {url}: {exc}")
         self.assertEqual([], problems, "\n  ".join(problems))
 
 
@@ -257,17 +297,38 @@ class EveryEngineIsCreditedAndReachable(unittest.TestCase):
 
 class EveryEngineCacheIsVisibleToCacheAdmin(unittest.TestCase):
     def test_every_declared_cache_store_is_reported_by_cache_admin(self):
-        """`cache usage` and `cache clean` must see it, or the disk fills invisibly."""
+        """`cache usage` and `cache clean` must see it, or the disk fills invisibly.
+
+        The expectation is computed the way production computes it - override first, then
+        the default under the cache root - rather than assumed to be the default. The
+        first version unpacked the override variable and threw it away, so it asserted the
+        default path unconditionally and FAILED for anyone who had the override set: a
+        developer with pre-fetched checkpoints, or anyone whose shell carries what the
+        Modal deploy path itself sets (`modal_app._fs_image`). `conftest`'s autouse fixture
+        pins the engine ENABLE flags off and touches nothing else, so an ambient
+        `HAVERSACK_*` store variable really does reach this test. It reported a cache-admin
+        defect that did not exist (2026-09-08).
+        """
         declaring = {n: e.cache_store for n, e in R.ENGINES.items() if e.cache_store}
         if not declaring:
             self.skipTest("no engine declares a cache store")
         from haversack.cache_admin import cache_root, stores
-        reported = {str(s["path"]) for s in stores()}
-        missing = []
-        for name, (sub, _env) in declaring.items():
-            if str(cache_root() / sub) not in reported:
-                missing.append(f"{name}: {sub!r} is not among the stores cache admin reports")
-        self.assertEqual([], missing, "\n  ".join(missing))
+        for name, (sub, env_var) in declaring.items():
+            for label, override in (("no override", None),
+                                    ("absolute override", "/tmp/haversack-cache-store-probe"),
+                                    ("tilde override", "~/haversack-cache-store-probe")):
+                with self.subTest(engine=name, case=label):
+                    with mock.patch.dict("os.environ", {}, clear=False):
+                        if env_var and override is None:
+                            os.environ.pop(env_var, None)
+                        elif env_var:
+                            os.environ[env_var] = override
+                        expected = (Path(override).expanduser() if override and env_var
+                                    else cache_root() / sub)
+                        reported = {str(s["path"]) for s in stores()}
+                        self.assertIn(str(expected), reported,
+                                      f"{name}: {expected} is not among the stores cache admin "
+                                      f"reports ({sorted(reported)})")
 
     def test_only_one_engine_declares_a_cache_store(self):
         """`cache_admin.clean` addresses ONE path per category, and `checkpoints` is a
