@@ -135,7 +135,7 @@ def _fastsurfer_lut() -> Path:
 def _fastsurfer_names():
     """FreeSurfer aparc+aseg id -> name."""
     out = {}
-    for line in _fastsurfer_lut().read_text().splitlines()[1:]:
+    for line in _fastsurfer_lut().read_text(encoding="utf-8").splitlines()[1:]:
         f = line.split("\t")
         if len(f) >= 2 and f[0].strip().isdigit():
             out[int(f[0])] = f[1].strip()
@@ -788,7 +788,7 @@ def write_readme(store):
     format, never this dataset.
     """
     if README.exists():
-        store.write_text("README.md", README.read_text())
+        store.write_text("README.md", README.read_text(encoding="utf-8"))
 
 
 def layout(shape):
@@ -863,7 +863,7 @@ def build(src, out, case, parts="all", allow_unnamed=False,
             k.pop("flush", None)
             print(*a, file=sys.stderr, flush=True, **k)
     src, out = Path(src), Path(out)
-    meta = json.loads((src / "meta.json").read_text())
+    meta = json.loads((src / "meta.json").read_text(encoding="utf-8"))
     with open_store(out, "w") as st:   # a directory, or a standard zarr zip when OUT ends in .zip
         _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say, source)
     if not quiet:                        # sizing the store walks it: not for a dropped line

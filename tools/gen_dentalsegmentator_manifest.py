@@ -80,7 +80,7 @@ def main() -> None:
         entry[algo] = digest
     DEST.write_text(json.dumps(
         {"source": f"{API} + the zip's own dataset.json (read by Range)",
-         "tasks": {TASK: entry}}, indent=1) + "\n")
+         "tasks": {TASK: entry}}, indent=1) + "\n", encoding="utf-8")
     print(f"  {d['folder']}  folds={d['folds']}  checkpoints={d['checkpoints']}  "
           f"channels={d['channels']}  structures={d['structures']}", file=sys.stderr)
     print(f"1 model -> {DEST}")

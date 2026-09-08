@@ -259,11 +259,11 @@ def reader_reorients(model_folder) -> bool:
     name = None
     ds = f / "dataset.json"
     if ds.exists():
-        name = json.loads(ds.read_text()).get("overwrite_image_reader_writer")
+        name = json.loads(ds.read_text(encoding="utf-8")).get("overwrite_image_reader_writer")
     if not name:
         pl = f / "plans.json"
         if pl.exists():
-            name = json.loads(pl.read_text()).get("image_reader_writer")
+            name = json.loads(pl.read_text(encoding="utf-8")).get("image_reader_writer")
     return bool(name) and "reorient" in str(name).lower()
 
 

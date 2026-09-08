@@ -203,7 +203,7 @@ def test_every_url_answering_writes_the_manifest(gen, registry, tmp_path):
     tasks = _generate(gen, registry, dest, status=status)
     assert set(tasks) == OFFERED
     assert len(asked) == len(ALL)                   # every recorded URL, the excluded one too, once
-    raw = json.loads(dest.read_text())
+    raw = json.loads(dest.read_text(encoding="utf-8"))
     assert raw["source"] == "moosez/models.py"
     assert set(raw["tasks"]) == OFFERED
     assert raw["tasks"]["clin_ct_dental"]["tag"] == "v100"
@@ -251,7 +251,7 @@ def test_a_model_not_offered_is_recorded_with_its_reason_checked(gen, registry, 
     tasks = _generate(gen, registry, dest, top_level=top_level)
     assert "clin_mr_FVM" not in tasks
     assert listed == [gen.parse(registry)["clin_mr_FVM"]["url"]]   # only the excluded asset is read
-    raw = json.loads(dest.read_text())
+    raw = json.loads(dest.read_text(encoding="utf-8"))
     assert set(raw["excluded"]) == {"clin_mr_FVM"}
     why = raw["excluded"]["clin_mr_FVM"]
     assert "['clin_mr_FVM']" in why and "'Dataset501_FVM'" in why
@@ -289,7 +289,7 @@ def test_a_reason_the_generator_cannot_check_is_refused(gen, registry, tmp_path)
 def test_the_shipped_manifest_has_the_excluded_model_out_of_its_tasks(gen):
     """The catalog reads `tasks` only, so an excluded entry must never also be a task."""
     from haversack.ecosystems import MOOSE_MANIFEST, MooseEcosystem
-    raw = json.loads(MOOSE_MANIFEST.read_text())
+    raw = json.loads(MOOSE_MANIFEST.read_text(encoding="utf-8"))
     assert set(raw["excluded"]) == set(gen.NOT_OFFERED)
     assert not (set(raw["excluded"]) & set(raw["tasks"]))
     offered = MooseEcosystem().tasks()

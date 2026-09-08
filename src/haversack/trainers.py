@@ -70,7 +70,7 @@ def ensure_trainer(model_folder, *, shim_dir: Path | None = None) -> str | None:
             "# so a bare subclass loads and predicts identically. See haversack/trainers.py.\n"
             "from nnunetv2.training.nnUNetTrainer.nnUNetTrainer import nnUNetTrainer\n\n\n"
             f"class {name}(nnUNetTrainer):\n    pass\n"
-        )
+        , encoding="utf-8")
     existing = os.environ.get("nnUNet_extTrainer", "")
     paths = existing.split(os.pathsep) if existing else []
     if str(shim_dir) not in paths:

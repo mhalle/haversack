@@ -141,7 +141,7 @@ def test_writing_through_a_symlink_updates_the_real_store(tmp_path):
     link.symlink_to(real)
     with rs.open_store(link, "w") as st:
         st.write_text("README.md", "v2")
-    assert link.is_symlink() and (real / "README.md").read_text() == "v2"
+    assert link.is_symlink() and (real / "README.md").read_text(encoding="utf-8") == "v2"
     assert not [q for q in tmp_path.iterdir() if ".old-" in q.name or ".staging" in q.name]
 
 

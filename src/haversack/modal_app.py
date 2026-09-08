@@ -291,7 +291,7 @@ def _check_volumes_attached() -> None:
     for root in (SCRATCH_ROOT, CACHE_ROOT, INPUTS_ROOT, WEIGHTS_ROOT):
         probe = Path(root) / f".attach-probe-{os.getpid()}"
         try:
-            probe.write_text("ok")
+            probe.write_text("ok", encoding="utf-8")
             probe.unlink()
         except Exception as e:
             raise RuntimeError(

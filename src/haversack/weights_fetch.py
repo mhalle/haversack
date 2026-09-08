@@ -52,7 +52,7 @@ def installed_version(folder) -> dict | None:
                  for name in (SIDECAR, *LEGACY_SIDECARS)]:
         if cand.exists():
             try:
-                return json.loads(cand.read_text())
+                return json.loads(cand.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 return None
     return None
@@ -69,7 +69,7 @@ def _write_sidecar(dest: Path, weights_id, tag: str, entry: dict, sha256: str | 
            "installed": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
            "by": "haversack"}
     try:
-        (dest / SIDECAR).write_text(json.dumps(rec, indent=2) + "\n")
+        (dest / SIDECAR).write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
     except OSError:                                   # a read-only weights root must not fail a fetch
         pass
 
@@ -101,7 +101,7 @@ def user_manifest_path() -> Path:
 
 
 def _read_manifest_file(path) -> dict:
-    raw = json.loads(Path(path).read_text())
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
     # `raw.get("weights") or raw` would fall through to the wrapper for an EMPTY manifest,
     # leaking the key "weights" in as a dataset id. Test for the key, not its truthiness.
     return _normalize(raw["weights"] if "weights" in raw else raw)
@@ -452,7 +452,7 @@ def refresh_manifest(path=None, *, repo: str = TS_REPO, token: str | None = None
     if write and merged != current:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         Path(path).write_text(json.dumps(
-            {"weights": dict(sorted(merged.items(), key=_sort_key))}, indent=2) + "\n")
+            {"weights": dict(sorted(merged.items(), key=_sort_key))}, indent=2) + "\n", encoding="utf-8")
         say(f"wrote {path}")
     elif write:
         say(f"nothing to write ({path} is current)")

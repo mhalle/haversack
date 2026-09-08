@@ -147,7 +147,7 @@ def test_the_client_finds_a_local_servers_generated_token(tmp_path, monkeypatch)
     assert local_token_for("http://127.0.0.1:8790") is None            # no server yet
     write_serve_token(p, "s3cret", host="127.0.0.1", port=8790)
     assert oct(p.stat().st_mode & 0o777) == "0o600"
-    assert json.loads(p.read_text())["pid"] == os.getpid()             # this process "serves"
+    assert json.loads(p.read_text(encoding="utf-8"))["pid"] == os.getpid()             # this process "serves"
     assert local_token_for("http://127.0.0.1:8790") == "s3cret"
     assert local_token_for("http://localhost:8790") == "s3cret"
     assert local_token_for("127.0.0.1:8790") == "s3cret"

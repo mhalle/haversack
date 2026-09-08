@@ -127,11 +127,11 @@ def guide_text(which: str = "user") -> str:
     shipped_name, local_name = GUIDES[which]
     shipped = files("haversack").joinpath(shipped_name)
     if shipped.is_file():
-        return shipped.read_text()
+        return shipped.read_text(encoding="utf-8")
     from pathlib import Path
     local = Path(__file__).resolve().parents[2] / local_name
     if local.is_file():
-        return local.read_text()
+        return local.read_text(encoding="utf-8")
     raise RuntimeError(f"the {which} guide is missing from this installation")
 
 

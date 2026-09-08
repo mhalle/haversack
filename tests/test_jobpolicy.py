@@ -205,7 +205,7 @@ class PolicyHasOneHome(unittest.TestCase):
     def test_only_jobpolicy_decides_to_discard_a_cached_input(self):
         callers = []
         for path in sorted(SRC.glob("*.py")):
-            tree = ast.parse(path.read_text())
+            tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Call)
                         and isinstance(node.func, ast.Attribute)
@@ -227,7 +227,7 @@ class PolicyHasOneHome(unittest.TestCase):
         for path in sorted(SRC.glob("*.py")):
             if path.name == "jobpolicy.py":
                 continue
-            for node in ast.walk(ast.parse(path.read_text())):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if (isinstance(node, ast.Call)
                         and isinstance(node.func, ast.Attribute)
                         and node.func.attr == "fill"
@@ -262,7 +262,7 @@ class PolicyHasOneHome(unittest.TestCase):
         docstrings that merely cite it."""
         for module, fname in (("serve.py", "_refresh_input"),
                               ("modal_app.py", "_refresh_series")):
-            tree = ast.parse((SRC / module).read_text())
+            tree = ast.parse((SRC / module).read_text(encoding="utf-8"))
             fn = next((n for n in ast.walk(tree)
                        if isinstance(n, ast.FunctionDef) and n.name == fname), None)
             self.assertIsNotNone(fn, f"{module}: {fname} is gone")
@@ -351,7 +351,7 @@ class TerminalStatesHaveOneDefinition(unittest.TestCase):
         for path in sorted(SRC.glob("*.py")):
             if path.name == "jobpolicy.py":
                 continue
-            for node in ast.walk(ast.parse(path.read_text())):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
                     vals = [e.value for e in node.elts
                             if isinstance(e, ast.Constant) and isinstance(e.value, str)]
@@ -400,7 +400,7 @@ class SourceKeysAreDerivedOnce(unittest.TestCase):
         `kind + ":" + ident` sails through it. This counts the call sites
         instead, so a hand-rolled derivation shows up as a MISSING delegation."""
         for module, least in (("serve.py", 3), ("modal_app.py", 3)):
-            tree = ast.parse((SRC / module).read_text())
+            tree = ast.parse((SRC / module).read_text(encoding="utf-8"))
             n = sum(1 for x in ast.walk(tree)
                     if isinstance(x, ast.Call)
                     and ast.unparse(x.func).endswith("source_cache_key"))
@@ -415,7 +415,7 @@ class SourceKeysAreDerivedOnce(unittest.TestCase):
         pattern = '{kind}:{ident}'
         offenders = []
         for path in (SRC / "serve.py", SRC / "modal_app.py"):
-            for i, line in enumerate(path.read_text().splitlines(), 1):
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
                 if pattern in line:
                     offenders.append(f"{path.name}:{i}")
         self.assertEqual(offenders, [],
@@ -814,7 +814,7 @@ class PrefetchCandidates(unittest.TestCase):
         call prefetchable from their own bodies."""
         for module, fname in (("serve.py", "_prefetch_next"),
                               ("modal_app.py", "_prefetch_candidate")):
-            tree = ast.parse((SRC / module).read_text())
+            tree = ast.parse((SRC / module).read_text(encoding="utf-8"))
             fn = next((n for n in ast.walk(tree)
                        if isinstance(n, ast.FunctionDef) and n.name == fname), None)
             self.assertIsNotNone(fn, f"{module}: {fname} is gone")
@@ -851,7 +851,7 @@ class PreReadIsClaimedThroughPolicy(unittest.TestCase):
         for path in sorted(SRC.glob("*.py")):
             if path.name == "jobpolicy.py":
                 continue
-            for node in ast.walk(ast.parse(path.read_text())):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if (isinstance(node, ast.Call)
                         and isinstance(node.func, ast.Attribute)
                         and node.func.attr == "pop"

@@ -1355,7 +1355,7 @@ def test_awkward_identifiers_stay_inside_the_root(tmp_path):
         assert sc.has(weird)
         name = sc._entry(weird).name
         assert "/" not in name and ":" not in name and name not in (".", "..")
-        assert (sc._entry(weird) / ".key").read_text() == weird   # round-trips
+        assert (sc._entry(weird) / ".key").read_text(encoding="utf-8") == weird   # round-trips
     assert sc.get_or_fetch("doi:10.1234/abc.def") and len(fetched) == 4  # cached
 
     class Doi:
@@ -1442,7 +1442,7 @@ def test_catalog_remaps_match_installed_weights():
 
     import pytest
 
-    data = json.loads((Path("src/haversack/data/ts_tasks.json")).read_text())
+    data = json.loads((Path("src/haversack/data/ts_tasks.json")).read_text(encoding="utf-8"))
     tasks = data["tasks"] if isinstance(data, dict) else data
     roots = [Path.home() / ".totalsegmentator/nnunet/results"]
     checked = 0
@@ -1456,7 +1456,7 @@ def test_catalog_remaps_match_installed_weights():
                    for dj in r.glob(f"Dataset{wid}_*/**/dataset.json")]
             if not djs or not remap:
                 continue
-            labels = json.loads(djs[0].read_text())["labels"]
+            labels = json.loads(djs[0].read_text(encoding="utf-8"))["labels"]
             local_names = {int(v): k for k, v in labels.items() if isinstance(v, int)}
             for local, global_ in remap.items():
                 assert int(local) in local_names, (
@@ -4087,7 +4087,7 @@ def test_the_path_surface_refresh_follows_the_caller_not_the_engine(tmp_path, mo
     """Both path-surface initiations must use the caller's directive alone. The
     labels route once passed the variable that also carries the engine's cache
     policy, so a VoxTell-class task re-downloaded its series on every request."""
-    src = (pathlib.Path(__file__).resolve().parents[1] / "src/haversack/serve.py").read_text()
+    src = (pathlib.Path(__file__).resolve().parents[1] / "src/haversack/serve.py").read_text(encoding="utf-8")
     assert src.count("refresh_input=(wants_no_cache(request)\n") + \
            src.count("refresh_input=(wants_no_cache(request) and authed(request))") >= 2
     assert "refresh_input=skip" not in src
@@ -4122,7 +4122,7 @@ def test_a_claim_always_names_its_owner(tmp_path):
     assert cache._owner_of(entry) is None              # no claim at all
     token = cache._claim(entry)
     assert token and cache._owner_of(entry) == token   # never an unnamed claim
-    assert (entry / cache.CLAIM).read_text() == token
+    assert (entry / cache.CLAIM).read_text(encoding="utf-8") == token
 
     # a second writer cannot take it, and learns that from the claim itself
     assert cache._claim(entry) is None

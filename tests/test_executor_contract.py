@@ -27,7 +27,7 @@ def _executor_surface() -> tuple:
     Taken from the parameter's real name so renaming it cannot silently empty
     the set - which would turn every assertion below into a tautology.
     """
-    tree = ast.parse(pathlib.Path(inspect.getsourcefile(serve)).read_text())
+    tree = ast.parse(pathlib.Path(inspect.getsourcefile(serve)).read_text(encoding="utf-8"))
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == "create_app")
     param = fn.args.args[0].arg

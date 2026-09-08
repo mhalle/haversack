@@ -154,7 +154,7 @@ def build(keep_all: bool = False) -> dict:
 if __name__ == "__main__":
     data = build(keep_all="--all" in sys.argv)
     dest = Path(__file__).parent.parent / "src/haversack/data/monai_bundles.json"
-    dest.write_text(json.dumps(data, indent=1, sort_keys=False) + "\n")
+    dest.write_text(json.dumps(data, indent=1, sort_keys=False) + "\n", encoding="utf-8")
     print(f"wrote {dest} with {len(data['bundles'])} bundles")
     for line in data["skipped"]:
         print("  skipped:", line)

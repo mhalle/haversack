@@ -52,8 +52,8 @@ def test_histogram_and_sort_paths_agree(tmp_path):
                                 tmp_path / f"rf{case}.json")
         if ri is None and rf is None:
             continue
-        a = {s["label"]: s for s in json.loads(ri.read_text())["structures"]}
-        b = {s["label"]: s for s in json.loads(rf.read_text())["structures"]}
+        a = {s["label"]: s for s in json.loads(ri.read_text(encoding="utf-8"))["structures"]}
+        b = {s["label"]: s for s in json.loads(rf.read_text(encoding="utf-8"))["structures"]}
         assert a.keys() == b.keys()
         for v in a:
             for key in ("median", "p10", "p90", "min", "max"):
@@ -72,7 +72,7 @@ def test_all_background_symmetric(tmp_path):
                        tmp_path / str(dt))
         out = compute_statistics(gi, str(lp), tmp_path / f"o{dt}.json")
         assert out is not None
-        assert json.loads(out.read_text())["structures"] == []
+        assert json.loads(out.read_text(encoding="utf-8"))["structures"] == []
 
 
 def test_negative_labels_do_not_crash(tmp_path):
@@ -84,7 +84,7 @@ def test_negative_labels_do_not_crash(tmp_path):
     gi, lp = _pair((np.zeros((8, 8, 8), dtype=np.int16) + 40), lab, {2: "kidney"},
                    tmp_path)
     out = compute_statistics(gi, str(lp), tmp_path / "o.json")
-    labels = [s["label"] for s in json.loads(out.read_text())["structures"]]
+    labels = [s["label"] for s in json.loads(out.read_text(encoding="utf-8"))["structures"]]
     assert labels == [2]
 
 
@@ -132,7 +132,7 @@ def test_without_a_ranked_code_the_output_is_unchanged(tmp_path):
     """The compatibility contract: every existing number and key survives, and no field
     column appears. This is what makes it safe to ship the two side by side."""
     gi, lp, code, _ = _phantom_case(tmp_path)
-    plain = json.loads(compute_statistics(gi, lp, tmp_path / "a.json").read_text())
+    plain = json.loads(compute_statistics(gi, lp, tmp_path / "a.json").read_text(encoding="utf-8"))
     assert plain["structures"], "the fixture produced no structures"
     assert "field_grid_spacing_mm" not in plain
     for row in plain["structures"]:
@@ -146,7 +146,7 @@ def test_the_field_columns_appear_and_beat_counting_on_a_known_sphere(tmp_path):
     of 4 pi r^2, where the labelmap's own face count would be about half again too big."""
     gi, lp, code, body = _phantom_case(tmp_path)
     out = json.loads(compute_statistics(gi, lp, tmp_path / "b.json",
-                                        ranked_code=code).read_text())
+                                        ranked_code=code).read_text(encoding="utf-8"))
     row = next(r for r in out["structures"] if r["label"] == 1)
     assert out["field_grid_spacing_mm"] == [1.0, 1.0, 1.0]
     assert out["units"]["area"] == "cm2"
@@ -166,10 +166,10 @@ def test_a_code_that_cannot_be_read_leaves_the_counted_numbers_alone(tmp_path):
     must cost the caller nothing - statistics never fails a job, and a half-written
     artifact would be worse than an absent column."""
     gi, lp, code, _ = _phantom_case(tmp_path)
-    ref = json.loads(compute_statistics(gi, lp, tmp_path / "c.json").read_text())
+    ref = json.loads(compute_statistics(gi, lp, tmp_path / "c.json").read_text(encoding="utf-8"))
     for broken in (object(), _no_labels(code), _raising(code)):
         out = json.loads(compute_statistics(gi, lp, tmp_path / "d.json",
-                                            ranked_code=broken).read_text())
+                                            ranked_code=broken).read_text(encoding="utf-8"))
         assert out["structures"] == ref["structures"]
         assert "field_grid_spacing_mm" not in out
 

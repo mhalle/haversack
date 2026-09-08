@@ -269,7 +269,7 @@ class Segmenter:
                         import json
                         ds = Path(folder) / "dataset.json"
                         if ds.exists():
-                            j = json.loads(ds.read_text())
+                            j = json.loads(ds.read_text(encoding="utf-8"))
                             channels = j.get("channel_names") or j.get("modality")
             except HaversackError:
                 pass                      # no root configured / unresolvable: stays not-installed

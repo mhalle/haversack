@@ -226,7 +226,7 @@ def main() -> None:
                                "download cannot be checked against one; every other task is "
                                "verified against the sha256 the release states"},
          "excluded": excluded,
-         "tasks": tasks}, indent=1) + "\n")
+         "tasks": tasks}, indent=1) + "\n", encoding="utf-8")
     print(f"{len(tasks)} models, {len(excluded)} excluded -> {DEST}")
     if no_digest:
         print(f"NOTE: no digest published for {no_digest} - recorded in 'unverified'")

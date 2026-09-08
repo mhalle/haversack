@@ -26,7 +26,7 @@ STORE = Path(os.environ["HAVERSACK_RESTORE_STORE"]) if os.environ.get("HAVERSACK
 
 def _duckn_spec() -> str:
     """The duckn git source haversack's own pyproject pins (a tag), as a pip requirement."""
-    text = (HERE.parent / "pyproject.toml").read_text()
+    text = (HERE.parent / "pyproject.toml").read_text(encoding="utf-8")
     m = re.search(r'duckn\s*=\s*\{\s*git\s*=\s*"([^"]+)"\s*,\s*tag\s*=\s*"([^"]+)"', text)
     if not m:
         raise SystemExit("pyproject.toml: no duckn git source found")

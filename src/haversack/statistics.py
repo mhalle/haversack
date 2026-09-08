@@ -180,7 +180,7 @@ def compute_statistics(image, labels_path, out_json, *, pair=None,
             out["field_measurements"] = ({"available": True} if problem is None
                                          else {"available": False, "reason": problem})
         path = Path(out_json)
-        path.write_text(json.dumps(out, indent=1))
+        path.write_text(json.dumps(out, indent=1), encoding="utf-8")
         return path
     except Exception:
         return None

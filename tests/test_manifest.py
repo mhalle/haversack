@@ -46,7 +46,7 @@ def test_refresh_adds_missing_datasets(fake_github, tmp_path):
     m = tmp_path / "w.json"
     m.write_text(json.dumps({"weights": {}}))
     r = wf.refresh_manifest(path=m)
-    saved = json.loads(m.read_text())["weights"]
+    saved = json.loads(m.read_text(encoding="utf-8"))["weights"]
     assert set(r["added"]) == {"291", "297", "305"} and set(saved) == {"291", "297", "305"}
 
 
@@ -56,7 +56,7 @@ def test_new_versions_are_recorded_without_changing_current(fake_github, tmp_pat
     m.write_text(json.dumps({"weights": {"297": {
         "default": "v2.0.0", "versions": {"v2.0.0": {"url": "https://x/v2.0.0/Dataset297_total_3mm.zip"}}}}}))
     r = wf.refresh_manifest(path=m)
-    saved = json.loads(m.read_text())["weights"]["297"]
+    saved = json.loads(m.read_text(encoding="utf-8"))["weights"]["297"]
     assert saved["default"] == "v2.0.0"                  # untouched
     assert set(saved["versions"]) == {"v2.0.0", "v2.5.0"}
     assert r["new_versions"]["297"] == ["v2.5.0"] and r["behind_upstream"]["297"] == ("v2.0.0", "v2.5.0")
@@ -67,7 +67,7 @@ def test_update_existing_opts_in_to_repointing(fake_github, tmp_path):
     m.write_text(json.dumps({"weights": {"297": {
         "default": "v2.0.0", "versions": {"v2.0.0": {"url": "https://x/v2.0.0/Dataset297_total_3mm.zip"}}}}}))
     wf.refresh_manifest(path=m, update_existing=True)
-    assert json.loads(m.read_text())["weights"]["297"]["default"] == "v2.5.0"
+    assert json.loads(m.read_text(encoding="utf-8"))["weights"]["297"]["default"] == "v2.5.0"
 
 
 def test_dry_run_writes_nothing(fake_github, tmp_path):
@@ -75,7 +75,7 @@ def test_dry_run_writes_nothing(fake_github, tmp_path):
     before = json.dumps({"weights": {}})
     m.write_text(before)
     r = wf.refresh_manifest(path=m, write=False)
-    assert r["added"] and m.read_text() == before
+    assert r["added"] and m.read_text(encoding="utf-8") == before
 
 
 # -- license-gated weights ----------------------------------------------------------------
@@ -150,7 +150,7 @@ def test_migration_matches_by_url_and_never_silently_repoints(fake_github, tmp_p
     m = tmp_path / "w.json"
     m.write_text(json.dumps({"weights": {"297": {"url": "https://x/v2.0.0/Dataset297_total_3mm.zip"}}}))
     r = wf.refresh_manifest(path=m)
-    saved = json.loads(m.read_text())["weights"]["297"]
+    saved = json.loads(m.read_text(encoding="utf-8"))["weights"]["297"]
     assert saved["default"] == "v2.0.0"                 # named, not repointed
     assert set(saved["versions"]) == {"v2.0.0", "v2.5.0"}   # the newer one is recorded, not chosen
     assert r["migrated"] == {"297": "v2.0.0"}
@@ -257,7 +257,7 @@ def test_a_pin_beats_newest_when_choosing_current(fake_github, tmp_path, monkeyp
     m = tmp_path / "w.json"
     m.write_text(json.dumps({"weights": {}}))
     wf.refresh_manifest(path=m)
-    e = json.loads(m.read_text())["weights"]["297"]
+    e = json.loads(m.read_text(encoding="utf-8"))["weights"]["297"]
     assert e["default"] == "v2.0.0"                  # not v2.5.0, the newest asset
     assert set(e["versions"]) == {"v2.0.0", "v2.5.0"}
 
@@ -267,7 +267,7 @@ def test_without_a_pin_current_falls_back_to_newest(fake_github, tmp_path, monke
     m = tmp_path / "w.json"
     m.write_text(json.dumps({"weights": {}}))
     wf.refresh_manifest(path=m)
-    assert json.loads(m.read_text())["weights"]["297"]["default"] == "v2.5.0"
+    assert json.loads(m.read_text(encoding="utf-8"))["weights"]["297"]["default"] == "v2.5.0"
 
 
 def test_our_manifest_agrees_with_totalsegmentator_today():
@@ -278,7 +278,7 @@ def test_our_manifest_agrees_with_totalsegmentator_today():
     cfg = Path(__file__).resolve().parents[2] / "upstream/TotalSegmentator/totalsegmentator/map_tasks_config.py"
     if not cfg.exists():
         pytest.skip("no local TotalSegmentator clone")
-    pins = {str(int(m.group(1))): m.group(2) for m in wf.PIN_RE.finditer(cfg.read_text())}
+    pins = {str(int(m.group(1))): m.group(2) for m in wf.PIN_RE.finditer(cfg.read_text(encoding="utf-8"))}
     ours = wf._manifest()
     differ = {k: (ours[k]["default"], pins[k]) for k in set(pins) & set(ours)
               if ours[k]["default"] != pins[k]}
@@ -301,12 +301,12 @@ def test_installed_refresh_writes_the_users_manifest_and_reads_it_back(fake_gith
     monkeypatch.setattr(wf, "_is_checkout", lambda: False)
     monkeypatch.setattr(wf, "_api", lambda url, token=None: [          # a dataset no release has
         _release("v9.9.9", "2030-01-01T00:00:00Z", [("Dataset999_future.zip", "fff")])])
-    packaged_before = wf.MANIFEST.read_text()
+    packaged_before = wf.MANIFEST.read_text(encoding="utf-8")
     assert wf.refresh_target() == tmp_path / "haversack" / "ts_weights.json"
     r = wf.refresh_manifest()
     assert r["path"] == str(tmp_path / "haversack" / "ts_weights.json")
     assert (tmp_path / "haversack" / "ts_weights.json").is_file()
-    assert wf.MANIFEST.read_text() == packaged_before               # the package is untouched
+    assert wf.MANIFEST.read_text(encoding="utf-8") == packaged_before               # the package is untouched
     assert "999" in wf._manifest() and "999" not in wf._manifest(wf.MANIFEST)
     src = wf.manifest_sources()
     assert src["user"] >= src["package"] and src["user_path"].endswith("ts_weights.json")
@@ -332,7 +332,7 @@ def test_explicit_target_wins(fake_github, tmp_path, monkeypatch):
     out = tmp_path / "elsewhere.json"
     out.write_text(json.dumps({"weights": {}}))
     r = wf.refresh_manifest(path=out)
-    assert r["path"] == str(out) and set(json.loads(out.read_text())["weights"]) == {"291", "297", "305"}
+    assert r["path"] == str(out) and set(json.loads(out.read_text(encoding="utf-8"))["weights"]) == {"291", "297", "305"}
     assert not (tmp_path / "cfg").exists()
 
 

@@ -81,7 +81,7 @@ def release_tag(url: str) -> str:
 def parse(models_py: Path) -> dict:
     """``{name: {url, folder, tag}}`` for every entry in the registry, or a
     clear error naming the ``KEY_URL`` blocks that did not parse as one."""
-    src = models_py.read_text()
+    src = models_py.read_text(encoding="utf-8")
     out = {}
     for m in ENTRY.finditer(src):
         name, url, folder = m.group("name", "url", "folder")
@@ -149,7 +149,7 @@ def generate(models_py: Path, dest: Path = DEST, status=zippeek.head_status,
     tasks = {name: e for name, e in entries.items() if name not in excluded}
     dest.write_text(json.dumps({"source": "moosez/models.py",
                                 "excluded": excluded,
-                                "tasks": tasks}, indent=1) + "\n")
+                                "tasks": tasks}, indent=1) + "\n", encoding="utf-8")
     return tasks
 
 

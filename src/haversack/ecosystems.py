@@ -362,7 +362,7 @@ class ZipManifestEcosystem(ModelEcosystem):
             raise ValueError(f"{type(self).__name__} declares no bucket; a catalog "
                              "installs under <weights root>/<bucket>/")
         path = Path(manifest or self.MANIFEST)
-        self._entries = self._entries_of(json.loads(path.read_text()), path.name)
+        self._entries = self._entries_of(json.loads(path.read_text(encoding="utf-8")), path.name)
 
     def tasks(self) -> list:
         return sorted(self._entries)
@@ -414,7 +414,7 @@ class ZipManifestEcosystem(ModelEcosystem):
             if not (c.is_dir() and not c.name.startswith(".") and c.name.count("__") == 2):
                 return False
             try:
-                json.loads((c / "dataset.json").read_text())
+                json.loads((c / "dataset.json").read_text(encoding="utf-8"))
                 return True
             except Exception:
                 # deliberately broad: this is a predicate every caller treats as
@@ -647,7 +647,7 @@ class MRSegmentatorEcosystem(ModelEcosystem):
 
     def __init__(self, manifest=None):
         path = Path(manifest or MRSEGMENTATOR_MANIFEST)
-        self._entries = ZipManifestEcosystem._entries_of(json.loads(path.read_text()), path.name)
+        self._entries = ZipManifestEcosystem._entries_of(json.loads(path.read_text(encoding="utf-8")), path.name)
 
     def tasks(self) -> list:
         return sorted(self._entries)
@@ -666,7 +666,7 @@ class MRSegmentatorEcosystem(ModelEcosystem):
         # "successfully" and then raised out of every spec() with no way back
         ds = self._folder(task, root) / "dataset.json"
         try:
-            json.loads(ds.read_text())
+            json.loads(ds.read_text(encoding="utf-8"))
             return True
         except Exception:
             return False
@@ -678,7 +678,7 @@ class MRSegmentatorEcosystem(ModelEcosystem):
         if not vf.is_file():
             return None
         try:
-            v = json.loads(vf.read_text()).get("weights_version")
+            v = json.loads(vf.read_text(encoding="utf-8")).get("weights_version")
         except (json.JSONDecodeError, OSError):
             return None
         return None if v is None else str(v)
@@ -860,7 +860,7 @@ class TotalVibeEcosystem(ZipManifestEcosystem):
         from .tasks import resolve_model_folder
         try:
             folder = resolve_model_folder(self._folder(task, root))
-            raw = json.loads((folder / "dataset.json").read_text()).get("orientation")
+            raw = json.loads((folder / "dataset.json").read_text(encoding="utf-8")).get("orientation")
         except (OSError, ValueError, ModelNotFound):
             return None
         code = "".join(str(c) for c in raw).upper() if isinstance(raw, (list, tuple)) \
@@ -1291,7 +1291,7 @@ class MonaiEcosystem(EngineEcosystem):
     description = "MONAI model zoo bundles (engine)"
 
     def __init__(self, manifest: Path | None = None):
-        raw = json.loads(Path(manifest or MONAI_MANIFEST).read_text())
+        raw = json.loads(Path(manifest or MONAI_MANIFEST).read_text(encoding="utf-8"))
         self._bundles = raw.get("bundles", raw)
 
     def tasks(self) -> list:
@@ -1356,7 +1356,7 @@ class MonaiEcosystem(EngineEcosystem):
 
     def bundle_metadata(self, task: str, root) -> dict:
         """The installed bundle's own metadata.json (the spec)."""
-        return json.loads((self._dir(task, root) / "configs" / "metadata.json").read_text())
+        return json.loads((self._dir(task, root) / "configs" / "metadata.json").read_text(encoding="utf-8"))
 
     def bundle_root(self, task: str, root) -> Path:
         """Where the installed bundle lives - what the engine runs."""
@@ -1447,7 +1447,7 @@ class MonaiEcosystem(EngineEcosystem):
             if cfg.suffix != ".json":
                 # YAML would need a parser the lean API image does not carry
                 raise ValueError(f"{cfg.suffix} config")
-            post = json.loads(cfg.read_text()).get("postprocessing") or {}
+            post = json.loads(cfg.read_text(encoding="utf-8")).get("postprocessing") or {}
             transforms = post.get("transforms") if isinstance(post, dict) else None
             order = [str((t or {}).get("_target_", "")) for t in (transforms or [])
                      if isinstance(t, dict)]

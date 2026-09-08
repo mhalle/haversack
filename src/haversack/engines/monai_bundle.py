@@ -49,7 +49,7 @@ def _output_channel_def(bundle_dir) -> dict:
     import json
     from pathlib import Path
 
-    meta = json.loads((Path(bundle_dir) / "configs" / "metadata.json").read_text())
+    meta = json.loads((Path(bundle_dir) / "configs" / "metadata.json").read_text(encoding="utf-8"))
     fmt = (meta.get("network_data_format") or {})
     return ((fmt.get("outputs") or {}).get("pred") or {}).get("channel_def") or {}
 
@@ -118,7 +118,7 @@ def input_roles(bundle_dir) -> list:
     import json
     from pathlib import Path
 
-    meta = json.loads((Path(bundle_dir) / "configs" / "metadata.json").read_text())
+    meta = json.loads((Path(bundle_dir) / "configs" / "metadata.json").read_text(encoding="utf-8"))
     inp = (((meta.get("network_data_format") or {}).get("inputs") or {})
            .get("image") or {})
     cd = inp.get("channel_def") or {}
@@ -216,7 +216,7 @@ def _datalist_overrides(bundle_dir, paths: list) -> dict:
     parent = Path(paths[0]).parent
     if "data_list_file_path" in cfg:
         dl = parent / "datalist.json"
-        dl.write_text(json.dumps({"testing": [{"image": item}]}))
+        dl.write_text(json.dumps({"testing": [{"image": item}]}), encoding="utf-8")
         return {"data_list_file_path": str(dl), "dataset_dir": str(parent)}
     return {"datalist": [item], "dataset_dir": str(parent)}
 

@@ -284,7 +284,7 @@ def main(store_dir, out_dir):
                 ph_origin, ph_dirs, list(ph_code.ranks.shape[1:])),
         },
     }
-    (out / "manifest.json").write_text(json.dumps(manifest, indent=1))
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=1), encoding="utf-8")
 
     total = ph_code.ranks.shape[0] * np.prod(
         [-(-s // c) for s, c in zip(ph_code.ranks.shape[1:], (16, 16, 16))])

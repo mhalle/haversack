@@ -424,7 +424,7 @@ def test_the_transpose_knob_is_forwarded_to_the_container():
     assert "HAVERSACK_ALLOW_TRANSPOSE" in modal_app._RUNTIME_KNOBS
     # every env var the worker reads at runtime must be in the forwarded set,
     # or the container's copy is simply unset
-    src = pathlib.Path(modal_app.__file__).read_text()
+    src = pathlib.Path(modal_app.__file__).read_text(encoding="utf-8")
     worker = src.split("class Worker")[1].split("\nclass ")[0]
     read_at_runtime = set(re.findall(r'os\.environ(?:\.get)?[(\[]\s*"(HAVERSACK_[A-Z_]+)"', worker))
     missing = read_at_runtime - set(modal_app._RUNTIME_KNOBS)
@@ -437,6 +437,6 @@ def test_a_skipped_input_refresh_reaches_a_modal_caller():
     bytes it asked not to reuse with no indication. The local executor reports
     it, so this deployment must too."""
     from haversack import modal_app
-    src = pathlib.Path(modal_app.__file__).read_text()
+    src = pathlib.Path(modal_app.__file__).read_text(encoding="utf-8")
     keys = src.split("keys = (")[1].split(")")[0]
     assert '"input_refresh_skipped"' in keys

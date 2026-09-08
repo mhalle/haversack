@@ -172,7 +172,7 @@ def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=20.0, *, quiet=Fals
         {"image": str(image), "task": task, "depth": depth, "clip": clip,
          "envelope_mm": envelope_mm,
          "parts": metas, "provenance": seg.provenance, "timings": seg.timings},
-        indent=1, default=str))
+        indent=1, default=str), encoding="utf-8")
     say(f"done in {time.perf_counter() - t0:.0f}s -> {out}")
     return seg
 

@@ -91,7 +91,7 @@ class TaskSpec:
         if not (f / "dataset.json").is_file():
             raise ModelNotFound(f"{f} has no dataset.json - not a trained nnU-Net model folder "
                                 "(expected .../Dataset<id>_<name>/<trainer>__<plans>__<config>/)")
-        ds = json.loads((f / "dataset.json").read_text())
+        ds = json.loads((f / "dataset.json").read_text(encoding="utf-8"))
         labels = ds.get("labels") or {}
         if any(isinstance(v, (list, tuple)) for v in labels.values()):
             raise UnsupportedModel(
@@ -140,7 +140,7 @@ class TaskCatalog:
         return here / name
 
     def _load(self, path: Path) -> None:
-        raw = json.loads(Path(path).read_text())
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
         items = raw["tasks"] if isinstance(raw, dict) and "tasks" in raw else raw
         items = list(items.values()) if isinstance(items, dict) else items
         for d in items:

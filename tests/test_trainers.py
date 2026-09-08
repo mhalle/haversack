@@ -14,7 +14,7 @@ def test_shim_written_and_env_set_for_unknown_trainer(tmp_path, monkeypatch):
     shims = tmp_path / "shims"
     p = ensure_trainer(folder, shim_dir=shims)
     assert p and (shims / "nnUNetTrainerMadeUpNonexistent.py").exists()
-    body = (shims / "nnUNetTrainerMadeUpNonexistent.py").read_text()
+    body = (shims / "nnUNetTrainerMadeUpNonexistent.py").read_text(encoding="utf-8")
     assert "class nnUNetTrainerMadeUpNonexistent(nnUNetTrainer)" in body
     assert str(shims) in os.environ["nnUNet_extTrainer"]
     # idempotent: second call adds the path once, does not duplicate

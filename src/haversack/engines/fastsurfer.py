@@ -53,7 +53,7 @@ def weights_installed() -> list[dict]:
 def load_lut() -> dict[int, dict]:
     """FastSurfer output labels -> {name, color}. The segment table for the
     ``.seg.nrrd`` (names) and the canonical FreeSurfer colors."""
-    raw = json.loads(_LUT_PATH.read_text())
+    raw = json.loads(_LUT_PATH.read_text(encoding="utf-8"))
     return {int(k): v for k, v in raw.items()}
 
 

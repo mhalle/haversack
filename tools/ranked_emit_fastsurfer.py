@@ -73,7 +73,7 @@ def main(t1, outdir, depth=6, clip=8.0, device="mps"):
         {"image": str(t1), "task": "fastsurfer:brain", "engine": "fastsurfer",
          "depth": depth, "clip": clip, "device": device,
          "parts": metas, "provenance": seg.provenance, "timings": seg.timings},
-        indent=1, default=str))
+        indent=1, default=str), encoding="utf-8")
     print(f"done in {time.perf_counter() - t0:.0f}s -> {out}", flush=True)
 
 

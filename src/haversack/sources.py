@@ -355,7 +355,7 @@ def fetch_recording_origin(src, identifier: str, entry, credentials=None):
         record["origin"] = {"fetched": fetched_at}
         record["error"] = f"{type(e).__name__}: {e}"
     try:
-        (entry / INPUT_SIDECAR).write_text(json.dumps(record, indent=1, ensure_ascii=False))
+        (entry / INPUT_SIDECAR).write_text(json.dumps(record, indent=1, ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass                                    # a read-only cache: the fetch still stands
     return fetched
@@ -365,7 +365,7 @@ def read_input_record(entry) -> dict | None:
     """The record :func:`fetch_recording_origin` left, or None when there is none."""
     import json
     try:
-        return json.loads((Path(entry) / INPUT_SIDECAR).read_text())
+        return json.loads((Path(entry) / INPUT_SIDECAR).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
 
@@ -1434,7 +1434,7 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
         if progress:
             progress(f"fetching {ident if kind == 'http' else f'{kind}:{ident}'}")
         fetch_recording_origin(src, ident, entry, credentials)
-        done.write_text(f"{kind}:{ident}\n")
+        done.write_text(f"{kind}:{ident}\n", encoding="utf-8")
     content = entry / "series"
     if not content.is_dir():
         content = entry                      # a source that wrote directly under the entry

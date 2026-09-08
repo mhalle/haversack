@@ -213,7 +213,7 @@ def write_serve_token(path: Path, token: str, *, host: str, port: int) -> None:
 
     def _unlink_if_mine(p=path, pid=os.getpid()):
         try:
-            if json.loads(p.read_text()).get("pid") == pid:
+            if json.loads(p.read_text(encoding="utf-8")).get("pid") == pid:
                 p.unlink()
         except (OSError, ValueError):
             pass
@@ -266,7 +266,7 @@ def local_token_for(server_url: str) -> str | None:
     if not _is_loopback(host):
         return None
     try:
-        info = json.loads(serve_token_path(port).read_text())
+        info = json.loads(serve_token_path(port).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     tok = info.get("token") if isinstance(info, dict) else None

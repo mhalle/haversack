@@ -436,7 +436,7 @@ class SeriesCache:
         self.claims.mkdir(parents=True, exist_ok=True)
         tmp = self.claims / token
         try:
-            tmp.write_text(token)
+            tmp.write_text(token, encoding="utf-8")
             try:
                 os.link(tmp, claim)
             except FileExistsError:
@@ -501,7 +501,7 @@ class SeriesCache:
         mid-establishment; it reads as a live claim so nothing reclaims it.
         """
         try:
-            return (entry / self.CLAIM).read_text() or "<establishing>"
+            return (entry / self.CLAIM).read_text(encoding="utf-8") or "<establishing>"
         except FileNotFoundError:
             return None                    # genuinely unclaimed
         except OSError:
@@ -522,7 +522,7 @@ class SeriesCache:
         the token is written before the claim exists at all: it means the claim
         is not ours any more. Refuse either way."""
         try:
-            if (entry / self.CLAIM).read_text() != token:
+            if (entry / self.CLAIM).read_text(encoding="utf-8") != token:
                 return                     # reclaimed by a successor: not ours
         except OSError:
             return                         # cannot prove ownership: never delete
@@ -728,7 +728,7 @@ class SeriesCache:
                 token: str | None = None) -> None:
         if token is not None:
             try:
-                if (entry / self.CLAIM).read_text() != token:
+                if (entry / self.CLAIM).read_text(encoding="utf-8") != token:
                     raise ResourceError(
                         f"claim for {key or entry.name!r} was reclaimed while "
                         "fetching; discarding this writer's result")
@@ -744,8 +744,8 @@ class SeriesCache:
         size = sum(f.stat().st_size for f in entry.rglob("*")
                    if f.is_file() and not f.name.startswith("."))
         if key is not None and entry.name != key:
-            (entry / ".key").write_text(key)   # readable name for hashed entries
-        (entry / self.MARKER).write_text(str(size))
+            (entry / ".key").write_text(key, encoding="utf-8")   # readable name for hashed entries
+        (entry / self.MARKER).write_text(str(size), encoding="utf-8")
         self._evict(keep={entry.name})
 
     def discard(self, series: str) -> bool:
@@ -829,7 +829,7 @@ class SeriesCache:
                 if not m.exists():
                     continue                   # a writer mid-flight: never touch
                 try:
-                    mtime, size = m.stat().st_mtime, int(m.read_text() or 0)
+                    mtime, size = m.stat().st_mtime, int(m.read_text(encoding="utf-8") or 0)
                 except (OSError, ValueError):
                     continue
                 if e.name in protected:
@@ -912,7 +912,7 @@ class ResultCache:
             if not (d.is_dir() and labels.exists()):
                 continue
             try:
-                meta = json.loads(meta_p.read_text()) if meta_p.exists() else {}
+                meta = json.loads(meta_p.read_text(encoding="utf-8")) if meta_p.exists() else {}
                 st = labels.stat()
             except (OSError, json.JSONDecodeError):
                 continue
@@ -938,7 +938,7 @@ class ResultCache:
         try:
             import os as _os
             _os.utime(d)                       # LRU touch
-            result = json.loads((d / "result.json").read_text())
+            result = json.loads((d / "result.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             result = {}
         return labels, result
@@ -962,8 +962,8 @@ class ResultCache:
 
         # sidecars first, labels LAST: get() and list() gate on the labels
         # file's existence, so an entry appears atomically complete
-        _place("result.json", lambda t: t.write_text(json.dumps(result)))
-        _place("meta.json", lambda t: t.write_text(json.dumps(meta, indent=2)))
+        _place("result.json", lambda t: t.write_text(json.dumps(result), encoding="utf-8"))
+        _place("meta.json", lambda t: t.write_text(json.dumps(meta, indent=2), encoding="utf-8"))
         if preview_path and Path(preview_path).exists():
             _place("preview.png", lambda t: shutil.copy2(preview_path, t))
         if statistics_path and Path(statistics_path).exists():
@@ -1801,7 +1801,7 @@ class LocalExecutor:
                 record_inputs(seg, entries, rec.input_identity, self.series_cache)
                 rec.labels_path = Path(seg.save(rec.dir / RESULT_NAME))
                 rec.result = result_payload(seg, rec.labels_path)
-                (rec.dir / "result.json").write_text(json.dumps(rec.result))
+                (rec.dir / "result.json").write_text(json.dumps(rec.result), encoding="utf-8")
 
                 def _migrate(old_key: str, new_key: str) -> None:
                     with self._cv:
@@ -3584,7 +3584,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 sj = await _await_artifact(request, key, hit,
                                            "statistics.json", "statistics",
                                            deadline=deadline)
-                return JSONResponse(json.loads(sj.read_text()),
+                return JSONResponse(json.loads(sj.read_text(encoding="utf-8")),
                                     headers=_pref_headers(request, key))
 
             @app.get(base + f"/statistics{tok}.tsv", tags=["results"])
@@ -3595,7 +3595,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 sj = await _await_artifact(request, key, hit,
                                            "statistics.json", "statistics",
                                            deadline=deadline)
-                return Response(statistics_tsv(json.loads(sj.read_text())),
+                return Response(statistics_tsv(json.loads(sj.read_text(encoding="utf-8"))),
                                 media_type="text/tab-separated-values",
                                 headers=_pref_headers(request, key))
 
@@ -3721,7 +3721,7 @@ def main_serve(args) -> int:
     # belongs to that server, and its clients - refuse rather than take its file away.
     try:
         import json as _json
-        owner = _json.loads(token_file.read_text()).get("pid")
+        owner = _json.loads(token_file.read_text(encoding="utf-8")).get("pid")
     except (OSError, ValueError, AttributeError):
         owner = None
     if owner and owner != os.getpid() and _alive(owner):

@@ -344,9 +344,9 @@ def test_the_lru_budget_can_see_the_decoded_copy(tmp_path):
     store = ContentStore(cache, decode=_decoder())
     d = store.put_file(_real_volume(tmp_path))
     entry = cache.path(d).parent
-    before = int((entry / cache.MARKER).read_text())
+    before = int((entry / cache.MARKER).read_text(encoding="utf-8"))
     store.fast_path(d)
-    assert int((entry / cache.MARKER).read_text()) > before
+    assert int((entry / cache.MARKER).read_text(encoding="utf-8")) > before
 
 
 def test_a_crash_leftover_is_never_served_as_the_decoded_copy(tmp_path):

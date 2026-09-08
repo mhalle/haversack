@@ -133,7 +133,7 @@ class OneDoor(unittest.TestCase):
         for path in files:
             if path.name in allowed:
                 continue
-            for node in ast.walk(ast.parse(path.read_text())):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 if isinstance(node, ast.Attribute) and node.attr in self.HTTP_NAMES:
                     out.append(f"{path.name}:{node.lineno} {ast.unparse(node)}")
                 if (isinstance(node, ast.Attribute) and node.attr == "Request"

@@ -119,7 +119,7 @@ def test_every_published_totalvibe_asset_is_accounted_for():
     reason recorded is indistinguishable from an oversight, so the offered tasks
     and the recorded exclusions must PARTITION the published assets exactly -
     checkable offline because the generator records what the release held."""
-    raw = json.loads(TotalVibeEcosystem.MANIFEST.read_text())
+    raw = json.loads(TotalVibeEcosystem.MANIFEST.read_text(encoding="utf-8"))
     published = set(raw["release_assets"])
     offered = {e["dataset_id"] for e in raw["tasks"].values()}
     excluded = set(raw["excluded"])
@@ -137,7 +137,7 @@ def test_every_published_totalvibe_asset_is_accounted_for():
 def test_the_manifest_says_which_downloads_are_unverified():
     """Three assets are published with no digest. Silence would read as "checked",
     so the manifest names them and the reason."""
-    raw = json.loads(TotalVibeEcosystem.MANIFEST.read_text())
+    raw = json.loads(TotalVibeEcosystem.MANIFEST.read_text(encoding="utf-8"))
     unverified = set(raw["unverified"]["tasks"])
     assert unverified == {n for n, e in raw["tasks"].items() if "sha256" not in e}
     assert unverified and raw["unverified"]["why"]
@@ -598,7 +598,7 @@ def test_describe_degrades_and_carries_the_label_map(tmp_path):
             c.rename(folder / "t__p__3d_fullres_bs8")
     (folder / "t__p__3d_cascade_fullres").mkdir()
     (folder / "t__p__3d_cascade_fullres" / "dataset.json").write_text(
-        (folder / "t__p__3d_fullres_bs8" / "dataset.json").read_text())
+        (folder / "t__p__3d_fullres_bs8" / "dataset.json").read_text(encoding="utf-8"))
     seg2 = Segmenter(weights=tmp_path, device="cpu")
     d2 = seg2.describe("dentalsegmentator:base")
     assert "no runnable configuration" in d2["unresolved"]

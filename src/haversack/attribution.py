@@ -30,7 +30,7 @@ _ARXIV = re.compile(r"arXiv[: ]\s*(\d{4}\.\d{4,5})", re.I)
 
 @lru_cache(maxsize=1)
 def load() -> dict:
-    return json.loads(DATA.read_text())
+    return json.loads(DATA.read_text(encoding="utf-8"))
 
 
 def for_ecosystem(name: str) -> dict | None:

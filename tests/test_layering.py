@@ -47,7 +47,7 @@ def _module_path(name: str) -> pathlib.Path:
 
 
 def _imports(path: pathlib.Path, top_level_only: bool):
-    tree = ast.parse(path.read_text())
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if top_level_only and getattr(node, "col_offset", 0) != 0:
             continue
@@ -94,6 +94,26 @@ class TestLayering(unittest.TestCase):
                     self.assertIn(name, SCIPY_OK_AT_CALL_TIME if mod == "scipy" else set(),
                                   f"{name}.py:{line} imports {mod!r} at module level; the kernel "
                                   f"layer must stay torch + numpy (+ rankfield) so it can be extracted")
+
+    def test_text_is_read_and_written_as_utf8_not_as_the_locale(self):
+        """`Path.read_text()` with no encoding uses the LOCALE's, which is ASCII
+        under LANG=C - and CI runs that way. The shipped store README has had an
+        em-dash and a section sign for months; the day the runner image stopped
+        coercing the C locale, `haversack segment -o x.duckn` began failing there
+        with UnicodeDecodeError, and 0.7.0 and 0.7.1 both went out on a red CI.
+
+        Data files are UTF-8 because we write them; say so at every read rather
+        than inherit whatever the machine is set to. Reproduce the failure with::
+
+            LC_ALL=C PYTHONCOERCECLOCALE=0 PYTHONUTF8=0 uv run pytest -q
+        """
+        import re
+        bare = []
+        for path in list(SRC.rglob("*.py")) + list((SRC.parents[1] / "tools").glob("*.py")):
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if re.search(r"\.read_text\(\s*\)", line):
+                    bare.append(f"{path.name}:{i}")
+        self.assertEqual(bare, [], f"read_text() without an encoding: {bare}")
 
     def test_the_default_path_does_not_need_the_ranked_store_extra(self):
         """rankfield, duckn and zarr are the `duckn` extra: the undocumented ranked store. A

@@ -242,7 +242,7 @@ class ContentStore:
         marker = entry / self.cache.MARKER
         try:
             total = sum(p.stat().st_size for p in entry.rglob("*") if p.is_file())
-            marker.write_text(str(total))
+            marker.write_text(str(total), encoding="utf-8")
         except OSError:
             pass
 

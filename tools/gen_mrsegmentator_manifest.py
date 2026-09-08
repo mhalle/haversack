@@ -69,7 +69,7 @@ def describe_zip(url: str) -> dict:
 
 def main(argv: list) -> None:
     if argv:
-        config_py = Path(argv[0]).read_text()
+        config_py = Path(argv[0]).read_text(encoding="utf-8")
         source = str(argv[0])
     else:
         with zippeek.open_url(UPSTREAM_CONFIG) as r:
@@ -96,7 +96,7 @@ def main(argv: list) -> None:
         print(f"  {d['folder']}  folds={d['folds']}  structures={d['structures']}", file=sys.stderr)
     DEST.write_text(json.dumps({"source": f"{source} MODEL_REGISTRY + each zip's own plans.json / "
                                           "version.json / fold_0 checkpoint",
-                                "tasks": tasks}, indent=1) + "\n")
+                                "tasks": tasks}, indent=1) + "\n", encoding="utf-8")
     print(f"{len(tasks)} models -> {DEST}")
 
 
