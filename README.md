@@ -61,7 +61,7 @@ it SimpleITK:
 
 ```bash
 uv pip install --no-deps "haversack @ git+https://github.com/mhalle/haversack"
-uv pip install numpy SimpleITK pydantic typer tqdm httpx obstore   # add `modal` to deploy the server
+uv pip install numpy SimpleITK pydantic tqdm httpx obstore   # add `modal` to deploy the server
 ```
 
 That environment runs `haversack tasks`, `haversack remote ...`, `haversack modal deploy`, and
