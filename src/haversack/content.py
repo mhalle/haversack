@@ -394,6 +394,42 @@ class ArchiveError(ValueError):
     """The archive cannot be safely or sensibly unpacked."""
 
 
+def basename(member: str) -> str:
+    """The last path segment of an archive member or object key, with Windows
+    separators normalized.
+
+    Deliberately string slicing rather than ``Path(...).name``: a bucket's
+    pseudo-directory key ``abc/`` must come back as ``""`` so callers can skip
+    it, and pathlib normalizes the trailing slash away and answers ``abc``.
+    """
+    return str(member).replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def flatten_names(members, *, always_index: bool = False) -> list[str]:
+    """Destination basenames for ``members`` being flattened into one directory.
+
+    One name per member, in order, all distinct. This is the ONE place that rule
+    lives; three call sites had three answers and two of them lost files.
+
+    A synthesized name must not be able to collide with a real one, which is the
+    trap the disambiguate-on-collision version fell into: members ``a/IM.dcm``,
+    ``b/IM.dcm`` and ``IM-1.dcm`` produced two files, because the ``IM-1.dcm``
+    invented for the second member was never registered and the third member then
+    overwrote it. Order does not save it - putting the real ``IM-1.dcm`` first
+    just changes which file is lost. So when basenames collide at all, EVERY name
+    is indexed and no original name survives to be collided with.
+
+    When they do not collide the names are left alone, because a fetch of one
+    object under a prefix should land as ``scan.nii.gz`` and not ``0_scan.nii.gz``.
+    ``always_index=True`` opts out of that for callers whose names are pure
+    staging (the content store renames by digest immediately afterwards).
+    """
+    names = [basename(m) for m in members]
+    if always_index or len(set(names)) != len(names):
+        return [f"{i}_{n}" for i, n in enumerate(names)]
+    return names
+
+
 def extract_zip(archive, dest, *, max_members: int = MAX_MEMBERS,
                 max_bytes: int = MAX_BYTES) -> list:
     """Unpack ``archive`` into ``dest``, flattened, returning the files written.
@@ -413,7 +449,7 @@ def extract_zip(archive, dest, *, max_members: int = MAX_MEMBERS,
 
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    written, total, seen = [], 0, {}
+    written, total = [], 0
     try:
         with zipfile.ZipFile(archive) as z:
             members = [m for m in z.infolist() if not m.is_dir()]
@@ -422,24 +458,17 @@ def extract_zip(archive, dest, *, max_members: int = MAX_MEMBERS,
             if len(members) > max_members:
                 raise ArchiveError(
                     f"{len(members)} members exceeds the {max_members} limit")
-            for m in members:
-                name = Path(m.filename.replace("\\", "/")).name
-                if not name or name in (".", ".."):
-                    continue               # a directory entry in disguise
+            keep = [m for m in members
+                    if basename(m.filename) not in ("", ".", "..")]
+            # These names are staging only; the store renames members by their
+            # own digest. What matters is that none of them collide.
+            names = flatten_names([m.filename for m in keep], always_index=True)
+            for m, name in zip(keep, names):
                 total += m.file_size
                 if total > max_bytes:
                     raise ArchiveError(
                         f"the archive expands past the {max_bytes} byte limit")
-                # Two members can flatten onto one name (a/IM1 and b/IM1), and
-                # both must survive: dropping one would silently change what the
-                # tree IS. Index every member unconditionally rather than only
-                # the collisions - a synthesized "2_IM1.dcm" would otherwise
-                # collide with a real member of that name and overwrite it,
-                # which is the same silent loss by a longer route. These names
-                # are staging only; the store renames members by their own
-                # digest.
-                seen[name] = seen.get(name, 0) + 1
-                out = dest / f"{len(written)}_{name}"
+                out = dest / name
                 with z.open(m) as src, open(out, "wb") as f:
                     while chunk := src.read(_CHUNK):
                         f.write(chunk)

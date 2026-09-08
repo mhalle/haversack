@@ -141,7 +141,13 @@ _ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack 
 #:
 #: 1 (2026-09-08): the first epoch. Everything before it was keyed on the release
 #: number, so this bump invalidates the cache once and for the last time.
-CACHE_EPOCH = "1"
+#: 2 (2026-09-08): a prefix fetch used to write every object under its basename, so
+#: two objects sharing one (`case/a/IM.dcm` and `case/b/IM.dcm`) landed on the same
+#: path and a slice of the series was lost. The result key holds the SOURCE
+#: IDENTIFIER, not the bytes' digest, so the same `idc:`/`s3:`/`gs:` identifier now
+#: computes from a complete series where it used to compute from a truncated one -
+#: different bytes under an unchanged key, which is exactly what this exists for.
+CACHE_EPOCH = "2"
 
 
 def result_key(identity, task, options, weights_versions, epoch=None) -> str:

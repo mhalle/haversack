@@ -644,3 +644,160 @@ def test_the_canonical_s3_url_spelling_is_answered_with_the_one_this_takes():
     from haversack.sources import S3Source, check_identifier
     with pytest.raises(InputError, match="drop the slashes.*s3:fcp-indi/x.nii.gz"):
         check_identifier(S3Source(), "//fcp-indi/x.nii.gz")
+
+
+# ---------------------------------------------------------------------------
+# Flattening: one rule, three call sites
+# ---------------------------------------------------------------------------
+
+#: Members that break a disambiguate-on-collision flattener. The first two share a
+#: basename, so such a flattener invents `IM-1.dcm` for the second - and never
+#: registers it, so the third member, genuinely named `IM-1.dcm`, overwrites it.
+#: Three members, two files, one slice of a series silently gone. Order does not
+#: save it: putting the real `IM-1.dcm` first only changes which file is lost.
+COLLIDING = ["case/a/IM.dcm", "case/b/IM.dcm", "case/IM-1.dcm"]
+COLLIDING_BYTES = [b"first", b"second", b"third"]
+
+
+def _zip_of(names, payloads):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, p in zip(names, payloads):
+            z.writestr(n, p)
+    return buf.getvalue()
+
+
+class TestOneFlatteningRule:
+    """Every path that flattens names into one directory must keep every member.
+
+    Three call sites had three answers, and two of them lost files: the object
+    prefix fetch wrote every key to its basename with no dedup at all (through a
+    32-thread pool, so two objects sharing a name interleaved into one inode and
+    the survivor was neither), and the archive extractor disambiguated only on
+    collision. `content.extract_zip` was the one that had it right, and its comment
+    described precisely the bug in the other two. They share its helper now, and
+    this exercises all three against the same adversarial member list.
+    """
+
+    def test_the_rule_itself_keeps_every_member_distinct(self):
+        from haversack.content import flatten_names
+        names = flatten_names(COLLIDING)
+        assert len(set(names)) == len(COLLIDING), names
+        # and indexing is all-or-nothing, so no synthesized name can equal a kept one
+        assert all("_" in n for n in names), names
+
+    def test_names_that_do_not_collide_are_left_alone(self):
+        """A one-object prefix fetch should land as `scan.nii.gz`, not `0_scan.nii.gz`."""
+        from haversack.content import flatten_names
+        assert flatten_names(["a/scan.nii.gz", "b/mask.nii.gz"]) == ["scan.nii.gz", "mask.nii.gz"]
+
+    def test_a_pseudo_directory_key_has_no_basename(self):
+        """`abc/` is a bucket's directory marker and must not become a file called
+        `abc`. pathlib normalizes the trailing slash away, which is why this is
+        string slicing - caught by the prefix-fetch test when it did use pathlib."""
+        from haversack.content import basename
+        assert basename("abc/") == ""
+        assert basename("a/b/c.dcm") == "c.dcm"
+        assert basename("c.dcm") == "c.dcm"
+
+    def test_the_content_store_keeps_every_member(self, tmp_path):
+        from haversack.content import extract_zip
+        src = tmp_path / "a.zip"
+        src.write_bytes(_zip_of(COLLIDING, COLLIDING_BYTES))
+        written = extract_zip(src, tmp_path / "out")
+        assert len(written) == 3
+        assert sorted(p.read_bytes() for p in written) == sorted(COLLIDING_BYTES)
+
+    def test_the_archive_extractor_keeps_every_member(self, fake_cloud, tmp_path):
+        built, stores = fake_cloud
+        stores[("aws", "fcp-indi")] = _FakeStore(
+            {"data/a.zip": _zip_of(COLLIDING, COLLIDING_BYTES)})
+        got = S3Source().fetch("fcp-indi/data/a.zip!case/", tmp_path)
+        files = sorted(got.iterdir())
+        assert len(files) == 3, [p.name for p in files]
+        assert sorted(p.read_bytes() for p in files) == sorted(COLLIDING_BYTES)
+
+    def test_the_prefix_fetch_keeps_every_object(self, fake_cloud, tmp_path):
+        built, stores = fake_cloud
+        stores[("gcp", "idc-open-data")] = _FakeStore(
+            {"case/": b"", **dict(zip(COLLIDING, COLLIDING_BYTES))})
+        got = GCSSource().fetch("idc-open-data/case/", tmp_path)
+        files = sorted(got.iterdir())
+        assert len(files) == 3, [p.name for p in files]
+        assert sorted(p.read_bytes() for p in files) == sorted(COLLIDING_BYTES)
+
+    def test_a_prefix_fetch_counts_bytes_as_they_land(self, fake_cloud, tmp_path, monkeypatch):
+        """The listing's sizes are checked first, but they are the listing's claim.
+        A store that understates them must still hit the ceiling while streaming -
+        and the ceiling is shared across the thread pool, or a prefix fetch is
+        bounded at `threads * cap` rather than at `cap`."""
+        from haversack import sources as S
+
+        class _Liar(_FakeStore):
+            def list(self, prefix=None):
+                self.calls.append(("list", prefix))
+                yield [{"path": k, "size": 1} for k in self.objects]   # every size a lie
+
+        built, stores = fake_cloud
+        stores[("gcp", "idc-open-data")] = _Liar(
+            {f"case/{i}.dcm": b"x" * 4096 for i in range(8)})
+        monkeypatch.setattr(S, "MAX_FETCH_BYTES", 5000)
+        with pytest.raises(InputError, match="fetch cap"):
+            GCSSource().fetch("idc-open-data/case/", tmp_path)
+
+
+class TestTheArchiveCacheIsKeyedOnTheCredential:
+    """Both `_zip` caches must key on `(outer, credentials)`, not on `outer`.
+
+    On a cache hit the resolve/locate step is SKIPPED, and that step is the only
+    place the access gate runs - the bucket allowlist here, the restricted-record
+    refusal and the token binding in `ArchiveReadingSource`. Keying on `outer`
+    alone let a tokenless caller reuse an earlier caller's authenticated archive.
+    That was found once, fixed in `ArchiveReadingSource`, and written up in its
+    docstring - while the same defect sat un-fixed in `ObjectStoreSource`, which
+    keyed on `outer` until 2026-09-08. So this asserts it of BOTH, and of the
+    cache key itself, because a class that grows a third archive cache will
+    otherwise repeat it a third time.
+    """
+
+    def test_every_archive_cache_in_the_module_keys_on_the_credential(self):
+        """Read as source, so a new `_zip` cannot quietly opt out."""
+        import ast
+        import inspect
+
+        from haversack import sources as S
+        tree = ast.parse(inspect.getsource(S))
+        zips = [n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "_zip"]
+        assert len(zips) >= 2, "no _zip implementations found - has this been renamed?"
+        caching = []
+        for fn in zips:
+            body = ast.unparse(fn)
+            if "_archives" not in body:
+                # an override that resolves and delegates (HttpSource) keeps no cache
+                assert "super()._zip" in body, (
+                    f"the _zip at line {fn.lineno} neither caches in `_archives` nor "
+                    "delegates to super() - it has invented a third archive cache")
+                continue
+            caching.append(fn.lineno)
+            assert "ck = (outer, credentials)" in body and "cache.get(ck)" in body, (
+                f"the _zip at line {fn.lineno} does not key its archive cache on the "
+                "credential; a cache hit skips the access gate")
+        assert len(caching) >= 2, f"expected both archive caches, found {caching}"
+
+    def test_a_cached_public_archive_does_not_admit_a_credentialed_request(
+            self, fake_cloud, tmp_path):
+        """The object store reads public buckets anonymously and REFUSES a
+        credential. With the cache keyed on `outer` alone the refusal was skipped
+        for any archive someone had already fetched."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("inner/scan.nii.gz", b"\x1f\x8b" + b"z" * 500)
+        built, stores = fake_cloud
+        stores[("aws", "fcp-indi")] = _FakeStore({"data/a.zip": buf.getvalue()})
+        src = S3Source()
+        src.fetch("fcp-indi/data/a.zip!inner/scan.nii.gz", tmp_path)       # warms the cache
+        (tmp_path / "b").mkdir()
+        with pytest.raises(InputError, match="takes no credentials"):
+            src.fetch("fcp-indi/data/a.zip!inner/scan.nii.gz", tmp_path / "b",
+                      credentials="someone-elses-token")

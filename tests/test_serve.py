@@ -3084,8 +3084,10 @@ def test_a_release_does_not_throw_the_result_cache_away(monkeypatch):
     monkeypatch.setattr(sv, "_version", lambda: "9.9.9")     # a release, any release
     assert sv.result_key(*args) == before, "a version bump moved the cache key"
 
-    # ...and the epoch still does, which is the whole point of having one
-    monkeypatch.setattr(sv, "CACHE_EPOCH", "2")
+    # ...and the epoch still does, which is the whole point of having one.
+    # Derived from the live value rather than a literal: this said `"2"`, and the day
+    # the real epoch reached 2 the test asserted that an unchanged epoch changed the key.
+    monkeypatch.setattr(sv, "CACHE_EPOCH", sv.CACHE_EPOCH + "-moved")
     assert sv.result_key(*args) != before, "the epoch no longer reaches the key"
 
     # everything that determines the bytes still keys

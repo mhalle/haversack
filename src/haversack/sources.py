@@ -26,7 +26,7 @@ import re
 import urllib.error
 from pathlib import Path
 
-from . import fetchlib
+from . import content, fetchlib
 from .errors import InputError
 
 __all__ = ["DataSource", "UrlTemplateSource", "IDCSource", "GitHubReleaseSource",
@@ -447,32 +447,72 @@ def _list_objects(store, prefix: str) -> list:
     return out
 
 
+class _Budget:
+    """A byte ceiling shared by concurrent downloads.
+
+    One object's stream cannot see what the other thirty-one are doing, so a
+    per-object cap bounds a prefix fetch at ``threads * cap`` rather than at
+    ``cap``. This is the shared counter, and it is spent as the bytes land.
+    """
+
+    def __init__(self, cap: int, what: str):
+        import threading
+        self.cap, self._what = cap, what
+        self._left = cap
+        self._lock = threading.Lock()
+
+    def spend(self, n: int) -> None:
+        with self._lock:
+            self._left -= n
+            if self._left < 0:
+                raise InputError(f"{self._what}: exceeded the {self.cap}-byte fetch cap")
+
+
 def _fetch_objects(store, keys: list, dest: Path, *, what: str, cap: int,
                    threads: int = 32) -> int:
-    """Download every listed object into ``dest`` by basename, in parallel -
-    the IDC mechanism (obstore beat s5cmd in every measured quadrant), shared
-    by every prefix fetch. The cap is checked against the listing's sizes
-    BEFORE any byte moves; returns how many files were written."""
-    import obstore
+    """Download every listed object into ``dest``, flattened, in parallel - the
+    IDC mechanism (obstore beat s5cmd in every measured quadrant), shared by
+    every prefix fetch. Returns how many files were written.
+
+    Two objects under one prefix can share a basename (``case/a/IM.dcm`` and
+    ``case/b/IM.dcm``), and until 2026-09-08 both were opened at the same
+    destination by different threads - so the survivor was not the later object
+    but an interleaving of the two, and a slice of the series was simply gone.
+    The flattening rule is :func:`haversack.content.flatten_names`, shared with
+    the content store and the archive extractor. It matters more here than it
+    looks: a series that collapses onto one name stops being a series, because
+    :func:`sole_file` then hands the pipeline a single file, and the input's
+    provenance digest turns from ``sha256-tree:`` into ``sha256:``.
+
+    The listing's own sizes are checked before any byte moves, and then the
+    bytes are counted as they arrive - a listing that understated a size cannot
+    fill the disk.
+    """
     from concurrent.futures import ThreadPoolExecutor
     total = sum(size for _, size in keys)
     if total > cap:
         raise InputError(f"{what}: {len(keys)} objects total {total} bytes, over the "
                          f"{cap}-byte fetch cap (HAVERSACK_MAX_FETCH_GB)")
-    wanted = [k for k, _ in keys if k.rsplit("/", 1)[-1] not in ("", ".", "..")]
+    # a bucket pseudo-directory key has no basename of its own
+    wanted = [k for k, _ in keys if content.basename(k) not in ("", ".", "..")]
+    budget = _Budget(cap, what)
+    names = content.flatten_names(wanted)
 
-    def one(key):                          # a bucket pseudo-directory key is skipped above
-        with open(dest / key.rsplit("/", 1)[-1], "wb") as f:
-            f.write(bytes(obstore.get(store, key).bytes()))
+    def one(pair):
+        key, name = pair
+        _stream_object(store, key, dest / name, what=what, cap=cap, budget=budget)
 
     with ThreadPoolExecutor(threads) as ex:
-        list(ex.map(one, wanted))
+        list(ex.map(one, zip(wanted, names)))
     return len(wanted)
 
 
-def _stream_object(store, key: str, out: Path, *, what: str, cap: int) -> int:
+def _stream_object(store, key: str, out: Path, *, what: str, cap: int, budget=None) -> int:
     """One object to disk in 1 MiB chunks, with the same hard ceiling the HTTP
-    downloads have: a listing that lied about a size cannot fill the disk."""
+    downloads have: a listing that lied about a size cannot fill the disk.
+
+    ``budget``, when given, is a ceiling shared with every other object in the
+    same fetch; the per-object ``cap`` still applies on its own."""
     import obstore
     n = 0
     with open(out, "wb") as f:
@@ -480,6 +520,8 @@ def _stream_object(store, key: str, out: Path, *, what: str, cap: int) -> int:
             n += len(chunk)
             if n > cap:
                 raise InputError(f"{what}: exceeded the {cap}-byte fetch cap")
+            if budget is not None:
+                budget.spend(len(chunk))
             f.write(chunk)
     return n
 
@@ -797,17 +839,14 @@ class ArchiveReadingSource(DataSource):
             if total > MAX_FETCH_BYTES:
                 raise InputError(f"{self.prefix}:{identifier}: members total "
                                  f"{total} bytes, over the {MAX_FETCH_BYTES} cap")
-            seen: dict = {}
-            for m in members:
-                name = Path(m).name        # flatten: archive paths never touch disk
-                if not name or name.startswith("."):
-                    continue
-                if name in seen:           # basename collision: disambiguate
-                    seen[name] += 1        # rather than silently overwrite
-                    stem, dot, ext = name.partition(".")
-                    name = f"{stem}-{seen[name]}{dot}{ext}"
-                else:
-                    seen[name] = 0
+            # flatten: archive paths never touch disk. The naming rule is shared
+            # with the content store and the prefix fetch, because this site had
+            # its own and it lost a member - it disambiguated only on collision,
+            # so the `IM-1.dcm` it invented for a second `IM.dcm` was overwritten
+            # by a third member genuinely named `IM-1.dcm`.
+            keep = [m for m in members
+                    if content.basename(m) and not content.basename(m).startswith(".")]
+            for m, name in zip(keep, content.flatten_names(keep)):
                 with z.open(m) as src, open(dest / name, "wb") as f:
                     shutil.copyfileobj(src, f, 1 << 20)
         except InputError:
@@ -1034,11 +1073,23 @@ class ObjectStoreSource(ArchiveReadingSource):
         return f"{self.scheme}://{outer.partition('/')[0]}/{key}", size
 
     def _zip(self, outer: str, credentials=None):
-        """The remote zip over the store's ranged reads instead of HTTP Range."""
+        """The remote zip over the store's ranged reads instead of HTTP Range.
+
+        Cached per ``(outer, credentials)``, for the reason
+        :meth:`ArchiveReadingSource._zip` gives at length: on a cache hit ``locate`` is
+        skipped, and ``locate`` is where ``check`` runs the bucket allowlist and
+        ``_headers`` refuses a credential. This cache keyed on ``outer`` alone until
+        2026-09-08 - the exact defect its sibling documents as a round-4 finding, sitting
+        un-fixed in the parallel class. What it bypassed here is the allowlist rather than
+        a token, because this source refuses credentials outright rather than forwarding
+        them; that mitigation is incidental, and the next object-store subclass to accept
+        one would inherit the replay.
+        """
         import obstore
         import zipfile
         cache = self.__dict__.setdefault("_archives", {})
-        z = cache.get(outer)
+        ck = (outer, credentials)
+        z = cache.get(ck)
         if z is None:
             store, key, size = self.locate(outer, credentials)
 
@@ -1046,7 +1097,7 @@ class ObjectStoreSource(ArchiveReadingSource):
                 return bytes(obstore.get_range(store, key, start=lo, end=hi + 1))
 
             z = zipfile.ZipFile(RangeFile.over(read_range, size))
-            cache[outer] = z
+            cache[ck] = z
             while len(cache) > 4:
                 cache.pop(next(iter(cache)))
         return z
@@ -1428,13 +1479,42 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
     done = entry / ".done"
     if not done.exists():
         import shutil
-        if entry.exists():
-            shutil.rmtree(entry)             # a partial fetch: start over
-        entry.mkdir(parents=True)
-        if progress:
-            progress(f"fetching {ident if kind == 'http' else f'{kind}:{ident}'}")
-        fetch_recording_origin(src, ident, entry, credentials)
-        done.write_text(f"{kind}:{ident}\n", encoding="utf-8")
+        import uuid
+
+        from . import filelock
+        # Fetch into a directory THIS caller owns and publish it by rename, under the
+        # same advisory lock the model installs take.
+        #
+        # The protocol used to be: no `.done`, so delete the entry and start fetching.
+        # That reads an absent marker as "the writer is dead", and a live download of a
+        # large series looks exactly like abandoned work - so a second `haversack`
+        # process (the input cache is one shared user-level root; running two commands
+        # at once is ordinary) deleted the first one's tree from under it and fetched
+        # into a directory the first still believed it owned. Both could then write
+        # `.done` over contents assembled from two fetches, and `.done` holds the
+        # identifier rather than a size or a digest, so nothing downstream could tell.
+        # The loud variants were no better: `entry.mkdir(parents=True)` without
+        # `exist_ok` raised, and two simultaneous `rmtree`s raced mid-walk.
+        #
+        # The staging name carries the pid and a random suffix, so even where no lock
+        # facility exists (`filelock.SUPPORTED` False) two callers cannot share a
+        # staging directory: the last rename wins and every published entry is still
+        # internally consistent. Dotfile names keep both invisible to `cache clean`.
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.held(entry.parent / f".lock-{entry.name}"):
+            if not done.exists():            # another process published while we waited
+                staging = entry.parent / f".staging-{entry.name}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+                try:
+                    staging.mkdir(parents=True)
+                    if progress:
+                        progress(f"fetching {ident if kind == 'http' else f'{kind}:{ident}'}")
+                    fetch_recording_origin(src, ident, staging, credentials)
+                    (staging / ".done").write_text(f"{kind}:{ident}\n", encoding="utf-8")
+                    shutil.rmtree(entry, ignore_errors=True)     # a partial fetch: start over
+                    os.replace(staging, entry)
+                except BaseException:
+                    shutil.rmtree(staging, ignore_errors=True)
+                    raise
     content = entry / "series"
     if not content.is_dir():
         content = entry                      # a source that wrote directly under the entry

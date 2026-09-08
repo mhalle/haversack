@@ -158,3 +158,51 @@ class _Saved:
 
     def present(self):
         return {}
+
+
+def test_two_processes_materializing_one_input_do_not_corrupt_each_other(tmp_path):
+    """Two `haversack` commands on one input is ordinary - the input cache is a single
+    shared user-level root - and it used to be destructive.
+
+    The old protocol read an absent `.done` as "the writer is dead", so the second
+    caller deleted the first's in-progress tree and fetched into a directory the first
+    still believed it owned. Both could then write `.done` over contents assembled from
+    two fetches, and `.done` records the identifier rather than a size or a digest, so
+    nothing downstream could tell. Every slice here carries its writer's marker, so a
+    directory holding both markers is exactly that mixed entry.
+
+    Real subprocesses, not threads: the claim is an advisory FILE lock, and threads in
+    one process share it by definition and would prove nothing.
+    """
+    import subprocess
+    import sys
+
+    cache = tmp_path / "cache"
+    env = {**__import__("os").environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
+    probe = str(Path(__file__).resolve().parent / "slow_source_probe.py")
+    started = tmp_path / "A-has-begun"
+    procs = [
+        subprocess.Popen([sys.executable, probe, "A", str(cache), "case1",
+                          "--signal", str(started)],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env),
+        # B enters only once A is demonstrably mid-fetch, which is the window that
+        # used to destroy A's tree; leaving it to start-up jitter reproduced nothing
+        subprocess.Popen([sys.executable, probe, "B", str(cache), "case1",
+                          "--await", str(started)],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env),
+    ]
+    outs = [p.communicate(timeout=180) for p in procs]
+    for (out, err), m in zip(outs, "AB"):
+        assert procs["AB".index(m)].returncode == 0, f"writer {m} failed:\n{err}"
+
+    entry = cache / "slow" / sorted(p.name for p in (cache / "slow").iterdir()
+                                    if not p.name.startswith("."))[0]
+    series = entry / "series"
+    slices = sorted(series.glob("*.dcm"))
+    markers = {p.read_text(encoding="utf-8") for p in slices}
+    assert len(slices) == 6, f"the published entry is short: {[p.name for p in slices]}"
+    assert len(markers) == 1, f"the published entry mixes two fetches: {markers}"
+    assert (entry / ".done").exists()
+    # both callers returned the SAME published directory, and neither left staging behind
+    assert {out.strip() for out, _ in outs} == {str(series)}
+    assert not [p for p in (cache / "slow").iterdir() if p.name.startswith(".staging")]

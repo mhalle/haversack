@@ -14,6 +14,7 @@ lockable, so an empty lock file works).
 """
 from __future__ import annotations
 
+import contextlib as _contextlib
 import time
 
 try:
@@ -69,3 +70,36 @@ def unlock(handle) -> None:
             _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
     except OSError:
         pass                                 # closing the descriptor releases it anyway
+
+
+@_contextlib.contextmanager
+def held(path, *, mode: int = 0o644):
+    """Hold an exclusive advisory lock on ``path`` for the block.
+
+    Yields True when the lock is really held and False when it could not be taken
+    at all - a read-only cache directory, a filesystem with no lock facility - so
+    a caller degrades to unlocked rather than refusing, which is no worse than
+    having no lock. The lock file is created if missing and never removed:
+    unlinking it would let the next process create a different inode and lock
+    that instead, which is a lock that locks nothing.
+
+    Written once here because two callers had the same twenty lines - the
+    per-model install lock and, from 2026-09-08, the input cache's fetch claim.
+    """
+    import os
+    fd = None
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, mode)
+        lock(fd)
+    except OSError:
+        if fd is not None:
+            os.close(fd)                     # opened but not locked: do not leak the fd
+        fd = None
+    try:
+        yield fd is not None
+    finally:
+        if fd is not None:
+            try:
+                unlock(fd)
+            finally:
+                os.close(fd)
