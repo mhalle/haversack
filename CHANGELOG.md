@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-08
+
+A cache that survives its own releases, and two guards for facts that were written twice.
+
 - **A release no longer throws the result cache away.** The key carried `__version__`, so every
   version bump discarded every stored result - three times on 2026-09-08, for releases that
   touched no model, no resampling and no encoding. What a stored result depends on is already
