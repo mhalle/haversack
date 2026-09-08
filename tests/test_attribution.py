@@ -14,7 +14,12 @@ from unittest import mock
 
 from haversack import attribution
 
-ENGINE_VARS = ("HAVERSACK_FASTSURFER", "HAVERSACK_SYNTHSTRIP", "HAVERSACK_VOXTELL", "HAVERSACK_MONAI")
+#: Derived, never hand-listed: this tuple decides which catalogs `_every_ecosystem` can
+#: see, so a hand-written copy that missed a new engine would quietly stop checking that
+#: engine's catalog for a record - the test would still pass, having looked at less.
+from haversack.engines.registry import engine_env_vars  # noqa: E402
+
+ENGINE_VARS = engine_env_vars()
 
 
 def _every_ecosystem():

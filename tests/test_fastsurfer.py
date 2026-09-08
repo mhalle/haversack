@@ -24,6 +24,62 @@ def test_lut_has_canonical_freesurfer_labels():
     assert len(lut) > 70          # the ~95 aparc+aseg structures (minus background)
 
 
+def _upstream_lut_path():
+    """FastSurfer's own colour table, wherever this machine has it.
+
+    Engines get their own environments, so the checkout running the tests usually is NOT
+    the one holding FastSurferCNN; look in the per-engine venvs too before giving up.
+    """
+    from pathlib import Path as _P
+    try:
+        import FastSurferCNN
+        p = _P(FastSurferCNN.__file__).parent / "config" / "FastSurfer_ColorLUT.tsv"
+        if p.exists():
+            return p
+    except ImportError:
+        pass
+    root = _P(__file__).resolve().parent.parent
+    for p in sorted(root.glob(".venvs/*/lib/python*/site-packages/FastSurferCNN/config/"
+                              "FastSurfer_ColorLUT.tsv")):
+        return p
+    return None
+
+
+def test_the_shipped_lut_still_matches_the_one_fastsurfer_ships():
+    """The shipped table is the ONLY source of FastSurfer label names now.
+
+    Until 2026-09-08 the ranked store builder parsed upstream's `FastSurfer_ColorLUT.tsv`
+    instead, so the two could disagree without anything noticing; they were verified equal
+    by hand on all 78 ids and the builder was pointed at ours. A verification done once is
+    a snapshot - a `fastsurfer-lean` bump could move upstream's table and nothing would say
+    so, which is precisely the silent-staleness failure the builder's own docstring records
+    (a changed LUT path once renamed all 78 segments to `label_<id>` while the build
+    reported success). This pins it.
+
+    Upstream carries id 0 `Background`; a label map excludes background by definition, so
+    it is the one allowed difference and is asserted as such rather than merely ignored.
+    """
+    path = _upstream_lut_path()
+    if path is None:
+        pytest.skip("FastSurferCNN is not installed here and no .venvs copy was found")
+    upstream = {}
+    for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+        f = line.split("\t")
+        if len(f) >= 2 and f[0].strip().isdigit():
+            upstream[int(f[0])] = f[1].strip()
+    shipped = {i: v["name"] for i, v in fs.load_lut().items()}
+
+    assert shipped, "the shipped LUT is empty"
+    differing = {i: (shipped[i], upstream[i])
+                 for i in set(shipped) & set(upstream) if shipped[i] != upstream[i]}
+    assert differing == {}, f"shipped LUT disagrees with FastSurfer's own: {differing}"
+    assert set(shipped) - set(upstream) == set(), \
+        f"shipped LUT has ids upstream does not: {sorted(set(shipped) - set(upstream))}"
+    assert set(upstream) - set(shipped) == {0}, \
+        ("upstream should differ only by id 0 Background; it also has "
+         f"{sorted(set(upstream) - set(shipped) - {0})}")
+
+
 def _img(arr, spacing, origin=(0., 0., 0.)):
     im = sitk.GetImageFromArray(np.ascontiguousarray(arr))
     im.SetSpacing(spacing); im.SetOrigin(origin)

@@ -30,7 +30,6 @@ import numpy as np
 from rankfield import levels as rf_levels
 import zarr
 
-from haversack.engines import registry as _registry
 from haversack.ranked_store import (brick_attrs, grid_attrs, grid_reference, group, leaf,
                                     open_store, part_attrs, root_attrs, segmentation)
 
@@ -72,12 +71,30 @@ GROUP_CLAIMS = {
 }
 
 
+def claims_for(engine):
+    """The named unions ``engine``'s stores carry, or none at all.
+
+    Deliberately NOT defaulting to nnU-Net's. It used to, and the default was wrong rather
+    than merely empty: every engine without its own entry inherited TotalSegmentator's
+    claims, so a store whose leaves happened to be named like TS's five lung lobes shipped
+    `g_lungs` with ``exhaustive=True`` - an anatomical assertion that TotalSegmentator's
+    model DEFINES the lung as exactly those five and nothing else. MONAI bundles and VoxTell
+    prompts can produce those names without making that claim, and an exhaustive union is
+    read as a guarantee by anything consuming the store. An engine that declares no claims
+    now makes none, which is the only honest default.
+
+    Shared with tools/ranked_upgrade_seg.py, which asked the same question and carried its
+    own copy of the same wrong fallback.
+    """
+    return GROUP_CLAIMS.get(str(engine), ())
+
+
 def named_groups(engine, leaves):
     """The engine's named unions over ``leaves`` (duckn Segments), as group Segments.
     A group is written whenever it has a member, even one: the set of group ids in a
     store is a property of the task, not of how much anatomy the field of view held."""
     out = []
-    for claim in GROUP_CLAIMS.get(engine, GROUP_CLAIMS["nnunetv2"]):
+    for claim in claims_for(engine):
         gid, name, pred, disjoint, exhaustive = claim[:5]
         exact = claim[5] if len(claim) > 5 else None
         hits = [s for s in leaves if s.label_value is not None and not s.background
@@ -132,6 +149,9 @@ def names_for(engine, task, allow_unnamed=False, say=None):
         # otherwise the labels are the ecosystem's and the catalog names them.
         # Asked of the registry rather than branched on here, so a second engine
         # with its own numbering is a field on its row, not a case in this line.
+        # Imported HERE, not at module scope: the registry pulls `schemas`, and with it
+        # pydantic, into a toolchain that otherwise needs only numpy/rankfield/zarr.
+        from haversack.engines import registry as _registry
         thunk = _registry.ENGINES.get(engine).label_names if engine in _registry.ENGINES else None
         names = thunk(task) if thunk is not None else _ts_names(task)
     except Exception as exc:                       # noqa: BLE001 - any import/catalog problem

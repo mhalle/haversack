@@ -24,7 +24,7 @@ from pathlib import Path
 
 from duckn import SegmentationExtension
 
-from haversack.ranked_build import GROUP_CLAIMS, named_groups, part_partition, write_readme
+from haversack.ranked_build import claims_for, named_groups, part_partition, write_readme
 from haversack.ranked_store import leaf, open_store, root_attrs, segmentation
 
 STEP = "Segment metadata upgraded to seg 0.7"
@@ -71,7 +71,7 @@ def _upgrade(st, store: Path) -> None:
                   for s in leaves]
     # the named unions are re-derived (their claims are the builder's decision); any other
     # group the store had - none today - is kept as it was
-    known = {gid for gid, *_ in GROUP_CLAIMS.get(engine, GROUP_CLAIMS["nnunetv2"])}
+    known = {gid for gid, *_ in claims_for(engine)}
     kept = [s for s in seg.segments if s.members is not None
             and s.id not in known and not s.id.startswith("classes_")]
     groups = [part_partition(i, o["name"], leaves) for i, o in enumerate(order)]

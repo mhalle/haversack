@@ -1258,6 +1258,49 @@ if MONAI:
                                         progress=on_progress, cancel=token)
 
 
+def _wiring_problems() -> list[str]:
+    """Every way an engine can be in the registry and still never run here.
+
+    The `_WORKER_CLASSES` assert above compares KEYS to the registry, which catches a
+    forgotten entry and nothing else. Two omissions it cannot see are both silent and
+    both fatal at deploy, and an adversarial review produced each one from a plausible
+    new row (2026-09-08):
+
+    * No module-level flag. `_worker_classes` reads a global named by stripping
+      HAVERSACK_ off `enabled_env`, so a missing `NNINTERACTIVE = _engines.enabled(...)`
+      - a line that sits a thousand lines above the worker it gates - makes
+      `globals().get(...)` return the False default. The engine is then absent from
+      every deploy while `HAVERSACK_NNINTERACTIVE=1` is set, and the error the caller
+      finally gets tells them to set the variable that is already set.
+    * A typo in the CLASS NAME. `globals().get(cls_name)` returns None, and the engine
+      drops out of dispatch with nothing said.
+
+    Returns the problems rather than raising, so a test can show them all at once.
+    """
+    problems = []
+    for engine, cls_name in _WORKER_CLASSES.items():
+        env = _engines.ENGINES[engine].enabled_env
+        if env is not None:
+            flag = env[len("HAVERSACK_"):]
+            if flag not in globals():
+                problems.append(
+                    f"{engine}: no module-level `{flag}` flag - _worker_classes reads it "
+                    f"from globals(), so this engine would be silently absent from every "
+                    f"deploy even with {env}=1. Add `{flag} = _engines.enabled({engine!r})`.")
+                continue
+            if not globals()[flag]:
+                continue                     # off here on purpose: its class is not defined
+        if cls_name not in globals():
+            problems.append(
+                f"{engine}: enabled here, but no worker class named {cls_name!r} is "
+                f"defined - check the class name in _WORKER_CLASSES against the `class` "
+                f"statement inside `if {env and env[len('HAVERSACK_'):]}:`.")
+    return problems
+
+
+assert not _wiring_problems(), "modal_app is miswired:\n  " + "\n  ".join(_wiring_problems())
+
+
 def _worker_classes() -> dict:
     """engine name -> worker class, for the engines this deployment can run.
 

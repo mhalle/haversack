@@ -90,3 +90,19 @@ def test_openapi_carries_the_guides_rules_and_tags(tmp_path):
     assert untagged == [], untagged
     r = client.get("/openapi.json")
     assert r.status_code == 200 and r.json()["info"]["title"] == "haversack"
+
+
+def test_the_guide_documents_every_engine_enable_flag():
+    """The guide hand-lists the engine flags; the registry derives them.
+
+    One fact in two places, and only one of them moves when an engine is added - the same
+    shape as the `/v1/version` package list that went two engines stale without anyone
+    noticing (fixed 2026-09-08 by deriving it from `Engine.dist`). An operator reads this
+    guide to find out what to set at deploy, so a flag missing here is an engine nobody
+    can turn on.
+    """
+    from haversack.engines.registry import engine_env_vars
+    text = _guide()
+    missing = [v for v in engine_env_vars() if v not in text]
+    assert missing == [], (f"the server guide never mentions {missing} - add the flag where "
+                           "the other engine flags are listed, or an operator cannot enable it")
