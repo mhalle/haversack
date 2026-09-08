@@ -57,6 +57,22 @@ def load_lut() -> dict[int, dict]:
     return {int(k): v for k, v in raw.items()}
 
 
+def label_names() -> dict[int, str]:
+    """FastSurfer output label id -> name, for consumers that need names without
+    colors (the ranked store builder).
+
+    Reads the LUT haversack SHIPS, not FastSurfer's ``FastSurfer_ColorLUT.tsv``.
+    The builder used to hunt for that file - importing FastSurferCNN, then
+    globbing ``.venvs/*/`` when the import failed, which it does in the ordinary
+    case because engines get their own environments. Verified 2026-09-08:
+    identical to upstream's table, name for name, on all 78 ids; upstream adds
+    only id 0 ``Background``, which a label map excludes by definition. Reading
+    what we ship removes an environment dependency from a build step that once
+    degraded silently and named all 78 segments ``label_<id>``.
+    """
+    return {i: v["name"] for i, v in load_lut().items()}
+
+
 def sitk_to_nibabel(img):
     """A SimpleITK image -> an in-memory nibabel Nifti1Image, so FastSurfer's
     ``conform`` (which is nibabel-coupled, and which we deliberately do not

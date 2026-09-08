@@ -2651,8 +2651,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # haversack itself is reported by the top-level "version" (its __version__): it's
         # mounted/source-on-path in the deployed images and CI, so it has no dist
         # metadata to read here. `packages` reports the installed DEPENDENCIES.
+        # Derived from the engine registry, never hand-listed: the list here used to
+        # be five literals and had silently missed voxtell and monai since each was
+        # added, so the endpoint that exists to say WHICH REV is running said nothing
+        # about the one engine pinned to a git rev for exactly that reason. A package
+        # absent from this environment is skipped, so naming every engine's is right.
+        from .engines import registry as _engines
         pkgs = {}
-        for name in ("nnunetv2", "torch", "fastsurfer-lean", "synthstrip-torch", "surfa"):
+        for name in sorted({d for e in _engines.ENGINES.values() for d in e.dist}):
             info = _pkg_info(name)
             if info is not None:
                 pkgs[name] = info

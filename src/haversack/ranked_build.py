@@ -30,6 +30,7 @@ import numpy as np
 from rankfield import levels as rf_levels
 import zarr
 
+from haversack.engines import registry as _registry
 from haversack.ranked_store import (brick_attrs, grid_attrs, grid_reference, group, leaf,
                                     open_store, part_attrs, root_attrs, segmentation)
 
@@ -111,37 +112,6 @@ def _ts_names(task):
     return dict(_resolve_spec(task, EcosystemCatalog(root=store.root)).label_map)
 
 
-def _fastsurfer_lut() -> Path:
-    """Locate FastSurfer's color LUT, importing it if possible and searching if not.
-
-    Engines each get their own environment here (they pin conflicting numpy and torch ranges),
-    so the builder normally runs *outside* the one holding FastSurferCNN - an import alone fails
-    in the ordinary case, not the exotic one. Fall back to the per-engine venvs beside the repo.
-    """
-    try:
-        import FastSurferCNN
-        return Path(FastSurferCNN.__file__).parent / "config" / "FastSurfer_ColorLUT.tsv"
-    except ImportError:
-        pass
-    root = Path(__file__).resolve().parents[2]              # src/haversack -> the repo
-    for p in sorted(root.glob(".venvs/*/lib/python*/site-packages/FastSurferCNN/config/"
-                              "FastSurfer_ColorLUT.tsv")):
-        return p
-    raise FileNotFoundError(
-        "FastSurfer_ColorLUT.tsv not found - import FastSurferCNN failed and no per-engine "
-        f"venv under {root}/.venvs/ contains it")
-
-
-def _fastsurfer_names():
-    """FreeSurfer aparc+aseg id -> name."""
-    out = {}
-    for line in _fastsurfer_lut().read_text(encoding="utf-8").splitlines()[1:]:
-        f = line.split("\t")
-        if len(f) >= 2 and f[0].strip().isdigit():
-            out[int(f[0])] = f[1].strip()
-    return out
-
-
 CASCADE_PART = re.compile(r":s\d+$")      # a cascade stage is named `<task>:s<i>`
 
 
@@ -157,7 +127,13 @@ def names_for(engine, task, allow_unnamed=False, say=None):
     if say is None:
         say = lambda *a, **k: print(*a, file=sys.stderr, flush=True)   # noqa: E731
     try:
-        names = _fastsurfer_names() if engine == "fastsurfer" else _ts_names(task)
+        # The engine names its own labels when they are in ITS namespace
+        # (FastSurfer carries FreeSurfer aparc+aseg ids, which no catalog knows);
+        # otherwise the labels are the ecosystem's and the catalog names them.
+        # Asked of the registry rather than branched on here, so a second engine
+        # with its own numbering is a field on its row, not a case in this line.
+        thunk = _registry.ENGINES.get(engine).label_names if engine in _registry.ENGINES else None
+        names = thunk(task) if thunk is not None else _ts_names(task)
     except Exception as exc:                       # noqa: BLE001 - any import/catalog problem
         msg = (f"no label names for engine={engine!r} task={task!r} "
                f"({exc.__class__.__name__}: {exc})")

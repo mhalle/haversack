@@ -13,8 +13,29 @@ weights identity that keys the result cache, and the ecosystem -> engine route.
 Adding an engine is one row here plus a worker class in
 :mod:`haversack.modal_app` that declares its image and compute.
 
-Deliberately a **static registry, not a plugin framework** - engines are a
-closed set we ship and test together (YAGNI). It is also deliberately **light**:
+Deliberately a **static registry, not a plugin framework**. That is not only
+YAGNI; three properties of this system make discovered plugins impossible to
+do honestly, and they are worth stating so the question stops being reopened:
+
+1. ``import haversack`` must pull no torch (``docs/dependency-discipline.md``).
+   Anything discovered at import time drags its runtime in with it.
+2. Modal resolves ``@app.cls`` decorators at import, so a worker and its image
+   are declared statically under the engine's flag. An engine that appeared at
+   runtime could not have a Modal worker at all.
+3. Engines live in mutually conflicting environments - synthstrip pins
+   ``numpy<2`` where the torch extra resolves past 2 - so "the set of installed
+   engines" is not a coherent question to ask one interpreter.
+
+What DOES keep the cost down is this row owning every per-engine fact that code
+outside the engine needs. Each field below was added because a consumer was
+otherwise keeping its own copy, and the copies drift: ``dist`` exists because
+``/v1/version`` hand-listed engine packages and silently omitted two engines,
+and ``label_names`` because the ranked builder tested ``engine == "fastsurfer"``.
+When adding an engine needs an edit somewhere new, the fix is a field here, not
+a branch there. ``tests/test_engine_completeness.py`` walks this dict and fails
+naming the step that was missed.
+
+It is also deliberately **light**:
 no torch, no SimpleITK, not even an import of the engine modules. ``importing
 haversack`` must stay torch-free (see ``docs/dependency-discipline.md``), and
 ``info()`` on the lean API image reads these constants, so the version literals
@@ -73,6 +94,21 @@ class Engine:
     #: The extra that installs that runtime, in its own environment (pyproject's
     #: [tool.uv] conflicts): UV_PROJECT_ENVIRONMENT=.venvs/<name> uv sync --extra <extra>.
     extra: str | None = None
+    #: The DISTRIBUTION names this engine brings, for `/v1/version`'s package
+    #: report - which pins the rev a deployment is actually running. Not
+    #: derivable from `runtime_module`: the import name and the distribution
+    #: differ for two engines already (FastSurferCNN <- fastsurfer-lean,
+    #: synthstrip_torch <- synthstrip-torch), and one engine's answer is more
+    #: than one package. Includes what the engine pulls in that we want pinned
+    #: in the report (surfa, under synthstrip), not just the top-level name.
+    #: Reported only where installed, so listing all of them here is right.
+    dist: tuple[str, ...] = ()
+    #: ``task -> {label id: name}`` when the labels this engine emits are in the
+    #: ENGINE's namespace rather than the catalog's - FastSurfer carries
+    #: FreeSurfer's aparc+aseg ids, which no ecosystem knows. A thunk, called at
+    #: use and never at import, so this module keeps taking no engine imports.
+    #: None means the labels are the ecosystem's and the catalog names them.
+    label_names: Callable[[str], dict] | None = None
     #: Whether a stored result may be SERVED for a repeat request (RFC 9111
     #: `no-cache` when False - results are still stored, so artifacts, the job's
     #: `key` and its `links` all keep working; `no-store` is a different thing we
@@ -113,6 +149,15 @@ def _fastsurfer_compute(image, **kw):
     return run_local(image, **kw)
 
 
+def _fastsurfer_label_names(task: str) -> dict:
+    """FreeSurfer aparc+aseg id -> name, read from FastSurfer's own colour LUT.
+
+    Ignores ``task``: this engine has one label namespace whatever it is asked for.
+    """
+    from .fastsurfer import label_names
+    return label_names()
+
+
 def _synthstrip_identity() -> list[dict]:
     return [{"id": "synthstrip", "version": "v1"}]
 
@@ -135,6 +180,7 @@ ENGINES: dict[str, Engine] = {
     NNUNETV2: Engine(
         name=NNUNETV2,
         runtime_module="nnunetv2", extra="torch",
+        dist=("nnunetv2", "torch"),
         # the only engine whose surrounding pipeline is ours, so the only one
         # where our processing knobs are real
         behavior=GRADED_RESTORE,
@@ -146,6 +192,8 @@ ENGINES: dict[str, Engine] = {
         weights_identity=_fastsurfer_identity,
         compute=_fastsurfer_compute,
         runtime_module="FastSurferCNN", extra="fastsurfer",
+        dist=("fastsurfer-lean",),
+        label_names=_fastsurfer_label_names,
         behavior=GRADED_RESTORE,
         processing_knobs=False,
         description="FastSurferVINN 2.5D view-aggregation parcellation",
@@ -154,6 +202,9 @@ ENGINES: dict[str, Engine] = {
         name="synthstrip",
         enabled_env="HAVERSACK_SYNTHSTRIP",
         runtime_module="synthstrip_torch", extra="synthstrip",
+        # surfa is synthstrip-torch's conform/reorient dependency, pinned in
+        # the report because a change in it moves the output grid.
+        dist=("synthstrip-torch", "surfa"),
         weights_identity=_synthstrip_identity,
         compute=_synthstrip_compute,
         behavior=GRADED_RESTORE,
@@ -164,6 +215,7 @@ ENGINES: dict[str, Engine] = {
         name="voxtell",
         enabled_env="HAVERSACK_VOXTELL",
         runtime_module="voxtell", extra="voxtell",
+        dist=("voxtell",),
         weights_identity=_voxtell_identity,
         # free text means an unbounded key space and interactive, low-reuse
         # requests: memoizing them evicts results that do get re-read
@@ -179,6 +231,7 @@ ENGINES: dict[str, Engine] = {
         name="monai",
         enabled_env="HAVERSACK_MONAI",
         runtime_module="monai", extra="monai",
+        dist=("monai",),
         weights_identity=None,          # per bundle - see MonaiEcosystem
         processing_knobs=False,
         # The first engine that can be handed more than one image. Which bundles
