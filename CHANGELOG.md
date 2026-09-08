@@ -1,8 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.0] - 2026-09-07
 
-Two data sources and two model catalogs, each on the extension seam that already existed.
+Four data sources and two model catalogs on the extension seams that already existed; one
+home for the decisions the local server and the Modal worker both make; and a result that
+says whose work it is - which model, under what license, from which data, under what terms.
 
 ### Sources
 
