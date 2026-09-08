@@ -126,6 +126,47 @@ class TestLayering(unittest.TestCase):
                                       "is CI, add them to the install list in "
                                       ".github/workflows/tests.yml")
 
+    def test_ci_pins_the_same_git_refs_as_pyproject(self):
+        """The git-sourced dependencies are pinned in TWO files and nothing made them agree.
+
+        CI hand-lists its installs rather than `uv sync`-ing, so a tag bump has to be made in
+        `pyproject.toml` `[tool.uv.sources]` AND in the workflow. Miss the workflow and CI
+        keeps testing the old revision while the project claims the new one - a green run
+        that proves something about code nobody ships. Miss pyproject and it is the reverse.
+        Neither failure announces itself; both were a comment in the notes, not a check.
+
+        Only CI's entries are checked against pyproject, not the reverse: the engine extras
+        (fastsurfer-lean, voxtell, synthstrip-torch) are git sources CI deliberately does not
+        install.
+        """
+        import re
+        import tomllib
+
+        root = SRC.parents[1]
+        pyproject, workflow = root / "pyproject.toml", root / ".github/workflows/tests.yml"
+        if not pyproject.exists() or not workflow.exists():
+            self.skipTest("running against an installed copy, not the repository")
+
+        sources = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["uv"]["sources"]
+        ci = re.findall(r"'([A-Za-z0-9_.-]+) @ git\+([^@']+)@([^']+)'",
+                        workflow.read_text(encoding="utf-8"))
+        self.assertTrue(ci, "no git-pinned installs found in the workflow - has the install "
+                            "list changed shape? This guard reads it as text.")
+
+        problems = []
+        for name, url, ref in ci:
+            declared = sources.get(name)
+            if declared is None:
+                problems.append(f"{name}: CI installs it from git, pyproject declares no source")
+                continue
+            if declared.get("git") != url:
+                problems.append(f"{name}: CI {url} != pyproject {declared.get('git')}")
+            pinned = declared.get("tag") or declared.get("rev")
+            if pinned != ref:
+                problems.append(f"{name}: CI pins {ref}, pyproject pins {pinned}")
+        self.assertEqual(problems, [], "CI and pyproject disagree about a git dependency:\n  "
+                                       + "\n  ".join(problems))
+
     def test_text_is_read_and_written_as_utf8_not_as_the_locale(self):
         """`Path.read_text()` with no encoding uses the LOCALE's, which is ASCII
         under LANG=C - and CI runs that way. The shipped store README has had an

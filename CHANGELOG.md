@@ -9,6 +9,17 @@
   own component is now `serve.CACHE_EPOCH`, which moves only when the same inputs would compute
   different bytes - the pipeline's resampling, framing or restore, the label mapping, an
   engine's inference path. This change invalidates the cache once more, and then stops.
+- **rankfield moves to v0.3.2**, in `pyproject.toml` and CI's hand-written list. No encoder or
+  decoder change and no bytes move: it is 0.3.1 plus a CUDA test runner and a corrected claim
+  about where a store's tail plane can differ. The tag is what a fresh install resolves, so it
+  is worth being current even when nothing in it is load-bearing here.
+- **A rankfield API change under `tools/` is now caught by the suite.** Nothing there is
+  imported by a test - they are `--no-project` scripts, several Modal- or GPU-only - so the
+  0.3.0 `Geometry` migration left `tools/ranked_restore_modal.py` calling a constructor that
+  no longer existed, raising on its first field, while every test stayed green. A new test
+  reads the scripts and checks that every rankfield name still exists and every call binds
+  against the installed signature. It is static: it says nothing about a call whose meaning
+  changed while its shape did not.
 
 ## [0.7.2] - 2026-09-08
 
