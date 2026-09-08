@@ -80,6 +80,27 @@ def test_the_shipped_lut_still_matches_the_one_fastsurfer_ships():
          f"{sorted(set(upstream) - set(shipped) - {0})}")
 
 
+@pytest.mark.parametrize("override", [None, "/tmp/haversack-ckpt-probe"])
+def test_the_engine_and_cache_admin_agree_where_checkpoints_live(monkeypatch, override):
+    """Two modules answer "where are the checkpoints?" and both must say the same thing.
+
+    They used to answer it from two hand-written copies of the convention, cache admin
+    explaining in a comment that it was avoiding an engine import. The subdirectory and its
+    override are `Engine.cache_store` now, so both read one fact - but they still reach it
+    by different code, and a store that `cache clean` cannot find is one the disk keeps.
+    """
+    from haversack.cache_admin import stores
+    if override is None:
+        monkeypatch.delenv("HAVERSACK_FASTSURFER_CHECKPOINTS", raising=False)
+    else:
+        monkeypatch.setenv("HAVERSACK_FASTSURFER_CHECKPOINTS", override)
+    admin = [s for s in stores() if s["name"] == "checkpoints"][0]["path"]
+    assert str(admin) == str(fs.checkpoint_dir()), (
+        f"cache admin says {admin}, the engine says {fs.checkpoint_dir()}")
+    if override is not None:
+        assert str(admin) == override
+
+
 def _img(arr, spacing, origin=(0., 0., 0.)):
     im = sitk.GetImageFromArray(np.ascontiguousarray(arr))
     im.SetSpacing(spacing); im.SetOrigin(origin)

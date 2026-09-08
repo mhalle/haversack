@@ -194,7 +194,8 @@ def _run(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="haversack", formatter_class=Fmt,
         description="Medical-image segmentation with many model families behind one command: "
-                    "TotalSegmentator, MOOSE, MRSegmentator, stock nnU-Net, FastSurfer, SynthStrip. "
+                    "TotalSegmentator, MOOSE, MRSegmentator, stock nnU-Net, FastSurfer, "
+                    "SynthStrip, VoxTell, MONAI bundles. "
                     "Runs on Apple Silicon (MPS), CUDA or CPU; also a local REST server and a client for one.",
         epilog="""examples:
   haversack tasks                                          what can be segmented

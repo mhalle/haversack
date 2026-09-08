@@ -103,6 +103,14 @@ class Engine:
     #: in the report (surfa, under synthstrip), not just the top-level name.
     #: Reported only where installed, so listing all of them here is right.
     dist: tuple[str, ...] = ()
+    #: The store this engine keeps under the CACHE root, as ``(subdirectory, environment
+    #: override)`` - what ``haversack cache usage`` reports and ``cache clean`` may sweep.
+    #: Data, not a call into the engine, so cache admin can read it without importing an
+    #: engine module (which is why it hand-copied FastSurfer's location until 2026-09-08,
+    #: making every OTHER engine's cache invisible to both commands). None for an engine
+    #: that caches nothing there - weights baked into the image, fetched to the weights
+    #: volume, or left in the runtime's own hub cache.
+    cache_store: tuple[str, str | None] | None = None
     #: ``task -> {label id: name}`` when the labels this engine emits are in the
     #: ENGINE's namespace rather than the catalog's - FastSurfer carries
     #: FreeSurfer's aparc+aseg ids, which no ecosystem knows. A thunk, called at
@@ -194,6 +202,7 @@ ENGINES: dict[str, Engine] = {
         runtime_module="FastSurferCNN", extra="fastsurfer",
         dist=("fastsurfer-lean",),
         label_names=_fastsurfer_label_names,
+        cache_store=("fastsurfer-checkpoints", "HAVERSACK_FASTSURFER_CHECKPOINTS"),
         behavior=GRADED_RESTORE,
         processing_knobs=False,
         description="FastSurferVINN 2.5D view-aggregation parcellation",

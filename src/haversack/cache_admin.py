@@ -71,13 +71,25 @@ def stores() -> list[dict]:
     from .tasks import weights_root
 
     def checkpoint_dir() -> Path:
-        # Computed here (not imported from the fastsurfer engine) so cache admin does not pull
-        # in an engine module; the location is the fixed convention.
+        """The engine checkpoint store, read from the engine registry.
+
+        The subdirectory and its environment override used to be copied here by hand, with
+        a comment explaining that importing the engine module was the thing being avoided.
+        They are DATA on the Engine row now, so this reads the same fact the engine reads
+        and still imports no engine. `clean` addresses one path per category, so exactly one
+        engine may declare a store today; `test_engine_completeness` fails the day a second
+        one does, naming this function as what has to widen.
+        """
         import os
-        env = os.environ.get("HAVERSACK_FASTSURFER_CHECKPOINTS")
-        if env:
-            return Path(env).expanduser()
-        return cache_root() / "fastsurfer-checkpoints"
+
+        from .engines.registry import ENGINES
+        for eng in ENGINES.values():
+            if not eng.cache_store:
+                continue
+            sub, env_var = eng.cache_store
+            env = os.environ.get(env_var) if env_var else None
+            return Path(env).expanduser() if env else cache_root() / sub
+        return cache_root() / "checkpoints"        # no engine declares one
 
     try:
         wroot = weights_root("ts")

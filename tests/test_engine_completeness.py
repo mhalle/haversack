@@ -142,6 +142,66 @@ class EveryEngineDeclaresWhatInstallsIt(unittest.TestCase):
         self.assertEqual([], problems, "\n  ".join(problems))
 
 
+class EveryGitSourceIsPinnedToSomethingReal(unittest.TestCase):
+    """A git dependency has to be pinned, and the pin has to look like a pin.
+
+    Nothing validated these. An adversarial review shipped
+    ``rev = "0000000000000000000000000000000000000000"`` for a new engine and the whole
+    suite stayed green - CI installs no engine extra, so no engine source is ever resolved
+    there. This cannot prove a revision EXISTS without the network, but it does refuse a
+    floating branch and the placeholder shape, which is what a hand-edited pin looks like.
+    """
+
+    def test_every_git_source_is_pinned_by_tag_or_revision(self):
+        sources = _pyproject()["tool"]["uv"]["sources"]
+        unpinned = sorted(n for n, spec in sources.items()
+                          if "git" in spec and not ({"tag", "rev"} & set(spec)))
+        self.assertEqual([], unpinned,
+                         f"git sources with no tag or rev: {unpinned} - a floating branch "
+                         "makes a sync unreproducible")
+
+    def test_no_pinned_revision_is_a_placeholder(self):
+        sources = _pyproject()["tool"]["uv"]["sources"]
+        problems = []
+        for name, spec in sources.items():
+            rev = spec.get("rev")
+            if rev is None:
+                continue
+            if not re.fullmatch(r"[0-9a-f]{40}", rev):
+                problems.append(f"{name}: rev {rev!r} is not a full 40-character sha")
+            elif len(set(rev)) < 5:
+                problems.append(f"{name}: rev {rev!r} looks like a placeholder, not a commit")
+        self.assertEqual([], problems, "\n  ".join(problems))
+
+
+    @pytest.mark.slow
+    def test_every_pinned_revision_actually_exists_upstream(self):
+        """The only check that can prove a pin resolves, so it needs the network.
+
+        Marked slow, therefore out of the fast suite and out of CI, which installs no engine
+        extra and so never resolves an engine source at all - a bad rev reaches a developer's
+        `uv sync` and nothing earlier. Run it deliberately: `uv run pytest -m slow -k pinned`.
+        """
+        import subprocess
+        sources = _pyproject()["tool"]["uv"]["sources"]
+        problems = []
+        for name, spec in sources.items():
+            url, ref = spec.get("git"), spec.get("tag") or spec.get("rev")
+            if not url or not ref:
+                continue
+            try:
+                out = subprocess.run(["git", "ls-remote", url, ref, f"{ref}^{{}}"],
+                                     capture_output=True, text=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                self.skipTest(f"cannot reach {url}: {exc}")
+            if out.returncode != 0:
+                problems.append(f"{name}: git ls-remote failed - {out.stderr.strip()[:120]}")
+            elif not out.stdout.strip() and not re.fullmatch(r"[0-9a-f]{40}", ref):
+                # a tag must be listable; a bare sha is not, and cannot be checked this way
+                problems.append(f"{name}: {ref!r} is not a ref this repository publishes")
+        self.assertEqual([], problems, "\n  ".join(problems))
+
+
 class EveryEngineIsCreditedAndReachable(unittest.TestCase):
     def test_every_engine_is_credited_with_a_SUBSTANTIVE_attribution_record(self):
         """Key presence is not credit: `"swinunetr": {}` passed the first version. A record
@@ -193,6 +253,34 @@ class EveryEngineIsCreditedAndReachable(unittest.TestCase):
         self.assertEqual([], wrong,
                          "ECOSYSTEM_ENGINE routes from names no ecosystem provides: "
                          + "; ".join(wrong))
+
+
+class EveryEngineCacheIsVisibleToCacheAdmin(unittest.TestCase):
+    def test_every_declared_cache_store_is_reported_by_cache_admin(self):
+        """`cache usage` and `cache clean` must see it, or the disk fills invisibly."""
+        declaring = {n: e.cache_store for n, e in R.ENGINES.items() if e.cache_store}
+        if not declaring:
+            self.skipTest("no engine declares a cache store")
+        from haversack.cache_admin import cache_root, stores
+        reported = {str(s["path"]) for s in stores()}
+        missing = []
+        for name, (sub, _env) in declaring.items():
+            if str(cache_root() / sub) not in reported:
+                missing.append(f"{name}: {sub!r} is not among the stores cache admin reports")
+        self.assertEqual([], missing, "\n  ".join(missing))
+
+    def test_only_one_engine_declares_a_cache_store(self):
+        """`cache_admin.clean` addresses ONE path per category, and `checkpoints` is a
+        user-facing category name fixed by the CLI, so the single-path model holds only
+        while a single engine declares a store. This is deliberately a tripwire rather
+        than machinery for a case that does not exist: the day a second engine caches
+        under the cache root, this fails and says what has to change."""
+        declaring = sorted(n for n, e in R.ENGINES.items() if e.cache_store)
+        self.assertLessEqual(len(declaring), 1,
+                             f"{declaring} all declare a cache store, but "
+                             "cache_admin.checkpoint_dir returns one path and clean() maps "
+                             "one path per category - widen both to a store per engine, and "
+                             "decide what `cache clean checkpoints` then means")
 
 
 class TheModalDeploymentIsWiredForEveryEngine(unittest.TestCase):
@@ -278,6 +366,32 @@ class TheModalDeploymentIsWiredForEveryEngine(unittest.TestCase):
         pytest.importorskip("modal")
         from haversack import modal_app
         self.assertEqual([], modal_app._wiring_problems())
+
+
+class TheCommandLineNamesEveryEngine(unittest.TestCase):
+    def test_the_top_level_description_mentions_every_optional_engine(self):
+        """`haversack --help` is where someone finds out what this can run.
+
+        The sentence was hand-written and had gone two engines stale: VoxTell and the MONAI
+        bundles had shipped for weeks without appearing, so the only place a new user looks
+        said they did not exist. Prose is the right form here - the families are a mix of
+        catalogs and engines and a generated list would read badly - but it has to be
+        complete, so the check is that each optional engine's name appears somewhere in it.
+        """
+        import contextlib
+        import io
+
+        from haversack import cli
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
+            cli.main(["--help"])               # argparse prints the description, then exits
+        text = buf.getvalue()
+        self.assertIn("haversack", text.lower(),
+                      "`--help` produced nothing this guard can read")
+        missing = [n for n in _optional_engines() if n.lower() not in text.lower()]
+        self.assertEqual([], missing,
+                         f"`haversack --help` never mentions {missing} - add them to the "
+                         "top-level description, or nobody discovers the engine exists")
 
 
 class TheVersionEndpointDerivesItsPackageList(unittest.TestCase):
