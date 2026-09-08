@@ -801,3 +801,85 @@ class TestTheArchiveCacheIsKeyedOnTheCredential:
         with pytest.raises(InputError, match="takes no credentials"):
             src.fetch("fcp-indi/data/a.zip!inner/scan.nii.gz", tmp_path / "b",
                       credentials="someone-elses-token")
+
+
+class TestForcedRefreshReachesTheSourcesOwnCache:
+    """`no-cache` has to reach EVERY cache between the request and the repository.
+
+    The refresh policy dropped the cached series and the read-ahead image, and
+    stopped there - while the source instance, which lives as long as the process
+    on both deployments, held the parsed archive: a ZipFile with its central
+    directory and a RangeFile block cache. On a hit `resolve`/`locate` is skipped,
+    so a forced refetch of a replaced object reused the OLD RESOLVED URL and the
+    old member offsets. Not merely stale: against an object that really changed,
+    reading at the old offsets is a CRC failure or garbage.
+    """
+
+    def test_a_replaced_object_is_resolved_again_after_forget(self, fake_cloud, tmp_path):
+        built, stores = fake_cloud
+        store = stores[("aws", "fcp-indi")] = _FakeStore(
+            {"data/a.zip": _zip_of(["inner/scan.nii.gz"], [b"\x1f\x8bOLD"])})
+        src = S3Source()
+        got = src.fetch("fcp-indi/data/a.zip!inner/scan.nii.gz", tmp_path)
+        assert (got / "scan.nii.gz").read_bytes() == b"\x1f\x8bOLD"
+
+        # the same identifier, different bytes upstream - which is the whole reason
+        # `no-cache` exists for a source whose identity is not content-pinned
+        store.objects["data/a.zip"] = _zip_of(["inner/scan.nii.gz"], [b"\x1f\x8bNEW"])
+        (tmp_path / "b").mkdir()
+        src.forget("fcp-indi/data/a.zip!inner/scan.nii.gz")
+        got = src.fetch("fcp-indi/data/a.zip!inner/scan.nii.gz", tmp_path / "b")
+        assert (got / "scan.nii.gz").read_bytes() == b"\x1f\x8bNEW", \
+            "the refetch was served out of the previously parsed archive"
+
+    def test_without_forget_the_stale_archive_really_is_returned(self, fake_cloud, tmp_path):
+        """The control: this is what the refresh policy used to do, and it is why
+        `forget` had to be wired in rather than assumed unnecessary."""
+        built, stores = fake_cloud
+        store = stores[("aws", "fcp-indi")] = _FakeStore(
+            {"data/a.zip": _zip_of(["inner/scan.nii.gz"], [b"\x1f\x8bOLD"])})
+        src = S3Source()
+        src.fetch("fcp-indi/data/a.zip!inner/scan.nii.gz", tmp_path)
+        store.objects["data/a.zip"] = _zip_of(["inner/scan.nii.gz"], [b"\x1f\x8bNEW"])
+        (tmp_path / "b").mkdir()
+        got = src.fetch("fcp-indi/data/a.zip!inner/scan.nii.gz", tmp_path / "b")
+        assert (got / "scan.nii.gz").read_bytes() == b"\x1f\x8bOLD"
+
+    def test_the_refresh_policy_calls_it(self):
+        """The wiring, not the hook: `refresh_cached_input` must actually reach the
+        source. Both the discard branch and the nothing-cached branch, because a
+        source cache can outlive a series cache entry - the series is evicted on a
+        byte budget and the archive parse is not."""
+        from haversack import jobpolicy
+
+        class Cache:
+            def __init__(self, present): self.present = present
+            def has(self, key): return self.present
+            def discard(self, key): return True
+
+        class Rep:
+            def stage(self, *a, **k): pass
+
+        for present in (True, False):
+            forgotten = []
+            src = type("Src", (), {"forget": lambda self, i: forgotten.append(i)})()
+            assert jobpolicy.refresh_cached_input(
+                "k", wanted=True, cache=Cache(present), reporter=Rep(),
+                on_skipped=lambda: None, source=src, identifier="bucket/a.zip!m")
+            assert forgotten == ["bucket/a.zip!m"], f"present={present}: {forgotten}"
+
+    def test_a_source_without_the_hook_is_not_an_error(self):
+        """Test doubles stand in for sources all over this suite, and a source that
+        caches nothing has no reason to grow the method."""
+        from haversack import jobpolicy
+
+        class Cache:
+            def has(self, key): return True
+            def discard(self, key): return True
+
+        class Rep:
+            def stage(self, *a, **k): pass
+
+        assert jobpolicy.refresh_cached_input(
+            "k", wanted=True, cache=Cache(), reporter=Rep(), on_skipped=lambda: None,
+            source=object(), identifier="x")

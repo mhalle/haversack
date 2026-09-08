@@ -56,7 +56,19 @@ def purgeable(meta, now: float, ttl_s: float) -> bool:
     return (now - float(now if stamp is None else stamp)) > ttl_s
 
 
+def _forget_source(source, identifier) -> None:
+    """Best effort, and optional on both counts: a test double stands in for a
+    source without the hook, and a single-input job has no identifier to give."""
+    forget = getattr(source, "forget", None)
+    if forget is not None and identifier:
+        try:
+            forget(identifier)
+        except Exception:
+            pass
+
+
 def refresh_cached_input(key: str, *, wanted: bool, cache, reporter, on_skipped,
+                         source=None, identifier=None,
                          read_ahead=None, already: set | None = None) -> bool:
     """Drop a cached input - and any image already read from it - when the caller
     asked for a recompute. Returns whether the input is now fresh.
@@ -82,6 +94,14 @@ def refresh_cached_input(key: str, *, wanted: bool, cache, reporter, on_skipped,
         this deployment keeps job state. A caller that asked for fresh bytes and
         did not get them must be able to see that from either deployment.
     :param read_ahead: optional; the Modal worker may have none.
+    :param source: optional; the :class:`~haversack.sources.DataSource` this input
+        came from. A refusal to reuse bytes has to reach every cache between the
+        request and the repository, and the source keeps one of its own - the
+        parsed archive, with its central directory and its range blocks. Missing
+        it meant a forced refetch could be served entirely out of the previous
+        caller's memory.
+    :param identifier: the source-side identifier for ``source.forget``; ``key``
+        is the series-cache key and is not the same string.
     :param already: identifiers refreshed by this same job. A multi-input task may
         bind two roles to ONE identifier; without this the second pass sees the
         first pass's fresh bytes cached under its own pin and reports "could not
@@ -96,10 +116,12 @@ def refresh_cached_input(key: str, *, wanted: bool, cache, reporter, on_skipped,
     if not cache.has(key):
         if read_ahead is not None:
             read_ahead.pop(key)
+        _forget_source(source, identifier)
         return True                    # nothing cached: the fetch itself IS the refresh
     if cache.discard(key):
         if read_ahead is not None:
             read_ahead.pop(key)        # the image read from those bytes is stale too
+        _forget_source(source, identifier)   # ...and so is the source's parsed archive
         reporter.stage("fetch", "refetching (no-cache)")
         return True
     # Refused: another job is reading those bytes, or a writer holds the claim.
@@ -235,17 +257,45 @@ def input_records(sources, identities, series_cache) -> list:
     is its identity - and says so. Written once because both deployments must
     answer identically: a result cached from either is read by both.
 
-    :param sources: the job's ``source`` entries.
-    :param identities: the job's ``input_identity`` list, in the same order
-        (``ROLE=identity`` strings for a multi-input job).
+    :param sources: the job's ``source`` entries, in the model's channel order.
+    :param identities: the job's ``input_identity`` list. For a multi-input job
+        these are ``ROLE=identity`` strings and they are **sorted**, not in
+        channel order - so they are joined BY ROLE.
+
+    The two lists are not parallel and this used to assume they were. A
+    multi-input job's identity tuple is sorted, deliberately, so that permuting
+    the source list cannot split a cache key; the source entries stay in the
+    model's declared channel order, because the first of them is the reference
+    image. Joining them by index therefore paired each role with another
+    channel's identity: the shipped MONAI BraTS bundle declares T1c, T1, T2,
+    FLAIR and sorts to FLAIR, T1, T1c, T2, so three of four records were wrong.
+    Only the provenance - `_stage_many` binds channels by role and never by
+    index, so nothing was fed to the wrong channel - but for an all-upload
+    submission, which is the ordinary way that bundle is used, the digest itself
+    was another channel's (2026-09-08).
+
+    The role is already in the string, so the join uses it. Exact string
+    equality, not `schemas.roles_match`: both lists come from the same binding,
+    so the spellings are identical by construction, and this module must not
+    pull pydantic in to discover that.
     """
     from .sources import read_input_record
     out = []
     entries = list(sources or [{"kind": "upload"}])
     ids = list(identities or [])
+    by_role = {}
+    for s in ids:
+        role, sep, value = str(s).partition("=")
+        if sep:
+            by_role[role] = value
     for i, entry in enumerate(entries):
-        ident = ids[i] if i < len(ids) else None
-        ident = ident.partition("=")[2] if ident and "=" in ident else ident
+        role = entry.get("role")
+        if role is not None and role in by_role:
+            ident = by_role[role]
+        else:
+            # single input, or an entry with no role: the lists ARE parallel then
+            ident = ids[i] if i < len(ids) else None
+            ident = ident.partition("=")[2] if ident and "=" in ident else ident
         kind = entry.get("kind", "upload")
         sk = source_cache_key(entry)
         if sk is None:

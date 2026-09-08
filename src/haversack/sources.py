@@ -129,6 +129,34 @@ class DataSource:
         """The result-cache identity token for one identifier."""
         return f"{self.prefix}:{identifier}"
 
+    def forget(self, identifier: str) -> None:
+        """Drop whatever this source has cached about ``identifier``.
+
+        Called when a job asks for fresh bytes (``Cache-Control: no-cache``), so
+        the refusal has to reach EVERY cache that stands between the request and
+        the repository - not just the series cache and the read-ahead image.
+
+        The one that was missed is the parsed archive. A source instance lives as
+        long as the process on both deployments (``LocalExecutor.__init__``, and
+        Modal's ``@modal.enter``), and it holds up to four ``ZipFile`` objects
+        with their central directories and a ``RangeFile`` block cache of up to
+        256 MiB each. On a hit ``resolve``/``locate`` is skipped, so a forced
+        refetch of a replaced ``s3:`` object or ``github:`` asset reused not only
+        old bytes but the OLD RESOLVED URL and the old central-directory offsets -
+        against an object that really had changed, that is a CRC failure or
+        garbage rather than a refresh (2026-09-08).
+
+        Defined here rather than on the two archive classes because both keep
+        their cache in the same attribute, and a third would inherit the fix.
+        """
+        outer = str(identifier).partition("!")[0]
+        cache = self.__dict__.get("_archives")
+        if not cache:
+            return
+        # every credential's parse of that object is equally stale
+        for ck in [k for k in list(cache) if (k[0] if isinstance(k, tuple) else k) == outer]:
+            cache.pop(ck, None)
+
     def describe_input(self, identifier: str, fetched=None, credentials=None) -> dict | None:
         """What this repository says about one input: where it came from, under
         what license, and what to cite. ``None`` means *not determined* - never

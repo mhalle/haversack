@@ -4235,3 +4235,123 @@ def test_a_no_cache_job_never_uses_a_pre_read_image(tmp_path):
     flags = [ast.unparse(kw.value) for call in takes for kw in call.keywords
              if kw.arg == "fresh_bytes_wanted"]
     assert any("refresh_input" in f for f in flags), flags
+
+
+def test_provenance_pairs_each_ROLE_with_its_own_digest(tmp_path, monkeypatch):
+    """The audit record has to survive the two orders this request is held in.
+
+    `input_identity` is SORTED, so permuting the source list cannot split a cache
+    key. The source entries stay in the model's declared CHANNEL order, because the
+    first of them is the reference image. Those two lists are not parallel, and
+    `input_records` joined them by index - so with this bundle's real channel order
+    (T1c, T1, T2, FLAIR, which sorts to FLAIR, T1, T1c, T2) three of the four records
+    claimed another channel's digest. Four DISTINCT payloads here; with identical
+    bytes the bug is invisible, which is why the existing plumbing test never saw it.
+
+    Only the record was wrong - `_stage_many` binds channels by role and never by
+    index - but for an all-upload submission, the ordinary way this bundle is used,
+    the digest itself came from another channel.
+    """
+    seg, client = _multi(tmp_path, monkeypatch)
+    blobs = {r: volume_bytes(i + 1) for i, r in enumerate(ROLES)}
+    assert len({b for b in blobs.values()}) == 4, "the payloads must differ or this proves nothing"
+    r = _post_multi(client, blobs)
+    assert r.status_code == 202, r.text
+    s = wait_state(client, r.json()["id"], ("done",))
+
+    want = {role: f"sha256:{hashlib.sha256(b).hexdigest()}" for role, b in blobs.items()}
+    got = {rec["role"]: rec["content"]["digest"]
+           for rec in s["result"]["provenance"]["inputs"]}
+    assert got == want, (
+        "provenance paired roles with the wrong digests: "
+        + "; ".join(f"{r}: got {got.get(r)} want {want[r]}" for r in ROLES if got.get(r) != want[r]))
+    # and the identity on each record is that role's, not its neighbour's
+    assert {rec["role"]: rec["identity"] for rec in s["result"]["provenance"]["inputs"]} == want
+
+
+#: The artifact filenames the REST surface serves - `/v1/.../preview.png` and
+#: `/v1/.../statistics.json`. Written out here rather than imported from serve, so
+#: these tests reconcile the cache against the published API instead of against the
+#: constant the cache itself is built from.
+SERVED_ARTIFACTS = ("preview.png", "statistics.json")
+
+
+class TestArtifactsBelongToOneGeneration:
+    """A published result and its artifacts must describe the same computation.
+
+    `put` replaces the labels and the metadata but used to LEAVE any artifact it
+    was not given - and the one production caller passes neither, so a `no-cache`
+    recomputation published new labels over the previous preview and statistics.
+    `_await_artifact` returns an existing file before it consults the pending
+    marker, so a client that explicitly asked not to reuse a stored response got
+    the stale one. Deterministic, not a race: the recompute finishes and the old
+    file is simply still there.
+    """
+
+    def _cache(self, tmp_path):
+        from haversack.serve import ResultCache
+        return ResultCache(tmp_path / "rc", keep=50)
+
+    def _publish(self, cache, tmp_path, tag, *, artifacts=True):
+        labels = tmp_path / f"{tag}-labels.seg.nrrd"
+        labels.write_bytes(tag.encode())
+        pre = sta = None
+        if artifacts:
+            pre = tmp_path / f"{tag}-preview.png"; pre.write_bytes(f"{tag}-png".encode())
+            sta = tmp_path / f"{tag}-statistics.json"; sta.write_text(f'{{"who": "{tag}"}}')
+        return cache.put("k", labels, {"who": tag}, {"who": tag},
+                         preview_path=pre, statistics_path=sta)
+
+    def test_replacing_a_result_does_not_leave_the_previous_artifacts(self, tmp_path):
+        cache = self._cache(tmp_path)
+        self._publish(cache, tmp_path, "old")
+        entry = cache.root / "k"
+        assert (entry / "statistics.json").read_text() == '{"who": "old"}'
+
+        self._publish(cache, tmp_path, "new", artifacts=False)   # what production does
+        labels, result = cache.get("k")
+        assert labels.read_bytes() == b"new" and result == {"who": "new"}
+        left = [n for n in SERVED_ARTIFACTS if (entry / n).exists()]
+        assert left == [], f"artifacts describing the previous result survived: {left}"
+
+    def test_an_artifact_worker_cannot_write_into_a_later_generation(self, tmp_path):
+        cache = self._cache(tmp_path)
+        mine = self._publish(cache, tmp_path, "old", artifacts=False)
+        theirs = self._publish(cache, tmp_path, "new", artifacts=False)
+        assert mine != theirs, "every publication needs its own generation token"
+
+        png = tmp_path / "late.png"; png.write_bytes(b"rendered from the old labels")
+        assert cache.add_artifact("k", "preview.png", png, generation=mine) is False
+        assert not (cache.root / "k" / "preview.png").exists()
+        # the worker for the CURRENT generation still places normally
+        assert cache.add_artifact("k", "preview.png", png, generation=theirs) is True
+        assert (cache.root / "k" / "preview.png").read_bytes() == b"rendered from the old labels"
+
+    def test_a_recompute_does_not_serve_the_previous_statistics(self, tmp_path, monkeypatch):
+        """The end-to-end shape: publish with artifacts, then recompute the same key
+        with `Cache-Control: no-cache` and ask for statistics.json."""
+        seg = FakeSegmenter()
+        ex = LocalExecutor(seg, workdir=tmp_path, cache_dir=tmp_path / "rc")
+        try:
+            client = TestClient(create_app(ex))
+            r = client.post("/v1/jobs", data={"task": "total_fast"},
+                            files={"file": ("v.nii.gz", volume_bytes(), "application/gzip")})
+            jid = r.json()["id"]
+            wait_state(client, jid, ("done",))
+            key = next(j.cache_key for j in ex.jobs() if j.id == jid)
+            entry = ex.cache.root / key
+            # stand in for a previous generation's artifacts, whatever this build renders
+            for n in SERVED_ARTIFACTS:
+                (entry / n).write_bytes(b"from the previous computation")
+            r2 = client.post("/v1/jobs", data={"task": "total_fast"},
+                             files={"file": ("v.nii.gz", volume_bytes(), "application/gzip")},
+                             headers={"Cache-Control": "no-cache"})
+            wait_state(client, r2.json()["id"], ("done",))
+            # the behaviour first, so this fails on what a client would SEE
+            survivors = [n for n in SERVED_ARTIFACTS
+                         if (entry / n).exists()
+                         and (entry / n).read_bytes() == b"from the previous computation"]
+            assert survivors == [], f"the recompute served the old {survivors}"
+            assert ex.cache.generation(key), "a published entry carries no generation"
+        finally:
+            ex.close()

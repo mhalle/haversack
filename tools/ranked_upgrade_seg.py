@@ -24,7 +24,8 @@ from pathlib import Path
 
 from duckn import SegmentationExtension
 
-from haversack.ranked_build import claims_for, named_groups, part_partition, write_readme
+from haversack.ranked_build import (GENERATED_GROUP_IDS, named_groups, part_partition,
+                                   write_readme)
 from haversack.ranked_store import leaf, open_store, root_attrs, segmentation
 
 STEP = "Segment metadata upgraded to seg 0.7"
@@ -69,9 +70,18 @@ def _upgrade(st, store: Path) -> None:
         # `layer` states which part a leaf belongs to; a single-part store has nothing to say
         leaves = [s.model_copy(update={"layer": None}) if s.layer is not None else s
                   for s in leaves]
-    # the named unions are re-derived (their claims are the builder's decision); any other
-    # group the store had - none today - is kept as it was
-    known = {gid for gid, *_ in claims_for(engine)}
+    # The named unions are re-derived (their claims are the builder's decision); any
+    # other group the store had is kept as it was.
+    #
+    # `GENERATED_GROUP_IDS`, not `claims_for(engine)`: what the builder may rewrite is
+    # not the same question as what it currently generates for THIS engine, and the
+    # difference is exactly this migration. A monai store written before 2026-09-08
+    # carries `g_lungs` from the old nnU-Net fallback; monai claims nothing now, so
+    # `claims_for` returned an empty set, the id looked user-authored, and it was
+    # re-emitted verbatim with `exhaustive=True` - leaving in place the anatomical
+    # assertion the fix removed from fresh builds, while the provenance step claimed
+    # the named unions had been rewritten.
+    known = GENERATED_GROUP_IDS
     kept = [s for s in seg.segments if s.members is not None
             and s.id not in known and not s.id.startswith("classes_")]
     groups = [part_partition(i, o["name"], leaves) for i, o in enumerate(order)]

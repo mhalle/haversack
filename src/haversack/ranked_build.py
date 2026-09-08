@@ -71,6 +71,19 @@ GROUP_CLAIMS = {
 }
 
 
+#: Every group id the builder has EVER generated, across every engine. Not the same
+#: question as `claims_for`, and the difference is a migration: the upgrader decides
+#: which existing groups it owns and may rebuild, and asking `claims_for(engine)` gets
+#: that wrong for exactly the stores the claims fix was written for. A monai store
+#: written before 2026-09-08 carries `g_lungs` from the old nnU-Net fallback; monai
+#: now claims nothing, so the upgrader saw an id it did not recognise, filed it as a
+#: user-authored group and re-emitted it verbatim - `exhaustive=True` and all, which
+#: is the anatomical assertion the fix exists to remove. A generated id belongs to the
+#: builder whether or not this engine still generates it.
+GENERATED_GROUP_IDS = frozenset(
+    gid for claims in GROUP_CLAIMS.values() for gid, *_ in claims)
+
+
 def claims_for(engine):
     """The named unions ``engine``'s stores carry, or none at all.
 

@@ -444,3 +444,89 @@ def test_the_upgrade_tool_parses_arguments_and_names_a_store_that_is_not_one(tmp
         st.write_text("README.md", "not a haversack store")
     with pytest.raises(SystemExit, match="no `haversack`"):
         up.main([str(bare)])
+
+
+# ----------------------------------------------------------------------------------------
+# the metadata upgrader and the claims it inherits
+# ----------------------------------------------------------------------------------------
+
+LOBES = ("lung_upper_lobe_left", "lung_lower_lobe_left", "lung_upper_lobe_right",
+         "lung_middle_lobe_right", "lung_lower_lobe_right")
+
+
+def _legacy_store(path, engine):
+    """A store as the builder wrote it BEFORE 2026-09-08: five lung lobes and a
+    generated `g_lungs`, exhaustive, whatever engine produced them - because
+    `named_groups` fell back to nnU-Net's claims for every engine without its own."""
+    segs = [rs.leaf("bg", "background", 0, layer=0, background=True)]
+    segs += [rs.leaf(f"c{i}", n, i + 1, layer=0) for i, n in enumerate(LOBES)]
+    segs.append(rs.group("g_lungs", "lungs", [f"c{i}" for i in range(len(LOBES))],
+                         disjoint=True, exhaustive=True))
+    with rs.open_store(path, "w") as st:
+        st.root.attrs.update(rs.root_attrs(
+            rs.segmentation(segs),
+            haversack={"engine": engine, "part_order": [{"name": "labels"}]},
+            provenance={"version": "1.0", "processing": []}))
+
+
+def _groups_after_upgrade(path):
+    upgrader = _tool("ranked_upgrade_seg")
+    upgrader.write_readme = lambda st: None            # the README is not what is under test
+    upgrader.upgrade(Path(path))
+    with rs.open_store(path, "r") as st:
+        back = rs.read_segmentation(st.root)
+    return {s.id: s for s in back.segments if s.members is not None}
+
+
+def test_the_upgrader_removes_a_generated_group_THIS_engine_no_longer_claims(tmp_path):
+    """The migration the claims fix needed and did not have.
+
+    `named_groups` used to fall back to nnU-Net's claims for any engine without its
+    own, so a MONAI or VoxTell store whose leaves happened to be named like
+    TotalSegmentator's five lobes shipped `g_lungs` with `exhaustive=True` - an
+    assertion that the model defines the lung as exactly those five. Fresh builds stopped
+    making it. The upgrader did not: it asked `claims_for(engine)` which groups it owned,
+    got nothing back for monai, filed the legacy `g_lungs` as a user-authored group and
+    re-emitted it verbatim - while its own provenance step said the named unions had been
+    rewritten. What the builder may rewrite is every id it has EVER generated, which is
+    not the same question as what it generates for this engine today.
+    """
+    store = tmp_path / "monai.duckn.zip"
+    _legacy_store(store, "monai")
+    groups = _groups_after_upgrade(store)
+    assert "g_lungs" not in groups, (
+        "the upgrade kept an exhaustive `lungs` claim that a fresh monai build does not make"
+    )
+    # and a fresh build for this engine agrees there is no such union
+    from haversack.ranked_build import named_groups
+    with rs.open_store(store, "r") as st:
+        leaves = [s for s in rs.read_segmentation(st.root).segments if s.label_value is not None]
+    assert [g.id for g in named_groups("monai", leaves)] == []
+
+
+def test_the_upgrader_keeps_the_group_for_an_engine_that_DOES_claim_it(tmp_path):
+    """The other half, and the reason this is not just "delete every g_ id": for
+    nnU-Net the same five lobes are exactly the claim TotalSegmentator makes, so the
+    upgrade must rebuild it rather than drop it."""
+    store = tmp_path / "ts.duckn.zip"
+    _legacy_store(store, "nnunetv2")
+    groups = _groups_after_upgrade(store)
+    assert "g_lungs" in groups and groups["g_lungs"].exhaustive
+
+
+def test_the_upgrader_keeps_a_group_nothing_ever_generated(tmp_path):
+    """A user-authored group is not the builder's to remove."""
+    store = tmp_path / "mine.duckn.zip"
+    _legacy_store(store, "monai")
+    with rs.open_store(store, "a") as st:
+        seg = rs.read_segmentation(st.root)
+        segs = list(seg.segments) + [rs.group("my_own", "what I care about", ["c0", "c1"])]
+        attrs = st.root.attrs.asdict()
+        others = {k: v for k, v in (attrs["duckn"]["extensions"]).items()
+                  if k not in ("seg", "provenance")}
+        st.root.attrs.update(rs.root_attrs(rs.segmentation(segs),
+                                           provenance={"version": "1.0", "processing": []},
+                                           **others))
+    groups = _groups_after_upgrade(store)
+    assert "my_own" in groups, f"a user-authored group was removed: {sorted(groups)}"
+    assert "g_lungs" not in groups, f"the generated group survived: {sorted(groups)}"

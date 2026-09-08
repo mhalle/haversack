@@ -672,7 +672,8 @@ def _content_store():
                         lock=_INPUTS_LOCK)
 
 
-def _refresh_series(ctx, meta: dict, key: str, rep, already: set | None = None) -> None:
+def _refresh_series(ctx, meta: dict, key: str, rep, already: set | None = None,
+                    *, kind: str | None = None, ident: str | None = None) -> None:
     """Drop a cached input when the caller sent ``Cache-Control: no-cache``.
 
     The same rule the local server follows, from the same place - it lives in
@@ -688,6 +689,8 @@ def _refresh_series(ctx, meta: dict, key: str, rep, already: set | None = None) 
                          reporter=rep,
                          on_skipped=lambda: _emit(meta.get("id"),
                                                   {"input_refresh_skipped": True}),
+                         source=getattr(ctx, "_sources", {}).get(kind) if kind else None,
+                         identifier=ident,
                          already=already)
 
 
@@ -718,6 +721,10 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
     token = CancelToken()
     started = time.time()
     pinned = []
+    # the content store is a DIFFERENT SeriesCache from ctx.series_cache on this
+    # deployment (an inputs volume against /dev/shm), so its pins release through
+    # its own object and cannot share the list above
+    content_pinned = []
     _emit(jid, {"state": "running", "started": started})
     prefetch_stop = threading.Event()
     _prefetch_next(jid, prefetch_stop, ctx.series_cache, ctx.read_ahead,
@@ -748,12 +755,21 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
                     staged[role] = next(jdir.glob(f"input_{role}_*"))
                     continue
                 if kind == "input":
-                    staged[role] = ctx.content.resolve(
-                        str(entry.get("id") or entry.get("sha256") or ""))
+                    # pinned like any other input: the content store is LRU, and
+                    # without this an entry could be evicted from under a running
+                    # job. The local twin has always pinned here (`_from_store`);
+                    # this side did not, and on a shared inputs volume the eviction
+                    # that matters comes from ANOTHER container, whose pins this
+                    # one cannot see either way (2026-09-08).
+                    digest = str(entry.get("id") or entry.get("sha256") or "")
+                    ctx.content.pin(digest)
+                    content_pinned.append(digest)
+                    staged[role] = ctx.content.resolve(digest)
                     continue
                 sk = source_cache_key(entry)
                 ident, key = sk.ident, sk.key
-                _refresh_series(ctx, meta, key, rep, refreshed)   # BEFORE our own pin
+                _refresh_series(ctx, meta, key, rep, refreshed,   # BEFORE our own pin
+                                kind=kind, ident=entry.get("id"))
                 ctx.series_cache.pin(key)
                 pinned.append(key)
                 rep.stage("fetch", f"{role} {ident[:8]}")
@@ -765,14 +781,19 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
                 rep.check()
             input_path = staged
         elif (kind := entries[0].get("kind", "upload")) == "input":
-            # content this server already holds: nothing to fetch or copy
-            input_path = ctx.content.resolve(str(entries[0].get("id") or ""))
+            # content this server already holds: nothing to fetch or copy - but
+            # pinned, for the reason above
+            digest = str(entries[0].get("id") or "")
+            ctx.content.pin(digest)
+            content_pinned.append(digest)
+            input_path = ctx.content.resolve(digest)
         elif kind != "upload":
             src = entries[0]
             rep = Reporter.of(on_progress, cancel=token)
             sk = source_cache_key(src)
             ident, key = sk.ident, sk.key
-            _refresh_series(ctx, meta, key, rep)       # BEFORE our own pin
+            _refresh_series(ctx, meta, key, rep,       # BEFORE our own pin
+                            kind=kind, ident=src.get("id"))
             ctx.series_cache.pin(key)
             pinned.append(key)
             if ctx.series_cache.has(key):
@@ -834,21 +855,22 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
         def _clear_pending(key: str) -> None:
             _clear_pending_marker(key, jid)
 
-        def _put(key: str) -> None:
-            ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).put(
+        def _put(key: str) -> str:
+            gen = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).put(
                 key, jdir / RESULT_NAME, result,
                 {"identity": meta.get("input_identity"), "task": meta["task"],
                  "options": meta.get("options"), "job": jid,
                  "computed": started})
             cache_vol.commit()
+            return gen
 
         def _mark_done() -> None:
             _emit(jid, {"state": "done", "finished": time.time(),
                         "result": result})
 
-        def _start(pair, key: str) -> None:
+        def _start(pair, key: str, generation=None) -> None:
             threading.Thread(target=ctx._artifact_worker,
-                             args=(pair, key, jid, meta["task"]),
+                             args=(pair, key, jid, meta["task"], generation),
                              name="haversack-artifacts", daemon=True).start()
 
         meta["cache_key"], _ = publish_completion(
@@ -874,6 +896,8 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
     finally:                                     # set_pending must not 202
         for key in pinned:                       # until the sweep
             ctx.series_cache.unpin(key)
+        for digest in content_pinned:
+            ctx.content.unpin(digest)
         prefetch_stop.set()            # end the scan loop with the run
         with ctx._vol_lock:
             _bound_jobs_store(jid)
@@ -936,7 +960,8 @@ class _WorkerBase:
         except Exception as e:                    # never keep a container from starting
             print(f"[reconcile] skipped: {e}", flush=True)
 
-    def _artifact_worker(self, pair, cache_key: str, jid: str, task: str) -> None:
+    def _artifact_worker(self, pair, cache_key: str, jid: str, task: str,
+                         generation=None) -> None:
         """Post-done artifacts via the shared overlap body; this side's place
         is vol-locked add_artifact + tmpfs cleanup, and finish commits once,
         logs, and always deletes the pending marker."""
@@ -945,7 +970,7 @@ class _WorkerBase:
 
         def _place(name: str, path) -> bool:
             with self._vol_lock:
-                ok = cache.add_artifact(cache_key, name, path)
+                ok = cache.add_artifact(cache_key, name, path, generation=generation)
             Path(path).unlink(missing_ok=True)
             return ok
 

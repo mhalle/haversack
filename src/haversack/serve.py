@@ -115,6 +115,13 @@ ARTIFACT_PENDING_TTL = 900.0   # a pending marker older than this is a dead
 #: Defined in jobpolicy; imported here so the wire vocabulary has one source.
 from .jobpolicy import TERMINAL  # noqa: E402
 RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default artifact
+#: The eventually-consistent artifacts, rendered after "done" is already served.
+#: Named once: `put` has to know which files belong to the generation it replaces.
+ARTIFACT_NAMES = ("preview.png", "statistics.json")
+#: Which publication an entry holds. Written by `put` before the labels file, so an
+#: entry that is visible at all has one, and checked by `add_artifact` so a worker
+#: from an earlier publication cannot write into a later one.
+GENERATION_NAME = ".generation"
 from .sources import (CRDC_RE, IDC_BUCKETS, check_identifier as _check_identifier,  # noqa: E402
                       fetch_recording_origin as _fetch_recording_origin,
                       registry as _source_registry)
@@ -971,12 +978,35 @@ class ResultCache:
             result = {}
         return labels, result
 
+    def generation(self, key: str) -> str | None:
+        """Which publication the entry at ``key`` currently holds, or None."""
+        try:
+            return (self.root / key / GENERATION_NAME).read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+
     def put(self, key: str, labels_path, result: dict, meta: dict,
-            preview_path=None, statistics_path=None) -> None:
+            preview_path=None, statistics_path=None) -> str:
+        """Publish one generation of a result, returning its generation token.
+
+        A ``put`` REPLACES the entry, artifacts included: any it is not given are
+        removed rather than left. They used to be left, and the sole production
+        caller passes neither, so a `no-cache` recomputation published new labels
+        over an entry whose preview and statistics still described the old ones -
+        and `_await_artifact` returns an existing file before it consults the
+        pending marker, so a client that explicitly asked not to reuse a stored
+        response reliably got the stale artifact. Not a race: the recompute
+        completes, and the old file is simply still there (2026-09-08).
+
+        The generation token is what an artifact worker must present to
+        :meth:`add_artifact`, so a worker from a previous publication cannot write
+        into this one.
+        """
         import os
         import shutil
         d = self.root / key
         d.mkdir(parents=True, exist_ok=True)
+        gen = uuid.uuid4().hex
 
         def _place(name: str, write) -> None:
             # temp + rename, every file: an overwriting put (no_cache
@@ -990,26 +1020,40 @@ class ResultCache:
 
         # sidecars first, labels LAST: get() and list() gate on the labels
         # file's existence, so an entry appears atomically complete
+        _place(GENERATION_NAME, lambda t: t.write_text(gen, encoding="utf-8"))
         _place("result.json", lambda t: t.write_text(json.dumps(result), encoding="utf-8"))
         _place("meta.json", lambda t: t.write_text(json.dumps(meta, indent=2), encoding="utf-8"))
-        if preview_path and Path(preview_path).exists():
-            _place("preview.png", lambda t: shutil.copy2(preview_path, t))
-        if statistics_path and Path(statistics_path).exists():
-            _place("statistics.json", lambda t: shutil.copy2(statistics_path, t))
+        supplied = {"preview.png": preview_path, "statistics.json": statistics_path}
+        for name in ARTIFACT_NAMES:
+            src = supplied.get(name)
+            if src and Path(src).exists():
+                _place(name, lambda t, s=src: shutil.copy2(s, t))
+            else:
+                # belongs to the generation being replaced; a later worker will
+                # bring this generation's own, or the entry simply has none
+                (d / name).unlink(missing_ok=True)
         _place(RESULT_NAME, lambda t: shutil.copy2(labels_path, t))
         self.evict()
+        return gen
 
-    def add_artifact(self, key: str, name: str, src_path) -> bool:
+    def add_artifact(self, key: str, name: str, src_path, generation=None) -> bool:
         """Place an eventually-consistent artifact (preview.png,
         statistics.json) into an existing entry, atomically (temp + rename) -
         the overlap thread calls this after "done" has already been served.
         False if the entry no longer exists (evicted meanwhile) - skip, never
-        recreate."""
+        recreate - or if it has moved on to a later generation.
+
+        ``generation`` is the token :meth:`put` returned for the publication this
+        worker was started for. Without it the check was existence only, so a
+        worker still rendering when a second flight republished the same key
+        wrote its old preview into the new result."""
         import os
         import shutil
         d = self.root / key
         if not (d / RESULT_NAME).exists():
             return False
+        if generation is not None and self.generation(key) != generation:
+            return False                       # a later publication owns this entry now
         tmp = d / f"{name}.{uuid.uuid4().hex[:8]}.tmp"   # unique per writer
         shutil.copy2(src_path, tmp)
         os.replace(tmp, d / name)
@@ -1231,12 +1275,15 @@ def publish_completion(*, segmenter, task, identity, options, cache_key,
             pair = None
     if pair is not None:
         set_pending(cache_key)
+    generation = None
     if cache_enabled and cache_key:
-        put(cache_key)
+        # the token identifying THIS publication; the artifact worker presents it
+        # so a worker from an earlier one cannot write into this result
+        generation = put(cache_key)
     mark_done()
     if pair is not None:
         try:
-            start_worker(pair, cache_key)
+            start_worker(pair, cache_key, generation)
         except Exception:
             clear_pending(cache_key)
     return cache_key, pair
@@ -1677,7 +1724,8 @@ class LocalExecutor:
             self._emit(rec)
 
     # -- the dispatcher ------------------------------------------------------
-    def _refresh_input(self, rec, key: str, reporter, already: set | None = None) -> None:
+    def _refresh_input(self, rec, key: str, reporter, already: set | None = None,
+                       *, kind: str | None = None, ident: str | None = None) -> None:
         """Drop a cached input when this job asked for a recompute.
 
         The rule itself lives in :func:`haversack.jobpolicy.refresh_cached_input`,
@@ -1693,6 +1741,8 @@ class LocalExecutor:
                              wanted=bool(getattr(rec, "refresh_input", False)),
                              cache=self.series_cache, read_ahead=self.read_ahead,
                              reporter=reporter, on_skipped=mark_skipped,
+                             source=self.sources.get(kind) if kind else None,
+                             identifier=ident,
                              already=already)
 
     def _from_store(self, entry, pinned: list):
@@ -1735,7 +1785,8 @@ class LocalExecutor:
                 continue
             sk = source_cache_key(entry)
             ident, key = sk.ident, sk.key
-            self._refresh_input(rec, key, reporter, refreshed)   # BEFORE our own pin
+            self._refresh_input(rec, key, reporter, refreshed,   # BEFORE our own pin
+                                kind=kind, ident=entry.get("id"))
             self.series_cache.pin(key)
             pinned.append(key)
             reporter.stage("fetch", f"{role} {ident[:8]}")
@@ -1788,7 +1839,8 @@ class LocalExecutor:
                     elif kind != "upload":
                         sk = source_cache_key(src)
                         ident, key = sk.ident, sk.key
-                        self._refresh_input(rec, key, reporter)   # BEFORE our own pin
+                        self._refresh_input(rec, key, reporter,   # BEFORE our own pin
+                                            kind=kind, ident=src.get("id"))
                         self.series_cache.pin(key)
                         pinned.append(key)
                         if self.series_cache.has(key):
@@ -1860,9 +1912,9 @@ class LocalExecutor:
                     if self._artifacts_pending.get(key, (None,))[0] == rec.id:
                         self._artifacts_pending.pop(key, None)
 
-                def _start(pair, key: str) -> None:
+                def _start(pair, key: str, generation=None) -> None:
                     threading.Thread(target=self._artifact_worker,
-                                     args=(pair, key, rec.dir, rec.task, rec.id),
+                                     args=(pair, key, rec.dir, rec.task, rec.id, generation),
                                      name="haversack-artifacts", daemon=True).start()
 
                 if rec.cancel_token.cancelled:
@@ -1918,7 +1970,7 @@ class LocalExecutor:
                 self._evict()
 
     def _artifact_worker(self, pair, cache_key: str, jdir: Path, task: str,
-                         owner: str) -> None:
+                         owner: str, generation=None) -> None:
         """Post-completion artifacts via the shared overlap body; placement
         is the cache's atomic add_artifact, finish clears the pending marker
         only when this job still owns it."""
@@ -1931,7 +1983,8 @@ class LocalExecutor:
             pair, task, self.artifacts,
             preview_out=jdir / "preview.png",
             statistics_out=jdir / "statistics.json",
-            place=lambda name, path: self.cache.add_artifact(cache_key, name, path),
+            place=lambda name, path: self.cache.add_artifact(
+                cache_key, name, path, generation=generation),
             finish=_finish)
 
     def _prefetch_next(self) -> None:
