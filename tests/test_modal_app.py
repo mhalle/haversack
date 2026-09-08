@@ -377,6 +377,37 @@ def test_volume_attach_preflight_fails_with_the_remedy(monkeypatch, tmp_path):
         m._check_volumes_attached()
 
 
+def test_a_disabled_engine_costs_no_image_build():
+    """The engine images were module-level expressions, so Modal built every one on
+    every deploy. With HAVERSACK_FASTSURFER unset, two deploys still ran the
+    FastSurfer image's checkpoint fetch and both died on a Zenodo 504 (2026-09-07) -
+    one engine's upstream having a bad day stopped a deploy that did not use it.
+
+    The property, checked where it can fail: the only modal Images built at MODULE
+    scope are the two every deployment needs. An engine's image is built inside the
+    `if <ENGINE>:` that defines its worker.
+    """
+    import ast
+    import inspect
+
+    from haversack import modal_app
+
+    def builds_an_image(node) -> bool:
+        return any(isinstance(c, ast.Call) and "modal.Image" in ast.unparse(c.func)
+                   for c in ast.walk(node))
+
+    tree = ast.parse(inspect.getsource(modal_app))
+    at_module_scope = {t.id for node in tree.body if isinstance(node, ast.Assign)
+                       and builds_an_image(node)
+                       for t in node.targets if isinstance(t, ast.Name)}
+    assert at_module_scope == {"image", "api_image"}, (
+        f"an engine image is built at module scope and will be built on every "
+        f"deploy: {sorted(at_module_scope - {'image', 'api_image'})}")
+    # ...and each engine's builder is a function, called only beside its worker
+    fns = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
+    assert {"_fs_image", "_synthstrip_image", "_voxtell_image", "_monai_image"} <= fns
+
+
 def test_the_idc_cloud_knob_is_forwarded_to_the_container():
     """A worker in Google Cloud reads HAVERSACK_IDC_CLOUD at fetch time; a deploy
     shell variable does not exist in the container unless it is forwarded."""

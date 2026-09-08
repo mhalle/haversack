@@ -133,7 +133,14 @@ image = (
     .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
 )
 
-# FastSurfer engine image (built only when the deployment enables it). uv-NATIVE:
+# Each engine image is built by a FUNCTION, called from inside the `if <ENGINE>:`
+# that defines its worker - so an engine this deployment does not enable costs no
+# build. They used to be module-level expressions, and Modal built every one of them
+# on every deploy: with HAVERSACK_FASTSURFER unset, two deploys still ran the
+# FastSurfer image's checkpoint fetch and both died on a Zenodo 504 (2026-09-07).
+# One engine's upstream having a bad day must not stop a deploy that does not use it.
+
+# FastSurfer engine image. uv-NATIVE:
 # `uv_sync` installs the project's deps for the `fastsurfer` + `idc` extras straight
 # from pyproject (`--no-install-project`, so haversack stays mounted, not installed) -
 # the fastsurfer-lean git source + rev live ONLY in [tool.uv.sources], not here.
@@ -141,27 +148,31 @@ image = (
 # monai/meshpy/torchio); `idc` pulls obstore (source fetch); core deps (SimpleITK
 # etc.) come with the sync. frozen=False: this repo gitignores uv.lock (pyproject is
 # the source of truth), so resolve at build.
-_FS_CKPT = os.environ.get("HAVERSACK_FASTSURFER_CHECKPOINTS")
-fs_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .apt_install("git")                       # uv needs git for the git source in pyproject
-    .uv_sync(extras=["fastsurfer"], frozen=False)
-    .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack", copy=True)
-)
-if _FS_CKPT:
-    # Ship a local checkpoint directory into the image (a user's pre-fetched copy).
-    fs_image = fs_image.add_local_dir(_FS_CKPT, remote_path="/opt/fastsurfer-checkpoints", copy=True)
-else:
-    # Bake the ~66 MB checkpoints at BUILD via haversack's own Zenodo fetch (sha256-verified,
-    # stdlib) - so cold containers never download them, and the build never touches
-    # FastSurfer's b2share host, whose certificate chain fails in the container (2026-09-03).
-    fs_image = fs_image.run_commands(
-        "PYTHONPATH=/root/pkg python -c "
-        "'from haversack.engines.fastsurfer import ensure_checkpoints;"
-        "ensure_checkpoints(\"/opt/fastsurfer-checkpoints\")'")
-fs_image = (fs_image
-            .env({"HAVERSACK_FASTSURFER_CHECKPOINTS": "/opt/fastsurfer-checkpoints"})
-            .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ}))
+def _fs_image():
+    _FS_CKPT = os.environ.get("HAVERSACK_FASTSURFER_CHECKPOINTS")
+    fs_image = (
+        modal.Image.debian_slim(python_version="3.12")
+        .apt_install("git")                       # uv needs git for the git source in pyproject
+        .uv_sync(extras=["fastsurfer"], frozen=False)
+        .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack", copy=True)
+    )
+    if _FS_CKPT:
+        # Ship a local checkpoint directory into the image (a user's pre-fetched copy).
+        fs_image = fs_image.add_local_dir(_FS_CKPT, remote_path="/opt/fastsurfer-checkpoints", copy=True)
+    else:
+        # Bake the ~66 MB checkpoints at BUILD via haversack's own Zenodo fetch (sha256-verified,
+        # stdlib) - so cold containers never download them, and the build never touches
+        # FastSurfer's b2share host, whose certificate chain fails in the container (2026-09-03).
+        fs_image = fs_image.run_commands(
+            "PYTHONPATH=/root/pkg python -c "
+            "'from haversack.engines.fastsurfer import ensure_checkpoints;"
+            "ensure_checkpoints(\"/opt/fastsurfer-checkpoints\")'")
+    fs_image = (fs_image
+                .env({"HAVERSACK_FASTSURFER_CHECKPOINTS": "/opt/fastsurfer-checkpoints"})
+                .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ}))
+    return fs_image
+
+
 
 # SynthStrip engine image (built only when enabled). uv-NATIVE, same shape as fs_image:
 # `synthstrip` brings synthstrip-torch (from its git source in pyproject) + scipy (haversack
@@ -169,16 +180,20 @@ fs_image = (fs_image
 # preview - synthstrip-torch doesn't carry it, it's a serve-tier concern). numpy<2 comes
 # from synthstrip-torch (surfa's reorient breaks on numpy 2.x). Weights fetch from MGH at
 # first use (cached warm), like FastSurfer's checkpoints.
-synthstrip_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .apt_install("git")                       # uv needs git for the git source in pyproject
-    .uv_sync(extras=["synthstrip", "preview"], frozen=False)
-    # Bake the 29 MB weights into the image at BUILD (to synthstrip-torch's default cache)
-    # so cold containers don't re-download from MGH. Same rationale as FastSurfer above.
-    .run_commands("python -c 'import synthstrip_torch; synthstrip_torch.fetch_weights()'")
-    .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
-    .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
-)
+def _synthstrip_image():
+    synthstrip_image = (
+        modal.Image.debian_slim(python_version="3.12")
+        .apt_install("git")                       # uv needs git for the git source in pyproject
+        .uv_sync(extras=["synthstrip", "preview"], frozen=False)
+        # Bake the 29 MB weights into the image at BUILD (to synthstrip-torch's default cache)
+        # so cold containers don't re-download from MGH. Same rationale as FastSurfer above.
+        .run_commands("python -c 'import synthstrip_torch; synthstrip_torch.fetch_weights()'")
+        .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
+        .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
+    )
+    return synthstrip_image
+
+
 
 # VoxTell engine image (built only when enabled). The `voxtell` extra brings the package
 # and its own tree (torch<2.9, nnunetv2, transformers, huggingface_hub); `idc` brings
@@ -191,25 +206,29 @@ synthstrip_image = (
 # and the cold pull IS the cold start here. So HF_HOME points at the PERSISTENT weights
 # volume instead: the backbone is fetched once ever and every later cold container reads it
 # locally - the same treatment nnU-Net's weights already get.
-voxtell_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .apt_install("git")
-    .uv_sync(extras=["voxtell", "preview"], frozen=False)
-    # Bake the checkpoint into the image at a FIXED path (it is small) and address it by
-    # VOXTELL_MODEL, so it stays findable after HF_HOME moves to the volume below.
-    .run_commands(
-        "python -c \""
-        "import shutil;"
-        "from voxtell.inference.predictor import download_voxtell_model as d;"
-        "shutil.copytree(d(), '/opt/voxtell/model', dirs_exist_ok=True)\""
+def _voxtell_image():
+    voxtell_image = (
+        modal.Image.debian_slim(python_version="3.12")
+        .apt_install("git")
+        .uv_sync(extras=["voxtell", "preview"], frozen=False)
+        # Bake the checkpoint into the image at a FIXED path (it is small) and address it by
+        # VOXTELL_MODEL, so it stays findable after HF_HOME moves to the volume below.
+        .run_commands(
+            "python -c \""
+            "import shutil;"
+            "from voxtell.inference.predictor import download_voxtell_model as d;"
+            "shutil.copytree(d(), '/opt/voxtell/model', dirs_exist_ok=True)\""
+        )
+        # The runtime caches - the small embedding bank, and the Qwen3 backbone that only a
+        # prompt outside that bank needs - live on the PERSISTENT weights volume, so they are
+        # fetched once ever and every later cold container reads them locally.
+        .env({"VOXTELL_MODEL": "/opt/voxtell/model", "HF_HOME": f"{WEIGHTS_ROOT}/hf"})
+        .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
+        .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
     )
-    # The runtime caches - the small embedding bank, and the Qwen3 backbone that only a
-    # prompt outside that bank needs - live on the PERSISTENT weights volume, so they are
-    # fetched once ever and every later cold container reads them locally.
-    .env({"VOXTELL_MODEL": "/opt/voxtell/model", "HF_HOME": f"{WEIGHTS_ROOT}/hf"})
-    .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
-    .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
-)
+    return voxtell_image
+
+
 
 # MONAI engine image (built only when enabled). The `monai` extra brings monai + torch;
 # the curated bundles declare their own dependency set (itk, pytorch-ignite, einops, timm,
@@ -217,13 +236,17 @@ voxtell_image = (
 # list is derived from the bundles rather than guessed. Weights are NOT baked: this is a
 # catalog, so bundles install per task into the persistent weights volume (like nnU-Net and
 # MOOSE), which is why this worker's _prepare/_ensure do real work.
-monai_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .apt_install("git")
-    .uv_sync(extras=["monai", "preview"], frozen=False)
-    .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
-    .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
-)
+def _monai_image():
+    monai_image = (
+        modal.Image.debian_slim(python_version="3.12")
+        .apt_install("git")
+        .uv_sync(extras=["monai", "preview"], frozen=False)
+        .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
+        .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
+    )
+    return monai_image
+
+
 
 # Lean front-end image for the ASGI api/public functions. The api never runs inference -
 # only catalog/describe + orchestration + cache/publish - and `import haversack` + the whole
@@ -1065,7 +1088,7 @@ class _EngineShim:
 
 if FASTSURFER:
     @app.cls(gpu=GPU, timeout=3600, memory=40960, scaledown_window=SCALEDOWN,
-             max_containers=MAX_CONTAINERS, image=fs_image,
+             max_containers=MAX_CONTAINERS, image=_fs_image(),
              volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
                   CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
              enable_memory_snapshot=SNAPSHOT, **_cls_extra)
@@ -1101,7 +1124,7 @@ if FASTSURFER:
 
 if SYNTHSTRIP:
     @app.cls(gpu=GPU, timeout=3600, memory=32768, scaledown_window=SCALEDOWN,
-             max_containers=MAX_CONTAINERS, image=synthstrip_image,
+             max_containers=MAX_CONTAINERS, image=_synthstrip_image(),
              volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
                   CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
              enable_memory_snapshot=SNAPSHOT, **_cls_extra)
@@ -1145,7 +1168,7 @@ assert set(_WORKER_CLASSES) == set(_engines.ENGINES), (
 
 if VOXTELL:
     @app.cls(gpu=GPU, timeout=3600, memory=40960, scaledown_window=SCALEDOWN,
-             max_containers=MAX_CONTAINERS, image=voxtell_image,
+             max_containers=MAX_CONTAINERS, image=_voxtell_image(),
              volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
                   CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
              enable_memory_snapshot=SNAPSHOT, **_cls_extra)
@@ -1188,7 +1211,7 @@ if VOXTELL:
 
 if MONAI:
     @app.cls(gpu=GPU, timeout=3600, memory=40960, scaledown_window=SCALEDOWN,
-             max_containers=MAX_CONTAINERS, image=monai_image,
+             max_containers=MAX_CONTAINERS, image=_monai_image(),
              volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
                   CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
              enable_memory_snapshot=SNAPSHOT, **_cls_extra)
