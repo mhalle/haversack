@@ -95,6 +95,37 @@ class TestLayering(unittest.TestCase):
                                   f"{name}.py:{line} imports {mod!r} at module level; the kernel "
                                   f"layer must stay torch + numpy (+ rankfield) so it can be extracted")
 
+    def test_every_core_dependency_is_actually_installed_here(self):
+        """CI does not `uv sync` - it hand-lists what to install, so torch can come
+        from the CPU index - and that list drifts from pyproject silently. `obstore`
+        has been a core dependency since 2026-09-03 and was never added to it; it
+        did not matter while only `idc:` used it and the idc tests skipped without
+        it. When 0.7.0 moved `s3:` and `gs:` onto the same client, those sources
+        began reporting themselves disabled in CI, and the allowlist tests got
+        "missing dependency" where they assert a refusal by name.
+
+        Names, not imports: the mapping from distribution to module is not
+        mechanical (scikit-image -> skimage), and what drifted is the install list.
+        """
+        import re
+        import tomllib
+        from importlib.metadata import PackageNotFoundError, distribution
+
+        pyproject = SRC.parents[1] / "pyproject.toml"
+        if not pyproject.exists():
+            self.skipTest("running against an installed copy, not the repository")
+        core = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["dependencies"]
+        missing = []
+        for spec in core:
+            name = re.split(r"[<>=!~\[; ]", spec.strip(), 1)[0]
+            try:
+                distribution(name)
+            except PackageNotFoundError:
+                missing.append(name)
+        self.assertEqual(missing, [], f"core dependencies not installed: {missing} - if this "
+                                      "is CI, add them to the install list in "
+                                      ".github/workflows/tests.yml")
+
     def test_text_is_read_and_written_as_utf8_not_as_the_locale(self):
         """`Path.read_text()` with no encoding uses the LOCALE's, which is ASCII
         under LANG=C - and CI runs that way. The shipped store README has had an
