@@ -15,9 +15,9 @@ class TestStoreGeometryFollowsTheCrop(unittest.TestCase):
     canonical 100^3 at 1 mm, cropped to 60^3 at 20 mm, model 30^3."""
 
     def _meta(self, convention):
-        return {"frame": {"canonical": {"shape_zyx": [100, 100, 100], "spacing_zyx": [1.0, 1.0, 1.0],
-                                        "origin_xyz": [0.0, 0.0, 0.0],
-                                        "direction_xyz": [1, 0, 0, 0, 1, 0, 0, 0, 1]},
+        from haversack.values import Geometry
+        return {"frame": {"canonical": Geometry(shape_zyx=(100, 100, 100),
+                                                spacing_zyx=(1.0, 1.0, 1.0)).to_record(),
                           "source": {"shape": [100, 100, 100], "spacing": [1.0, 1.0, 1.0], "origin": [0, 0, 0]},
                           "model_source": {"shape": [60, 60, 60], "spacing": [1.0, 1.0, 1.0],
                                            "origin": [20.0, 20.0, 20.0]},

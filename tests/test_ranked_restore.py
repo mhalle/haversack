@@ -73,7 +73,9 @@ def test_a_roi_restore_equals_the_full_restore_on_that_box(run):
     sl = tuple(slice(a, b) for a, b in box)
     np.testing.assert_array_equal(part.labels, full.labels[sl])
     assert part.labels.shape == tuple(b - a for a, b in box)
-    d = np.asarray(part.geometry.origin_xyz) - np.asarray(full.geometry.origin_xyz)
+    from haversack.values import Geometry          # rankfield 0.3 keeps one order; convert
+    d = (np.asarray(Geometry.from_record(part.geometry).origin_xyz)
+         - np.asarray(Geometry.from_record(full.geometry).origin_xyz))
     assert np.allclose(np.abs(d), np.asarray([box[2][0], box[1][0], box[0][0]]) * 1.0)
 
 
@@ -148,9 +150,11 @@ def test_a_frameless_store_takes_its_geometry_from_the_array(run, monkeypatch):
         rr.restore(path, grid="input")
     res = rr.restore(path, grid=1.0, device="cpu")
     assert res.frame is None
-    assert np.allclose(res.geometry.direction_xyz, geo.direction_xyz)
-    D = np.asarray(geo.direction_xyz).reshape(3, 3)
-    assert np.allclose(res.geometry.origin_xyz, np.asarray(geo.origin_xyz) + D @ np.asarray(res.grid.origin)[::-1])
+    from haversack.values import Geometry          # rankfield 0.3 keeps one order; convert
+    rg, sg = Geometry.from_record(res.geometry), Geometry.from_record(geo)
+    assert np.allclose(rg.direction_xyz, sg.direction_xyz)
+    D = np.asarray(sg.direction_xyz).reshape(3, 3)
+    assert np.allclose(rg.origin_xyz, np.asarray(sg.origin_xyz) + D @ np.asarray(res.grid.origin)[::-1])
 
 
 def test_the_command_writes_names_and_refuses_what_it_should(run, tmp_path):

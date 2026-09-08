@@ -49,8 +49,7 @@ class Restored:
         from . import io as nio
         from .values import Geometry
         g = self.geometry
-        geo = Geometry(spacing_zyx=g.spacing_zyx, shape_zyx=g.shape_zyx, origin_xyz=g.origin_xyz,
-                       direction_xyz=g.direction_xyz)
+        geo = Geometry.from_record(g)       # rankfield 0.3's Geometry keeps one order
         arr = self.labels
         if orientation == "input" and self.frame is not None:
             arr, geo = nio.reorient(arr, geo, self.frame.original_orientation)

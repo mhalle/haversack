@@ -14,6 +14,8 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
+from haversack.values import Geometry
 import torch
 
 zarr = pytest.importorskip("zarr")
@@ -236,8 +238,9 @@ def _synthetic_emit(tmp_path):
             np.save(src / f"organs_{nm}.npy", arr)
     part = {**code.meta, "engine": "nnunetv2", "task": "total_fast", "part": "organs",
             "labels": labels, "convention": "corner", "spacing_zyx": [3.0, 3.0, 3.0],
-            "frame": {"canonical": {"shape_zyx": [40, 48, 56], "spacing_zyx": [1.5, 1.5, 1.5],
-                                    "origin_xyz": [-10.0, -20.0, 5.0], "direction_xyz": D}},
+            "frame": {"canonical": Geometry(shape_zyx=(40, 48, 56), spacing_zyx=(1.5, 1.5, 1.5),
+                                            origin_xyz=(-10.0, -20.0, 5.0),
+                                            direction_xyz=tuple(D)).to_record()},
             "model_grid": [20, 24, 28], "envelope": {"start": [0, 0, 0], "stop": [20, 24, 28]},
             "softmax": {"classes": len(labels), "weights": "synthetic", "version": "0"},
             "haversack": "test"}
@@ -368,8 +371,9 @@ def _two_part_emit(tmp_path, names, part_names=("total_fast:s0", "total_fast:s1"
                 np.save(src / f"{pn}_{nm}.npy", arr)      # the emit names files by the part
         parts[pn] = {**code.meta, "engine": "nnunetv2", "task": "liver_segments", "part": pn,
                      "labels": labels, "convention": "corner", "spacing_zyx": [3.0] * 3,
-                     "frame": {"canonical": {"shape_zyx": [16, 16, 16], "spacing_zyx": [1.5] * 3,
-                                             "origin_xyz": [0.0, 0.0, 0.0], "direction_xyz": D}},
+                     "frame": {"canonical": Geometry(shape_zyx=(16, 16, 16), spacing_zyx=(1.5,) * 3,
+                                                     origin_xyz=(0.0, 0.0, 0.0),
+                                                     direction_xyz=tuple(D)).to_record()},
                      "model_grid": [8, 8, 8], "envelope": {"start": [0, 0, 0], "stop": [8, 8, 8]},
                      "softmax": {"classes": 3, "weights": "synthetic", "version": "0"},
                      "haversack": "test"}

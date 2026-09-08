@@ -98,10 +98,9 @@ class Frame:
                 "model_spacing": [float(v) for v in self.model_spacing],
                 "convention": self.convention,
                 "original_orientation": self.original_orientation,
-                "canonical": {"spacing_zyx": [float(v) for v in c.spacing_zyx],
-                              "shape_zyx": [int(v) for v in c.shape_zyx],
-                              "origin_xyz": [float(v) for v in c.origin_xyz],
-                              "direction_xyz": [float(v) for v in c.direction_xyz]}}
+                # duckn's one-order form, which is what rankfield 0.3 reads: it
+                # refuses the old spacing_zyx / direction_xyz record outright
+                "canonical": c.to_record()}
 
     @classmethod
     def from_meta(cls, meta: dict) -> "Frame":
@@ -111,7 +110,7 @@ class Frame:
                    model_shape=tuple(meta["model_shape"]),
                    model_spacing=tuple(meta["model_spacing"]),
                    convention=meta["convention"],
-                   canonical=Geometry(**{k: tuple(v) for k, v in meta["canonical"].items()}),
+                   canonical=Geometry.from_record(meta["canonical"]),
                    original_orientation=meta.get("original_orientation", "RAS"),
                    model_source=_grid_from(meta.get("model_source")))
 

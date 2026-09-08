@@ -57,9 +57,11 @@ def model_grid_geometry(meta):
     """
     fr = meta["frame"]
     c = fr["canonical"]
+    from .values import Geometry
+    g = Geometry.from_record(c)              # rankfield 0.3's one-order record
     ran_on = fr.get("model_source") or fr.get("source")
     if ran_on is None:                       # a frame that states only its canonical grid
-        ran_on = {"shape": c["shape_zyx"], "spacing": c["spacing_zyx"]}
+        ran_on = {"shape": g.shape_zyx, "spacing": g.spacing_zyx}
     n_src = [int(v) for v in ran_on["shape"]]
     s_src = [float(v) for v in ran_on["spacing"]]
     crop = [float(v) for v in (ran_on.get("origin") or (0.0, 0.0, 0.0))]
@@ -73,11 +75,11 @@ def model_grid_geometry(meta):
     else:
         eff = [n_s * s / n_m for n_s, s, n_m in zip(n_src, s_src, model)]
         shift = [(e - s) / 2 for e, s in zip(eff, s_src)]
-    D = np.asarray(c["direction_xyz"], float).reshape(3, 3)
+    D = np.asarray(g.direction_xyz, float).reshape(3, 3)
     off_zyx = [cr + sh + st * e for cr, sh, st, e in zip(crop, shift, start, eff)]
     off_xyz = np.asarray([off_zyx[2], off_zyx[1], off_zyx[0]], float)
-    origin = np.asarray(c["origin_xyz"], float) + D @ off_xyz
-    return eff, tuple(float(v) for v in origin), list(c["direction_xyz"]), centering
+    origin = np.asarray(g.origin_xyz, float) + D @ off_xyz
+    return eff, tuple(float(v) for v in origin), list(g.direction_xyz), centering
 
 
 def _true_spacing(meta):
