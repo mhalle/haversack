@@ -2,6 +2,80 @@
 
 ## [Unreleased]
 
+Acting on an external review of 0.8.0, and on three adversarial reviews of the fixes.
+Twelve findings were raised; all twelve held under verification, and checking them turned
+up four more the review had missed. **Anyone running a server or the CLI should take this
+one**: three of the defects silently changed what was segmented or what a result claimed
+about itself.
+
+### Bytes that were lost, mixed, or claimed wrongly
+
+- **A prefix fetch could lose slices of a DICOM series.** Every object under an `idc:`,
+  `s3:` or `gs:` prefix was written under its basename with no deduplication, through a
+  32-thread pool - so two objects sharing a basename were opened at one path by two
+  threads and the file that survived was an interleaving of both. It matters more than a
+  lost file sounds: a series that collapses onto one name stops being a series, because
+  the pipeline is then handed a single file and the input's provenance digest turns from
+  `sha256-tree:` into `sha256:`. The archive extractor had a second form of the same bug,
+  disambiguating only on collision so that the name it invented could be overwritten by a
+  real member of that name. There is one flattening rule now, and it decides collisions on
+  what the FILESYSTEM merges rather than on string equality - APFS folds case and unicode
+  normalization, exFAT and FAT32 fold case, so `T1.nii` and `t1.nii` are one file.
+
+- **A `Cache-Control: no-cache` recomputation served the previous preview and statistics.**
+  Publishing replaced the labels and metadata but kept any artifact it was not given, and
+  nothing gives them - so a client that explicitly asked not to reuse a stored response
+  reliably got new labels beside artifacts describing the old ones. Not a race. Each
+  publication now carries a generation: artifacts it does not supply are removed, and a
+  worker still rendering for an earlier one cannot write into a later result.
+
+- **Multi-input provenance paired roles with the wrong digests.** The cache identity is
+  sorted so that permuting the source list cannot split a key, while the source entries
+  stay in the model's channel order; the two were joined by index. For the shipped MONAI
+  BraTS bundle - channels T1c, T1, T2, FLAIR, sorting to FLAIR, T1, T1c, T2 - three of
+  four records carried another channel's identity, and for an all-upload submission the
+  digest itself. The audit record only: channels were always bound by role, never by
+  index. The join uses the role now.
+
+- **A forced refresh did not reach the archive the source had already parsed.** It dropped
+  the cached series and the read-ahead image and stopped, while the source kept a ZipFile,
+  its central directory and up to 256 MiB of range blocks. Since a cache hit skips
+  resolution, a refetch of a replaced `s3:` object or `github:` asset reused the old
+  resolved URL and old member offsets - against an object that really had changed, that is
+  a CRC failure rather than a refresh.
+
+- **Two `haversack` commands on one input could destroy each other's download.** The input
+  cache read a missing completion marker as "the writer is dead", so a second process
+  deleted the first's in-progress tree and both could publish contents assembled from two
+  fetches. Fetches now go to a directory the caller owns, under the advisory lock the
+  model installs already take, and are published by rename.
+
+- **A store upgrade kept the anatomical claim 0.8.0 stopped making.** The upgrader asked
+  which groups the engine currently claims, so a legacy `g_lungs` written by the old
+  nnU-Net fallback looked user-authored on a MONAI or VoxTell store and was re-emitted
+  with `exhaustive=True`, while the provenance step said the unions had been rewritten.
+
+- **`ObjectStoreSource` cached a parsed archive without its credential**, so a cache hit
+  skipped the bucket allowlist - the same defect its sibling class documents as fixed.
+
+`serve.CACHE_EPOCH` moves to 2: the same source identifier now computes from a complete
+series where it used to compute from a truncated one, which invalidates stored results once.
+
+### Things that were not being checked
+
+- **98 kernel tests had never been collected, once.** Six files arrived misnamed and
+  matched neither of pytest's default patterns, and `python_files` was never configured -
+  so the grid, mapping, resample, backend and MLX-oracle parity checks were absent from
+  every green run. They cost 1.3 seconds. The fast suite goes from 1032 to 1155.
+- The engine registry is now authoritative for FastSurfer's checkpoint directory rather
+  than being restated by the engine; the two ecosystem-to-engine routing declarations are
+  reconciled; `/v1/version` reports a package it cannot see as unknown rather than
+  dropping it, which on Modal is the normal case for four of the five engines; and the
+  README's engine list is pinned the way `--help` and SERVER.md already were.
+- Guards that could not fail were rewritten: the collection check now asks pytest what it
+  collects instead of modelling one of its four gates, and the upstream pin check no
+  longer lets one unreachable repository void the whole thing.
+
 ## [0.8.0] - 2026-09-08
 
 A cache that survives its own releases, and two guards for facts that were written twice.
