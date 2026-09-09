@@ -459,62 +459,96 @@ class TheModalDeploymentIsWiredForEveryEngine(unittest.TestCase):
     The first version used `importorskip("modal")`, which deleted these obligations wherever
     modal is absent - the per-engine virtualenvs, and any sync without the modal extra, which
     is precisely where someone adding an engine works. Parsing costs nothing and always runs.
+
+    Reshaped on 2026-09-09, when each engine's image and worker moved into its own
+    `engines/modal_<engine>.py` beside the runtime it deploys. Two of the four obligations
+    here existed to catch failure modes that shape removes rather than guards: a missing
+    module-level flag, and an entry naming a class that does not exist. `modal_app` composed
+    its workers from a map of name STRINGS looked up in `globals()`, so either mistake
+    dropped an engine from every deploy in silence. It now imports the adapter and takes its
+    class object, so there is no name to mistype and no flag to forget.
     """
 
     def setUp(self):
         self.tree = _modal_tree()
-        self.classes = {n.name for n in ast.walk(self.tree) if isinstance(n, ast.ClassDef)}
+        # AnnAssign as well as Assign: `ENGINE_WORKERS: dict = {...}` is annotated, and a
+        # walk that sees only Assign reported the composer missing when it was right there
         self.assigned = {t.id for n in ast.walk(self.tree) if isinstance(n, ast.Assign)
                          for t in n.targets if isinstance(t, ast.Name)}
-        self.workers = self._worker_map()
+        self.assigned |= {n.target.id for n in ast.walk(self.tree)
+                          if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)}
 
-    def _worker_map(self) -> dict:
-        """`_WORKER_CLASSES` as {engine: class name}, read from the source."""
-        for node in ast.walk(self.tree):
-            if not (isinstance(node, ast.Assign)
-                    and any(getattr(t, "id", None) == "_WORKER_CLASSES" for t in node.targets)):
+    def _adapter(self, engine: str) -> Path:
+        return PKG / "engines" / f"modal_{engine}.py"
+
+    def test_every_engine_has_an_adapter_module_or_is_the_default(self):
+        """The default engine's worker is `modal_app.Worker` - its image IS the base image
+        and it is never optional. Every other engine needs a module of its own."""
+        missing = sorted(n for n in _optional_engines() if not self._adapter(n).exists())
+        self.assertEqual([], missing,
+                         f"engines with no Modal adapter: {missing} - add "
+                         f"src/haversack/engines/modal_<engine>.py, holding that engine's "
+                         "image builder and its @app.cls worker")
+
+    def test_every_adapter_DEFINES_A_WORKER_AND_SAYS_WHICH_ENGINE_IT_IS(self):
+        """Three sources reconciled: the filename, the module's own `ENGINE`, and the
+        registry key. The composer imports by filename and then checks `ENGINE`, so a
+        module copied from a sibling and half-renamed fails at import rather than
+        deploying the wrong engine's image under the right engine's name.
+
+        `WORKER` must be a NAME BOUND TO A CLASS defined in the module, and that class must
+        carry an `@app.cls` decoration - a module that defines a plain class and exports it
+        registers nothing with Modal and would deploy as nothing at all.
+        """
+        problems = []
+        for engine in sorted(_optional_engines()):
+            path = self._adapter(engine)
+            if not path.exists():
+                continue                     # the test above owns that
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            declared = [n.value.value for n in tree.body
+                        if isinstance(n, ast.Assign)
+                        and any(getattr(t, "id", None) == "ENGINE" for t in n.targets)
+                        and isinstance(n.value, ast.Constant)]
+            if declared != [engine]:
+                problems.append(f"{path.name}: ENGINE is {declared or None}, not {engine!r}")
+            exported = [ast.unparse(n.value) for n in tree.body
+                        if isinstance(n, ast.Assign)
+                        and any(getattr(t, "id", None) == "WORKER" for t in n.targets)]
+            if len(exported) != 1:
+                problems.append(f"{path.name}: defines {len(exported)} WORKER assignments; "
+                                "the composer takes exactly one")
                 continue
-            out = {}
-            for k, v in zip(node.value.keys, node.value.values):
-                if isinstance(k, ast.Constant):
-                    key = k.value
-                elif isinstance(k, ast.Attribute):        # _engines.NNUNETV2
-                    key = getattr(R, k.attr, k.attr)
-                else:
-                    continue
-                out[key] = v.value if isinstance(v, ast.Constant) else None
-            return out
-        self.fail("no _WORKER_CLASSES assignment found in modal_app.py - this guard reads "
-                  "it as text and can no longer see it")
+            classes = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+            cls = classes.get(exported[0])
+            if cls is None:
+                problems.append(f"{path.name}: WORKER = {exported[0]}, which is not a class "
+                                "defined in this module")
+            elif not any("app.cls" in ast.unparse(d) for d in cls.decorator_list):
+                problems.append(f"{path.name}: {exported[0]} carries no @app.cls decoration, "
+                                "so Modal registers nothing for this engine")
+        self.assertEqual([], problems, "\n  ".join(problems))
 
-    def test_every_engine_has_an_entry_in_the_worker_map(self):
-        self.assertEqual([], sorted(set(R.ENGINES) - set(self.workers)),
-                         f"engines missing from _WORKER_CLASSES: "
-                         f"{sorted(set(R.ENGINES) - set(self.workers))}")
+    def test_modal_app_COMPOSES_the_adapters_rather_than_naming_them(self):
+        """The composer must import by the registry's own names.
 
-    def test_every_worker_map_entry_NAMES_A_CLASS_THAT_EXISTS(self):
-        """The import-time assert compares keys only, so a typo in the VALUE dropped the
-        engine out of dispatch in silence. `globals().get(name)` returned None and nothing
-        was said; the engine was simply absent from every deploy."""
-        bad = sorted(f"{eng} -> {cls!r}" for eng, cls in self.workers.items()
-                     if cls not in self.classes)
-        self.assertEqual([], bad,
-                         f"_WORKER_CLASSES names classes modal_app does not define: {bad}")
-
-    def test_every_engine_has_the_MODULE_FLAG_that_gates_its_worker(self):
-        """`_worker_classes()` finds the flag by stripping HAVERSACK_ off `enabled_env` and
-        reading module globals. A missing assignment - a line a thousand lines above the
-        worker it gates - makes the lookup return its False default, so the engine is absent
-        from every deploy while its variable is set to 1, and the error tells the caller to
-        set the variable that is already set."""
-        missing = []
-        for name, e in R.ENGINES.items():
-            if e.enabled_env is None:
-                continue
-            flag = e.enabled_env[len("HAVERSACK_"):]
-            if flag not in self.assigned:
-                missing.append(f"{name}: no module-level `{flag} = _engines.enabled({name!r})`")
-        self.assertEqual([], missing, "\n  ".join(missing))
+        What this replaced was a literal map from engine to class-name string. Reading the
+        registry means a new engine needs no edit here at all; hardcoding four imports would
+        pass every other rule in this file and go stale exactly the way the old map did.
+        """
+        src = MODAL_APP.read_text(encoding="utf-8")
+        self.assertIn("ENGINE_WORKERS", self.assigned,
+                      "modal_app no longer builds ENGINE_WORKERS - the composer is gone")
+        self.assertIn("haversack.engines.modal_", src,
+                      "modal_app imports no adapter modules")
+        self.assertNotIn("_WORKER_CLASSES", src,
+                         "the old name-string worker map is back; the composer takes class "
+                         "objects so that a typo cannot silently drop an engine")
+        loops = [n for n in ast.walk(self.tree) if isinstance(n, ast.For)
+                 and "ENGINES" in ast.unparse(n.iter)]
+        self.assertTrue(loops,
+                        "the composer does not iterate the registry, so adding an engine "
+                        "needs an edit in modal_app after all")
 
     def test_the_engine_enable_flags_are_FORWARDED_INTO_THE_CONTAINER(self):
         """Two independent sources again.
@@ -532,10 +566,21 @@ class TheModalDeploymentIsWiredForEveryEngine(unittest.TestCase):
                         "so an engine's enable flag never reaches the container: the engine "
                         "is listed and described, then refuses every job inside the worker")
 
-    def test_the_import_time_wiring_check_agrees_when_modal_is_installed(self):
+    def test_the_composed_deployment_covers_every_engine_when_modal_is_installed(self):
+        """The one obligation that has to import: static text cannot prove that Modal
+        accepted the decorators. Skips where modal is absent, which is why every rule
+        above is written to run without it."""
         pytest.importorskip("modal")
-        from haversack import modal_app
-        self.assertEqual([], modal_app._wiring_problems())
+        with mock.patch.dict("os.environ",
+                             {e.enabled_env: "1" for e in R.ENGINES.values() if e.enabled_env}):
+            import importlib
+
+            from haversack import modal_app
+            importlib.reload(modal_app)
+            composed = set(modal_app.ENGINE_WORKERS)
+        self.assertEqual(set(R.ENGINES), composed,
+                         f"engines the deployment composes no worker for: "
+                         f"{sorted(set(R.ENGINES) - composed)}")
 
 
 class TheCommandLineNamesEveryEngine(unittest.TestCase):

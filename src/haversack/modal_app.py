@@ -39,6 +39,7 @@ installed wheel alike). TODO(release): switch to ``uv_pip_install("haversack==<v
 once published, so a deploy is pinned to a version instead of a working tree.
 """
 import functools
+import importlib
 import os
 import sys
 import threading
@@ -82,10 +83,6 @@ def _engine_registry():
 _engines = _engine_registry()
 # Which engines this deployment runs. Snapshotted at import because Modal
 # resolves the @app.cls decorators now; the registry reads the same env vars.
-FASTSURFER = _engines.enabled("fastsurfer")
-SYNTHSTRIP = _engines.enabled("synthstrip")
-VOXTELL = _engines.enabled("voxtell")
-MONAI = _engines.enabled("monai")
 
 
 def _pkg_dir() -> Path:
@@ -133,118 +130,15 @@ image = (
     .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
 )
 
-# Each engine image is built by a FUNCTION, called from inside the `if <ENGINE>:`
-# that defines its worker - so an engine this deployment does not enable costs no
-# build. They used to be module-level expressions, and Modal built every one of them
-# on every deploy: with HAVERSACK_FASTSURFER unset, two deploys still ran the
-# FastSurfer image's checkpoint fetch and both died on a Zenodo 504 (2026-09-07).
-# One engine's upstream having a bad day must not stop a deploy that does not use it.
-
-# FastSurfer engine image. uv-NATIVE:
-# `uv_sync` installs the project's deps for the `fastsurfer` + `idc` extras straight
-# from pyproject (`--no-install-project`, so haversack stays mounted, not installed) -
-# the fastsurfer-lean git source + rev live ONLY in [tool.uv.sources], not here.
-# `fastsurfer` pulls fastsurfer-lean (CNN inference deps incl. matplotlib, no
-# monai/meshpy/torchio); `idc` pulls obstore (source fetch); core deps (SimpleITK
-# etc.) come with the sync. frozen=False: this repo gitignores uv.lock (pyproject is
-# the source of truth), so resolve at build.
-def _fs_image():
-    _FS_CKPT = os.environ.get("HAVERSACK_FASTSURFER_CHECKPOINTS")
-    fs_image = (
-        modal.Image.debian_slim(python_version="3.12")
-        .apt_install("git")                       # uv needs git for the git source in pyproject
-        .uv_sync(extras=["fastsurfer"], frozen=False)
-        .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack", copy=True)
-    )
-    if _FS_CKPT:
-        # Ship a local checkpoint directory into the image (a user's pre-fetched copy).
-        fs_image = fs_image.add_local_dir(_FS_CKPT, remote_path="/opt/fastsurfer-checkpoints", copy=True)
-    else:
-        # Bake the ~66 MB checkpoints at BUILD via haversack's own Zenodo fetch (sha256-verified,
-        # stdlib) - so cold containers never download them, and the build never touches
-        # FastSurfer's b2share host, whose certificate chain fails in the container (2026-09-03).
-        fs_image = fs_image.run_commands(
-            "PYTHONPATH=/root/pkg python -c "
-            "'from haversack.engines.fastsurfer import ensure_checkpoints;"
-            "ensure_checkpoints(\"/opt/fastsurfer-checkpoints\")'")
-    fs_image = (fs_image
-                .env({"HAVERSACK_FASTSURFER_CHECKPOINTS": "/opt/fastsurfer-checkpoints"})
-                .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ}))
-    return fs_image
 
 
 
-# SynthStrip engine image (built only when enabled). uv-NATIVE, same shape as fs_image:
-# `synthstrip` brings synthstrip-torch (from its git source in pyproject) + scipy (haversack
-# mask cleanup); `idc` brings obstore (fetch); `preview` brings matplotlib (serve-core
-# preview - synthstrip-torch doesn't carry it, it's a serve-tier concern). numpy<2 comes
-# from synthstrip-torch (surfa's reorient breaks on numpy 2.x). Weights fetch from MGH at
-# first use (cached warm), like FastSurfer's checkpoints.
-def _synthstrip_image():
-    synthstrip_image = (
-        modal.Image.debian_slim(python_version="3.12")
-        .apt_install("git")                       # uv needs git for the git source in pyproject
-        .uv_sync(extras=["synthstrip", "preview"], frozen=False)
-        # Bake the 29 MB weights into the image at BUILD (to synthstrip-torch's default cache)
-        # so cold containers don't re-download from MGH. Same rationale as FastSurfer above.
-        .run_commands("python -c 'import synthstrip_torch; synthstrip_torch.fetch_weights()'")
-        .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
-        .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
-    )
-    return synthstrip_image
 
 
 
-# VoxTell engine image (built only when enabled). The `voxtell` extra brings the package
-# and its own tree (torch<2.9, nnunetv2, transformers, huggingface_hub); `idc` brings
-# obstore, `preview` matplotlib for the serve-core preview.
-#
-# Weights policy differs from the other engines, deliberately. The VoxTell checkpoint and
-# the precomputed text-embedding bank are baked at BUILD (small, and they cover the common
-# prompts with no text backbone at all). But a prompt outside that bank is embedded on the
-# fly by Qwen3-Embedding-4B - ~8 GB, which would bloat the image and slow every cold pull,
-# and the cold pull IS the cold start here. So HF_HOME points at the PERSISTENT weights
-# volume instead: the backbone is fetched once ever and every later cold container reads it
-# locally - the same treatment nnU-Net's weights already get.
-def _voxtell_image():
-    voxtell_image = (
-        modal.Image.debian_slim(python_version="3.12")
-        .apt_install("git")
-        .uv_sync(extras=["voxtell", "preview"], frozen=False)
-        # Bake the checkpoint into the image at a FIXED path (it is small) and address it by
-        # VOXTELL_MODEL, so it stays findable after HF_HOME moves to the volume below.
-        .run_commands(
-            "python -c \""
-            "import shutil;"
-            "from voxtell.inference.predictor import download_voxtell_model as d;"
-            "shutil.copytree(d(), '/opt/voxtell/model', dirs_exist_ok=True)\""
-        )
-        # The runtime caches - the small embedding bank, and the Qwen3 backbone that only a
-        # prompt outside that bank needs - live on the PERSISTENT weights volume, so they are
-        # fetched once ever and every later cold container reads them locally.
-        .env({"VOXTELL_MODEL": "/opt/voxtell/model", "HF_HOME": f"{WEIGHTS_ROOT}/hf"})
-        .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
-        .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
-    )
-    return voxtell_image
 
 
 
-# MONAI engine image (built only when enabled). The `monai` extra brings monai + torch;
-# the curated bundles declare their own dependency set (itk, pytorch-ignite, einops, timm,
-# ...) and the image carries the union - `tools/gen_monai_manifest.py` prints it, so the
-# list is derived from the bundles rather than guessed. Weights are NOT baked: this is a
-# catalog, so bundles install per task into the persistent weights volume (like nnU-Net and
-# MOOSE), which is why this worker's _prepare/_ensure do real work.
-def _monai_image():
-    monai_image = (
-        modal.Image.debian_slim(python_version="3.12")
-        .apt_install("git")
-        .uv_sync(extras=["monai", "preview"], frozen=False)
-        .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
-        .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
-    )
-    return monai_image
 
 
 
@@ -1118,236 +1012,61 @@ class _EngineShim:
         return t
 
 
-if FASTSURFER:
-    @app.cls(gpu=GPU, timeout=3600, memory=40960, scaledown_window=SCALEDOWN,
-             max_containers=MAX_CONTAINERS, image=_fs_image(),
-             volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
-                  CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
-             enable_memory_snapshot=SNAPSHOT, **_cls_extra)
-    class FastSurferWorker(_WorkerBase):
-        """The FastSurfer engine worker: the shared scheduler + serve-core from
-        _WorkerBase, with FastSurfer's image and compute."""
-
-        engine = "fastsurfer"
-
-        @modal.enter(snap=SNAPSHOT)
-        def preload(self):
-            """Heavy imports paid once per deploy, before the memory snapshot; later
-            cold containers restore from it. Stays per-worker because its body IS this
-            image's import set. Classic snapshot => imports only, no CUDA; with
-            HAVERSACK_GPU_SNAPSHOT the model is built onto the GPU so a restored container
-            starts model-ready."""
-            _pkg_dir()
-            import torch  # noqa: F401
-            import FastSurferCNN.run_prediction  # noqa: F401 - the CNN import graph
-            import haversack  # noqa: F401
-            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-            if GPU_SNAPSHOT:
-                from haversack.engines import fastsurfer
-                fastsurfer._get_runner("cuda", 8)
-
-        def _compute(self, input_path, meta, on_progress, token):
-            from haversack.engines import fastsurfer
-            # input_path is a SimpleITK image when read-ahead pre-read it
-            # (memory-in, decode-once) or a path otherwise; segment() takes both
-            # and writes no temp files (model is cached across jobs on this worker).
-            return fastsurfer.segment(input_path, device="cuda")
 
 
-if SYNTHSTRIP:
-    @app.cls(gpu=GPU, timeout=3600, memory=32768, scaledown_window=SCALEDOWN,
-             max_containers=MAX_CONTAINERS, image=_synthstrip_image(),
-             volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
-                  CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
-             enable_memory_snapshot=SNAPSHOT, **_cls_extra)
-    class SynthStripWorker(_WorkerBase):
-        """The SynthStrip engine worker: the shared scheduler + serve-core, with
-        the slim synthstrip image and the standalone synthstrip-torch package."""
-
-        engine = "synthstrip"
-
-        @modal.enter(snap=SNAPSHOT)
-        def preload(self):
-            """Heavy imports before the memory snapshot (see FastSurferWorker.preload)."""
-            _pkg_dir()
-            import torch  # noqa: F401
-            import synthstrip_torch  # noqa: F401 - model class + torch
-            import haversack  # noqa: F401
-            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-            if GPU_SNAPSHOT:
-                from haversack.engines import synthstrip
-                synthstrip._get_model("cuda")
-
-        def _compute(self, input_path, meta, on_progress, token):
-            from haversack.engines import synthstrip
-            # input_path is a SimpleITK image (read-ahead memory-in) or a path;
-            # segment() takes both and writes no temp files (model cached per worker).
-            return synthstrip.segment(input_path, device="cuda")
 
 
-#: engine name -> the worker class defined for it. Engine workers are defined
-#: conditionally (Modal resolves the decorators at import, so an image is built
-#: only where its engine is enabled), hence the lookup by name.
-_WORKER_CLASSES = {_engines.NNUNETV2: "Worker",
-                   "fastsurfer": "FastSurferWorker",
-                   "synthstrip": "SynthStripWorker",
-                   "voxtell": "VoxTellWorker",
-                   "monai": "MonaiWorker"}
-assert set(_WORKER_CLASSES) == set(_engines.ENGINES), (
-    "every engine needs a worker class (and vice versa): "
-    f"{sorted(_WORKER_CLASSES)} vs {sorted(_engines.ENGINES)}")
 
 
-if VOXTELL:
-    @app.cls(gpu=GPU, timeout=3600, memory=40960, scaledown_window=SCALEDOWN,
-             max_containers=MAX_CONTAINERS, image=_voxtell_image(),
-             volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
-                  CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
-             enable_memory_snapshot=SNAPSHOT, **_cls_extra)
-    class VoxTellWorker(_WorkerBase):
-        """The VoxTell engine worker: free-text prompts instead of a fixed task.
-
-        The only worker whose compute reads the job's ``options`` for what to
-        segment - ``{"prompts": [...]}`` - which is also what makes two prompt lists
-        two different cache entries."""
-
-        engine = "voxtell"
-
-        @modal.enter(snap=SNAPSHOT)
-        def preload(self):
-            """Heavy imports before the memory snapshot (see FastSurferWorker.preload)."""
-            _pkg_dir()
-            import torch  # noqa: F401
-            import voxtell.inference.predictor  # noqa: F401 - the model import graph
-            import haversack  # noqa: F401
-            if GPU_SNAPSHOT:
-                from haversack.engines import voxtell
-                voxtell._get_predictor("cuda")
-
-        def _compute(self, input_path, meta, on_progress, token):
-            from haversack.engines import voxtell
-            opts = dict(meta.get("options") or {})
-            seg = voxtell.segment(input_path, opts.get("prompts"), device="cuda",
-                                  progress=on_progress, cancel=token)
-            # The text backbone and embedding bank land in HF_HOME on the weights
-            # volume; commit once per container so the next cold start reads them
-            # instead of re-downloading (the whole point of caching them there).
-            if not getattr(self, "_hf_committed", False):
-                try:
-                    weights_vol.commit()
-                    self._hf_committed = True
-                except Exception as e:                  # never fail a finished job on this
-                    print(f"[voxtell] weights volume commit failed: {e}", flush=True)
-            return seg
 
 
-if MONAI:
-    @app.cls(gpu=GPU, timeout=3600, memory=40960, scaledown_window=SCALEDOWN,
-             max_containers=MAX_CONTAINERS, image=_monai_image(),
-             volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
-                  CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
-             enable_memory_snapshot=SNAPSHOT, **_cls_extra)
-    class MonaiWorker(_WorkerBase):
-        """The MONAI engine worker: a CATALOG of bundles, so unlike the other engine
-        workers its _prepare/_ensure do real work - bundles install per task into the
-        weights volume, exactly as the nnU-Net worker installs its models."""
-
-        engine = "monai"
-
-        @modal.enter(snap=SNAPSHOT)
-        def preload(self):
-            """Heavy imports before the memory snapshot (see FastSurferWorker.preload)."""
-            _pkg_dir()
-            import torch  # noqa: F401
-            import monai  # noqa: F401 - eagerly loads transforms/networks/inferers...
-            # ...but monai/__init__ EXCLUDES monai.bundle from that eager load
-            # ("(^(monai.bundle))" in its exclude_pattern), and monai.bundle is the
-            # only part this engine actually calls. Importing it here is what puts
-            # it in the snapshot instead of on the first request after every restore.
-            import monai.bundle  # noqa: F401
-            import monai.transforms  # noqa: F401 - the chain every bundle composes
-            import haversack  # noqa: F401
-
-        def _bundle_of(self, task: str) -> str:
-            return str(task).partition(":")[2] or str(task)
-
-        def _prepare(self, task: str, progress=None) -> dict:
-            from haversack.ecosystems import MonaiEcosystem
-            bundle = self._bundle_of(task)
-            MonaiEcosystem().ensure(bundle, WEIGHTS_ROOT, progress=progress)
-            weights_vol.commit()
-            self._ensured.add(task)
-            return {"engine": self.engine, "task": task, "bundle": bundle}
-
-        def _ensure(self, task: str) -> None:
-            if task not in self._ensured:
-                self._prepare(task)
-
-        def _compute(self, input_path, meta, on_progress, token):
-            from haversack.engines import monai_bundle
-            return monai_bundle.segment(input_path, self._bundle_of(meta["task"]),
-                                        root=WEIGHTS_ROOT, device="cuda",
-                                        progress=on_progress, cancel=token)
 
 
-def _wiring_problems() -> list[str]:
-    """Every way an engine can be in the registry and still never run here.
-
-    The `_WORKER_CLASSES` assert above compares KEYS to the registry, which catches a
-    forgotten entry and nothing else. Two omissions it cannot see are both silent and
-    both fatal at deploy, and an adversarial review produced each one from a plausible
-    new row (2026-09-08):
-
-    * No module-level flag. `_worker_classes` reads a global named by stripping
-      HAVERSACK_ off `enabled_env`, so a missing `NNINTERACTIVE = _engines.enabled(...)`
-      - a line that sits a thousand lines above the worker it gates - makes
-      `globals().get(...)` return the False default. The engine is then absent from
-      every deploy while `HAVERSACK_NNINTERACTIVE=1` is set, and the error the caller
-      finally gets tells them to set the variable that is already set.
-    * A typo in the CLASS NAME. `globals().get(cls_name)` returns None, and the engine
-      drops out of dispatch with nothing said.
-
-    Returns the problems rather than raising, so a test can show them all at once.
-    """
-    problems = []
-    for engine, cls_name in _WORKER_CLASSES.items():
-        env = _engines.ENGINES[engine].enabled_env
-        if env is not None:
-            flag = env[len("HAVERSACK_"):]
-            if flag not in globals():
-                problems.append(
-                    f"{engine}: no module-level `{flag}` flag - _worker_classes reads it "
-                    f"from globals(), so this engine would be silently absent from every "
-                    f"deploy even with {env}=1. Add `{flag} = _engines.enabled({engine!r})`.")
-                continue
-            if not globals()[flag]:
-                continue                     # off here on purpose: its class is not defined
-        if cls_name not in globals():
-            problems.append(
-                f"{engine}: enabled here, but no worker class named {cls_name!r} is "
-                f"defined - check the class name in _WORKER_CLASSES against the `class` "
-                f"statement inside `if {env and env[len('HAVERSACK_'):]}:`.")
-    return problems
 
 
-assert not _wiring_problems(), "modal_app is miswired:\n  " + "\n  ".join(_wiring_problems())
+
+
+
+
+#: engine name -> the worker class this deployment can run.
+#:
+#: Each optional engine's image and `@app.cls` worker live in
+#: ``haversack/engines/modal_<engine>.py``, beside the runtime they deploy, and are
+#: imported HERE: at the bottom, after everything they import from this module exists,
+#: and only when the engine is enabled - Modal resolves the decorators at import, so an
+#: image must not be built for an engine this deployment does not run.
+#:
+#: This replaces a map from engine name to CLASS NAME STRING that was looked up in
+#: ``globals()``, plus one module-level flag per engine. Both had a silent, deploy-fatal
+#: failure mode - a missing flag or a mistyped class name dropped the engine from every
+#: deploy while its variable was set to 1 - and both needed `_wiring_problems` to catch
+#: what this shape makes impossible instead.
+ENGINE_WORKERS: dict = {_engines.NNUNETV2: Worker}
+for _name in _engines.ENGINES:
+    if _name == _engines.NNUNETV2 or not _engines.enabled(_name):
+        continue
+    _adapter = importlib.import_module(f"haversack.engines.modal_{_name}")
+    _worker = getattr(_adapter, "WORKER", None)
+    if _worker is None:                      # a partially-initialized adapter
+        raise ImportError(
+            f"{_adapter.__name__} defines no WORKER. If you imported that adapter "
+            "directly, import haversack.modal_app instead: the adapter imports from this "
+            "module, so a direct import re-enters this loop before its class exists.")
+    if getattr(_adapter, "ENGINE", None) != _name:
+        raise ImportError(
+            f"{_adapter.__name__} says it deploys {getattr(_adapter, 'ENGINE', None)!r} "
+            f"but its filename says {_name!r}")
+    ENGINE_WORKERS[_name] = _worker
 
 
 def _worker_classes() -> dict:
     """engine name -> worker class, for the engines this deployment can run.
 
-    Read from module globals on each call rather than frozen at import, so the
-    enable flags stay patchable in tests and the map cannot drift from what was
-    actually defined."""
-    out = {}
-    for engine, cls_name in _WORKER_CLASSES.items():
-        cls = globals().get(cls_name)
-        env = _engines.ENGINES[engine].enabled_env
-        # the flag global mirrors the env var (HAVERSACK_FASTSURFER -> FASTSURFER)
-        on = True if env is None else bool(globals().get(env[len("HAVERSACK_"):], False))
-        if cls is not None and on:
-            out[engine] = cls
-    return out
+    Filtered on each call rather than returned frozen, so a test that patches an enable
+    flag sees the effect. An engine that was off when this module was imported has no
+    adapter loaded at all and simply is not here - which is the point: its image was
+    never built either."""
+    return {n: c for n, c in ENGINE_WORKERS.items() if _engines.enabled(n)}
 
 
 def _spawn_worker(task: str, jid: str, source_tokens=None):

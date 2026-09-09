@@ -247,21 +247,19 @@ def test_fresh_weights_versions_reloads_once(monkeypatch):
     assert Vol.n == 2                       # window elapsed: one more
 
 
-def test_spawn_worker_rejects_fastsurfer_when_disabled(monkeypatch):
-    """Dispatch: a fastsurfer: task on a deployment without the engine enabled
-    fails loudly rather than routing to a nonexistent worker."""
-    from haversack import modal_app
-    monkeypatch.setattr(modal_app, "FASTSURFER", False)
-    with pytest.raises(RuntimeError, match="fastsurfer engine is not enabled"):
-        modal_app._spawn_worker("fastsurfer:brain", "j1")
+@pytest.mark.parametrize("engine, task", [("fastsurfer", "fastsurfer:brain"),
+                                          ("synthstrip", "synthstrip:mask")])
+def test_spawn_worker_rejects_an_engine_this_deployment_does_not_run(engine, task, monkeypatch):
+    """Dispatch: an engine task on a deployment without that engine enabled fails
+    loudly rather than routing to a worker that was never registered.
 
-
-def test_spawn_worker_rejects_synthstrip_when_disabled(monkeypatch):
-    """Same dispatch guard for the synthstrip: engine."""
+    The enable state was a module-level flag per engine, patched here by name. It is
+    read from the registry now - `_worker_classes()` filters on `enabled()` each call -
+    so the switch this patches is the same one an operator sets, not a mirror of it."""
     from haversack import modal_app
-    monkeypatch.setattr(modal_app, "SYNTHSTRIP", False)
-    with pytest.raises(RuntimeError, match="synthstrip engine is not enabled"):
-        modal_app._spawn_worker("synthstrip:mask", "j1")
+    monkeypatch.setenv(f"HAVERSACK_{engine.upper()}", "0")
+    with pytest.raises(RuntimeError, match=f"{engine} engine is not enabled"):
+        modal_app._spawn_worker(task, "j1")
 
 
 def test_execute_job_and_hooks_exist():
@@ -312,7 +310,10 @@ def test_spawn_worker_routes_by_engine_not_by_task_prefix():
     assert R.engine_for_task("ts:total_fast").name == R.NNUNETV2
     assert R.engine_for_task("custom:mine").name == R.NNUNETV2
     assert R.engine_for_task("fastsurfer:brain").name == "fastsurfer"
-    assert modal_app._WORKER_CLASSES.keys() == R.ENGINES.keys()
+    assert modal_app.ENGINE_WORKERS.keys() <= R.ENGINES.keys()
+    # every engine this deployment ENABLES has a composed worker; one that is off has
+    # no adapter imported at all, which is the point - its image was never built either
+    assert set(modal_app._worker_classes()) == {n for n in R.ENGINES if R.enabled(n)}
 
 
 def test_the_two_executors_speak_the_same_submit_signature():
@@ -403,9 +404,24 @@ def test_a_disabled_engine_costs_no_image_build():
     assert at_module_scope == {"image", "api_image"}, (
         f"an engine image is built at module scope and will be built on every "
         f"deploy: {sorted(at_module_scope - {'image', 'api_image'})}")
-    # ...and each engine's builder is a function, called only beside its worker
-    fns = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
-    assert {"_fs_image", "_synthstrip_image", "_voxtell_image", "_monai_image"} <= fns
+    # ...and each engine's builder now lives in that engine's own adapter module,
+    # which modal_app imports only when the engine is enabled - so the image is built
+    # exactly when a worker for it is being registered, and never otherwise
+    from haversack.engines import registry as R
+    adapters = pathlib.Path(modal_app.__file__).parent / "engines"
+    for name in R.ENGINES:
+        if name == R.NNUNETV2:
+            continue                       # its image IS the base image
+        mod = adapters / f"modal_{name}.py"
+        assert mod.exists(), f"{name} has no Modal adapter"
+        atree = ast.parse(mod.read_text(encoding="utf-8"))
+        built_at_scope = [n for n in atree.body if isinstance(n, ast.Assign)
+                          and builds_an_image(n)]
+        assert built_at_scope == [], (
+            f"modal_{name}.py builds an image at module scope, so importing the adapter "
+            "builds it whether or not this deployment runs the engine")
+        assert any(isinstance(n, ast.FunctionDef) and builds_an_image(n)
+                   for n in atree.body), f"modal_{name}.py builds no image at all"
 
 
 def test_the_idc_cloud_knob_is_forwarded_to_the_container():
