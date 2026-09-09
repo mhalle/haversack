@@ -122,6 +122,9 @@ ARTIFACT_NAMES = ("preview.png", "statistics.json")
 #: entry that is visible at all has one, and checked by `add_artifact` so a worker
 #: from an earlier publication cannot write into a later one.
 GENERATION_NAME = ".generation"
+#: The pointer file naming the generation an entry currently publishes. One
+#: atomic rename of this file IS the publication.
+CURRENT_NAME = "current"
 from .sources import (FETCH_EPOCH,  # noqa: E402
                       CRDC_RE, IDC_BUCKETS, check_identifier as _check_identifier,  # noqa: E402
                       fetch_recording_origin as _fetch_recording_origin,
@@ -956,15 +959,50 @@ class ResultCache:
         self.root.mkdir(parents=True, exist_ok=True)
         self.keep = int(keep)
 
+    #: How many superseded generations survive a replacement. One is enough and is not
+    #: arbitrary: a reader resolves `current` and then opens files under the directory it
+    #: named, so the only generation it can still be holding is the one that was current
+    #: an instant ago. Keeping it means that reader finishes; keeping more would only
+    #: hold disk.
+    KEEP_GENERATIONS = 1
+
+    def _generation_dir(self, key: str, gen: str) -> Path:
+        return self.root / key / f"g-{gen}"
+
+    def _resolve(self, key: str) -> Path | None:
+        """The directory holding the generation that is current NOW, or None.
+
+        Everything a reader needs is inside it, which is the point: labels, metadata and
+        artifacts are published as one directory and referred to by one pointer, so no
+        reader can be handed a pair from two publications and no writer can land a file
+        in a generation that is not its own. Replacing files in place could not offer
+        that however carefully it was ordered - a review demonstrated both halves, a
+        reader seeing new metadata beside old labels, and an artifact worker overtaken
+        mid-copy writing into the result that replaced it (2026-09-09).
+
+        A flat entry from before this change is still readable, so an existing cache
+        keeps answering; the next publication of that key replaces it with a generation.
+        """
+        d = self.root / key
+        try:
+            gen = (d / CURRENT_NAME).read_text(encoding="utf-8").strip()
+        except OSError:
+            return d if (d / RESULT_NAME).exists() else None      # legacy flat entry
+        g = self._generation_dir(key, gen)
+        return g if (g / RESULT_NAME).exists() else None
+
     def list(self, limit: int = 500) -> list:
         """Completed segmentations, newest first: the readable meta of every
         cached entry plus size and, when the entry is path-addressable (single
         source identity, default options), its path-surface URL."""
         out = []
         for d in self.root.iterdir():
-            labels, meta_p = d / RESULT_NAME, d / "meta.json"
-            if not (d.is_dir() and labels.exists()):
+            if not d.is_dir():
                 continue
+            g = self._resolve(d.name)
+            if g is None:
+                continue
+            labels, meta_p = g / RESULT_NAME, g / "meta.json"
             try:
                 meta = json.loads(meta_p.read_text(encoding="utf-8")) if meta_p.exists() else {}
                 st = labels.stat()
@@ -976,8 +1014,8 @@ class ResultCache:
                      "computed": meta.get("computed"), "bytes": st.st_size}
             links = resource_links(meta.get("task"), meta.get("identity"),
                                    meta.get("options"),
-                                   preview=(d / "preview.png").exists(),
-                                   statistics=(d / "statistics.json").exists())
+                                   preview=(g / "preview.png").exists(),
+                                   statistics=(g / "statistics.json").exists())
             if links:
                 entry["links"] = links
             out.append(entry)
@@ -985,22 +1023,21 @@ class ResultCache:
         return out[:limit]
 
     def get(self, key: str):
-        d = self.root / key
-        labels = d / RESULT_NAME
-        if not labels.exists():
+        g = self._resolve(key)
+        if g is None:
             return None
         try:
             import os as _os
-            _os.utime(d)                       # LRU touch
-            result = json.loads((d / "result.json").read_text(encoding="utf-8"))
+            _os.utime(self.root / key)         # LRU touch
+            result = json.loads((g / "result.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             result = {}
-        return labels, result
+        return g / RESULT_NAME, result
 
     def generation(self, key: str) -> str | None:
         """Which publication the entry at ``key`` currently holds, or None."""
         try:
-            return (self.root / key / GENERATION_NAME).read_text(encoding="utf-8").strip()
+            return (self.root / key / CURRENT_NAME).read_text(encoding="utf-8").strip()
         except OSError:
             return None
 
@@ -1008,46 +1045,24 @@ class ResultCache:
             preview_path=None, statistics_path=None) -> str:
         """Publish one generation of a result, returning its generation token.
 
-        A ``put`` REPLACES the entry, artifacts included: any it is not given are
-        removed rather than left. They used to be left, and the sole production
-        caller passes neither, so a `no-cache` recomputation published new labels
-        over an entry whose preview and statistics still described the old ones -
-        and `_await_artifact` returns an existing file before it consults the
-        pending marker, so a client that explicitly asked not to reuse a stored
-        response reliably got the stale artifact. Not a race: the recompute
-        completes, and the old file is simply still there (2026-09-08).
-
-        The generation token is what an artifact worker must present to
-        :meth:`add_artifact`, so a worker from a previous publication cannot write
-        into this one.
+        The generation is assembled COMPLETE in a directory of its own and becomes
+        visible by one atomic rename of the pointer file. Nothing is edited in place, so
+        there is no window in which an entry is half-replaced, and an artifact worker for
+        an earlier generation cannot reach this one - it writes into its own directory,
+        which either still exists or does not.
         """
         import os
         import shutil
         d = self.root / key
-        d.mkdir(parents=True, exist_ok=True)
         gen = uuid.uuid4().hex
-        # A REPLACEMENT takes the entry out of service first. `get` gates on the labels
-        # file and reads `result.json` beside it, so overwriting in place published new
-        # metadata against labels that were still the old ones until the last rename -
-        # a reader in that window got a mixed pair. Unlinking first turns that into a
-        # miss, which every caller already handles (it recomputes or waits); a mixed
-        # result is not something a caller can even detect. A first publication has
-        # nothing to withdraw, so this costs it nothing.
-        (d / RESULT_NAME).unlink(missing_ok=True)
+        g = self._generation_dir(key, gen)
+        g.mkdir(parents=True, exist_ok=True)
 
         def _place(name: str, write) -> None:
-            # temp + rename, every file: an overwriting put (no_cache
-            # recompute) must never truncate a file an open reader is
-            # streaming, and a crash mid-copy must not leave a partial
-            # gate file that get() would serve. The temp name is unique
-            # per writer - concurrent same-key writers must not share it.
-            tmp = d / f"{name}.{uuid.uuid4().hex[:8]}.tmp"
+            tmp = g / f"{name}.{uuid.uuid4().hex[:8]}.tmp"
             write(tmp)
-            os.replace(tmp, d / name)
+            os.replace(tmp, g / name)
 
-        # sidecars first, labels LAST: get() and list() gate on the labels
-        # file's existence, so an entry appears atomically complete
-        _place(GENERATION_NAME, lambda t: t.write_text(gen, encoding="utf-8"))
         _place("result.json", lambda t: t.write_text(json.dumps(result), encoding="utf-8"))
         _place("meta.json", lambda t: t.write_text(json.dumps(meta, indent=2), encoding="utf-8"))
         supplied = {"preview.png": preview_path, "statistics.json": statistics_path}
@@ -1055,46 +1070,66 @@ class ResultCache:
             src = supplied.get(name)
             if src and Path(src).exists():
                 _place(name, lambda t, s=src: shutil.copy2(s, t))
-            else:
-                # belongs to the generation being replaced; a later worker will
-                # bring this generation's own, or the entry simply has none
-                (d / name).unlink(missing_ok=True)
         _place(RESULT_NAME, lambda t: shutil.copy2(labels_path, t))
+
+        # the publication itself: one rename, and the entry is this generation
+        tmp_ptr = d / f"{CURRENT_NAME}.{uuid.uuid4().hex[:8]}.tmp"
+        tmp_ptr.write_text(gen, encoding="utf-8")
+        os.replace(tmp_ptr, d / CURRENT_NAME)
+
+        # a flat entry from before generations existed is now superseded
+        for name in (RESULT_NAME, "result.json", "meta.json", GENERATION_NAME, *ARTIFACT_NAMES):
+            (d / name).unlink(missing_ok=True)
+        self._prune_generations(key, keep_gen=gen)
         self.evict()
         return gen
 
-    def add_artifact(self, key: str, name: str, src_path, generation=None) -> bool:
-        """Place an eventually-consistent artifact (preview.png,
-        statistics.json) into an existing entry, atomically (temp + rename) -
-        the overlap thread calls this after "done" has already been served.
-        False if the entry no longer exists (evicted meanwhile) - skip, never
-        recreate - or if it has moved on to a later generation.
+    def _prune_generations(self, key: str, *, keep_gen: str) -> None:
+        """Drop generations no reader can still be holding - see KEEP_GENERATIONS."""
+        import shutil
 
-        ``generation`` is the token :meth:`put` returned for the publication this
-        worker was started for. Without it the check was existence only, so a
-        worker still rendering when a second flight republished the same key
-        wrote its old preview into the new result."""
+        def _mtime(p):
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        try:
+            gens = sorted((p for p in (self.root / key).iterdir()
+                           if p.is_dir() and p.name.startswith("g-")), key=_mtime)
+        except OSError:
+            return
+        keep = {self._generation_dir(key, keep_gen)}
+        for p in gens[-(self.KEEP_GENERATIONS + 1):]:
+            keep.add(p)
+        for p in gens:
+            if p not in keep:
+                shutil.rmtree(p, ignore_errors=True)
+
+    def add_artifact(self, key: str, name: str, src_path, generation=None) -> bool:
+        """Place an eventually-consistent artifact (preview.png, statistics.json) into
+        the generation it was rendered for, atomically (temp + rename) - the overlap
+        thread calls this after "done" has already been served.
+
+        False when that generation is gone: superseded and pruned, or the whole entry
+        evicted. Skipped, never recreated, and never written anywhere but its own
+        generation's directory - so no ordering between this and :meth:`put` can put an
+        artifact beside another publication's labels, in either direction. The version
+        before generations checked a token and then copied, which left the copy itself
+        unguarded in one direction and, once a check was added after the rename, let a
+        late worker delete the artifact its successor had already placed.
+        """
         import os
         import shutil
-        d = self.root / key
-        if not (d / RESULT_NAME).exists():
+        g = self._generation_dir(key, generation) if generation else self._resolve(key)
+        if g is None or not (g / RESULT_NAME).exists():
             return False
-        if generation is not None and self.generation(key) != generation:
-            return False                       # a later publication owns this entry now
-        tmp = d / f"{name}.{uuid.uuid4().hex[:8]}.tmp"   # unique per writer
+        tmp = g / f"{name}.{uuid.uuid4().hex[:8]}.tmp"   # unique per writer
         shutil.copy2(src_path, tmp)
-        os.replace(tmp, d / name)
-        # ...and CHECK AGAIN, because the check above guards nothing on its own: copying
-        # takes time, and a whole new publication can land between the check and this
-        # rename. It did, in a review's probe - `add_artifact` returned True and the new
-        # generation served the old preview (2026-09-09). Comparing after the commit is
-        # what makes this correct without a lock: whichever order the two interleave, the
-        # loser removes its own file. If `put` cleared first we see a new generation here
-        # and undo ourselves; if it clears after us, its own sweep removes the file.
-        # Leaving the entry with no artifact is right - the worker for the generation that
-        # actually won brings its own.
-        if generation is not None and self.generation(key) != generation:
-            (d / name).unlink(missing_ok=True)
+        try:
+            os.replace(tmp, g / name)
+        except OSError:                        # pruned between the check and the rename
+            Path(tmp).unlink(missing_ok=True)
             return False
         return True
 

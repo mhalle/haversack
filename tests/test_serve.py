@@ -4303,29 +4303,52 @@ class TestArtifactsBelongToOneGeneration:
                          preview_path=pre, statistics_path=sta)
 
     def test_replacing_a_result_does_not_leave_the_previous_artifacts(self, tmp_path):
+        """What a READER gets, not where the bytes sit: the artifacts a reader can reach
+        must describe the labels it was handed."""
         cache = self._cache(tmp_path)
         self._publish(cache, tmp_path, "old")
-        entry = cache.root / "k"
-        assert (entry / "statistics.json").read_text() == '{"who": "old"}'
+        served = cache.get("k")[0].parent
+        assert (served / "statistics.json").read_text() == '{"who": "old"}'
 
         self._publish(cache, tmp_path, "new", artifacts=False)   # what production does
         labels, result = cache.get("k")
         assert labels.read_bytes() == b"new" and result == {"who": "new"}
-        left = [n for n in SERVED_ARTIFACTS if (entry / n).exists()]
-        assert left == [], f"artifacts describing the previous result survived: {left}"
+        left = [n for n in SERVED_ARTIFACTS if (labels.parent / n).exists()]
+        assert left == [], f"artifacts describing the previous result are reachable: {left}"
 
-    def test_an_artifact_worker_cannot_write_into_a_later_generation(self, tmp_path):
+    def test_an_artifact_worker_CANNOT_REACH_the_generation_that_replaced_ITS_OWN(self, tmp_path):
+        """A late worker is not refused - it writes into the generation it rendered for,
+        which is a directory no reader resolves any more. That is the whole point of
+        publishing a generation at a time: neither ordering between this and `put` can
+        put an artifact beside another publication's labels, so nothing has to be timed
+        and nothing has to be undone. An earlier version returned False here and, once it
+        also deleted on a late check, could remove the artifact its successor had placed.
+        """
         cache = self._cache(tmp_path)
         mine = self._publish(cache, tmp_path, "old", artifacts=False)
         theirs = self._publish(cache, tmp_path, "new", artifacts=False)
         assert mine != theirs, "every publication needs its own generation token"
 
         png = tmp_path / "late.png"; png.write_bytes(b"rendered from the old labels")
-        assert cache.add_artifact("k", "preview.png", png, generation=mine) is False
-        assert not (cache.root / "k" / "preview.png").exists()
-        # the worker for the CURRENT generation still places normally
+        cache.add_artifact("k", "preview.png", png, generation=mine)
+        labels, _ = cache.get("k")
+        assert labels.read_bytes() == b"new"
+        assert not (labels.parent / "preview.png").exists(), (
+            "a worker for the superseded generation reached the one that replaced it")
+
+        # and the worker for the CURRENT generation still places normally
         assert cache.add_artifact("k", "preview.png", png, generation=theirs) is True
-        assert (cache.root / "k" / "preview.png").read_bytes() == b"rendered from the old labels"
+        assert (cache.get("k")[0].parent / "preview.png").read_bytes() == png.read_bytes()
+
+    def test_an_artifact_worker_whose_generation_is_GONE_is_refused(self, tmp_path):
+        """Superseded far enough to be pruned, or the entry evicted: there is nowhere to
+        write, and nothing is recreated."""
+        cache = self._cache(tmp_path)
+        mine = self._publish(cache, tmp_path, "old", artifacts=False)
+        for tag in ("second", "third"):        # push `mine` past KEEP_GENERATIONS
+            self._publish(cache, tmp_path, tag, artifacts=False)
+        png = tmp_path / "late.png"; png.write_bytes(b"stale")
+        assert cache.add_artifact("k", "preview.png", png, generation=mine) is False
 
     def test_a_recompute_does_not_serve_the_previous_statistics(self, tmp_path, monkeypatch):
         """The end-to-end shape: publish with artifacts, then recompute the same key
@@ -4408,14 +4431,37 @@ class TestPublicationIsCoherentUnderConcurrency:
         finally:
             shutil.copy2 = real_copy
 
-        entry = cache.root / "k"
         labels, result = cache.get("k")
         assert labels.read_bytes() == b"new" and result == {"who": "new"}
-        assert out.get("ok") is False, "the overtaken worker reported success"
-        assert not (entry / "preview.png").exists(), (
+        assert not (labels.parent / "preview.png").exists(), (
             "the new generation is serving an artifact rendered from the old labels - "
-            "checking the generation before the copy guards nothing, because the copy "
-            "is where the time goes")
+            "a check before the copy guards nothing, because the copy is where the time "
+            "goes; publishing a generation at a time removes the question")
+
+    def test_a_LATE_worker_does_not_disturb_the_generation_that_replaced_it(self, tmp_path):
+        """The inverse of the race above, and a defect an earlier fix introduced.
+
+        Re-checking the generation after the rename and deleting on mismatch closed the
+        stale-artifact direction and opened this one: a worker overtaken between its
+        rename and its re-check would delete the file its SUCCESSOR had already placed,
+        leaving the current result with no preview at all. Writing only inside one's own
+        generation has no such second edge.
+        """
+        cache = self._cache(tmp_path)
+        superseded = self._publish(cache, tmp_path, "old")
+        current = self._publish(cache, tmp_path, "new")
+
+        winner = tmp_path / "winner.png"
+        winner.write_bytes(b"the current generation's preview")
+        assert cache.add_artifact("k", "preview.png", winner, generation=current) is True
+
+        late = tmp_path / "late.png"
+        late.write_bytes(b"rendered from the old labels")
+        cache.add_artifact("k", "preview.png", late, generation=superseded)
+
+        served = cache.get("k")[0].parent
+        assert (served / "preview.png").exists(), "the late worker deleted the winner's artifact"
+        assert (served / "preview.png").read_bytes() == winner.read_bytes()
 
     def test_a_replacement_is_never_HALF_VISIBLE(self, tmp_path):
         """`get` gates on the labels file and reads `result.json` beside it. Overwriting
@@ -4427,13 +4473,19 @@ class TestPublicationIsCoherentUnderConcurrency:
 
         cache = self._cache(tmp_path)
         self._publish(cache, tmp_path, "old")
-        seen, stop = [], threading.Event()
+        seen, stop, failed = [], threading.Event(), []
 
         def read():
-            while not stop.is_set():
-                got = cache.get("k")
-                if got is not None:
-                    seen.append((got[0].read_bytes(), got[1].get("who")))
+            # every exception is CARRIED BACK. A background reader that swallows its own
+            # failure turns this test green by crashing early: `seen` keeps whatever it
+            # collected first and the assertions below still hold.
+            try:
+                while not stop.is_set():
+                    got = cache.get("k")
+                    if got is not None:
+                        seen.append((got[0].read_bytes(), got[1].get("who")))
+            except BaseException as e:                # noqa: BLE001 - re-raised below
+                failed.append(f"{type(e).__name__}: {e}")
 
         real_copy = shutil.copy2
 
@@ -4452,6 +4504,9 @@ class TestPublicationIsCoherentUnderConcurrency:
             stop.set()
             r.join(5)
 
+        assert failed == [], f"the reader thread died instead of observing: {failed}"
         mixed = sorted({p for p in seen if p[0].decode() != p[1]})
         assert mixed == [], f"a reader saw labels and metadata from different generations: {mixed}"
-        assert seen, "the reader never observed the entry at all - this proves nothing"
+        assert len(seen) > 10, (
+            f"the reader observed the entry only {len(seen)} times - too few for the "
+            "absence of a mixed pair to mean anything")

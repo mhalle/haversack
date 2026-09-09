@@ -1464,9 +1464,12 @@ def input_record(spec, *, cache_dir=None, sources=None) -> dict:
             pass
         return rec
     kind, ident = parsed
-    import hashlib
     root = Path(cache_dir) if cache_dir else default_input_cache()
-    rec = read_input_record(root / kind / hashlib.sha1(ident.encode()).hexdigest()[:20])
+    # `input_entry_dir`, not a third copy of it: this one was missed when FETCH_EPOCH
+    # went into the key, so `haversack` would have read provenance out of the entry a
+    # PREVIOUS build downloaded while segmenting the one this build did - the two
+    # disagreeing about the same identifier, silently
+    rec = read_input_record(input_entry_dir(root, kind, ident))
     if rec is None:
         return {"kind": kind, "identity": f"{kind}:{ident}", "content": None, "origin": None,
                 "license": None, "cite": [], "note": "no record of this fetch"}

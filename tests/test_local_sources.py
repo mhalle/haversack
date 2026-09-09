@@ -508,3 +508,35 @@ def test_two_callers_do_not_destroy_each_other_WHERE_LOCKING_IS_UNAVAILABLE(tmp_
     entry = next(p for p in (tmp_path / "slow").iterdir() if not p.name.startswith("."))
     markers = {p.read_text(encoding="utf-8") for p in (entry / "series").glob("*.dcm")}
     assert len(markers) == 1, f"the published entry mixes two fetches: {markers}"
+
+
+def test_provenance_reads_the_entry_THIS_BUILD_would_have_fetched(tmp_path):
+    """Three places derived the input entry's path; `FETCH_EPOCH` went into two of them.
+
+    The one left behind was provenance lookup, so `haversack` would have segmented the
+    entry this build downloaded while reporting the origin, license and digest recorded
+    beside the entry a PREVIOUS build downloaded - two answers about one identifier,
+    disagreeing silently. Seeding both makes the wrong one detectable.
+    """
+    import hashlib
+    import json
+
+    cache = tmp_path / "cache"
+    got = sources.materialize("fake:case1", cache_dir=cache, sources=[FakeSource()])
+    entry = got.parent.parent
+    (entry / sources.INPUT_SIDECAR).write_text(json.dumps(
+        {"kind": "fake", "identity": "fake:case1", "content": {"digest": "sha256:current"},
+         "origin": {"collection": "the entry this build fetched"}, "license": None, "cite": []}))
+
+    # the entry the PREVIOUS build would have written, with a different record
+    stale = cache / "fake" / hashlib.sha1(b"case1").hexdigest()[:20]
+    stale.mkdir(parents=True, exist_ok=True)
+    (stale / sources.INPUT_SIDECAR).write_text(json.dumps(
+        {"kind": "fake", "identity": "fake:case1", "content": {"digest": "sha256:stale"},
+         "origin": {"collection": "an entry from before the epoch moved"},
+         "license": None, "cite": []}))
+
+    rec = sources.input_record("fake:case1", cache_dir=cache, sources=[FakeSource()])
+    assert rec["content"]["digest"] == "sha256:current", (
+        "provenance was read from the pre-epoch entry, which is not the one that would "
+        "be segmented")
