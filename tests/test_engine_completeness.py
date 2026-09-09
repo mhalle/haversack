@@ -567,6 +567,49 @@ class TheModalDeploymentIsWiredForEveryEngine(unittest.TestCase):
                         "so an engine's enable flag never reaches the container: the engine "
                         "is listed and described, then refuses every job inside the worker")
 
+    def _compose_after_importing(self, first: str) -> set:
+        """Import `first` in a clean subprocess with every engine on, then report what
+        `haversack.modal_app.ENGINE_WORKERS` ended up holding. A subprocess because the
+        thing under test IS module import order, which cannot be undone in-process."""
+        import json
+        import subprocess
+        import sys as _sys
+
+        code = ("import importlib, json, sys; importlib.import_module(%r); "
+                "print(json.dumps(sorted(sys.modules['haversack.modal_app'].ENGINE_WORKERS)))"
+                % first)
+        env = {**os.environ,
+               **{e.enabled_env: "1" for e in R.ENGINES.values() if e.enabled_env}}
+        root = Path(R.__file__).resolve().parent.parent.parent
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(root), os.environ.get("PYTHONPATH", "")]).strip(os.pathsep)
+        out = subprocess.run([_sys.executable, "-c", code], capture_output=True,
+                             text=True, timeout=300, env=env)
+        self.assertEqual(0, out.returncode,
+                         f"importing {first} first failed:\n{out.stderr[-1200:]}")
+        return set(json.loads(out.stdout.strip().splitlines()[-1]))
+
+    def test_the_composer_works_WHICHEVER_MODULE_IS_ENTERED_FIRST(self):
+        """Both entry points must end with the same complete map, and neither may raise.
+
+        Modal uses BOTH. The api container imports `modal_app`; a WORKER container imports
+        the module its class LIVES IN, which is now the adapter. The first colocation
+        handled only the first order, so every engine worker crashed on start with
+        `defines no WORKER` while the api container was perfectly healthy - the job simply
+        stayed queued forever, with the failure visible only in the worker's own log. The
+        composer skips an adapter that is mid-import (it is the importer, and defines its
+        own class when it resumes) and each adapter registers itself on the way out.
+
+        Found by deploying. No static check and no in-process import reached it, which is
+        why this one spends a subprocess.
+        """
+        pytest.importorskip("modal")
+        engines = set(R.ENGINES)
+        for first in ("haversack.modal_app",
+                      *(f"haversack.engines.modal_{n}" for n in sorted(_optional_engines()))):
+            with self.subTest(first=first):
+                self.assertEqual(engines, self._compose_after_importing(first))
+
     def test_the_composer_survives_being_loaded_BY_PATH(self):
         """`modal deploy src/haversack/modal_app.py` imports this file by PATH.
 

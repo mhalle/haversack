@@ -12,6 +12,7 @@ name-string map that `globals()` was searched for, whose typo did the same. The
 composer takes :data:`WORKER` directly, so neither failure mode exists to guard.
 """
 import os
+import sys
 
 import modal
 
@@ -91,3 +92,10 @@ class MonaiWorker(_WorkerBase):
 
 #: What the composer in modal_app imports.
 WORKER = MonaiWorker
+
+# The other half of the handshake. A Modal WORKER container imports the module the class
+# LIVES IN - this one - not modal_app, so the composer over there ran while this module
+# was still initializing and skipped it rather than reading a class that did not exist
+# yet. Registering here means both import orders end with the same complete map, and
+# nothing has to know which way round it was entered.
+sys.modules["haversack.modal_app"].ENGINE_WORKERS.setdefault(ENGINE, WORKER)

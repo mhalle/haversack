@@ -1057,13 +1057,22 @@ ENGINE_WORKERS: dict = {_engines.NNUNETV2: Worker}
 for _name in _engines.ENGINES:
     if _name == _engines.NNUNETV2 or not _engines.enabled(_name):
         continue
-    _adapter = importlib.import_module(f"haversack.engines.modal_{_name}")
+    _mod_name = f"haversack.engines.modal_{_name}"
+    _partial = sys.modules.get(_mod_name)
+    if _partial is not None and getattr(_partial.__spec__, "_initializing", False):
+        # This adapter is what imported US: it is mid-execution further up the stack and
+        # will define its own class when it resumes. That is the order a Modal WORKER
+        # container uses - Modal imports the module the class LIVES in, which is the
+        # adapter, not this module - and treating it as a broken adapter is what made
+        # every engine worker crash on start while the api container was fine, because
+        # the api enters through this module instead (2026-09-09).
+        continue
+    _adapter = importlib.import_module(_mod_name)
     _worker = getattr(_adapter, "WORKER", None)
-    if _worker is None:                      # a partially-initialized adapter
+    if _worker is None:
         raise ImportError(
-            f"{_adapter.__name__} defines no WORKER. If you imported that adapter "
-            "directly, import haversack.modal_app instead: the adapter imports from this "
-            "module, so a direct import re-enters this loop before its class exists.")
+            f"{_adapter.__name__} defines no WORKER - every adapter must export the class "
+            "the composer deploys.")
     if getattr(_adapter, "ENGINE", None) != _name:
         raise ImportError(
             f"{_adapter.__name__} says it deploys {getattr(_adapter, 'ENGINE', None)!r} "
