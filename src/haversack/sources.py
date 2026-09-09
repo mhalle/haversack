@@ -703,6 +703,21 @@ def openneuro_source() -> UrlTemplateSource:
             "cite": []})
 
 
+#: The version of the FETCHED-INPUT contract: what a download of one identifier is
+#: expected to produce on disk. It is part of a fetched entry's cache key, so an entry
+#: written by an older build is simply not found and is downloaded again.
+#:
+#: NOT the same thing as `serve.CACHE_EPOCH`, which versions computed RESULTS, and the
+#: distinction is the whole point: a result epoch throws away segmentations while
+#: leaving the inputs they were computed from marked complete, so a build that fixes
+#: HOW AN INPUT IS DOWNLOADED needs this one too or the corrected code never runs.
+#:
+#: 1 (implicit): everything before 2026-09-09.
+#: 2: the flattener that could write two objects of one prefix to a single path, so a
+#:    DICOM series could be committed a slice short - and, being one file, could stop
+#:    reading as a series at all.
+FETCH_EPOCH = "2"
+
 MAX_FETCH_BYTES = int(float(os.environ.get("HAVERSACK_MAX_FETCH_GB", "16")) * (1 << 30))
 
 
@@ -1459,6 +1474,22 @@ def input_record(spec, *, cache_dir=None, sources=None) -> dict:
     return rec
 
 
+def input_entry_dir(root, kind: str, ident: str) -> Path:
+    """Where the local input cache keeps one fetched input.
+
+    THE derivation, called by `materialize` and by `cache_admin.input_entry` - which
+    had its own copy, so putting FETCH_EPOCH into the key here made `cache clean
+    inputs <spec>` silently match nothing while reporting success.
+
+    FETCH_EPOCH is part of the key for the reason it exists: an entry a previous build
+    downloaded is not found by this one, and is fetched again. The server's cache does
+    the same at `SeriesCache._entry`.
+    """
+    import hashlib
+    return Path(root) / kind / hashlib.sha1(
+        f"e{FETCH_EPOCH}!{ident}".encode()).hexdigest()[:20]
+
+
 def default_input_cache() -> Path:
     from .cache_admin import cache_root      # ONE root: HAVERSACK_CACHE_DIR, expanded, else XDG
     return cache_root() / "inputs"
@@ -1503,7 +1534,7 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
                          f"(a lean install?): uv pip install {'obstore' if kind == 'idc' else kind}")
     check_identifier(src, ident, credentials)
     root = Path(cache_dir) if cache_dir else default_input_cache()
-    entry = root / kind / hashlib.sha1(ident.encode()).hexdigest()[:20]
+    entry = input_entry_dir(root, kind, ident)
     done = entry / ".done"
     if not done.exists():
         import shutil
@@ -1534,16 +1565,22 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
             # said BEFORE blocking: a second caller used to sit silent for the whole of
             # someone else's download, since the only progress line was inside the lock
             progress(f"waiting for another process to finish fetching {what}")
-        with filelock.held(entry.parent / f".lock-{entry.name}"):
-            # Under the lock nobody else owns this entry, so any staging left here is
-            # abandoned - a writer killed mid-fetch, which its own teardown cannot
-            # catch. Swept HERE because these are dotfiles: `cache_admin._entries`
-            # skips them, so `cache clean` cannot see the litter and `cache usage`
-            # counts its bytes without counting it as an item. Before staging existed
-            # the abandoned partial sat at `entry/` and both swept it; this restores
-            # "the next fetch of the same input repairs it".
-            for old_staging in entry.parent.glob(f".staging-{entry.name}-*"):
-                shutil.rmtree(old_staging, ignore_errors=True)
+        with filelock.held(entry.parent / f".lock-{entry.name}") as locked:
+            # ONLY under a real lock: nobody else owns this entry then, so any staging
+            # left here is abandoned - a writer killed mid-fetch, which its own teardown
+            # cannot catch. Swept here because these are dotfiles: `cache_admin._entries`
+            # skips them, so `cache clean` cannot see the litter and `cache usage` counts
+            # its bytes without counting it as an item. Before staging existed the
+            # abandoned partial sat at `entry/` and both swept it; this restores "the next
+            # fetch of the same input repairs it".
+            #
+            # Unlocked, this sweep is the opposite of a repair: `held` used to claim a
+            # lock it did not have, and two callers on that path deleted each other's LIVE
+            # downloads - the unique staging name is isolation only while nothing removes
+            # every name that matches. Litter is left for a locked run to collect.
+            if locked:
+                for old_staging in entry.parent.glob(f".staging-{entry.name}-*"):
+                    shutil.rmtree(old_staging, ignore_errors=True)
             if not done.exists():            # another process published while we waited
                 staging = entry.parent / f".staging-{entry.name}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
                 try:
@@ -1552,8 +1589,14 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
                         progress(f"fetching {what}")
                     fetch_recording_origin(src, ident, staging, credentials)
                     (staging / ".done").write_text(f"{kind}:{ident}\n", encoding="utf-8")
-                    shutil.rmtree(entry, ignore_errors=True)     # a partial fetch: start over
-                    os.replace(staging, entry)
+                    if done.exists():
+                        # published while we fetched - only reachable unlocked, and the
+                        # reason the swap below re-checks rather than trusting the
+                        # earlier one: theirs is complete, ours is redundant
+                        shutil.rmtree(staging, ignore_errors=True)
+                    else:
+                        shutil.rmtree(entry, ignore_errors=True)  # a partial fetch: start over
+                        os.replace(staging, entry)
                 except BaseException:
                     shutil.rmtree(staging, ignore_errors=True)
                     raise

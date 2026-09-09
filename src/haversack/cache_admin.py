@@ -152,15 +152,13 @@ def _entries(path: Path, *, nested: bool = False) -> list[Path]:
 
 def input_entry(spec, cache_dir=None) -> Path | None:
     """The cache directory a remote input spec maps to, or None for a local path."""
-    import hashlib
-
-    from .sources import default_input_cache, parse_input
+    from .sources import default_input_cache, input_entry_dir, parse_input
     parsed = parse_input(spec)
     if parsed is None:
         return None
     kind, ident = parsed
     root = Path(cache_dir) if cache_dir else default_input_cache()
-    return root / kind / hashlib.sha1(ident.encode()).hexdigest()[:20]
+    return input_entry_dir(root, kind, ident)     # THE derivation lives there, not here
 
 
 def clean(category: str, *, older_than_days: float | None = None, item: str | None = None,

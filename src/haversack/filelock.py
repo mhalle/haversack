@@ -76,15 +76,18 @@ def unlock(handle) -> None:
 def held(path, *, mode: int = 0o644):
     """Hold an exclusive advisory lock on ``path`` for the block.
 
-    Yields False only when the lock FILE could not be opened - a read-only cache
-    directory - and True otherwise, so a caller degrades to unlocked rather than
-    refusing, which is no worse than having no lock. Note the asymmetry: on a
-    platform with no lock facility at all (:data:`SUPPORTED` False) this yields
-    True while holding nothing, because :func:`lock` returns True unlocked. Read
-    :data:`SUPPORTED` if you need to tell those apart; the yielded value cannot.
-    The lock file is created if missing and never removed: unlinking it would let
-    the next process create a different inode and lock that instead, which is a
-    lock that locks nothing.
+    Yields whether EXCLUSION IS REALLY HELD - False both when the lock file could
+    not be opened (a read-only cache directory) and on a platform with no locking
+    facility at all, where :func:`lock` returns True having locked nothing. It used
+    to yield True in that second case, which is a lie a caller can act on: the input
+    cache read it as permission to reclaim other callers' staging directories, and
+    two unlocked callers deleted each other's live downloads (2026-09-09).
+
+    A caller still degrades to unlocked rather than refusing - that is no worse than
+    having no lock - but anything whose SAFETY depends on exclusion must check the
+    yielded value first. The lock file is created if missing and never removed:
+    unlinking it would let the next process create a different inode and lock that
+    instead, which is a lock that locks nothing.
 
     Written once here because two callers had the same twenty lines - the
     per-model install lock in :mod:`haversack.ecosystems` and, from 2026-09-08,
@@ -100,7 +103,7 @@ def held(path, *, mode: int = 0o644):
             os.close(fd)                     # opened but not locked: do not leak the fd
         fd = None
     try:
-        yield fd is not None
+        yield fd is not None and SUPPORTED
     finally:
         if fd is not None:
             try:

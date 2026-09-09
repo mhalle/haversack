@@ -58,8 +58,15 @@ about itself.
 - **`ObjectStoreSource` cached a parsed archive without its credential**, so a cache hit
   skipped the bucket allowlist - the same defect its sibling class documents as fixed.
 
-`serve.CACHE_EPOCH` moves to 2: the same source identifier now computes from a complete
-series where it used to compute from a truncated one, which invalidates stored results once.
+**Two epochs move, and they answer different questions.** `serve.CACHE_EPOCH` goes to 2
+because the same source identifier now computes from a complete series where it used to
+compute from a truncated one - that discards stored results once. On its own it was not
+enough: it left the truncated INPUT marked complete under its own identifier, so an
+upgraded server would miss the result, reuse the bad input, and recompute from it without
+the corrected download ever running. `sources.FETCH_EPOCH` versions the fetched-input
+contract for that, and is part of a fetched entry's cache key, so inputs downloaded by an
+older build are fetched again. Content-addressed uploads are exempt and keep their
+identity - nothing fetched them, and there is nowhere to fetch them from.
 
 ### Things that were not being checked
 

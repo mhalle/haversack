@@ -397,3 +397,114 @@ def test_a_forced_refresh_REALLY_REREADS_an_archive_that_changed_upstream(mutabl
             "member offsets from the old central directory")
     finally:
         ex.close()
+
+
+def test_an_input_a_PREVIOUS_BUILD_downloaded_is_not_reused(tmp_path):
+    """`FETCH_EPOCH` versions the fetched-input contract, and it is not the result epoch.
+
+    `serve.CACHE_EPOCH` moved to 2 because the old flattener could write two objects of
+    one prefix to a single path, so a series could be committed a slice short. That
+    invalidated every stored RESULT - and left the truncated INPUT marked complete under
+    its own identifier, so an upgraded server missed the result, reused the bad input,
+    and recomputed from it. The corrected download never ran. A review demonstrated it
+    with a corrected fetch callback that was invoked zero times (2026-09-09).
+    """
+    calls = []
+
+    class Counting(FakeSource):
+        def fetch(self, identifier, dest_dir, *, credentials=None):
+            calls.append(identifier)
+            return super().fetch(identifier, dest_dir, credentials=credentials)
+
+    cache = tmp_path / "cache"
+    first = sources.materialize("fake:case1", cache_dir=cache, sources=[Counting()])
+    assert len(calls) == 1
+    sources.materialize("fake:case1", cache_dir=cache, sources=[Counting()])
+    assert len(calls) == 1, "a warm entry should not be fetched again"
+
+    # now pretend this entry was written by the previous build, by asking where THAT
+    # build would have put it - the derivation without the epoch
+    import hashlib
+    old_entry = cache / "fake" / hashlib.sha1(b"case1").hexdigest()[:20]
+    old_entry.mkdir(parents=True, exist_ok=True)
+    (old_entry / "series").mkdir(exist_ok=True)
+    (old_entry / "series" / "collapsed.nii.gz").write_bytes(b"one file where three belong")
+    (old_entry / ".done").write_text("fake:case1\n", encoding="utf-8")
+
+    calls.clear()
+    got = sources.materialize("fake:case1", cache_dir=cache, sources=[Counting()])
+    assert got.parent != old_entry / "series", (
+        "the pre-epoch entry was served: a build that changed HOW an input is downloaded "
+        "must not reuse what an older one left")
+    assert got == first, "the current entry should still be the one that answers"
+
+
+def test_cache_clean_can_still_name_one_input_after_the_epoch_moves(tmp_path):
+    """`cache_admin.input_entry` had its own copy of the entry derivation, so putting
+    FETCH_EPOCH into the key made `cache clean inputs <spec>` match nothing while
+    reporting success. There is one derivation now and this is what holds it there."""
+    from haversack import cache_admin
+
+    cache = tmp_path / "cache"
+    got = sources.materialize("fake:case1", cache_dir=cache, sources=[FakeSource()])
+    named = cache_admin.input_entry("fake:case1", cache_dir=cache)
+    assert named is not None and named.is_dir(), "cache admin cannot find the entry"
+    assert named == got.parent.parent, f"{named} is not the entry materialize wrote"
+
+
+def test_two_callers_do_not_destroy_each_other_WHERE_LOCKING_IS_UNAVAILABLE(tmp_path, monkeypatch):
+    """The degraded path, which is the one that had the sharper edge.
+
+    `filelock.held` continues when the lock cannot be taken, so a caller degrades to
+    unlocked rather than refusing. It also used to yield True on a platform with no
+    locking facility at all, having locked nothing - and `materialize` read that as
+    permission to sweep every staging directory matching this entry, so two unlocked
+    callers deleted each other's LIVE downloads. A unique staging name is isolation only
+    while nothing removes every name that matches.
+
+    `held` now reports whether exclusion is really held, and the sweep is conditional on
+    it. Litter is left for a locked run to collect, which is the safe direction.
+    """
+    from haversack import filelock
+
+    def refuse(*a, **k):
+        raise OSError("this filesystem provides no locking")
+
+    monkeypatch.setattr(filelock, "lock", refuse)
+
+    class Slow(sources.DataSource):
+        prefix, id_pattern, description = "slow", r"[a-z0-9]+", "test double"
+
+        def __init__(self, marker):
+            self.marker = marker
+
+        def fetch(self, identifier, dest_dir, *, credentials=None):
+            d = Path(dest_dir) / "series"
+            d.mkdir()
+            for i in range(4):
+                (d / f"{i}.dcm").write_text(self.marker, encoding="utf-8")
+                time.sleep(0.25)
+            return d
+
+    errors, results = [], []
+
+    def run(marker):
+        try:
+            results.append(sources.materialize("slow:case1", cache_dir=tmp_path,
+                                               sources=[Slow(marker)]))
+        except Exception as e:                        # noqa: BLE001 - the point of the test
+            errors.append(f"{marker}: {type(e).__name__}: {e}")
+
+    a = threading.Thread(target=run, args=("A",))
+    a.start()
+    time.sleep(0.35)                                  # B enters while A is mid-fetch
+    b = threading.Thread(target=run, args=("B",))
+    b.start()
+    a.join(60)
+    b.join(60)
+
+    assert errors == [], f"a caller had its own download deleted from under it: {errors}"
+    assert len(results) == 2
+    entry = next(p for p in (tmp_path / "slow").iterdir() if not p.name.startswith("."))
+    markers = {p.read_text(encoding="utf-8") for p in (entry / "series").glob("*.dcm")}
+    assert len(markers) == 1, f"the published entry mixes two fetches: {markers}"

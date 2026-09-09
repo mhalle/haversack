@@ -4355,3 +4355,103 @@ class TestArtifactsBelongToOneGeneration:
             assert ex.cache.generation(key), "a published entry carries no generation"
         finally:
             ex.close()
+
+
+class TestPublicationIsCoherentUnderConcurrency:
+    """A reader must never see one generation's labels beside another's anything.
+
+    The generation token alone did not achieve that: `add_artifact` checked it, then
+    copied, then renamed, with nothing covering check-through-rename. A review paused
+    the copy, landed a whole new publication, and released - `add_artifact` returned
+    True and the new generation served the old preview (2026-09-09).
+    """
+
+    def _cache(self, tmp_path):
+        from haversack.serve import ResultCache
+        return ResultCache(tmp_path / "rc", keep=50)
+
+    def _publish(self, cache, tmp_path, tag, *, preview=None):
+        labels = tmp_path / f"{tag}.seg.nrrd"
+        labels.write_bytes(tag.encode())
+        return cache.put("k", labels, {"who": tag}, {"who": tag}, preview_path=preview)
+
+    def test_a_worker_overtaken_MID_COPY_leaves_nothing_of_its_own_behind(self, tmp_path):
+        """The interleaving the sequential test cannot reach: the worker's generation is
+        still current when it looks, and stale by the time it commits."""
+        import shutil
+        import threading
+
+        cache = self._cache(tmp_path)
+        mine = self._publish(cache, tmp_path, "old")
+        late = tmp_path / "late.png"
+        late.write_bytes(b"rendered from the old labels")
+
+        released = threading.Event()
+        real_copy = shutil.copy2
+
+        def slow_copy(src, dst, *a, **k):
+            if str(src).endswith("late.png"):
+                released.wait(20)            # overtaken here, AFTER the check
+            return real_copy(src, dst, *a, **k)
+
+        out = {}
+        shutil.copy2 = slow_copy
+        try:
+            worker = threading.Thread(
+                target=lambda: out.update(
+                    ok=cache.add_artifact("k", "preview.png", late, generation=mine)))
+            worker.start()
+            time.sleep(0.3)
+            self._publish(cache, tmp_path, "new")     # a whole new publication lands
+            released.set()
+            worker.join(30)
+        finally:
+            shutil.copy2 = real_copy
+
+        entry = cache.root / "k"
+        labels, result = cache.get("k")
+        assert labels.read_bytes() == b"new" and result == {"who": "new"}
+        assert out.get("ok") is False, "the overtaken worker reported success"
+        assert not (entry / "preview.png").exists(), (
+            "the new generation is serving an artifact rendered from the old labels - "
+            "checking the generation before the copy guards nothing, because the copy "
+            "is where the time goes")
+
+    def test_a_replacement_is_never_HALF_VISIBLE(self, tmp_path):
+        """`get` gates on the labels file and reads `result.json` beside it. Overwriting
+        in place published the new metadata while the labels were still the old ones, so
+        a reader in that window got a mixed pair - which, unlike a miss, no caller can
+        detect. A replacement withdraws the entry first."""
+        import shutil
+        import threading
+
+        cache = self._cache(tmp_path)
+        self._publish(cache, tmp_path, "old")
+        seen, stop = [], threading.Event()
+
+        def read():
+            while not stop.is_set():
+                got = cache.get("k")
+                if got is not None:
+                    seen.append((got[0].read_bytes(), got[1].get("who")))
+
+        real_copy = shutil.copy2
+
+        def slow_copy(src, dst, *a, **k):
+            if str(src).endswith("new.seg.nrrd"):
+                time.sleep(0.4)              # widen the window the reader is racing
+            return real_copy(src, dst, *a, **k)
+
+        r = threading.Thread(target=read, daemon=True)
+        r.start()
+        shutil.copy2 = slow_copy
+        try:
+            self._publish(cache, tmp_path, "new")
+        finally:
+            shutil.copy2 = real_copy
+            stop.set()
+            r.join(5)
+
+        mixed = sorted({p for p in seen if p[0].decode() != p[1]})
+        assert mixed == [], f"a reader saw labels and metadata from different generations: {mixed}"
+        assert seen, "the reader never observed the entry at all - this proves nothing"

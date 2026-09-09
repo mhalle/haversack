@@ -122,7 +122,8 @@ ARTIFACT_NAMES = ("preview.png", "statistics.json")
 #: entry that is visible at all has one, and checked by `add_artifact` so a worker
 #: from an earlier publication cannot write into a later one.
 GENERATION_NAME = ".generation"
-from .sources import (CRDC_RE, IDC_BUCKETS, check_identifier as _check_identifier,  # noqa: E402
+from .sources import (FETCH_EPOCH,  # noqa: E402
+                      CRDC_RE, IDC_BUCKETS, check_identifier as _check_identifier,  # noqa: E402
                       fetch_recording_origin as _fetch_recording_origin,
                       registry as _source_registry)
 
@@ -395,7 +396,24 @@ class SeriesCache:
         # a deterministic hash, so identifiers with slashes (DOIs, org/name ids)
         # or colons (every content digest) are safe by construction rather than
         # forbidden.
-        name = safe_path_component(series)
+        # A FETCHED entry carries the epoch of the code that downloaded it, so a build
+        # that would download different bytes cannot reuse what an older one left. That
+        # is not the same question as the result cache's epoch, and bumping that one
+        # answered only half of it: 2 was set because the old flattener could drop a
+        # slice of a series, which invalidated every stored RESULT while leaving the
+        # truncated INPUT marked complete under its own identifier - so an upgraded
+        # server missed the result, reused the bad input, and recomputed from it. The
+        # corrected download never ran (2026-09-09).
+        #
+        # In the key rather than in the marker, exactly as `result_key` does it: an old
+        # entry becomes unreachable instead of needing a new predicate threaded through
+        # the claim protocol, and LRU or `cache clean inputs` reclaims it in time.
+        #
+        # Content-addressed entries are EXEMPT and must stay so: an upload is named by
+        # the digest of its own bytes, nothing here fetched it, and there is nothing to
+        # re-fetch it from - epoching those would strand them permanently.
+        name = safe_path_component(
+            series if is_digest(series) else f"e{FETCH_EPOCH}!{series}")
         # ".graveyard" would BE the graveyard: the reclaim then renames that
         # directory into itself, fails with EINVAL, and the single dispatcher
         # thread loops forever. No production key can spell it (every one carries
@@ -405,7 +423,8 @@ class SeriesCache:
                 and 0 < len(name) <= 200):
             return self.root / name
         import hashlib
-        d = self.root / ("h_" + hashlib.sha256(series.encode()).hexdigest()[:32])
+        stamp = series if is_digest(series) else f"e{FETCH_EPOCH}!{series}"
+        d = self.root / ("h_" + hashlib.sha256(stamp.encode()).hexdigest()[:32])
         return d
 
     def has(self, series: str) -> bool:
@@ -1007,6 +1026,14 @@ class ResultCache:
         d = self.root / key
         d.mkdir(parents=True, exist_ok=True)
         gen = uuid.uuid4().hex
+        # A REPLACEMENT takes the entry out of service first. `get` gates on the labels
+        # file and reads `result.json` beside it, so overwriting in place published new
+        # metadata against labels that were still the old ones until the last rename -
+        # a reader in that window got a mixed pair. Unlinking first turns that into a
+        # miss, which every caller already handles (it recomputes or waits); a mixed
+        # result is not something a caller can even detect. A first publication has
+        # nothing to withdraw, so this costs it nothing.
+        (d / RESULT_NAME).unlink(missing_ok=True)
 
         def _place(name: str, write) -> None:
             # temp + rename, every file: an overwriting put (no_cache
@@ -1057,6 +1084,18 @@ class ResultCache:
         tmp = d / f"{name}.{uuid.uuid4().hex[:8]}.tmp"   # unique per writer
         shutil.copy2(src_path, tmp)
         os.replace(tmp, d / name)
+        # ...and CHECK AGAIN, because the check above guards nothing on its own: copying
+        # takes time, and a whole new publication can land between the check and this
+        # rename. It did, in a review's probe - `add_artifact` returned True and the new
+        # generation served the old preview (2026-09-09). Comparing after the commit is
+        # what makes this correct without a lock: whichever order the two interleave, the
+        # loser removes its own file. If `put` cleared first we see a new generation here
+        # and undo ourselves; if it clears after us, its own sweep removes the file.
+        # Leaving the entry with no artifact is right - the worker for the generation that
+        # actually won brings its own.
+        if generation is not None and self.generation(key) != generation:
+            (d / name).unlink(missing_ok=True)
+            return False
         return True
 
     def delete(self, key: str) -> bool:
