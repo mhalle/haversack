@@ -32,13 +32,21 @@ it in single-digit megabytes.
 
 ## What is stored
 
-Per model, on that model's own grid, three arrays:
+> **The stored form is rankfield's, and `../rankfield/docs/format.md` is what defines it.**
+> This document explains WHY the format has the shape it does and what it cost to measure;
+> that one is the authority on the bytes. Where they disagree, rankfield is right and this
+> is stale - which happened within nine days: this was written 2026-08-29, format 0.4
+> landed 2026-09-07 making `tail` a uint16 and adding a second kind of tail, and the table
+> below still said uint8. Corrected 2026-09-09.
+
+Per model, on that model's own grid:
 
 | array | shape | dtype | meaning |
 |---|---|---|---|
 | `ranks` | `(N, Z, Y, X)` | uint8 / uint16 | `class + 1` of the N best channels; **0 = not this class** |
 | `support` | `(N-1, Z, Y, X)` | uint8 | how far each trails the winner: 255 = tied, **0 = at the clip** |
-| `tail` | `(Z, Y, X)` | uint8 | probability mass beyond the top N; omitted when exhaustive |
+| `tail` | `(Z, Y, X)` | uint16, optional | probability mass beyond the top N, in 1/65535; omitted when exhaustive |
+| `tail_temperature_<T>` | `(Z, Y, X)` | uint16, optional | the same mass at softmax temperature T (0.4) |
 
 `ranks[0]` is the argmax and is bit-exact — `ranks[0] - 1` *is* the labelmap, with no special
 cases, because every voxel has a winner and plane 0 therefore never holds the sentinel.
@@ -168,6 +176,26 @@ just **ranks + support**, two arrays in which zero means "nothing here".
 
 `max_tail` is recorded in metadata precisely so a consumer can check whether the depth it was
 given is deep enough for what it wants to do, rather than trusting a default.
+
+### The second tail: temperature (format 0.4)
+
+Everything above is the tail at T = 1. **A distillation at temperature T needs the tail at T,
+and cannot recover it from the kept classes** - re-softmaxing at another temperature
+redistributes mass among the classes that were dropped, which are precisely the ones not
+stored. So 0.4 writes a `tail_temperature_<T>` plane per temperature asked for, alongside the
+T = 1 plane, and records:
+
+- `tail_temperatures` - which were written;
+- `max_tail_at_temperature` - the largest dropped fraction at each, in the same order.
+
+`tail_at(code, T)` reads one back and **refuses a temperature that was never written** rather
+than substituting another, because renormalizing with the wrong tail misstates every
+probability. Temperatures are a WRITE-TIME decision: adding one later means re-encoding from
+logits, which is the one thing this format cannot reconstruct.
+
+0.4 also tightened `exhaustive` in the same area. It now means NOTHING WAS DROPPED - a fact
+about retention. It used to mean `depth >= classes`, a fact about capacity, under which an
+"exhaustive" field could drop a class past the clip and carry no tail to account for it.
 
 ## Quantization: what 8 bits costs
 

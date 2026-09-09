@@ -83,3 +83,63 @@ class TestCaches(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_the_format_doc_names_the_format_rankfield_ACTUALLY_DECLARES():
+    """`docs/ranked-probabilities.md` explains why the stored form has its shape; rankfield
+    defines the bytes. Two documents about one thing, and the explanation drifted within
+    NINE DAYS: it was written 2026-08-29 describing `tail` as a uint8 plane, format 0.4
+    landed 2026-09-07 making it uint16 and adding a second tail per softmax temperature,
+    and the table still said uint8 on 2026-09-09 - found while explaining the format to
+    someone rather than by anything in this suite.
+
+    Reads the TABLE ROW, not the document. The first version of this guard searched the
+    whole file for the dtype and the version, which both still appeared in the prose
+    around the table - so reverting the row to uint8 passed it. A check that a document
+    mentions a string somewhere is not a check on what the document says.
+    """
+    import pathlib
+    import re
+
+    rf = pytest.importorskip("rankfield")
+    doc = pathlib.Path(__file__).resolve().parent.parent / "docs" / "ranked-probabilities.md"
+    if not doc.exists():
+        pytest.skip("running against an installed copy, not the repository")
+    text = doc.read_text(encoding="utf-8")
+
+    # the FIRST contiguous table under "What is stored". Scoping to the section was not
+    # enough - it also contains a per-layer accuracy table with its own `tail` row, and
+    # reading both together took that cell instead ("exact", not a dtype).
+    after = text[text.index("## What is stored"):].splitlines()
+    block, seen = [], False
+    for line in after:
+        if line.startswith("|"):
+            seen, _ = True, block.append(line)
+        elif seen:
+            break
+    rows = {m.group(1): m.group(2).strip()
+            for m in (re.match(r"\|\s*`([^`]+)`\s*\|[^|]*\|([^|]*)\|", ln) for ln in block)
+            if m}
+    assert "ranks" in rows and "support" in rows, (
+        f"cannot find the stored-arrays table in {doc.name}; this guard reads it as a table "
+        f"and can no longer see it (rows found: {sorted(rows)})")
+
+    # the dtype rankfield actually writes, derived from its own constant
+    want = {255: "uint8", 65535: "uint16"}[rf.TAIL_MAX]
+    assert "tail" in rows, "the table has no `tail` row at all"
+    assert want in rows["tail"], (
+        f"the table says the tail is {rows['tail']!r}, but rankfield's TAIL_MAX is "
+        f"{rf.TAIL_MAX}, which is {want}")
+
+    if hasattr(rf, "tail_at"):
+        assert any(k.startswith("tail_temperature") for k in rows), (
+            "rankfield can read a per-temperature tail (`tail_at`) and the table lists no "
+            "such plane - a distillation at temperature T needs the tail at T, and it "
+            "cannot be recovered from the kept classes")
+
+    version = str(rf.FORMAT_VERSION)
+    assert re.search(rf"(?<![\d.]){re.escape(version)}(?![\d])", text), (
+        f"the doc never mentions format {version}, which is what rankfield declares")
+    assert "rankfield/docs/format.md" in text, (
+        "the doc no longer says rankfield is the authority on the stored form, which is the "
+        "only thing keeping two documents about one format honest")
