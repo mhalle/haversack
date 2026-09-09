@@ -481,22 +481,8 @@ class ZipManifestEcosystem(ModelEcosystem):
         entry = manifest_entry(self._entries, task, what=f"{self.name} task {task!r}",
                                generator=self.generator)
         stem = str(entry["folder"]).replace("/", "_")
-        fd = None
-        try:
-            fd = os.open(bucket / f".lock-{stem}", os.O_CREAT | os.O_RDWR, 0o644)
-            filelock.lock(fd)
-        except OSError:
-            if fd is not None:
-                os.close(fd)               # opened but not locked: do not leak the fd
-            fd = None
-        try:
+        with filelock.held(bucket / f".lock-{stem}"):
             yield
-        finally:
-            if fd is not None:
-                try:
-                    filelock.unlock(fd)
-                finally:
-                    os.close(fd)
 
     def ensure(self, task: str, root, progress=None, version=None) -> None:
         with self._install_lock(task, root):

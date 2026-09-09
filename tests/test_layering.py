@@ -64,24 +64,37 @@ def _imports(path: pathlib.Path, top_level_only: bool):
                 yield node.module.split(".")[0], node.lineno
 
 
-def _defines_tests(path: pathlib.Path) -> bool:
-    """Whether the file defines anything pytest would run, read from its AST rather
-    than from its name. The name is the OTHER source this is reconciled against."""
+def _tests_dir() -> pathlib.Path:
+    return pathlib.Path(__file__).resolve().parent
+
+
+def _test_sources() -> list[pathlib.Path]:
+    """Every python file under tests/, whatever it is called. Recursive on purpose:
+    a rule that stops at the top level stops applying the moment someone makes a
+    subdirectory, which is an ordinary thing to do."""
+    return sorted(p for p in _tests_dir().rglob("*.py")
+                  if "__pycache__" not in p.parts)
+
+
+def _declared_tests(path: pathlib.Path) -> set[str]:
+    """The test functions a file DECLARES, from its AST: module-level `test*`
+    functions and `test*` methods of module-level classes, which is what pytest's
+    default `python_functions`/`python_classes` would run.
+
+    Nested functions are excluded deliberately. Walking the whole tree also matched
+    a helper called `test_double_for_a_source()` defined inside another function,
+    and flagged a module pytest never looks at."""
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except SyntaxError:
-        return False
-    return any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-               and n.name.startswith("test")
-               for n in ast.walk(tree))
-
-
-def _test_modules() -> list[pathlib.Path]:
-    """Every file under tests/ that holds tests, found by CONTENT. Not by name: for six
-    files the name was exactly the problem (see the collection test below)."""
-    here = pathlib.Path(__file__).resolve().parent
-    return sorted(p for p in here.glob("*.py")
-                  if p.name != "conftest.py" and _defines_tests(p))
+        return set()
+    fn = (ast.FunctionDef, ast.AsyncFunctionDef)
+    out = {n.name for n in tree.body if isinstance(n, fn) and n.name.startswith("test")}
+    for cls in tree.body:
+        if isinstance(cls, ast.ClassDef):
+            out |= {n.name for n in cls.body
+                    if isinstance(n, fn) and n.name.startswith("test")}
+    return out
 
 
 class TestLayering(unittest.TestCase):
@@ -91,9 +104,8 @@ class TestLayering(unittest.TestCase):
         A unittest class takes no funcargs, but an autouse fixture on it still runs."""
         self._pytestconfig = pytestconfig
 
-    def test_every_file_holding_tests_is_one_PYTEST_ACTUALLY_COLLECTS(self):
-        """Reconciles two independent sources: which files define tests (their ASTs) and
-        which files pytest is configured to collect (its live `python_files`).
+    def test_every_test_this_repo_DECLARES_is_one_PYTEST_ACTUALLY_COLLECTS(self):
+        """Reconciles what the tests directory declares against what pytest really runs.
 
         Six files failed this for the whole life of the repo. `kernel_test_grid.py` and
         five siblings arrived already misnamed in f0d83dd, matching neither default
@@ -101,19 +113,66 @@ class TestLayering(unittest.TestCase):
         `kernel_test_grid.py` has neither - and `python_files` was never configured, so
         98 kernel tests were never collected once: the grid, mapping, resample, backend
         and MLX-oracle parity checks, all of them silently absent from every green run.
-        They cost 1.3 s. Renaming them to `test_kernel_*.py` on 2026-09-08 was the fix;
-        this is what stops the next one, because nothing else in the repo would notice.
-        The one place that DID know the old name read them as files, not as tests: the
-        MLX-import guard above globbed `kernel_test_*.py` by hand.
+        They cost 1.3 s. Renaming them to `test_kernel_*.py` on 2026-09-08 was the fix.
+
+        The FIRST version of this guard compared filenames against the configured
+        `python_files` and was itself hollow, three ways: it globbed one directory so a
+        `tests/kernel/` subdirectory reinstated the bug one level down; a
+        `collect_ignore_glob` in conftest removed 99 tests with the guard still green;
+        and `python_files` is only one of four gates, so dropping `unittest.TestCase`
+        from a class silently deleted it - every class in `test_engine_completeness.py`
+        is collected ONLY because it subclasses TestCase, none being `Test`-prefixed, so
+        one edit there deletes a whole checklist section. The fix is to stop modelling
+        pytest and ASK it: run a real collection and compare the node ids against the
+        functions the files declare.
         """
-        patterns = self._pytestconfig.getini("python_files")
-        self.assertTrue(patterns, "pytest reports no python_files patterns at all")
-        missed = [p.name for p in _test_modules()
-                  if not any(fnmatch.fnmatch(p.name, pat) for pat in patterns)]
-        self.assertEqual([], missed,
-                         f"these files define tests that pytest will never collect: {missed} - "
-                         f"rename them to match one of {patterns}, or add the pattern to "
-                         "[tool.pytest.ini_options] python_files in pyproject.toml")
+        import json
+        import subprocess
+        import sys
+
+        here = _tests_dir()
+        declared = {p: _declared_tests(p) for p in _test_sources()
+                    if p.name != "conftest.py" and _declared_tests(p)}
+        self.assertTrue(declared, "found no test functions at all - this guard is blind")
+
+        out = subprocess.run(
+            [sys.executable, "-m", "pytest", str(here), "--collect-only", "-q",
+             "-p", "no:cacheprovider"],
+            capture_output=True, text=True, timeout=600, cwd=here.parent)
+        if out.returncode not in (0, 5):
+            self.skipTest(f"could not collect: {out.stdout[-400:]}{out.stderr[-400:]}")
+        collected: dict = {}
+        for line in out.stdout.splitlines():
+            if "::" not in line:
+                continue
+            path, _, rest = line.partition("::")
+            name = rest.split("::")[-1].partition("[")[0]     # drop parametrize ids
+            collected.setdefault((here.parent / path.strip()).resolve(), set()).add(name)
+
+        problems = []
+        for path, names in sorted(declared.items()):
+            got = collected.get(path.resolve())
+            if got is None:
+                # zero nodes: either a gate dropped the file, or the module skips itself
+                # at import (`pytest.importorskip` for zarr/duckn/fastapi). Naming the
+                # file explicitly bypasses `python_files`, so it tells the two apart.
+                one = subprocess.run(
+                    [sys.executable, "-m", "pytest", str(path), "--collect-only", "-q",
+                     "-p", "no:cacheprovider"],
+                    capture_output=True, text=True, timeout=300, cwd=here.parent)
+                if "::" in one.stdout:
+                    problems.append(
+                        f"{path.relative_to(here)}: declares {len(names)} test(s) that a "
+                        "normal run never collects, though naming the file directly does - "
+                        "check python_files, testpaths, collect_ignore* and norecursedirs")
+                continue
+            missing = sorted(names - got)
+            if missing:
+                problems.append(
+                    f"{path.relative_to(here)}: declares {missing} which the run does not "
+                    "collect - a class that stopped subclassing unittest.TestCase without a "
+                    "`Test` prefix is the usual cause (python_classes)")
+        self.assertEqual([], problems, "\n  ".join(problems))
 
     def test_every_module_is_classified(self):
         found = {p.stem for p in SRC.glob("*.py") if p.stem not in ("__init__", "__main__")}
@@ -311,7 +370,7 @@ class TestLayering(unittest.TestCase):
         """The rules above cover src/haversack. The tests need the same property or CI cannot run
         them on Linux - test_frame once imported nnunet_inference_mlx.values.Geometry and
         broke the build."""
-        for path in _test_modules():
+        for path in _test_sources():
             for mod, line in _imports(path, top_level_only=False):
                 self.assertNotIn(mod, FORBIDDEN_EVERYWHERE,
                                  f"{path.name}:{line} imports {mod!r}; the haversack tests must run "

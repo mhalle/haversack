@@ -76,15 +76,19 @@ def unlock(handle) -> None:
 def held(path, *, mode: int = 0o644):
     """Hold an exclusive advisory lock on ``path`` for the block.
 
-    Yields True when the lock is really held and False when it could not be taken
-    at all - a read-only cache directory, a filesystem with no lock facility - so
-    a caller degrades to unlocked rather than refusing, which is no worse than
-    having no lock. The lock file is created if missing and never removed:
-    unlinking it would let the next process create a different inode and lock
-    that instead, which is a lock that locks nothing.
+    Yields False only when the lock FILE could not be opened - a read-only cache
+    directory - and True otherwise, so a caller degrades to unlocked rather than
+    refusing, which is no worse than having no lock. Note the asymmetry: on a
+    platform with no lock facility at all (:data:`SUPPORTED` False) this yields
+    True while holding nothing, because :func:`lock` returns True unlocked. Read
+    :data:`SUPPORTED` if you need to tell those apart; the yielded value cannot.
+    The lock file is created if missing and never removed: unlinking it would let
+    the next process create a different inode and lock that instead, which is a
+    lock that locks nothing.
 
     Written once here because two callers had the same twenty lines - the
-    per-model install lock and, from 2026-09-08, the input cache's fetch claim.
+    per-model install lock in :mod:`haversack.ecosystems` and, from 2026-09-08,
+    the input cache's fetch claim in :mod:`haversack.sources`.
     """
     import os
     fd = None

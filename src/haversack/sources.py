@@ -1529,13 +1529,27 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
         # staging directory: the last rename wins and every published entry is still
         # internally consistent. Dotfile names keep both invisible to `cache clean`.
         entry.parent.mkdir(parents=True, exist_ok=True)
+        what = ident if kind == "http" else f"{kind}:{ident}"
+        if progress and (entry.parent / f".lock-{entry.name}").exists():
+            # said BEFORE blocking: a second caller used to sit silent for the whole of
+            # someone else's download, since the only progress line was inside the lock
+            progress(f"waiting for another process to finish fetching {what}")
         with filelock.held(entry.parent / f".lock-{entry.name}"):
+            # Under the lock nobody else owns this entry, so any staging left here is
+            # abandoned - a writer killed mid-fetch, which its own teardown cannot
+            # catch. Swept HERE because these are dotfiles: `cache_admin._entries`
+            # skips them, so `cache clean` cannot see the litter and `cache usage`
+            # counts its bytes without counting it as an item. Before staging existed
+            # the abandoned partial sat at `entry/` and both swept it; this restores
+            # "the next fetch of the same input repairs it".
+            for old_staging in entry.parent.glob(f".staging-{entry.name}-*"):
+                shutil.rmtree(old_staging, ignore_errors=True)
             if not done.exists():            # another process published while we waited
                 staging = entry.parent / f".staging-{entry.name}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
                 try:
                     staging.mkdir(parents=True)
                     if progress:
-                        progress(f"fetching {ident if kind == 'http' else f'{kind}:{ident}'}")
+                        progress(f"fetching {what}")
                     fetch_recording_origin(src, ident, staging, credentials)
                     (staging / ".done").write_text(f"{kind}:{ident}\n", encoding="utf-8")
                     shutil.rmtree(entry, ignore_errors=True)     # a partial fetch: start over
@@ -1543,7 +1557,7 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
                 except BaseException:
                     shutil.rmtree(staging, ignore_errors=True)
                     raise
-    content = entry / "series"
-    if not content.is_dir():
-        content = entry                      # a source that wrote directly under the entry
-    return sole_file(content) or content
+    got = entry / "series"
+    if not got.is_dir():
+        got = entry                          # a source that wrote directly under the entry
+    return sole_file(got) or got

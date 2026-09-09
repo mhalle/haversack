@@ -405,6 +405,18 @@ def basename(member: str) -> str:
     return str(member).replace("\\", "/").rsplit("/", 1)[-1]
 
 
+def _fs_equivalent(name: str) -> str:
+    """The form two names share when a filesystem considers them the same file.
+
+    Case folding and NFC: APFS (this project's default) folds both, exFAT and
+    FAT32 fold case. Deliberately conservative - treating two distinct names as
+    colliding costs an index prefix, treating one collision as distinct costs a
+    slice of a series.
+    """
+    import unicodedata
+    return unicodedata.normalize("NFC", name).casefold()
+
+
 def flatten_names(members, *, always_index: bool = False) -> list[str]:
     """Destination basenames for ``members`` being flattened into one directory.
 
@@ -423,9 +435,18 @@ def flatten_names(members, *, always_index: bool = False) -> list[str]:
     object under a prefix should land as ``scan.nii.gz`` and not ``0_scan.nii.gz``.
     ``always_index=True`` opts out of that for callers whose names are pure
     staging (the content store renames by digest immediately afterwards).
+
+    Collision is decided by what the FILESYSTEM will treat as one name, not by
+    string equality. This compared strings until 2026-09-08 and so still lost
+    files on the platform it is developed on: APFS folds case AND unicode
+    normalization, and a cache root on FAT32 or exFAT - a supported way to run
+    this - folds case too, so ``case/a/T1.nii`` and ``case/b/t1.nii`` were left
+    un-indexed and opened at one path by two of thirty-two threads. The survivor
+    was an interleaving of both.
     """
     names = [basename(m) for m in members]
-    if always_index or len(set(names)) != len(names):
+    folded = [_fs_equivalent(n) for n in names]
+    if always_index or len(set(folded)) != len(folded):
         return [f"{i}_{n}" for i, n in enumerate(names)]
     return names
 

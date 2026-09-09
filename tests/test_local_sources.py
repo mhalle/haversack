@@ -6,6 +6,7 @@ server carries. Fakes and a loopback HTTP server - nothing leaves the machine.
 import http.server
 import io
 import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -160,7 +161,24 @@ class _Saved:
         return {}
 
 
-def test_two_processes_materializing_one_input_do_not_corrupt_each_other(tmp_path):
+def _probe(*args, cache=None):
+    import subprocess
+    import sys
+    env = {**__import__("os").environ,
+           "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
+    probe = str(Path(__file__).resolve().parent / "slow_source_probe.py")
+    return subprocess.Popen([sys.executable, probe, *args],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, env=env)
+
+
+def _sole_entry(cache):
+    kinds = [p for p in (cache / "slow").iterdir() if not p.name.startswith(".")]
+    assert len(kinds) == 1, [p.name for p in kinds]
+    return kinds[0]
+
+
+def test_two_processes_materializing_one_input_EXCLUDE_EACH_OTHER(tmp_path):
     """Two `haversack` commands on one input is ordinary - the input cache is a single
     shared user-level root - and it used to be destructive.
 
@@ -168,41 +186,87 @@ def test_two_processes_materializing_one_input_do_not_corrupt_each_other(tmp_pat
     caller deleted the first's in-progress tree and fetched into a directory the first
     still believed it owned. Both could then write `.done` over contents assembled from
     two fetches, and `.done` records the identifier rather than a size or a digest, so
-    nothing downstream could tell. Every slice here carries its writer's marker, so a
-    directory holding both markers is exactly that mixed entry.
+    nothing downstream could tell.
 
-    Real subprocesses, not threads: the claim is an advisory FILE lock, and threads in
-    one process share it by definition and would prove nothing.
+    What is asserted is MUTUAL EXCLUSION, not an outcome. An earlier version compared
+    the published bytes and caught only the interleavings that happened to corrupt -
+    a review measured that at 4 runs in 10, and it could not tell the shipped protocol
+    from one with no lock at all. The two fetches' intervals are recorded by the source
+    itself, and they must not overlap; with the lock removed the second fetch starts
+    while the first is still writing, every time, because the hand-off below guarantees
+    it. Real subprocesses, not threads: the claim is an advisory FILE lock, which
+    threads in one process share by definition.
     """
-    import subprocess
-    import sys
-
-    cache = tmp_path / "cache"
-    env = {**__import__("os").environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
-    probe = str(Path(__file__).resolve().parent / "slow_source_probe.py")
-    started = tmp_path / "A-has-begun"
+    cache, started, events = tmp_path / "cache", tmp_path / "A-began", tmp_path / "events"
     procs = [
-        subprocess.Popen([sys.executable, probe, "A", str(cache), "case1",
-                          "--signal", str(started)],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env),
-        # B enters only once A is demonstrably mid-fetch, which is the window that
-        # used to destroy A's tree; leaving it to start-up jitter reproduced nothing
-        subprocess.Popen([sys.executable, probe, "B", str(cache), "case1",
-                          "--await", str(started)],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env),
+        _probe("A", str(cache), "case1", "--signal", str(started), "--events", str(events)),
+        # B enters only once A is demonstrably mid-fetch: the window that used to
+        # destroy A's tree. Leaving it to start-up jitter reproduced nothing.
+        _probe("B", str(cache), "case1", "--await", str(started), "--events", str(events)),
     ]
     outs = [p.communicate(timeout=180) for p in procs]
-    for (out, err), m in zip(outs, "AB"):
-        assert procs["AB".index(m)].returncode == 0, f"writer {m} failed:\n{err}"
+    for i, (out, err) in enumerate(outs):
+        assert procs[i].returncode == 0, f"writer {'AB'[i]} failed:\n{err}"
 
-    entry = cache / "slow" / sorted(p.name for p in (cache / "slow").iterdir()
-                                    if not p.name.startswith("."))[0]
-    series = entry / "series"
-    slices = sorted(series.glob("*.dcm"))
+    log = [ln.split() for ln in events.read_text().splitlines() if ln.strip()]
+    spans = {}
+    for marker, event, when in log:
+        spans.setdefault(marker, {})[event] = float(when)
+    assert spans, "the probes recorded no fetch at all"
+    for marker, span in spans.items():
+        assert "fetch-end" in span, f"writer {marker} started a fetch it never finished"
+    ordered = sorted(spans.values(), key=lambda s: s["fetch-start"])
+    for earlier, later in zip(ordered, ordered[1:]):
+        assert later["fetch-start"] >= earlier["fetch-end"], (
+            "two fetches of one input overlapped in time: the second began "
+            f"{earlier['fetch-end'] - later['fetch-start']:.2f}s before the first ended, "
+            "so nothing was excluding them")
+
+    entry = _sole_entry(cache)
+    slices = sorted((entry / "series").glob("*.dcm"))
     markers = {p.read_text(encoding="utf-8") for p in slices}
     assert len(slices) == 6, f"the published entry is short: {[p.name for p in slices]}"
     assert len(markers) == 1, f"the published entry mixes two fetches: {markers}"
     assert (entry / ".done").exists()
-    # both callers returned the SAME published directory, and neither left staging behind
-    assert {out.strip() for out, _ in outs} == {str(series)}
+    assert {out.strip() for out, _ in outs} == {str(entry / "series")}
     assert not [p for p in (cache / "slow").iterdir() if p.name.startswith(".staging")]
+
+
+def test_a_writer_killed_mid_fetch_publishes_nothing_and_leaves_no_litter(tmp_path):
+    """The half the exclusion test cannot see: what the staging directory is FOR.
+
+    Under a lock alone, a second caller simply waits and then finds `.done`, so a
+    protocol with no staging passes that test - which is what a review demonstrated.
+    Staging earns its place when a writer dies: nothing half-fetched may be published,
+    and what it abandoned must not become permanent invisible litter. It briefly was:
+    `.staging-*` is a dotfile, and `cache_admin._entries` skips dotfiles, so `cache
+    clean` could not see it while `cache usage` counted its bytes.
+    """
+    import signal
+
+    cache, started = tmp_path / "cache", tmp_path / "A-began"
+    doomed = _probe("A", str(cache), "case1", "--signal", str(started))
+    deadline = time.monotonic() + 60
+    while not started.exists():
+        assert time.monotonic() < deadline, "the writer never began fetching"
+        assert doomed.poll() is None, "the writer exited before it began"
+        time.sleep(0.01)
+    doomed.send_signal(signal.SIGKILL)          # no teardown runs: the harshest case
+    doomed.communicate(timeout=60)
+
+    published = [p for p in (cache / "slow").iterdir() if not p.name.startswith(".")]
+    assert published == [], (
+        f"a killed writer published something: {[p.name for p in published]} - the entry "
+        "is only ever created by the final rename, so nothing half-fetched can appear "
+        "under a name a reader looks up")
+    abandoned = [p for p in (cache / "slow").iterdir() if p.name.startswith(".staging")]
+    assert abandoned, "expected the killed writer's staging to be left behind"
+
+    ok = _probe("B", str(cache), "case1")
+    out, err = ok.communicate(timeout=180)
+    assert ok.returncode == 0, err
+    entry = _sole_entry(cache)
+    assert (entry / ".done").exists()
+    assert {p.read_text(encoding="utf-8") for p in (entry / "series").glob("*.dcm")} == {"B"}
+    left = [p.name for p in (cache / "slow").iterdir() if p.name.startswith(".staging")]
+    assert left == [], f"the dead writer's staging survived a later fetch: {left}"

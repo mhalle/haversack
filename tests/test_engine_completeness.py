@@ -212,34 +212,53 @@ class EveryGitSourceIsPinnedToSomethingReal(unittest.TestCase):
             return git("fetch", "--depth", "1", "--quiet", url, sha, cwd=scratch).returncode == 0
 
         sources = _pyproject()["tool"]["uv"]["sources"]
-        problems = []
+        problems, unchecked = [], []
         with tempfile.TemporaryDirectory() as scratch:
-            if git("init", "--quiet", scratch).returncode != 0:
-                self.skipTest("cannot create a scratch git repository")
+            try:
+                if git("init", "--quiet", scratch).returncode != 0:
+                    self.skipTest("cannot create a scratch git repository")
+            except OSError as exc:               # no git on PATH: skip, never error
+                self.skipTest(f"git is not runnable here: {exc}")
             for name, spec in sources.items():
                 url, tag, rev = spec.get("git"), spec.get("tag"), spec.get("rev")
                 if not url or not (tag or rev):
                     continue
+                # A source that cannot be reached is recorded and the loop CONTINUES.
+                # These were `self.skipTest`, which aborts the whole test and discards
+                # every problem found so far - so one deleted, renamed, private or
+                # auth-gated repository turned the entire pin check into a no-op, and a
+                # renamed upstream is one of the things a pin check is for. Reported at
+                # the end, and only when nothing worse was found.
                 try:
                     if tag:
                         out = git("ls-remote", url, tag, f"{tag}^{{}}")
                         if out.returncode != 0:
-                            self.skipTest(f"cannot reach {url}: {out.stderr.strip()[:120]}")
-                        if not out.stdout.strip():
+                            unchecked.append(f"{name}: cannot reach {url} "
+                                             f"({out.stderr.strip()[:80]})")
+                        elif not out.stdout.strip():
                             problems.append(f"{name}: tag {tag!r} is not published by {url}")
-                        continue
-                    # the positive control: this repository's own HEAD, asked for by hash
+                    if not rev:
+                        continue                 # a tag-only pin: checked above
+                    # a pin carrying BOTH is checked twice; the rev is the one that
+                    # actually resolves, and short-circuiting on the tag skipped it
                     head = git("ls-remote", url, "HEAD")
                     if head.returncode != 0 or not head.stdout.strip():
-                        self.skipTest(f"cannot reach {url}: {head.stderr.strip()[:120]}")
-                    head_sha = head.stdout.split()[0]
-                    if not serves_by_hash(scratch, url, head_sha):
-                        self.skipTest(f"{url} serves no object by hash; {rev!r} unverifiable here")
+                        unchecked.append(f"{name}: cannot reach {url} "
+                                         f"({head.stderr.strip()[:80]})")
+                        continue
+                    # the positive control: this repository's own HEAD, asked for by hash.
+                    # A server that serves nothing by hash would fail a good pin the same
+                    # way it fails a bad one.
+                    if not serves_by_hash(scratch, url, head.stdout.split()[0]):
+                        unchecked.append(f"{name}: {url} serves no object by hash")
+                        continue
                     if not serves_by_hash(scratch, url, rev):
                         problems.append(f"{name}: rev {rev!r} is not a commit {url} will serve")
                 except (OSError, subprocess.TimeoutExpired) as exc:
-                    self.skipTest(f"cannot reach {url}: {exc}")
+                    unchecked.append(f"{name}: cannot reach {url} ({exc})")
         self.assertEqual([], problems, "\n  ".join(problems))
+        if unchecked:
+            self.skipTest("could not verify: " + "; ".join(unchecked))
 
 
 class EveryEngineIsCreditedAndReachable(unittest.TestCase):
@@ -379,19 +398,46 @@ class EveryEngineCacheIsVisibleToCacheAdmin(unittest.TestCase):
 
         from haversack.cache_admin import stores
         from haversack.engines import fastsurfer
-        moved = "review-checkpoints-probe"
+
+        declaring = sorted(n for n, e in R.ENGINES.items() if e.cache_store)
+        self.assertEqual(["fastsurfer"], declaring,
+                         "this test moves fastsurfer's store; the registry no longer says "
+                         f"fastsurfer is the engine that declares one ({declaring})")
+
+        # BOTH halves of `cache_store` are moved. Pinning the environment variable to its
+        # real name made it a third hand-written copy of the fact and left the override
+        # half untested, so restating `HAVERSACK_FASTSURFER_CHECKPOINTS` inside the engine
+        # passed - and with that variable set, which is exactly what `modal_app._fs_image`
+        # does, the engine downloaded to one directory while `cache clean` swept another.
+        moved_sub, moved_env = "review-checkpoints-probe", "HAVERSACK_REVIEW_CKPT_PROBE"
+        override = "/tmp/haversack-review-override-probe"
         with mock.patch.dict(R.ENGINES, {
                 "fastsurfer": replace(R.ENGINES["fastsurfer"],
-                                      cache_store=(moved, "HAVERSACK_FASTSURFER_CHECKPOINTS"))}):
-            with mock.patch.dict("os.environ", {}, clear=False):
-                os.environ.pop("HAVERSACK_FASTSURFER_CHECKPOINTS", None)
-                engine_says = fastsurfer.checkpoint_dir()
-                admin_says = {s["name"]: str(s["path"]) for s in stores()}["checkpoints"]
-        self.assertEqual(str(engine_says), admin_says,
-                         "the engine and cache admin disagree about where checkpoints live")
-        self.assertTrue(str(engine_says).endswith(moved),
-                        f"the engine ignored the registry and answered {engine_says} - it is "
-                        "restating the subdirectory instead of reading `Engine.cache_store`")
+                                      cache_store=(moved_sub, moved_env))}):
+            for label, env in (("registry default", None), ("registry override", override)):
+                with self.subTest(case=label):
+                    with mock.patch.dict("os.environ", {}, clear=False):
+                        # the OLD variable stays set throughout: an engine still reading it
+                        # must be caught, not accommodated
+                        os.environ["HAVERSACK_FASTSURFER_CHECKPOINTS"] = "/tmp/the-old-name"
+                        os.environ.pop(moved_env, None)
+                        if env:
+                            os.environ[moved_env] = env
+                        engine_says = str(fastsurfer.checkpoint_dir())
+                        admin_says = {s["name"]: str(s["path"]) for s in stores()}["checkpoints"]
+                    self.assertEqual(engine_says, admin_says,
+                                     "the engine and cache admin disagree about where "
+                                     "checkpoints live")
+                    self.assertNotIn("the-old-name", engine_says,
+                                     "the engine is still reading the environment variable it "
+                                     "used to restate, not the one the registry names")
+                    if env:
+                        self.assertEqual(env, engine_says,
+                                         "the engine ignored the registry's override variable")
+                    else:
+                        self.assertTrue(engine_says.endswith(moved_sub),
+                                        f"the engine answered {engine_says} - it is restating "
+                                        "the subdirectory instead of reading `cache_store`")
 
     def test_only_one_engine_declares_a_cache_store(self):
         """`cache_admin.clean` addresses ONE path per category, and `checkpoints` is a
@@ -595,12 +641,20 @@ class TheVersionEndpointDerivesItsPackageList(unittest.TestCase):
 
         from test_serve import make
 
-        # an engine that is on but whose package is certainly not importable here
+        # EVERY optional engine, each with its own uninstallable package name. Testing
+        # one - whichever came first in registry order - let the branch be narrowed to
+        # that engine (`elif remote_only[name] == "fastsurfer" and ...`) with the guard
+        # still green and the other three back to vanishing silently; and it let the note
+        # hardcode that engine's name, so the report could tell an operator that fastsurfer
+        # holds monai's package. Distinct names per engine make both impossible.
         from dataclasses import replace
-        eng = next(iter(_optional_engines()))
-        with mock.patch.dict(R.ENGINES, {
-                eng: replace(R.ENGINES[eng], dist=("a-package-nobody-installed",))}):
-            with mock.patch.dict("os.environ", {R.ENGINES[eng].enabled_env: "1"}):
+        optional = _optional_engines()
+        self.assertGreater(len(optional), 1, "only one optional engine: this cannot bite")
+        fake = {n: f"a-package-nobody-installed-{n}" for n in optional}
+        patched = {n: replace(R.ENGINES[n], dist=(fake[n],)) for n in optional}
+        with mock.patch.dict(R.ENGINES, patched):
+            with mock.patch.dict("os.environ",
+                                 {R.ENGINES[n].enabled_env: "1" for n in optional}):
                 with tempfile.TemporaryDirectory() as td:
                     _, ex, client = make(Path(td))
                     try:
@@ -609,12 +663,46 @@ class TheVersionEndpointDerivesItsPackageList(unittest.TestCase):
                         client.close()
                         getattr(ex, "shutdown", lambda: None)()
         pkgs = body.get("packages") or {}
-        self.assertIn("a-package-nobody-installed", pkgs,
-                      f"an enabled engine's distribution is missing from /v1/version "
-                      f"entirely: {sorted(pkgs)} - report it as unknown rather than dropping it")
-        self.assertIsNone(pkgs["a-package-nobody-installed"]["version"])
-        self.assertIn(eng, pkgs["a-package-nobody-installed"]["note"],
-                      "the note must name the engine whose environment holds it")
+        for eng, name in sorted(fake.items()):
+            with self.subTest(engine=eng):
+                self.assertIn(name, pkgs,
+                              f"{eng} is enabled and its distribution is missing from "
+                              f"/v1/version entirely: {sorted(pkgs)} - report it as unknown "
+                              "rather than dropping it")
+                self.assertIsNone(pkgs[name]["version"])
+                self.assertIn(eng, pkgs[name]["note"],
+                              f"the note for {name} does not name {eng}, the engine whose "
+                              f"environment holds it: {pkgs[name]['note']!r}")
+
+    def test_a_DISABLED_engine_is_not_padded_into_the_report(self):
+        """The inverse of the rule above: reporting an unknown regardless of enablement
+        satisfies it just as well, and fills the report with engines nobody asked for."""
+        pytest.importorskip("fastapi")
+        import tempfile
+
+        from dataclasses import replace
+
+        from test_serve import make
+
+        optional = _optional_engines()
+        fake = {n: f"a-package-nobody-installed-{n}" for n in optional}
+        patched = {n: replace(R.ENGINES[n], dist=(fake[n],)) for n in optional}
+        with mock.patch.dict(R.ENGINES, patched):
+            with mock.patch.dict("os.environ",
+                                 {R.ENGINES[n].enabled_env: "0" for n in optional}):
+                with tempfile.TemporaryDirectory() as td:
+                    _, ex, client = make(Path(td))
+                    try:
+                        body = client.get("/v1/version").json()
+                    finally:
+                        client.close()
+                        getattr(ex, "shutdown", lambda: None)()
+        pkgs = body.get("packages") or {}
+        padded = sorted(n for n in fake.values() if n in pkgs)
+        self.assertEqual([], padded,
+                         f"/v1/version lists {padded} for engines this deployment has "
+                         "switched off - an unknown is only worth saying about an engine "
+                         "that is meant to be running")
 
 
 if __name__ == "__main__":

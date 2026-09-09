@@ -108,24 +108,43 @@ def test_the_guide_documents_every_engine_enable_flag():
                            "the other engine flags are listed, or an operator cannot enable it")
 
 
-def test_the_readme_names_every_engine():
-    """The README hand-lists the engine families in several places, and it is where a
-    user decides whether this runs what they have.
+def test_the_readme_DESCRIBES_every_engine_where_it_describes_engines():
+    """The README is where a user decides whether this runs what they have.
 
-    Same shape as the `--help` sentence that had gone two engines stale and the
-    `/v1/version` package list that had missed voxtell and monai since each was added:
-    one fact written in prose, in more than one place, none of it derived. Prose is
-    right here - the families are a mix of catalogs and engines - so the check is only
-    that no engine is missing from it, which is what actually goes wrong.
+    Scoped to the section that describes the engines, and matched on word boundaries,
+    because the first version did neither and was hollow both ways. Deleting the whole
+    `## Engines` section - every install command and both worked examples - left it
+    green, since an extras list, a cache-path table cell and a deviations example still
+    contained the words. And `monai` was already satisfied vacuously by `msd-for-monai`,
+    the DATA SOURCE for the Medical Segmentation Decathlon mirror, which has nothing to
+    do with the MONAI engine: one of the four engines it covered was not covered at all.
     """
     import pathlib
+    import re
+
+    import pytest
 
     from haversack.engines.registry import ENGINES, NNUNETV2
-    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md")
+    readme = pathlib.Path(__file__).resolve().parent.parent / "README.md"
     if not readme.exists():
-        import pytest
         pytest.skip("running against an installed copy, not the repository")
-    text = readme.read_text(encoding="utf-8").lower()
-    missing = [n for n in ENGINES if n != NNUNETV2 and n not in text]
-    assert missing == [], (f"the README never mentions {missing} - add them where the other "
-                           "engines are described, or nobody discovers the engine exists")
+    text = readme.read_text(encoding="utf-8")
+
+    heads = [(m.start(), m.group(0)) for m in re.finditer(r"^## .*$", text, re.M)]
+    engine_heads = [i for i, (_, h) in enumerate(heads) if "engine" in h.lower()]
+    assert engine_heads, ("README.md has no `## ...Engines...` section - that section is "
+                          "where the engines are described and this guard reads it")
+    i = engine_heads[0]
+    start = heads[i][0]
+    end = heads[i + 1][0] if i + 1 < len(heads) else len(text)
+    section = text[start:end]
+    assert len(section.split()) > 100, (
+        f"the engines section is {len(section.split())} words - it no longer describes "
+        "anything, whatever words survive elsewhere in the file")
+
+    missing = [n for n in ENGINES if n != NNUNETV2
+               and not re.search(rf"(?<![-\w]){re.escape(n)}(?![-\w])", section, re.I)]
+    assert missing == [], (
+        f"the engines section of README.md never names {missing} - add them where the "
+        "other engines are described. A mention elsewhere in the file does not count, "
+        "and neither does one inside a longer word: `msd-for-monai` is a data source.")

@@ -686,6 +686,40 @@ class TestOneFlatteningRule:
         # and indexing is all-or-nothing, so no synthesized name can equal a kept one
         assert all("_" in n for n in names), names
 
+    def test_names_that_collide_only_ON_DISK_are_indexed_too(self):
+        """String equality is not the question; what the FILESYSTEM merges is.
+
+        APFS - the default on the machine this is developed on - folds case AND unicode
+        normalization, and a cache root on exFAT or FAT32, which the notes record as a
+        supported way to run this, folds case. So `case/a/T1.nii` and `case/b/t1.nii`
+        were left un-indexed and opened at one path by two of thirty-two threads, and
+        the survivor was an interleaving of both. A review reproduced it here with the
+        eight case spellings of one name collapsing to a single 4 MiB file holding two
+        objects' bytes (2026-09-08).
+        """
+        import unicodedata
+
+        from haversack.content import flatten_names
+        for label, members in (
+                ("case", ["case/a/T1.nii", "case/b/t1.nii"]),
+                ("normalization", ["a/" + unicodedata.normalize("NFC", "café.dcm"),
+                                   "b/" + unicodedata.normalize("NFD", "café.dcm")]),
+        ):
+            names = flatten_names(members)
+            assert len(names) == 2, (label, names)
+            assert all("_" in n for n in names), (
+                f"{label}: {names} differ as strings but name one file on this "
+                "filesystem, so both must be indexed")
+
+    def test_the_content_store_indexes_unconditionally(self):
+        """`extract_zip` opts out of the leave-nice-names rule entirely, because its
+        output is staging that the store renames by digest immediately afterwards. It
+        is also what makes that call site safe on a case-folding filesystem, so it is
+        worth pinning rather than leaving as a happy accident."""
+        from haversack.content import flatten_names
+        assert flatten_names(["a/one.dcm", "b/two.dcm"], always_index=True) == \
+            ["0_one.dcm", "1_two.dcm"]
+
     def test_names_that_do_not_collide_are_left_alone(self):
         """A one-object prefix fetch should land as `scan.nii.gz`, not `0_scan.nii.gz`."""
         from haversack.content import flatten_names
@@ -760,30 +794,16 @@ class TestTheArchiveCacheIsKeyedOnTheCredential:
     otherwise repeat it a third time.
     """
 
-    def test_every_archive_cache_in_the_module_keys_on_the_credential(self):
-        """Read as source, so a new `_zip` cannot quietly opt out."""
-        import ast
-        import inspect
-
-        from haversack import sources as S
-        tree = ast.parse(inspect.getsource(S))
-        zips = [n for n in ast.walk(tree)
-                if isinstance(n, ast.FunctionDef) and n.name == "_zip"]
-        assert len(zips) >= 2, "no _zip implementations found - has this been renamed?"
-        caching = []
-        for fn in zips:
-            body = ast.unparse(fn)
-            if "_archives" not in body:
-                # an override that resolves and delegates (HttpSource) keeps no cache
-                assert "super()._zip" in body, (
-                    f"the _zip at line {fn.lineno} neither caches in `_archives` nor "
-                    "delegates to super() - it has invented a third archive cache")
-                continue
-            caching.append(fn.lineno)
-            assert "ck = (outer, credentials)" in body and "cache.get(ck)" in body, (
-                f"the _zip at line {fn.lineno} does not key its archive cache on the "
-                "credential; a cache hit skips the access gate")
-        assert len(caching) >= 2, f"expected both archive caches, found {caching}"
+    # There was a third test here that read the module's source and required each `_zip`
+    # to contain the literals `ck = (outer, credentials)` and `cache.get(ck)`. It pinned a
+    # VARIABLE NAME, not a property, and a review broke it both ways in one sitting: a
+    # behaviourally identical `_zip` spelled with `key` instead of `ck` FAILED it, while a
+    # `_zip` that kept both literals and then added a scan over `cache.items()` matching on
+    # `k[0] == outer` - the replay defect, restored - PASSED. Only the behavioural tests
+    # caught that one. Brittleness that also gives false confidence is worse than no test,
+    # so it is gone; the two behavioural tests below and `test_archive_cache_isolates_
+    # credentials` cover both classes that keep an archive cache. A THIRD such class would
+    # need its own, which is the cost of not having a rule that can be checked mechanically.
 
     def test_a_cached_public_archive_does_not_admit_a_credentialed_request(
             self, fake_cloud, tmp_path):
