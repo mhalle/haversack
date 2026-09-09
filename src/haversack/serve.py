@@ -959,15 +959,36 @@ class ResultCache:
         self.root.mkdir(parents=True, exist_ok=True)
         self.keep = int(keep)
 
-    #: How many superseded generations survive a replacement. One is enough and is not
-    #: arbitrary: a reader resolves `current` and then opens files under the directory it
-    #: named, so the only generation it can still be holding is the one that was current
-    #: an instant ago. Keeping it means that reader finishes; keeping more would only
-    #: hold disk.
-    KEEP_GENERATIONS = 1
+    #: How long a superseded generation survives after the last time someone RESOLVED it.
+    #: Counting generations was the wrong rule and this replaces it: "keep the current one
+    #: and its predecessor" is safe only while publications are rarer than reads, and two
+    #: publications in a row deleted a generation a reader had selected and not yet opened
+    #: (2026-09-09). Resolving a generation touches it, so the window is measured from the
+    #: reader rather than from the writer, and it is visible to another process or
+    #: container because it is an mtime on disk rather than a dict in memory.
+    #:
+    #: Generous, because the cost of being wrong is asymmetric: a stale directory holds
+    #: disk until the next publication, a deleted one fails a request that was already
+    #: served.
+    GENERATION_GRACE_S = 900
+    #: A ceiling for the pathological case - a key republished faster than the grace
+    #: window while every generation keeps being resolved. The current generation is
+    #: never a candidate.
+    MAX_GENERATIONS = 16
 
     def _generation_dir(self, key: str, gen: str) -> Path:
         return self.root / key / f"g-{gen}"
+
+    def _staging_dir(self, key: str, gen: str) -> Path:
+        """Where a generation is ASSEMBLED, under a name pruning does not recognize.
+
+        A writer used to build straight into `g-<gen>`, where a concurrent publication of
+        the same key saw an old generation and deleted it mid-assembly - the writer then
+        failed on its own labels file. Staging is renamed into place only once complete,
+        so an unfinished generation is never a pruning candidate and a published one is
+        never unfinished.
+        """
+        return self.root / key / f"s-{gen}"
 
     def _resolve(self, key: str) -> Path | None:
         """The directory holding the generation that is current NOW, or None.
@@ -989,7 +1010,14 @@ class ResultCache:
         except OSError:
             return d if (d / RESULT_NAME).exists() else None      # legacy flat entry
         g = self._generation_dir(key, gen)
-        return g if (g / RESULT_NAME).exists() else None
+        if not (g / RESULT_NAME).exists():
+            return None
+        try:
+            import os as _os
+            _os.utime(g)                       # the reader's lease: see GENERATION_GRACE_S
+        except OSError:
+            pass
+        return g
 
     def list(self, limit: int = 500) -> list:
         """Completed segmentations, newest first: the readable meta of every
@@ -1055,7 +1083,7 @@ class ResultCache:
         import shutil
         d = self.root / key
         gen = uuid.uuid4().hex
-        g = self._generation_dir(key, gen)
+        g = self._staging_dir(key, gen)        # assembled here, renamed into place below
         g.mkdir(parents=True, exist_ok=True)
 
         def _place(name: str, write) -> None:
@@ -1072,21 +1100,29 @@ class ResultCache:
                 _place(name, lambda t, s=src: shutil.copy2(s, t))
         _place(RESULT_NAME, lambda t: shutil.copy2(labels_path, t))
 
-        # the publication itself: one rename, and the entry is this generation
+        # complete: the staging directory becomes a generation, and then one rename of
+        # the pointer makes it the entry. Nothing between those two is observable.
+        os.replace(g, self._generation_dir(key, gen))
         tmp_ptr = d / f"{CURRENT_NAME}.{uuid.uuid4().hex[:8]}.tmp"
         tmp_ptr.write_text(gen, encoding="utf-8")
         os.replace(tmp_ptr, d / CURRENT_NAME)
-
-        # a flat entry from before generations existed is now superseded
-        for name in (RESULT_NAME, "result.json", "meta.json", GENERATION_NAME, *ARTIFACT_NAMES):
-            (d / name).unlink(missing_ok=True)
         self._prune_generations(key, keep_gen=gen)
         self.evict()
         return gen
 
     def _prune_generations(self, key: str, *, keep_gen: str) -> None:
-        """Drop generations no reader can still be holding - see KEEP_GENERATIONS."""
+        """Drop what no reader can still be holding - see :data:`GENERATION_GRACE_S`.
+
+        Never the current generation, never a staging directory (an unfinished writer
+        owns that), and never one resolved within the grace window. Older flat files
+        from before generations existed age out on the same rule, because a reader can
+        be holding one of those paths too.
+        """
         import shutil
+        import time as _time
+
+        d = self.root / key
+        cutoff = _time.time() - self.GENERATION_GRACE_S
 
         def _mtime(p):
             try:
@@ -1095,15 +1131,25 @@ class ResultCache:
                 return 0.0
 
         try:
-            gens = sorted((p for p in (self.root / key).iterdir()
+            gens = sorted((p for p in d.iterdir()
                            if p.is_dir() and p.name.startswith("g-")), key=_mtime)
         except OSError:
             return
-        keep = {self._generation_dir(key, keep_gen)}
-        for p in gens[-(self.KEEP_GENERATIONS + 1):]:
-            keep.add(p)
-        for p in gens:
-            if p not in keep:
+        current = self._generation_dir(key, keep_gen)
+        stale = [p for p in gens if p != current and _mtime(p) < cutoff]
+        # the ceiling: oldest first, and only ever generations nobody is on
+        surplus = [p for p in gens if p != current and p not in stale]
+        overflow = surplus[:max(0, len(gens) - self.MAX_GENERATIONS)]
+        for p in stale + overflow:
+            shutil.rmtree(p, ignore_errors=True)
+        # a flat entry from before generations existed: superseded the moment `current`
+        # names a generation, but a reader may still hold its path
+        if (d / RESULT_NAME).exists() and _mtime(d / RESULT_NAME) < cutoff:
+            for name in (RESULT_NAME, "result.json", "meta.json",
+                         GENERATION_NAME, *ARTIFACT_NAMES):
+                (d / name).unlink(missing_ok=True)
+        for p in d.glob("s-*"):                # a writer that died mid-assembly
+            if p.is_dir() and _mtime(p) < cutoff:
                 shutil.rmtree(p, ignore_errors=True)
 
     def add_artifact(self, key: str, name: str, src_path, generation=None) -> bool:

@@ -540,3 +540,50 @@ def test_provenance_reads_the_entry_THIS_BUILD_would_have_fetched(tmp_path):
     assert rec["content"]["digest"] == "sha256:current", (
         "provenance was read from the pre-epoch entry, which is not the one that would "
         "be segmented")
+
+
+def test_an_unlocked_publish_CANNOT_REMOVE_a_completed_winner(tmp_path, monkeypatch):
+    """The decision "no completed download exists" is a statement about the past.
+
+    Unlocked, acting on it later can delete an entry that finished in between: caller A
+    checks, B publishes a complete download and returns its path, A deletes B's entry and
+    installs its own. Publishing by `os.rename` onto a name nothing holds is what makes
+    that impossible - the rename fails rather than replacing a non-empty directory, so
+    whoever finished first keeps the entry.
+    """
+    from haversack import filelock
+
+    monkeypatch.setattr(filelock, "lock",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("no locking here")))
+
+    published = []
+
+    class Racing(sources.DataSource):
+        prefix, id_pattern, description = "slow", r"[a-z0-9]+", "test double"
+
+        def __init__(self, marker, before_publish=None):
+            self.marker, self.before_publish = marker, before_publish
+
+        def fetch(self, identifier, dest_dir, *, credentials=None):
+            d = Path(dest_dir) / "series"
+            d.mkdir()
+            (d / "0.dcm").write_text(self.marker, encoding="utf-8")
+            if self.before_publish:
+                self.before_publish()          # B finishes entirely, right here
+            return d
+
+    def b_publishes_now():
+        published.append(sources.materialize("slow:case1", cache_dir=tmp_path,
+                                             sources=[Racing("B")]))
+
+    # A decided there was no entry, then B completes one before A publishes
+    got_a = sources.materialize("slow:case1", cache_dir=tmp_path,
+                                sources=[Racing("A", before_publish=b_publishes_now)])
+    assert published, "B never published; this proves nothing"
+    winner = published[0]
+    assert winner.exists(), "the later caller deleted the completed entry"
+    assert winner.read_text(encoding="utf-8") == "B"
+    assert got_a.read_text(encoding="utf-8") == "B", (
+        "A installed its own entry over a completed winner instead of taking it")
+    assert not [p for p in (tmp_path / "slow").iterdir() if p.name.startswith(".staging")], \
+        "the losing caller left its staging behind"

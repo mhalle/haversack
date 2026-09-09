@@ -4341,12 +4341,19 @@ class TestArtifactsBelongToOneGeneration:
         assert (cache.get("k")[0].parent / "preview.png").read_bytes() == png.read_bytes()
 
     def test_an_artifact_worker_whose_generation_is_GONE_is_refused(self, tmp_path):
-        """Superseded far enough to be pruned, or the entry evicted: there is nowhere to
-        write, and nothing is recreated."""
+        """Superseded and then aged out: there is nowhere to write, and nothing is
+        recreated. Aged rather than counted - a generation now survives until nobody has
+        resolved it for `GENERATION_GRACE_S`, so backdating it is what "gone" means."""
+        import os
+
         cache = self._cache(tmp_path)
         mine = self._publish(cache, tmp_path, "old", artifacts=False)
-        for tag in ("second", "third"):        # push `mine` past KEEP_GENERATIONS
-            self._publish(cache, tmp_path, tag, artifacts=False)
+        old_dir = cache._generation_dir("k", mine)
+        long_ago = time.time() - cache.GENERATION_GRACE_S - 60
+        os.utime(old_dir, (long_ago, long_ago))
+        self._publish(cache, tmp_path, "new", artifacts=False)     # prunes on publication
+
+        assert not old_dir.exists(), "an unreferenced, aged-out generation was kept"
         png = tmp_path / "late.png"; png.write_bytes(b"stale")
         assert cache.add_artifact("k", "preview.png", png, generation=mine) is False
 
@@ -4364,17 +4371,20 @@ class TestArtifactsBelongToOneGeneration:
             key = next(j.cache_key for j in ex.jobs() if j.id == jid)
             entry = ex.cache.root / key
             # stand in for a previous generation's artifacts, whatever this build renders
+            served = ex.cache.get(key)[0].parent
             for n in SERVED_ARTIFACTS:
-                (entry / n).write_bytes(b"from the previous computation")
+                (served / n).write_bytes(b"from the previous computation")
             r2 = client.post("/v1/jobs", data={"task": "total_fast"},
                              files={"file": ("v.nii.gz", volume_bytes(), "application/gzip")},
                              headers={"Cache-Control": "no-cache"})
             wait_state(client, r2.json()["id"], ("done",))
             # the behaviour first, so this fails on what a client would SEE
+            now = ex.cache.get(key)[0].parent
             survivors = [n for n in SERVED_ARTIFACTS
-                         if (entry / n).exists()
-                         and (entry / n).read_bytes() == b"from the previous computation"]
+                         if (now / n).exists()
+                         and (now / n).read_bytes() == b"from the previous computation"]
             assert survivors == [], f"the recompute served the old {survivors}"
+            assert now != served, "the recompute did not publish a new generation"
             assert ex.cache.generation(key), "a published entry carries no generation"
         finally:
             ex.close()
@@ -4510,3 +4520,98 @@ class TestPublicationIsCoherentUnderConcurrency:
         assert len(seen) > 10, (
             f"the reader observed the entry only {len(seen)} times - too few for the "
             "absence of a mixed pair to mean anything")
+
+
+class TestReclamationRespectsLifetimes:
+    """Cleanup must know whether anyone is still using what it removes.
+
+    Publishing a generation at a time made a reader's view coherent; it did not make the
+    generation it selected survive. Retaining "the current one and its predecessor" is
+    safe only while publications are rarer than reads, and two in a row deleted a
+    generation a reader had already been handed (2026-09-09).
+    """
+
+    def _cache(self, tmp_path):
+        from haversack.serve import ResultCache
+        return ResultCache(tmp_path / "rc", keep=50)
+
+    def _publish(self, cache, tmp_path, tag):
+        labels = tmp_path / f"{tag}.seg.nrrd"
+        labels.write_bytes(tag.encode())
+        return cache.put("k", labels, {"who": tag}, {"who": tag})
+
+    def test_a_reader_keeps_the_result_it_was_HANDED(self, tmp_path):
+        """The gap is between resolving and opening: `get` returns a path, and the caller
+        streams it later. Two publications used to land in that gap."""
+        cache = self._cache(tmp_path)
+        self._publish(cache, tmp_path, "A")
+        labels, result = cache.get("k")               # the reader selects, and pauses
+        for tag in ("B", "C", "D", "E"):
+            self._publish(cache, tmp_path, tag)
+        assert labels.exists(), (
+            "the generation this reader selected was reclaimed before it opened a file")
+        assert labels.read_bytes() == b"A" and result == {"who": "A"}
+
+    def test_an_UNFINISHED_writer_keeps_its_directory(self, tmp_path):
+        """Two writers on one key. A generation under assembly is not a generation, and
+        pruning must not see it as an old one - it used to, and the writer then failed on
+        its own labels file."""
+        import shutil
+        import threading
+
+        cache = self._cache(tmp_path)
+        slow_labels = tmp_path / "slow.seg.nrrd"
+        slow_labels.write_bytes(b"slow")
+        released, failed = threading.Event(), []
+        real_copy = shutil.copy2
+
+        def slow_copy(src, dst, *a, **k):
+            if str(src).endswith("slow.seg.nrrd"):
+                released.wait(20)                     # paused mid-assembly
+            return real_copy(src, dst, *a, **k)
+
+        def writer():
+            try:
+                cache.put("k", slow_labels, {"who": "slow"}, {"who": "slow"})
+            except BaseException as e:                # noqa: BLE001 - re-asserted below
+                failed.append(f"{type(e).__name__}: {e}")
+
+        # squeezed against the ceiling as well as the clock: with MAX_GENERATIONS small,
+        # pruning reclaims recent generations too, and an unfinished one is only spared
+        # because it is not a generation yet. Grace alone does not cover this.
+        monkeypatch = None
+        original_max = cache.MAX_GENERATIONS
+        type(cache).MAX_GENERATIONS = 2
+        shutil.copy2 = slow_copy
+        try:
+            t = threading.Thread(target=writer)
+            t.start()
+            time.sleep(0.4)
+            for tag in ("B", "C", "D", "E"):          # publications overtake it
+                self._publish(cache, tmp_path, tag)
+            released.set()
+            t.join(30)
+        finally:
+            shutil.copy2 = real_copy
+            type(cache).MAX_GENERATIONS = original_max
+        assert failed == [], f"the writer lost its own working directory: {failed}"
+        assert cache.get("k")[0].read_bytes() in (b"slow", b"E")
+
+    def test_an_unreferenced_generation_IS_eventually_reclaimed(self, tmp_path):
+        """The other half: a grace window that never expires is a leak. Nothing is kept
+        because it is recent, only because someone recently resolved it."""
+        import os
+
+        cache = self._cache(tmp_path)
+        gone = self._publish(cache, tmp_path, "A")
+        old_dir = cache._generation_dir("k", gone)
+        # a FIXED age, not one derived from the constant under test: computing the
+        # backdate as `GENERATION_GRACE_S + 60` moves with the value it is checking, so a
+        # grace window of thirty-one years passed this test unchanged
+        month = time.time() - 30 * 24 * 3600
+        os.utime(old_dir, (month, month))
+        self._publish(cache, tmp_path, "B")
+        assert not old_dir.exists(), (
+            "a generation nobody has resolved for a month was kept - the grace window is "
+            "a lease, and a lease that never expires is a leak")
+        assert cache.get("k")[0].read_bytes() == b"B"

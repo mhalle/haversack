@@ -1592,14 +1592,29 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
                         progress(f"fetching {what}")
                     fetch_recording_origin(src, ident, staging, credentials)
                     (staging / ".done").write_text(f"{kind}:{ident}\n", encoding="utf-8")
-                    if done.exists():
-                        # published while we fetched - only reachable unlocked, and the
-                        # reason the swap below re-checks rather than trusting the
-                        # earlier one: theirs is complete, ours is redundant
-                        shutil.rmtree(staging, ignore_errors=True)
-                    else:
-                        shutil.rmtree(entry, ignore_errors=True)  # a partial fetch: start over
+                    if locked:
+                        # Exclusive: nobody else can be publishing this entry, so what is
+                        # there is ours to clear - a partial fetch, or the stale entry we
+                        # decided to replace.
+                        shutil.rmtree(entry, ignore_errors=True)
                         os.replace(staging, entry)
+                    else:
+                        # Unlocked, the decision that "no completed download exists" is
+                        # only ever a decision about the PAST, and acting on it later can
+                        # delete a winner that finished in between. So publish only into
+                        # a name nothing holds: `os.rename` onto a non-empty directory
+                        # fails rather than replacing it, which is the guarantee wanted -
+                        # whoever finished first keeps the entry and we discard our work.
+                        try:
+                            os.rename(staging, entry)
+                        except OSError:
+                            shutil.rmtree(staging, ignore_errors=True)
+                            if not done.exists():
+                                raise InputError(
+                                    f"{what}: another fetch of this input is in progress "
+                                    "and this filesystem provides no locking, so neither "
+                                    "can safely replace the other's entry; retry once it "
+                                    "has finished") from None
                 except BaseException:
                     shutil.rmtree(staging, ignore_errors=True)
                     raise
