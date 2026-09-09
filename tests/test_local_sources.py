@@ -162,10 +162,22 @@ class _Saved:
 
 
 def _probe(*args, cache=None):
+    """Run one materialize in a real subprocess.
+
+    The child must import haversack the way the PARENT does, and the parent's way
+    differs between environments: here it comes from the venv, in CI it comes from
+    `PYTHONPATH=src` with the project deliberately not installed (`uv run
+    --no-project`, so the hand-installed CPU torch survives). Replacing PYTHONPATH
+    with the repo root passed locally and failed CI with `No module named
+    'haversack'` - the inherited value is prepended to, never overwritten."""
+    import os
     import subprocess
     import sys
-    env = {**__import__("os").environ,
-           "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
+    root = Path(__file__).resolve().parent.parent
+    inherited = os.environ.get("PYTHONPATH", "")
+    env = {**os.environ,
+           "PYTHONPATH": os.pathsep.join(
+               [p for p in (str(root), str(root / "src"), inherited) if p])}
     probe = str(Path(__file__).resolve().parent / "slow_source_probe.py")
     return subprocess.Popen([sys.executable, probe, *args],
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
