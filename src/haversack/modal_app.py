@@ -1028,6 +1028,18 @@ class _EngineShim:
 
 
 
+# `modal deploy src/haversack/modal_app.py` loads this file BY PATH, so it lands in
+# sys.modules under a synthetic name and `haversack.modal_app` is left unclaimed. The
+# adapters below import from that canonical name, and without this line that import
+# executes this module a SECOND time as a different object - re-entering the composer
+# while each adapter is still half-initialized, and failing with the very error the
+# composer raises for a direct adapter import. The deploy failed exactly there, which
+# is the one thing no static check could have told us (2026-09-09).
+#
+# setdefault, not assignment: under a normal `import haversack.modal_app` the name is
+# already this module and claiming it again would be a no-op at best.
+sys.modules.setdefault("haversack.modal_app", sys.modules[__name__])
+
 #: engine name -> the worker class this deployment can run.
 #:
 #: Each optional engine's image and `@app.cls` worker live in

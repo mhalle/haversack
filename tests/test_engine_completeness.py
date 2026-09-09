@@ -33,6 +33,7 @@ import ast
 import json
 import os
 import re
+import sys
 import tomllib
 import unittest
 from pathlib import Path
@@ -565,6 +566,46 @@ class TheModalDeploymentIsWiredForEveryEngine(unittest.TestCase):
                         "modal_app no longer spreads `engine_env_vars()` into _RUNTIME_KNOBS, "
                         "so an engine's enable flag never reaches the container: the engine "
                         "is listed and described, then refuses every job inside the worker")
+
+    def test_the_composer_survives_being_loaded_BY_PATH(self):
+        """`modal deploy src/haversack/modal_app.py` imports this file by PATH.
+
+        That lands it in sys.modules under a synthetic name, leaving
+        `haversack.modal_app` unclaimed - so each adapter's import of the canonical name
+        executed the module a SECOND time, as a different object, re-entering the
+        composer while the adapter was still half-initialized. Every static check passed
+        and every ordinary import worked; the deploy failed on the first engine
+        (2026-09-09). This reproduces the deploy's import mode in-process, because
+        nothing else in the suite does.
+        """
+        pytest.importorskip("modal")
+        import importlib.util
+
+        with mock.patch.dict("os.environ",
+                             {e.enabled_env: "1" for e in R.ENGINES.values() if e.enabled_env}):
+            spec = importlib.util.spec_from_file_location("modal_app_by_path", MODAL_APP)
+            mod = importlib.util.module_from_spec(spec)
+            saved = {k: sys.modules[k] for k in list(sys.modules)
+                     if k == "haversack.modal_app" or k.startswith("haversack.engines.modal_")}
+            for k in saved:
+                del sys.modules[k]
+            sys.modules[spec.name] = mod
+            try:
+                spec.loader.exec_module(mod)
+                composed = set(mod.ENGINE_WORKERS)
+                same = sys.modules.get("haversack.modal_app") is mod
+            finally:
+                sys.modules.pop(spec.name, None)
+                for k in list(sys.modules):
+                    if k == "haversack.modal_app" or k.startswith("haversack.engines.modal_"):
+                        del sys.modules[k]
+                sys.modules.update(saved)
+        self.assertEqual(set(R.ENGINES), composed,
+                         f"loaded by path, the composer misses "
+                         f"{sorted(set(R.ENGINES) - composed)}")
+        self.assertTrue(same,
+                        "`haversack.modal_app` is a SECOND module object here - the "
+                        "adapters would import a fresh copy and re-enter the composer")
 
     def test_the_composed_deployment_covers_every_engine_when_modal_is_installed(self):
         """The one obligation that has to import: static text cannot prove that Modal
