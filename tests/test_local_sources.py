@@ -5,6 +5,7 @@ server carries. Fakes and a loopback HTTP server - nothing leaves the machine.
 """
 import http.server
 import io
+import json
 import threading
 import time
 import zipfile
@@ -282,3 +283,117 @@ def test_a_writer_killed_mid_fetch_publishes_nothing_and_leaves_no_litter(tmp_pa
     assert {p.read_text(encoding="utf-8") for p in (entry / "series").glob("*.dcm")} == {"B"}
     left = [p.name for p in (cache / "slow").iterdir() if p.name.startswith(".staging")]
     assert left == [], f"the dead writer's staging survived a later fetch: {left}"
+
+
+@pytest.fixture
+def mutable_www(tmp_path):
+    """A loopback server whose files can be REPLACED while a test runs, with Range
+    support (the stdlib handler answers 200 to a Range request, which the zip reader
+    rightly refuses)."""
+    root = tmp_path / "mut"
+    root.mkdir()
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            rng = self.headers.get("Range")
+            path = Path(self.translate_path(self.path))
+            if not rng or not path.is_file():
+                return super().do_GET()
+            data = path.read_bytes()
+            lo, _, hi = rng.removeprefix("bytes=").partition("-")
+            lo, hi = int(lo or 0), (int(hi) if hi else len(data) - 1)
+            chunk = data[lo:hi + 1]
+            self.send_response(206)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Range", f"bytes {lo}-{hi}/{len(data)}")
+            self.send_header("Content-Length", str(len(chunk)))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            self.wfile.write(chunk)
+
+    srv = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", 0), lambda *a, **k: Quiet(*a, directory=str(root), **k))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}", root
+    srv.shutdown()
+
+
+def _archive(member: str, payload: bytes) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("padding.txt", b"x" * 4096)          # move the member's offset
+        z.writestr(member, payload)
+    return buf.getvalue()
+
+
+def test_a_forced_refresh_REALLY_REREADS_an_archive_that_changed_upstream(mutable_www, tmp_path):
+    """`Cache-Control: no-cache` against an archive that was genuinely replaced.
+
+    This is the case the refresh exists for: `s3:` keys and `github:` release assets
+    can both be replaced under one identifier - the GitHub source's own docstring says
+    so - and a result cached under such an identity can outlive the bytes it describes.
+
+    The policy dropped the cached series and the read-ahead image and stopped there,
+    while the SOURCE INSTANCE - which lives as long as the process on both deployments -
+    still held the parsed archive: a ZipFile with its central directory and a RangeFile
+    block cache. On a hit `resolve` is skipped, so the refetch reused the old resolved
+    URL and the old member offsets. The padding member above exists to move the real
+    member's offset between the two versions, so reading at the stale offsets cannot
+    accidentally succeed.
+
+    The unit tests either side of this one check that `forget` clears the cache and that
+    the policy calls it. What only this can check is that the SERVER passes the source in
+    at all - `_refresh_input(kind=..., ident=...)` looking it up in `self.sources` - and
+    that a real replaced archive really is re-read end to end.
+    """
+    pytest.importorskip("fastapi")
+    from test_serve import FakeSegmenter, LocalExecutor, TestClient, create_app, wait_state
+
+    url, root = mutable_www
+    (root / "a.zip").write_bytes(_archive("inner/scan.nii.gz", b"\x1f\x8bOLD" + b"o" * 900))
+
+    class Mutable(sources.ArchiveReadingSource):
+        """Shaped like the sources whose identity is not content-pinned."""
+
+        prefix = "mut"
+        id_pattern = r"[A-Za-z0-9._/-]+(?:![A-Za-z0-9._/-]+)?"
+        description = "test double: an archive that can be replaced under one name"
+
+        def enabled(self):
+            return True
+
+        def resolve(self, outer, credentials=None):
+            return f"{url}/{outer}", len((root / outer).read_bytes())
+
+    def digest_of(client, no_cache=False):
+        headers = {"Cache-Control": "no-cache"} if no_cache else {}
+        r = client.post("/v1/jobs",
+                        data={"task": "total_fast",
+                              "source": json.dumps([{"kind": "mut",
+                                                     "id": "a.zip!inner/scan.nii.gz"}])},
+                        headers=headers)
+        assert r.status_code == 202, r.text
+        s = wait_state(client, r.json()["id"], ("done", "failed"))
+        assert s["state"] == "done", s.get("error")
+        return s["result"]["provenance"]["inputs"][0]["content"]["digest"]
+
+    ex = LocalExecutor(FakeSegmenter(), workdir=tmp_path / "w",
+                       cache_dir=tmp_path / "rc", sources=[Mutable()])
+    try:
+        client = TestClient(create_app(ex))
+        first = digest_of(client)
+
+        # the same identifier, different bytes upstream, and a different layout
+        (root / "a.zip").write_bytes(
+            _archive("inner/scan.nii.gz", b"\x1f\x8bNEW" + b"n" * 1500))
+
+        second = digest_of(client, no_cache=True)
+        assert second != first, (
+            "the forced refetch returned the bytes of the archive this source had "
+            "already parsed; `resolve` was skipped on the cache hit, so it read the old "
+            "member offsets from the old central directory")
+    finally:
+        ex.close()
