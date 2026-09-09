@@ -193,8 +193,7 @@ VoxTell refuses cache serving.
 - Deviations from what the user asked (accumulator moved to host, fp16 retry) are never
   silent: `note:` on the CLI, a progress stage on the server, `provenance.deviations` in the result.
 - Tests are `unittest` classes under pytest, with the device matrix fixture in `conftest.py`.
-- Don't commit `CLAUDE.md` (the excluded working copy of this file), `data/`, `uv.lock`,
-  or model weights. Don't vendor sibling repos.
+- Don't commit this file, `data/`, `uv.lock`, or model weights. Don't vendor sibling repos.
 
 ## Guards added 2026-09-08 — what they cover, so they are not re-litigated
 
@@ -348,3 +347,58 @@ treat a failed apply as a HARNESS ERROR, not a survivor; run the unmutated basel
 require it to pass; and prefer killing a mutant that the guard should NOT catch as a sanity
 check. Also: mutate the facts the test does NOT check — 8 easy kills said nothing about the
 gaps that mattered.
+
+## The 2026-09-09 review round — what it cost and what it taught
+
+An external review raised 12 findings; all 12 held under verification, three needed
+narrowing, and checking them turned up four more it had missed. Then three adversarial
+agents on the fixes found six further real defects and proved **four of seven new guards
+hollow** — including one written that same day. Treat "I added a guard" as a hypothesis
+until a mutant has died.
+
+**Ask the tool, do not model it.** The collection guard compared filenames against
+`python_files`. Pytest has FOUR gates — directory recursion, `collect_ignore*`,
+`python_files`, `python_classes`/`python_functions` — so a `tests/kernel/` subdirectory
+reinstated the very bug it was written for, one level down, and dropping
+`unittest.TestCase` from a class deleted it silently. **Every class in
+`test_engine_completeness.py` is collected only because it subclasses `TestCase`** (none
+is `Test`-prefixed), so one edit there removes a whole checklist section. It now runs a
+real `--collect-only` and compares node ids against what each file declares.
+
+**A filename collision is what the FILESYSTEM merges, not what `==` says.** APFS folds
+case AND unicode normalization; exFAT and FAT32 fold case, and a cache root on one of
+those is a supported way to run this. `T1.nii` and `t1.nii` are one file here. Anything
+deciding "are these two names the same" must fold: `unicodedata.normalize("NFC",
+n).casefold()`. This lost DICOM slices in a 32-thread prefix fetch — the survivor was an
+interleaving of two objects, not either one.
+
+**A dotfile is invisible to `cache_admin`.** `_entries` skips them at both levels, so
+`cache clean` cannot sweep what you hide there and `cache usage` counts its bytes without
+counting it as an item. Whoever creates `.staging-*`/`.lock-*` owns removing it — the
+next fetch of the same input sweeps the staging, under the lock.
+
+**Test the property, not the outcome, for anything concurrent.** The two-process race
+test compared published bytes: it caught only the interleavings that happened to corrupt
+(measured 4 runs in 10) and could not distinguish the shipped protocol from one with no
+lock at all. Rewritten to assert MUTUAL EXCLUSION from timestamps the source records —
+two fetches of one input must not overlap — it kills that mutant 10 in 10. A lock alone
+still passes it, so a second test kills a writer mid-fetch; that is what staging is for.
+
+**An AST test that pins a variable name is worse than none.** Requiring `_zip` to contain
+`ck = (outer, credentials)` failed identical code spelled `key`, and passed a `_zip` that
+kept the literals and then scanned `cache.items()` for `k[0] == outer` — the replay
+defect restored. Deleted; the behavioural tests caught what it could not.
+
+**A subprocess test must not REPLACE `PYTHONPATH`.** Here haversack comes from the venv's
+.pth; in CI it comes only from `PYTHONPATH=src` with the project deliberately not
+installed. Overwriting the inherited value passed locally and failed CI outright. Prepend.
+
+### Review agents can destroy real data
+
+One agent misread the input-cache knob (it is `HAVERSACK_CACHE_DIR`, not
+`HAVERSACK_INPUT_CACHE`) and ran `cache_admin.clean("inputs")` against the real
+`~/.cache/haversack/inputs`, **deleting 28 entries / 421 MB**. Re-fetchable, but gone.
+Tell agents that probes touching cache admin, `clean`, or any `HAVERSACK_*` path must run
+with `HAVERSACK_CACHE_DIR` pointed at a temp directory, and have them echo the resolved
+root before the first destructive call. Two agents also ran concurrently and one read
+files the other had mutated; either serialize them or scope each to disjoint files.
