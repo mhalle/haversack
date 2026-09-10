@@ -77,9 +77,11 @@ Two layers, enforced by `tests/test_layering.py`:
   Modal and `get`) adds the bytes' digest + DICOM UIDs and writes `.input.json` beside the
   fetch; `jobpolicy.input_records` reads it back into `provenance.inputs`.
 - **Wire** — `serve` (FastAPI + LocalExecutor + sqlite `jobstore`), `modal_app` (same protocol,
-  one `@app.cls` worker per engine), `client` (RemoteClient), `schemas` (pydantic: one
-  declaration → JSON Schema, submit validation, OpenAPI), `sources` (idc/tcia/openneuro/
-  zenodo/hf), `content` (content-addressed inputs), `preview`, `statistics`.
+  one `@app.cls` worker per engine: nnU-Net's in `modal_app`, every other engine's in
+  `engines/modal_<engine>.py`, collected by a composer that iterates the registry), `client`
+  (RemoteClient), `schemas` (pydantic: one declaration → JSON Schema, submit validation,
+  OpenAPI), `sources` (idc/tcia/openneuro/zenodo/hf), `content` (content-addressed inputs),
+  `preview`, `statistics`.
 - **Engines** — `engines/registry.py` is the static ecosystem→engine map (ts, moose,
   mrsegmentator, dentalsegmentator, totalvibe, custom → nnunetv2; fastsurfer, synthstrip,
   voxtell, monai). Deliberately NOT a plugin system, and the reason is now in the module
@@ -89,6 +91,11 @@ Two layers, enforced by `tests/test_layering.py`:
   (schemas, the engine module, registry ×5, ecosystems ×2, modal_app ×4, pyproject ×3,
   attribution ×2) plus README/SERVER/CI/CHANGELOG. The old "one row plus a worker class"
   line here was wrong by about 4× — measured 2026-09-08 by an agent that actually added one.
+  That evening `e389021` made the four modal_app edits ONE new file instead, the adapter
+  `engines/modal_<engine>.py` (image, `@app.cls` worker, `ENGINE`, `WORKER`), and modal_app
+  takes no edit: 15 sites by arithmetic, not re-measured. Copy a sibling adapter whole: its
+  last line, registering itself into `ENGINE_WORKERS`, is the half of the import handshake
+  that runs in a worker container (see the sixth Modal round below).
   **The rule that keeps it from growing: when adding an engine needs an edit somewhere new,
   add a FIELD to the Engine row, not a branch there.** `dist` (distributions, for
   `/v1/version`), `label_names` (a thunk, for engines whose labels are in their own
@@ -215,9 +222,13 @@ passes, which is how the first engine checklist came out hollow.
   upstream adds only id 0 Background). A verification done once by hand is a snapshot.
 - `test_server_docs` / `test_engine_completeness` — SERVER.md's flag list and
   `haversack --help` must name every engine. `--help` had gone two engines stale.
-- `modal_app._wiring_problems()` — import-time: a missing module flag global, or a
-  `_WORKER_CLASSES` value naming no class. Both were silent and deploy-fatal; the existing
-  assert compares KEYS only.
+- `modal_app._wiring_problems()` is GONE (`e389021`), with the `_WORKER_CLASSES` name-string
+  map and the per-engine flags it guarded: the composer takes each adapter's `WORKER` class
+  directly, so neither silent deploy-fatal mistake (a mistyped class name, a forgotten flag)
+  can be written any more. What is left is checked at import — an adapter without `WORKER`,
+  or whose `ENGINE` is not its filename, raises naming the module — and statically by
+  `test_engine_completeness`: an adapter per optional engine, `ENGINE` = filename = registry
+  key, `WORKER` bound to an `@app.cls` class, and a composer that iterates the registry.
 
 ### Real defects these found (not hypotheticals)
 
@@ -260,7 +271,7 @@ proved, kept because it is still true.
   documentation; the tests exercise whichever facility the host has.
 - Concurrency probes were mostly threads within one process; cross-process coverage is thinner.
 
-### What Modal HAS been shown to do (2026-09-06/07, three rounds, torn down after each)
+### What Modal HAS been shown to do (2026-09-06/08, six rounds, torn down after each)
 
 Cold fetch and cache hit; `no-cache` idle and queued behind a running job; the prefetcher
 and read-ahead, including one worker warming only its own engine's jobs; uploads and the
@@ -288,9 +299,29 @@ setup: `[reconcile] 1 orphaned job(s) failed`, the record moving to `failed` wit
 telling the caller to resubmit. That is the code added in fab7706 doing deliberately what it
 first did by accident on records a `modal app stop` had orphaned 76 hours earlier.
 
-Modal now has no untouched path this file knows of. What remains is judgement, not coverage:
-every smoke has been small and short, so nothing says how the queue behaves under sustained
-load or how a multi-hour job fares against the 3600 s function timeout.
+Sixth round (2026-09-08), after the workers moved into `engines/modal_<engine>.py`: two
+defects that every static check and every in-process import passed, found only by
+deploying. **`modal deploy` loads `modal_app.py` BY PATH**, under a synthetic module name,
+so each adapter's `from haversack.modal_app import ...` executed the file a second time as
+a different object and re-entered the composer half-built; `sys.modules.setdefault` before
+the composer makes the two names one module (`e8599d6`). And **a worker container imports
+the module its class LIVES IN** — the adapter, not modal_app — so there the adapter is the
+entry point and the composer met it mid-initialization: every engine worker crashed on
+start while the api container stayed healthy, and a submitted job sat in `queued` with
+nothing wrong visible from outside. The composer skips an adapter whose
+`__spec__._initializing` is set, and each adapter registers itself into `ENGINE_WORKERS` on
+the way out (`97d0a0d`). Each has a test that reproduces its import mode — a by-path load
+in process, and a subprocess per entry point. Then, deployed: all five workers registered
+(Modal does discover a class defined in an imported submodule), a real job completed on
+each of the four adapters, and `/v1/version` reported their packages as
+unknown-because-remote.
+
+Modal has no untouched PATH this file knows of, but it has untouched CODE: the three
+publication commits after the sixth round (`6965e68`, `a256114`, `e4e80b4`) record no
+deploy, so generation-at-a-time publication and reclaim-by-lifetime have run only in the
+local suite. Beyond that, what remains is judgment, not coverage: every smoke has been
+small and short, so nothing says how the queue behaves under sustained load or how a
+multi-hour job fares against the 3600 s function timeout.
 
 ## Known open, deliberately
 
@@ -322,9 +353,10 @@ test - point `HAVERSACK_TEST_NOLINK_ROOT` at such a mount; the recipe is in its 
 - **README hand-lists engine families** in three places (`README.md:3/380/400/412`). Only
   `--help` and SERVER.md are pinned by tests.
 - **`[tool.uv] conflicts` and the worker image's `uv_sync(extras=[...])` restate
-  `Engine.extra`.** Omitting the conflicts entry breaks `uv sync` for everyone — loud, but
-  only at sync time, never in the suite. Note `fastsurfer` is deliberately NOT in a
-  conflicts group (it installs into the main env).
+  `Engine.extra`** — the image now in each `engines/modal_<engine>.py`. Omitting the
+  conflicts entry breaks `uv sync` for everyone — loud, but only at sync time, never in the
+  suite. Note `fastsurfer` is deliberately NOT in a conflicts group (it installs into the
+  main env).
 - `cache_admin.clean` addresses ONE path per category and `checkpoints` is a CLI category
   name, so only one engine may declare `cache_store`. A test tripwires the second one.
 

@@ -18,13 +18,18 @@ nnU-Net at all.
 The scheduler (``modal_app._execute_job``) is engine-agnostic: queue, cache,
 prefetch, artifacts, cancellation and publication are the same for every family.
 An engine supplies only ``_compute`` (plus ``_prepare``/``_ensure`` when it has
-weights to install), and declares its image on its worker class.
+weights to install), and declares its image on its worker class - which, for every
+engine but the default ``nnunetv2``, lives here in ``modal_<engine>.py``, beside
+the runtime it deploys, rather than in modal_app.
 
-**Adding an engine** is a row in :mod:`~haversack.engines.registry` (name, enable
-flag, weights identity), a module here with the compute, an ecosystem that names
-the engine, and a worker class with the image. Dispatch, cache keys, describe,
-env gating and knob forwarding are all derived from the registry - none of them
-need a new branch.
+**Adding an engine** centers on four pieces: a row in
+:mod:`~haversack.engines.registry` (name, enable flag, weights identity), a module
+here with the compute, an ecosystem that names the engine, and that Modal
+adapter. Dispatch, cache keys, describe, env gating, knob forwarding and the set
+of Modal workers are all derived from the registry - none of them need a new
+branch. A green suite asks for more than the four (schemas, packaging,
+attribution); ``tests/test_engine_completeness.py`` fails naming each step it
+finds missing.
 
 Every engine's heavy dependency (FastSurfer's torch stack, synthstrip-torch) is
 imported lazily inside the compute path, so importing haversack never requires it -

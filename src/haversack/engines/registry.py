@@ -10,8 +10,12 @@ are four catalogs of nnU-Net models, all run by the ``nnunetv2`` engine.
 This module is the single source of truth for that mapping and for every fact
 that used to be spelled once per engine per call site: the enable flag, the
 weights identity that keys the result cache, and the ecosystem -> engine route.
-Adding an engine is one row here plus a worker class in
-:mod:`haversack.modal_app` that declares its image and compute.
+Adding an engine starts with one row here and does not end there - it took 18
+edits in 7 files to reach a green suite when measured on 2026-09-08. Four of
+those were in :mod:`haversack.modal_app`; since the workers moved out of it the
+same day, the Modal side is one new file beside the engine instead,
+``engines/modal_<engine>.py`` (its image and its ``@app.cls`` worker), which
+modal_app composes by iterating this registry.
 
 Deliberately a **static registry, not a plugin framework**. That is not only
 YAGNI; three properties of this system make discovered plugins impossible to
@@ -20,8 +24,9 @@ do honestly, and they are worth stating so the question stops being reopened:
 1. ``import haversack`` must pull no torch (``docs/dependency-discipline.md``).
    Anything discovered at import time drags its runtime in with it.
 2. Modal resolves ``@app.cls`` decorators at import, so a worker and its image
-   are declared statically under the engine's flag. An engine that appeared at
-   runtime could not have a Modal worker at all.
+   are declared statically - an optional engine's in an adapter module that is
+   imported only when that engine is enabled. An engine that appeared at runtime
+   could not have a Modal worker at all.
 3. Engines live in mutually conflicting environments - synthstrip pins
    ``numpy<2`` where the torch extra resolves past 2 - so "the set of installed
    engines" is not a coherent question to ask one interpreter.
