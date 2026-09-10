@@ -4051,7 +4051,16 @@ def test_a_reclaim_refuses_a_claim_that_changed_hands_underneath_it(tmp_path):
     the window between its verdict and the rename is wide. Another process can
     reclaim in it, re-create the path and start fetching - and renaming by bare
     path then drags a LIVE claim into the graveyard and deletes it. That is the
-    failure the owner token was added for on the teardown side."""
+    failure the owner token was added for on the teardown side.
+
+    The handover below lands on EVERY liveness check, so the waiter must refuse
+    each one and give up, retryably, at ``MAX_HANDOVERS`` - and that exit is now
+    asserted, not only the survivors. Until 2026-09-10 the waiter's outcome died with
+    its thread: the correct exit leaked as the suite's one unhandled-thread warning,
+    and the survivors alone (the successor's file, an empty graveyard) are also what
+    a waiter leaves when it CRASHES in the handover branch or never gives up at all,
+    so both of those passed."""
+    from haversack.errors import ResourceError
     cache = serve_mod.SeriesCache(tmp_path / "series", lambda s, e: e / "series",
                                   claim_timeout=0.3)
     import shutil as _sh
@@ -4073,13 +4082,26 @@ def test_a_reclaim_refuses_a_claim_that_changed_hands_underneath_it(tmp_path):
         return verdict
 
     cache._writer_alive = alive_then_handover
-    done = []
-    t = threading.Thread(target=lambda: done.append(cache.get_or_fetch("s3:b/x")), daemon=True)
+    outcome = {}
+
+    def waiter():
+        try:
+            outcome["path"] = cache.get_or_fetch("s3:b/x")
+        except BaseException as e:                     # noqa: BLE001 - asserted below
+            outcome["error"] = e
+
+    t = threading.Thread(target=waiter, daemon=True)
     t.start()
-    t.join(timeout=8)
+    # About 5 s: the ceiling is reached on the eleventh liveness check. The margin is
+    # wide because a waiter still running at the end is now a failure, not a pass.
+    t.join(timeout=30)
+    assert not t.is_alive(), "the waiter never gave up on a claim that keeps changing hands"
     assert (entry / "partial.bin").read_bytes() == b"in flight", \
         "the successor's in-flight claim was reclaimed and deleted"
     assert not list(cache.graveyard.iterdir()) if cache.graveyard.is_dir() else True
+    err = outcome.get("error")
+    assert isinstance(err, ResourceError) and "changed hands" in str(err), \
+        f"the waiter should give up at the handover ceiling, not end with {outcome!r}"
 
 
 def test_a_cache_key_cannot_name_the_cache_s_own_directory(tmp_path):
