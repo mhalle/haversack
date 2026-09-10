@@ -83,6 +83,19 @@ identity - nothing fetched them, and there is nowhere to fetch them from.
   collects instead of modelling one of its four gates, and the upstream pin check no
   longer lets one unreachable repository void the whole thing.
 
+### Modal
+
+- **Each engine's Modal image and worker now live beside the engine**, in
+  `engines/modal_<engine>.py`, and `modal_app` composes them by iterating the engine
+  registry. In 0.8.0 the workers were found by looking a class-name STRING up in
+  `globals()`, each gated by a module-level flag declared a thousand lines from the class
+  it gated - so a typo in either would have dropped that engine from every deploy while its
+  environment variable was set to 1, and the error would have told the caller to set the
+  variable that was already set. Neither mistake can be written now, and adding an engine
+  no longer touches `modal_app` at all. `haversack modal deploy` is unchanged. Verified by
+  deploying: all five workers registered, and a real job ran to completion on each of the
+  four that moved.
+
 ## [0.8.0] - 2026-09-08
 
 A cache that survives its own releases, and two guards for facts that were written twice.
