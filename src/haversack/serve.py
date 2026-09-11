@@ -959,22 +959,40 @@ class ResultCache:
         self.root.mkdir(parents=True, exist_ok=True)
         self.keep = int(keep)
 
-    #: How long a superseded generation survives after the last time someone RESOLVED it.
-    #: Counting generations was the wrong rule and this replaces it: "keep the current one
-    #: and its predecessor" is safe only while publications are rarer than reads, and two
-    #: publications in a row deleted a generation a reader had selected and not yet opened
-    #: (2026-09-09). Resolving a generation touches it, so the window is measured from the
-    #: reader rather than from the writer, and it is visible to another process or
-    #: container because it is an mtime on disk rather than a dict in memory.
+    #: How long a reader's LEASE lasts: a generation - or a legacy flat entry - that was
+    #: handed to a reader survives for this long after the LAST time it was, whatever else
+    #: happens to the key. Counting generations was the wrong rule and this replaced it:
+    #: "keep the current one and its predecessor" is safe only while publications are
+    #: rarer than reads, and two publications in a row deleted a generation a reader had
+    #: selected and not yet opened (2026-09-09). Measured from the reader rather than the
+    #: writer, and visible to another process because it is on disk rather than in memory.
+    #:
+    #: The lease is the mtime of a file of its own (``LEASE_NAME``), and EVERY cleanup path
+    #: asks it - pruning, the ceiling, eviction. It used to be the directory's mtime, which
+    #: also moves when a generation is created or an artifact lands, so nothing could tell
+    #: "published recently" from "handed to a reader recently": the ceiling, needing
+    #: something to reclaim, reclaimed the second, and a legacy flat entry was judged by
+    #: a third timestamp that no read ever touched (2026-09-10).
     #:
     #: Generous, because the cost of being wrong is asymmetric: a stale directory holds
     #: disk until the next publication, a deleted one fails a request that was already
     #: served.
     GENERATION_GRACE_S = 900
-    #: A ceiling for the pathological case - a key republished faster than the grace
-    #: window while every generation keeps being resolved. The current generation is
-    #: never a candidate.
+    #: A ceiling on generations NOBODY holds: a key republished faster than the lease and
+    #: never read keeps at most this many. A held generation is never a candidate. The
+    #: ceiling used to take the oldest RECENT generations, and a generation is recent
+    #: precisely because a reader just resolved it - so this many publications inside one
+    #: lease deleted the result a reader had selected and not yet opened (2026-09-10).
+    #: Held generations are bounded instead by the lease, which expires, and by what a
+    #: publication costs, which is a whole segmentation.
     MAX_GENERATIONS = 16
+    #: The lease file, inside the directory whose files a reader was handed.
+    LEASE_NAME = ".lease"
+    #: ``<key>/.writer-<gen>``: a writer's claim on the generation it is publishing, locked
+    #: from before its staging exists until its pointer names it. See ``_claim``.
+    CLAIM_PREFIX = ".writer-"
+    #: Where reclamation moves a directory while it asks its second question.
+    TOMB_PREFIX = ".reclaim-"
 
     def _generation_dir(self, key: str, gen: str) -> Path:
         return self.root / key / f"g-{gen}"
@@ -986,11 +1004,12 @@ class ResultCache:
         the same key saw an old generation and deleted it mid-assembly - the writer then
         failed on its own labels file. Staging is renamed into place only once complete,
         so an unfinished generation is never a pruning candidate and a published one is
-        never unfinished.
+        never unfinished. Whether it is still being written is its writer's claim to say;
+        its age says nothing (see ``_claim``).
         """
         return self.root / key / f"s-{gen}"
 
-    def _resolve(self, key: str) -> Path | None:
+    def _resolve(self, key: str, *, lease: bool = True) -> Path | None:
         """The directory holding the generation that is current NOW, or None.
 
         Everything a reader needs is inside it, which is the point: labels, metadata and
@@ -1003,21 +1022,245 @@ class ResultCache:
 
         A flat entry from before this change is still readable, so an existing cache
         keeps answering; the next publication of that key replaces it with a generation.
+
+        With ``lease`` (the default) the reader's lease is taken BEFORE the answer is
+        final: the directory is leased and then checked, so a generation reclaimed in
+        between is noticed here - the lease lands nowhere, or the labels are gone - and
+        the pointer is read again, instead of a path being handed out that no cleanup
+        knows anyone holds. A legacy flat entry is leased the same way, in its own
+        directory, because that is where cleanup looks: the read used to touch the key
+        directory while cleanup judged the labels file (2026-09-10). ``list`` passes
+        False - it hands out no path, and it used to renew every entry's lease per call.
         """
         d = self.root / key
+        for _ in range(8):                     # a publication can land between any two reads
+            try:
+                gen = (d / CURRENT_NAME).read_text(encoding="utf-8").strip()
+            except OSError:
+                where = d                      # a legacy flat entry, or nothing at all
+            else:
+                where = self._generation_dir(key, gen)
+            if not (where / RESULT_NAME).exists():
+                if where == d:
+                    return None
+                continue                       # the pointer moved on, or dangles: ask again
+            if lease and not self._take_lease(where):
+                continue                       # reclaimed before the lease could land
+            if (where / RESULT_NAME).exists():
+                return where
+        return None
+
+    def _take_lease(self, where: Path) -> bool:
+        """Lease ``where`` to a reader, now. False only when ``where`` is gone: a lease
+        this process cannot WRITE - a read-only cache, a file another uid owns - lets the
+        read proceed unleased, as every read did before leases existed."""
         try:
-            gen = (d / CURRENT_NAME).read_text(encoding="utf-8").strip()
-        except OSError:
-            return d if (d / RESULT_NAME).exists() else None      # legacy flat entry
-        g = self._generation_dir(key, gen)
-        if not (g / RESULT_NAME).exists():
-            return None
-        try:
-            import os as _os
-            _os.utime(g)                       # the reader's lease: see GENERATION_GRACE_S
+            (where / self.LEASE_NAME).touch()
+        except FileNotFoundError:
+            return False
         except OSError:
             pass
-        return g
+        return True
+
+    def _leased(self, where: Path) -> bool:
+        """Was a path under ``where`` handed to a reader within the lease?"""
+        import time as _time
+        try:
+            age = _time.time() - (where / self.LEASE_NAME).stat().st_mtime
+        except OSError:
+            return False
+        return age < self.GENERATION_GRACE_S
+
+    def _claim(self, d: Path, gen: str):
+        """Claim generation ``gen`` of the entry at ``d`` for this writer: the open,
+        locked descriptor, or None where no lock can be taken.
+
+        Staging used to be judged dead once its directory had been quiet for the lease.
+        An mtime says when something last changed, not whether its writer is alive: one
+        long copy, a suspended process or a closed laptop lid leaves a live writer
+        looking exactly like a dead one, and a publication of the same key then deleted
+        its work under it (2026-09-10). The kernel releases a lock when its holder dies,
+        so being able to take it is proof - see ``_writer_gone``.
+
+        Locked BEFORE the host is written into it: a pruner that can read which host took
+        a claim therefore always finds it held, and one that reads nothing cannot tell
+        whose it is and leaves it alone. Where the lock cannot be taken the claim is
+        removed again, because an unlocked claim is exactly what a dead writer leaves.
+        """
+        import os
+        from . import filelock
+        if not filelock.SUPPORTED:
+            return None
+        path = d / f"{self.CLAIM_PREFIX}{gen}"
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o644)
+        except OSError:
+            return None
+        try:
+            if filelock.lock(fd, blocking=False):
+                os.write(fd, f"{_host_identity()}\n{os.getpid()}\n".encode("utf-8"))
+                return fd
+        except OSError:
+            pass
+        os.close(fd)
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
+
+    def _release(self, d: Path, gen: str, fd) -> None:
+        """Give up a claim: once the pointer names the generation, or once a failed
+        publication has removed what it built. Closed before it is unlinked, because
+        Windows will not delete an open file."""
+        import os
+        if fd is None:
+            return
+        try:
+            os.close(fd)
+        finally:
+            try:
+                (d / f"{self.CLAIM_PREFIX}{gen}").unlink()
+            except OSError:
+                pass
+
+    def _writer_gone(self, d: Path, gen: str):
+        """Is the writer of ``gen`` PROVABLY dead?
+
+        None when nothing claims ``gen`` - a publication that finished, or one from before
+        claims existed. True only when this host takes the lock the writer held, which the
+        kernel releases when the writer dies. False when the writer is alive - and also
+        when nothing here can say: a claim from another host (an advisory lock need not
+        reach across machines sharing a volume), a filesystem without locks, a claim that
+        cannot be read. Only True licenses reclaiming anything.
+        """
+        import os
+        from . import filelock
+        try:
+            fd = os.open(d / f"{self.CLAIM_PREFIX}{gen}", os.O_RDWR)
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return False
+        try:
+            try:
+                host = os.read(fd, 512).decode("utf-8", "replace").split("\n", 1)[0]
+            except OSError:
+                return False
+            if not filelock.SUPPORTED or host != _host_identity():
+                return False
+            try:
+                if not filelock.lock(fd, blocking=False):
+                    return False
+            except OSError:
+                return False
+            filelock.unlock(fd)
+            return True
+        finally:
+            os.close(fd)
+
+    def _reclaim(self, p: Path, needed) -> bool:
+        """Delete the directory ``p`` unless ``needed`` says it is in use - asked before,
+        and asked AGAIN once ``p`` has been moved out of reach, where a yes puts it back.
+        Returns whether ``p`` is gone.
+
+        Deciding "nobody holds this" and then deleting it is a check-then-act: a reader
+        can take its lease in between, be told its path is good, and lose it. Once ``p``
+        is out of reach, a reader that has not leased yet cannot find it - its lease lands
+        nowhere and it reads the pointer again - and one that leased before the move is
+        what the second question sees. What is left is the instant between the move and
+        the move back, for a reader that opens its file exactly then.
+        """
+        import os
+        import shutil
+        import time as _time
+        if needed(p):
+            return False
+        tomb = p.parent / f"{self.TOMB_PREFIX}{_time.time_ns()}-{os.getpid()}-{p.name}"
+        try:
+            os.rename(p, tomb)
+        except OSError:
+            return False                       # gone already, or another pruner moved it
+        if needed(tomb):
+            try:
+                os.rename(tomb, p)
+            except OSError:
+                pass                           # never deleted here: see _sweep_tombs
+            return False
+        shutil.rmtree(tomb, ignore_errors=True)
+        return True
+
+    def _reclaim_flat(self, d: Path) -> bool:
+        """A legacy flat entry's files, unless a reader holds them - the same two
+        questions as ``_reclaim``. The labels file moves first because it is what
+        ``_resolve`` gates on: once it is out of reach the entry is invisible."""
+        import os
+        import time as _time
+        labels = d / RESULT_NAME
+        if self._leased(d):
+            return False
+        tomb = d / f"{self.TOMB_PREFIX}{_time.time_ns()}-{os.getpid()}-{RESULT_NAME}"
+        try:
+            os.rename(labels, tomb)
+        except OSError:
+            return False
+        if self._leased(d):
+            try:
+                os.rename(tomb, labels)
+            except OSError:
+                pass
+            return False
+        for p in (tomb, *(d / n for n in ("result.json", "meta.json", GENERATION_NAME,
+                                           *ARTIFACT_NAMES, self.LEASE_NAME))):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        return True
+
+    def _sweep_tombs(self, parent: Path) -> None:
+        """Remove what a failed move-back left in ``parent``. Aged by the birth in its
+        NAME, and only past the lease: renaming keeps a directory's mtime, so a tomb one
+        instant old can look ancient; and whoever holds a tomb leased it before it moved -
+        nobody can find it afterwards - so past the lease, nobody does."""
+        import shutil
+        import time as _time
+        try:
+            tombs = [p for p in parent.iterdir() if p.name.startswith(self.TOMB_PREFIX)]
+        except OSError:
+            return
+        now = _time.time_ns()
+        for p in tombs:
+            try:
+                born = int(p.name[len(self.TOMB_PREFIX):].split("-", 1)[0])
+            except ValueError:
+                continue
+            if (now - born) / 1e9 < self.GENERATION_GRACE_S:
+                continue
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+    def _key_in_use(self, where: Path) -> bool:
+        """Is anything in the entry at ``where`` still held - a reader's lease on its
+        legacy flat files or on any generation, or a writer alive or not provably dead?"""
+        if self._leased(where):
+            return True
+        try:
+            children = list(where.iterdir())
+        except OSError:
+            return False
+        for c in children:
+            if c.name.startswith("g-") and self._leased(c):
+                return True
+            if (c.name.startswith(self.CLAIM_PREFIX)
+                    and self._writer_gone(where, c.name[len(self.CLAIM_PREFIX):]) is not True):
+                return True
+        return False
 
     def list(self, limit: int = 500) -> list:
         """Completed segmentations, newest first: the readable meta of every
@@ -1025,9 +1268,9 @@ class ResultCache:
         source identity, default options), its path-surface URL."""
         out = []
         for d in self.root.iterdir():
-            if not d.is_dir():
-                continue
-            g = self._resolve(d.name)
+            if not d.is_dir() or d.name.startswith("."):
+                continue                       # a tomb mid-reclamation is not an entry
+            g = self._resolve(d.name, lease=False)
             if g is None:
                 continue
             labels, meta_p = g / RESULT_NAME, g / "meta.json"
@@ -1078,45 +1321,70 @@ class ResultCache:
         there is no window in which an entry is half-replaced, and an artifact worker for
         an earlier generation cannot reach this one - it writes into its own directory,
         which either still exists or does not.
+
+        The writer holds a claim (``_claim``) from before its staging exists until the
+        pointer names its generation. That is what tells a concurrent pruner the staging
+        is still being written however quiet it has been, and what keeps the generation
+        from being reclaimed in the instant between its rename and the pointer's. A
+        publication that fails removes what it built itself - nobody else may.
         """
         import os
         import shutil
         d = self.root / key
+        d.mkdir(parents=True, exist_ok=True)
         gen = uuid.uuid4().hex
+        claim = self._claim(d, gen)
         g = self._staging_dir(key, gen)        # assembled here, renamed into place below
-        g.mkdir(parents=True, exist_ok=True)
+        try:
+            g.mkdir()
 
-        def _place(name: str, write) -> None:
-            tmp = g / f"{name}.{uuid.uuid4().hex[:8]}.tmp"
-            write(tmp)
-            os.replace(tmp, g / name)
+            def _place(name: str, write) -> None:
+                tmp = g / f"{name}.{uuid.uuid4().hex[:8]}.tmp"
+                write(tmp)
+                os.replace(tmp, g / name)
 
-        _place("result.json", lambda t: t.write_text(json.dumps(result), encoding="utf-8"))
-        _place("meta.json", lambda t: t.write_text(json.dumps(meta, indent=2), encoding="utf-8"))
-        supplied = {"preview.png": preview_path, "statistics.json": statistics_path}
-        for name in ARTIFACT_NAMES:
-            src = supplied.get(name)
-            if src and Path(src).exists():
-                _place(name, lambda t, s=src: shutil.copy2(s, t))
-        _place(RESULT_NAME, lambda t: shutil.copy2(labels_path, t))
+            _place("result.json", lambda t: t.write_text(json.dumps(result), encoding="utf-8"))
+            _place("meta.json", lambda t: t.write_text(json.dumps(meta, indent=2),
+                                                       encoding="utf-8"))
+            supplied = {"preview.png": preview_path, "statistics.json": statistics_path}
+            for name in ARTIFACT_NAMES:
+                src = supplied.get(name)
+                if src and Path(src).exists():
+                    _place(name, lambda t, s=src: shutil.copy2(s, t))
+            _place(RESULT_NAME, lambda t: shutil.copy2(labels_path, t))
 
-        # complete: the staging directory becomes a generation, and then one rename of
-        # the pointer makes it the entry. Nothing between those two is observable.
-        os.replace(g, self._generation_dir(key, gen))
-        tmp_ptr = d / f"{CURRENT_NAME}.{uuid.uuid4().hex[:8]}.tmp"
-        tmp_ptr.write_text(gen, encoding="utf-8")
-        os.replace(tmp_ptr, d / CURRENT_NAME)
+            # complete: the staging directory becomes a generation, and then one rename of
+            # the pointer makes it the entry. Nothing between those two is observable.
+            os.replace(g, self._generation_dir(key, gen))
+            tmp_ptr = d / f"{CURRENT_NAME}.{uuid.uuid4().hex[:8]}.tmp"
+            tmp_ptr.write_text(gen, encoding="utf-8")
+            os.replace(tmp_ptr, d / CURRENT_NAME)
+        except BaseException:
+            shutil.rmtree(g, ignore_errors=True)
+            if self.generation(key) != gen:
+                shutil.rmtree(self._generation_dir(key, gen), ignore_errors=True)
+            raise
+        finally:
+            self._release(d, gen, claim)
         self._prune_generations(key, keep_gen=gen)
         self.evict()
         return gen
 
     def _prune_generations(self, key: str, *, keep_gen: str) -> None:
-        """Drop what no reader can still be holding - see :data:`GENERATION_GRACE_S`.
+        """Drop what nobody can still be holding.
 
-        Never the current generation, never a staging directory (an unfinished writer
-        owns that), and never one resolved within the grace window. Older flat files
-        from before generations existed age out on the same rule, because a reader can
-        be holding one of those paths too.
+        Nothing is reclaimed that a reader holds (a lease: ``GENERATION_GRACE_S``), that
+        a writer is still publishing (a claim that is alive, or cannot be proved dead),
+        or that is current - asked of the POINTER as well as of ``keep_gen``, because
+        another publication can replace this one before its pruner runs. Of the rest, a
+        generation nobody has touched for the lease is stale, and the ceiling takes the
+        oldest recent ones beyond ``MAX_GENERATIONS``. Every deletion goes through
+        ``_reclaim``, which asks all of it again once the directory is out of reach.
+
+        Staging is reclaimed only once its writer is PROVABLY dead, never for being old
+        (``_writer_gone``); staging nobody claims - a build from before claims, or a
+        filesystem without locks - is left where it is. A legacy flat entry is treated
+        as a generation: kept while a reader holds it, aged out after that.
         """
         import shutil
         import time as _time
@@ -1131,26 +1399,42 @@ class ResultCache:
                 return 0.0
 
         try:
-            gens = sorted((p for p in d.iterdir()
-                           if p.is_dir() and p.name.startswith("g-")), key=_mtime)
+            names = list(d.iterdir())
         except OSError:
             return
-        current = self._generation_dir(key, keep_gen)
-        stale = [p for p in gens if p != current and _mtime(p) < cutoff]
-        # the ceiling: oldest first, and only ever generations nobody is on
-        surplus = [p for p in gens if p != current and p not in stale]
-        overflow = surplus[:max(0, len(gens) - self.MAX_GENERATIONS)]
+        # a dead writer's staging goes, and so does its claim, which would otherwise
+        # read as "dead" forever while protecting nothing
+        for c in names:
+            if c.name.startswith(self.CLAIM_PREFIX):
+                gen = c.name[len(self.CLAIM_PREFIX):]
+                if self._writer_gone(d, gen) is True:
+                    shutil.rmtree(self._staging_dir(key, gen), ignore_errors=True)
+                    try:
+                        c.unlink()
+                    except OSError:
+                        pass
+
+        def held(gen: str):
+            def ask(where: Path) -> bool:
+                return (gen == keep_gen or self.generation(key) == gen
+                        or self._leased(where) or self._writer_gone(d, gen) is False)
+            return ask
+
+        gens = sorted((p for p in names if p.name.startswith("g-") and p.is_dir()),
+                      key=_mtime)
+        free = [p for p in gens if not held(p.name[2:])(p)]
+        stale = [p for p in free if _mtime(p) < cutoff]
+        # the ceiling: oldest first, and only ever generations nobody holds
+        recent = [p for p in free if p not in stale]
+        overflow = recent[:max(0, len(gens) - len(stale) - self.MAX_GENERATIONS)]
         for p in stale + overflow:
-            shutil.rmtree(p, ignore_errors=True)
-        # a flat entry from before generations existed: superseded the moment `current`
-        # names a generation, but a reader may still hold its path
+            self._reclaim(p, held(p.name[2:]))
+        # a flat entry from before generations existed: superseded the moment the pointer
+        # names a generation, and held, like one, for as long as a reader's lease lasts
         if (d / RESULT_NAME).exists() and _mtime(d / RESULT_NAME) < cutoff:
-            for name in (RESULT_NAME, "result.json", "meta.json",
-                         GENERATION_NAME, *ARTIFACT_NAMES):
-                (d / name).unlink(missing_ok=True)
-        for p in d.glob("s-*"):                # a writer that died mid-assembly
-            if p.is_dir() and _mtime(p) < cutoff:
-                shutil.rmtree(p, ignore_errors=True)
+            self._reclaim_flat(d)
+        if any(p.name.startswith(self.TOMB_PREFIX) for p in names):
+            self._sweep_tombs(d)
 
     def add_artifact(self, key: str, name: str, src_path, generation=None) -> bool:
         """Place an eventually-consistent artifact (preview.png, statistics.json) into
@@ -1167,7 +1451,8 @@ class ResultCache:
         """
         import os
         import shutil
-        g = self._generation_dir(key, generation) if generation else self._resolve(key)
+        g = (self._generation_dir(key, generation) if generation
+             else self._resolve(key, lease=False))    # a writer, not a reader: no lease
         if g is None or not (g / RESULT_NAME).exists():
             return False
         tmp = g / f"{name}.{uuid.uuid4().hex[:8]}.tmp"   # unique per writer
@@ -1180,7 +1465,8 @@ class ResultCache:
         return True
 
     def delete(self, key: str) -> bool:
-        """Remove one entry; True if it existed."""
+        """Remove one entry; True if it existed. An explicit removal does not wait out
+        leases: taking the entry away, from its readers too, is what was asked."""
         import shutil
         d = self.root / key
         if not d.is_dir():
@@ -1189,7 +1475,11 @@ class ResultCache:
         return True
 
     def evict(self) -> None:
-        import shutil
+        """Keep at most ``keep`` entries, least recently used first - except one a reader
+        holds or a writer is still publishing. Eviction removes whole entries, and a read
+        making an entry the most recently used protects it only until ``keep`` others
+        have been touched, which a busy cache does inside one lease (2026-09-10). So
+        ``keep`` is a target: an entry in use outlives it until its lease runs out."""
 
         def _mtime(d):                         # entries can vanish between
             try:                               # iterdir and stat (concurrent
@@ -1198,13 +1488,29 @@ class ResultCache:
                 return 0.0
 
         try:
-            dirs = [d for d in self.root.iterdir() if d.is_dir()]
+            entries = list(self.root.iterdir())
         except OSError:
             return
-        if len(dirs) <= self.keep:
-            return
-        for d in sorted(dirs, key=_mtime)[: len(dirs) - self.keep]:
-            shutil.rmtree(d, ignore_errors=True)
+        dirs = [d for d in entries if d.is_dir() and not d.name.startswith(".")]
+        if len(dirs) > self.keep:
+            for d in sorted(dirs, key=_mtime)[: len(dirs) - self.keep]:
+                self._reclaim(d, self._key_in_use)
+        if any(p.name.startswith(self.TOMB_PREFIX) for p in entries):
+            self._sweep_tombs(self.root)
+
+
+def _host_identity() -> str:
+    """The host whose advisory locks this process can trust: its own.
+
+    A writer's claim (``ResultCache._claim``) is an advisory lock the kernel releases
+    when its holder dies, which makes "I can take it" proof of death - but only to a
+    process under that kernel. On a volume several machines or containers mount, a lock
+    need not reach from one to another, and there "I can take it" proves nothing. So a
+    claim records the host that took it, and only that host concludes anything from it.
+    Module-level so that a test can move a pruner to another host.
+    """
+    import socket
+    return socket.gethostname()
 
 
 class QueueFull(HaversackError):

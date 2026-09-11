@@ -26,8 +26,19 @@ about itself.
   Publishing replaced the labels and metadata but kept any artifact it was not given, and
   nothing gives them - so a client that explicitly asked not to reuse a stored response
   reliably got new labels beside artifacts describing the old ones. Not a race. Each
-  publication now carries a generation: artifacts it does not supply are removed, and a
-  worker still rendering for an earlier one cannot write into a later result.
+  publication is now a directory of its own behind one pointer, switched by one rename:
+  artifacts it does not supply are simply not in it, a worker still rendering for an
+  earlier publication writes only into that one, and no reader can be handed labels from
+  one publication beside metadata from another.
+
+- **Nothing a reader has been handed is cleaned up under it.** The cache hands out a path
+  that is opened later, when the response streams, so cleanup has to know who is holding
+  what. A superseded result now stays while any reader holds it - a lease renewed on every
+  read and honored by every cleanup path, the per-key ceiling and eviction included - and
+  a publication still being written is recognized by an advisory lock its writer holds,
+  never by its age: a writer quiet through one long copy or a suspended laptop is not
+  taken for dead, and the lock is trusted only on the host that took it. Eviction's
+  `keep` becomes a target that an entry in use can exceed until its lease runs out.
 
 - **Multi-input provenance paired roles with the wrong digests.** The cache identity is
   sorted so that permuting the source list cannot split a key, while the source entries

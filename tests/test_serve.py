@@ -4637,3 +4637,362 @@ class TestReclamationRespectsLifetimes:
             "a generation nobody has resolved for a month was kept - the grace window is "
             "a lease, and a lease that never expires is a leak")
         assert cache.get("k")[0].read_bytes() == b"B"
+
+    # -- the 2026-09-10 review: every cleanup path asks the same question, and trusts
+    # -- nothing it has only inferred
+
+    def _publish_as(self, cache, tmp_path, tag, key="k"):
+        labels = tmp_path / f"{key}-{tag}.seg.nrrd"
+        labels.write_bytes(tag.encode())
+        return cache.put(key, labels, {"who": tag}, {"who": tag})
+
+    def _held_generations(self, cache, tmp_path, n, key="k"):
+        """``n`` publications, each handed to a reader: a ceiling's worth of generations
+        of which not one is fair game."""
+        for i in range(n):
+            self._publish_as(cache, tmp_path, f"held{i}", key)
+            assert cache.get(key) is not None
+
+    def test_the_CEILING_never_takes_a_generation_a_reader_holds(self, tmp_path):
+        """The ceiling picked the oldest RECENT generations - and a generation is recent
+        precisely because a reader just resolved it. So `MAX_GENERATIONS` publications
+        inside the lease deleted the one a reader had selected and not yet opened, which
+        is the failure the lease exists to prevent. The ceiling is for what nobody holds."""
+        cache = self._cache(tmp_path)
+        self._publish_as(cache, tmp_path, "A")
+        labels, result = cache.get("k")                    # selected, not yet opened
+        for i in range(cache.MAX_GENERATIONS + 4):         # outrun the ceiling, inside the lease
+            self._publish_as(cache, tmp_path, f"n{i}")
+        assert labels.exists(), "the ceiling reclaimed a generation a reader was handed"
+        assert labels.read_bytes() == b"A" and result == {"who": "A"}
+        gens = [p for p in (cache.root / "k").iterdir() if p.name.startswith("g-")]
+        assert len(gens) <= cache.MAX_GENERATIONS, (
+            f"{len(gens)} generations: sparing the held one must not suspend the ceiling "
+            "for everything nobody holds")
+
+    def test_the_ceiling_still_bounds_what_NOBODY_holds(self, tmp_path):
+        """The other half, so the fix above cannot be to switch the ceiling off: a key
+        republished faster than the lease and never read keeps a bounded tail."""
+        cache = self._cache(tmp_path)
+        for i in range(cache.MAX_GENERATIONS + 8):
+            self._publish_as(cache, tmp_path, f"n{i}")
+        gens = [p for p in (cache.root / "k").iterdir() if p.name.startswith("g-")]
+        assert len(gens) <= cache.MAX_GENERATIONS, f"{len(gens)} generations kept"
+        assert cache.get("k")[0].read_bytes() == f"n{cache.MAX_GENERATIONS + 7}".encode()
+
+    def test_a_legacy_entry_READ_JUST_NOW_survives_its_replacement(self, tmp_path):
+        """A flat entry from before generations is still served, and its reader is as
+        entitled to what it was handed as any other. The read refreshed the KEY
+        directory's mtime while cleanup judged the labels FILE's - which no read ever
+        touches - so an old entry read a moment ago was unlinked by the next publication."""
+        import os
+        cache = self._cache(tmp_path)
+        d = cache.root / "k"
+        d.mkdir(parents=True)
+        (d / serve_mod.RESULT_NAME).write_bytes(b"legacy")
+        (d / "result.json").write_text(json.dumps({"who": "legacy"}), encoding="utf-8")
+        (d / "meta.json").write_text("{}", encoding="utf-8")
+        month = time.time() - 30 * 24 * 3600
+        for p in (d, *d.iterdir()):
+            os.utime(p, (month, month))                    # written long before this build
+        labels, result = cache.get("k")                    # ...and read just now
+        assert labels.read_bytes() == b"legacy" and result == {"who": "legacy"}
+        self._publish_as(cache, tmp_path, "B")             # the replacement prunes
+        assert labels.exists(), "a legacy entry read a moment ago was deleted by its replacement"
+        assert labels.read_bytes() == b"legacy"
+        assert cache.get("k")[0].read_bytes() == b"B", "the replacement is what is served now"
+
+    def test_an_UNREAD_legacy_entry_is_reclaimed_by_its_replacement(self, tmp_path):
+        """The other half: a flat entry nobody reads does not outlive its replacement."""
+        import os
+        cache = self._cache(tmp_path)
+        d = cache.root / "k"
+        d.mkdir(parents=True)
+        (d / serve_mod.RESULT_NAME).write_bytes(b"legacy")
+        (d / "result.json").write_text(json.dumps({"who": "legacy"}), encoding="utf-8")
+        month = time.time() - 30 * 24 * 3600
+        for p in d.iterdir():
+            os.utime(p, (month, month))
+        self._publish_as(cache, tmp_path, "B")
+        assert not (d / serve_mod.RESULT_NAME).exists(), "an unread, aged legacy entry was kept"
+        assert not (d / "result.json").exists()
+        assert cache.get("k")[0].read_bytes() == b"B"
+
+    def test_a_SILENT_writer_keeps_its_staging_however_long_it_is_quiet(self, tmp_path):
+        """A staging directory's mtime says when it last changed, not whether its writer
+        is alive: one long copy, a suspended process or a closed laptop lid leaves a live
+        writer looking exactly like a dead one. Reclaiming on age deleted its work."""
+        import os
+        import shutil
+        import threading
+
+        cache = self._cache(tmp_path)
+        slow = tmp_path / "slow.seg.nrrd"
+        slow.write_bytes(b"slow")
+        inside, released, failed = threading.Event(), threading.Event(), []
+        real_copy = shutil.copy2
+
+        def stalled_copy(src, dst, *a, **k):
+            if str(src).endswith("slow.seg.nrrd"):
+                inside.set()
+                released.wait(20)
+            return real_copy(src, dst, *a, **k)
+
+        def writer():
+            try:
+                cache.put("k", slow, {"who": "slow"}, {"who": "slow"})
+            except BaseException as e:                     # noqa: BLE001 - asserted below
+                failed.append(f"{type(e).__name__}: {e}")
+
+        t = threading.Thread(target=writer)
+        shutil.copy2 = stalled_copy
+        try:
+            t.start()
+            assert inside.wait(10), "the writer never reached its copy"
+            staging = [p for p in (cache.root / "k").iterdir() if p.name.startswith("s-")]
+            assert len(staging) == 1, staging
+            month = time.time() - 30 * 24 * 3600
+            os.utime(staging[0], (month, month))           # a month of silence, to an mtime
+            self._publish_as(cache, tmp_path, "B")         # which prunes
+            assert staging[0].is_dir(), "a live writer's staging was reclaimed for being quiet"
+        finally:
+            released.set()
+            shutil.copy2 = real_copy
+            t.join(30)
+        assert failed == [], f"the writer lost its work: {failed}"
+        assert cache.get("k")[0].read_bytes() == b"slow", "the writer finished last"
+
+    def test_a_DEAD_writer_is_reclaimed_but_only_where_its_death_is_VERIFIED(
+            self, tmp_path, monkeypatch):
+        """Liveness is proved, never inferred. A writer killed mid-assembly leaves its
+        staging behind, and the kernel released its lock when it died - so a pruner on
+        the SAME host can take that lock and knows. From another host it cannot: an
+        advisory lock does not reach across machines sharing a volume. So there the
+        directory stays, whatever its age - litter is recoverable, a live writer's work
+        is not."""
+        import os
+        import subprocess
+        import sys
+
+        doomed = (
+            "import pathlib, shutil, sys, time\n"
+            "from haversack.serve import ResultCache\n"
+            "root, inside = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n"
+            "labels = root.parent / 'doomed.seg.nrrd'\n"
+            "labels.write_bytes(b'doomed')\n"
+            "real = shutil.copy2\n"
+            "def stall(src, dst, *a, **k):\n"
+            "    if str(src).endswith('doomed.seg.nrrd'):\n"
+            "        inside.write_text('copying')\n"
+            "        time.sleep(600)                      # killed here, mid-assembly\n"
+            "    return real(src, dst, *a, **k)\n"
+            "shutil.copy2 = stall\n"
+            "ResultCache(root, keep=50).put('k', labels, {'who': 'doomed'}, {})\n")
+        cache = self._cache(tmp_path)
+        # prepended, never replaced: CI finds haversack ONLY through PYTHONPATH=src
+        repo = Path(__file__).resolve().parent.parent
+        inherited = os.environ.get("PYTHONPATH", "")
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join(
+            [p for p in (str(repo / "src"), inherited) if p])}
+        inside = tmp_path / "inside"
+        child = subprocess.Popen([sys.executable, "-c", doomed, str(cache.root), str(inside)],
+                                 env=env)
+        try:
+            deadline = time.time() + 60
+            while not inside.exists() and child.poll() is None and time.time() < deadline:
+                time.sleep(0.05)
+            assert inside.exists(), f"the writer never reached its copy (exit {child.poll()})"
+        finally:
+            child.kill()
+            child.wait(30)
+        staging = [p for p in (cache.root / "k").iterdir() if p.name.startswith("s-")]
+        assert len(staging) == 1, "the killed writer left no staging behind"
+        gen = staging[0].name[len("s-"):]
+
+        monkeypatch.setattr(serve_mod, "_host_identity", lambda: "some-other-host")
+        self._publish_as(cache, tmp_path, "B")
+        assert staging[0].is_dir(), "a lock taken on another host was trusted as proof of death"
+
+        monkeypatch.undo()
+        self._publish_as(cache, tmp_path, "C")
+        assert not staging[0].exists(), "a writer this host can see is dead kept its staging"
+        left = [p.name for p in (cache.root / "k").iterdir() if gen in p.name]
+        assert left == [], f"the dead writer's leavings outlived it: {left}"
+
+    def test_a_FAILED_publication_takes_down_what_it_built(self, tmp_path):
+        """Nobody else may reclaim staging a live claim covers, and the claim a failed
+        writer gives up leaves staging that nobody claims - which is never reclaimed
+        either. So a publication that fails must remove its own work, or it is litter
+        for as long as the entry exists."""
+        import shutil
+        cache = self._cache(tmp_path)
+        self._publish_as(cache, tmp_path, "A")
+        bad = tmp_path / "bad.seg.nrrd"
+        bad.write_bytes(b"bad")
+        real_copy = shutil.copy2
+
+        def failing_copy(src, dst, *a, **k):
+            if str(src).endswith("bad.seg.nrrd"):
+                raise OSError(28, "No space left on device")
+            return real_copy(src, dst, *a, **k)
+
+        shutil.copy2 = failing_copy
+        try:
+            with pytest.raises(OSError):
+                cache.put("k", bad, {"who": "bad"}, {"who": "bad"})
+        finally:
+            shutil.copy2 = real_copy
+        left = sorted(p.name for p in (cache.root / "k").iterdir()
+                      if not p.name.startswith(("g-", "current")))
+        assert left == [], f"a failed publication left {left} behind"
+        assert cache.get("k")[0].read_bytes() == b"A", "and the previous result still serves"
+
+    def test_staging_whose_writer_cannot_be_VERIFIED_is_left_alone_however_old(self, tmp_path):
+        """No claim at all - left by a build from before claims, or written where the
+        filesystem offers no locks - is no proof either way. Age is not proof."""
+        import os
+        cache = self._cache(tmp_path)
+        self._publish_as(cache, tmp_path, "A")
+        unclaimed = cache._staging_dir("k", "0" * 32)
+        unclaimed.mkdir()
+        (unclaimed / "result.json").write_text("{}", encoding="utf-8")
+        month = time.time() - 30 * 24 * 3600
+        os.utime(unclaimed, (month, month))
+        self._publish_as(cache, tmp_path, "B")
+        assert unclaimed.is_dir(), "a staging directory was reclaimed on its age alone"
+
+    def test_a_lease_taken_DURING_reclamation_still_wins(self, tmp_path, monkeypatch):
+        """Deciding "nobody holds this" and then deleting it is a check-then-act. A reader
+        that read `current` just before a publication can take its lease in between, be
+        told its path is good, and then lose it. Reclamation moves the directory out of
+        reach and asks again - so a lease that lands exactly in that gap brings the
+        generation back rather than letting it go."""
+        import os
+        cache = self._cache(tmp_path)
+        gone = self._publish_as(cache, tmp_path, "A")
+        a_dir = cache._generation_dir("k", gone)
+        self._publish_as(cache, tmp_path, "B")             # A superseded, never read
+        month = time.time() - 30 * 24 * 3600
+        os.utime(a_dir, (month, month))                    # ...and aged: fair game
+        real_rename, fired = os.rename, []
+
+        def rename(src, dst, *a, **k):
+            if Path(src) == a_dir and not fired:
+                fired.append(dst)
+                cache._take_lease(a_dir)       # the paused reader resumes and leases A
+                assert (a_dir / serve_mod.RESULT_NAME).exists()   # ...and is told it is good
+            return real_rename(src, dst, *a, **k)
+
+        monkeypatch.setattr(os, "rename", rename)
+        self._publish_as(cache, tmp_path, "C")
+        assert fired, "reclamation never moved A - this test no longer reaches its gap"
+        assert (a_dir / serve_mod.RESULT_NAME).read_bytes() == b"A", (
+            "a lease taken between the decision and the delete was ignored")
+
+    def test_a_generation_still_being_PUBLISHED_is_not_reclaimed(self, tmp_path, monkeypatch):
+        """Sparing held generations concentrates the ceiling on the NEWEST unheld ones -
+        and the newest can be a concurrent publication, renamed into place with its
+        pointer not yet moved. Reclaimed there, the pointer then names nothing and a
+        publication that succeeded reads as a miss. The writer's claim lasts until its
+        pointer has moved, and a live claim is not reclaimed."""
+        import os
+        import threading
+        cache = self._cache(tmp_path)
+        self._held_generations(cache, tmp_path, cache.MAX_GENERATIONS)   # a full ceiling
+        real_replace = os.replace
+        placed, go, failed, mine = threading.Event(), threading.Event(), [], []
+
+        def replace(src, dst, *a, **k):
+            out = real_replace(src, dst, *a, **k)
+            if threading.current_thread() in mine and Path(src).name.startswith("s-"):
+                placed.set()                   # renamed into place, pointer not yet moved
+                go.wait(20)
+            return out
+
+        def writer():
+            try:
+                self._publish_as(cache, tmp_path, "late")
+            except BaseException as e:                     # noqa: BLE001 - asserted below
+                failed.append(f"{type(e).__name__}: {e}")
+
+        monkeypatch.setattr(os, "replace", replace)
+        t = threading.Thread(target=writer)
+        mine.append(t)
+        t.start()
+        try:
+            assert placed.wait(10), "the writer never reached the gap"
+            self._publish_as(cache, tmp_path, "now")       # prunes, over the ceiling
+        finally:
+            go.set()
+            t.join(30)
+        assert failed == [], failed
+        got = cache.get("k")
+        assert got is not None, "the pointer names a generation reclaimed while in flight"
+        assert got[0].read_bytes() == b"late"
+
+    def test_a_pruner_that_FELL_BEHIND_does_not_reclaim_what_is_now_current(
+            self, tmp_path, monkeypatch):
+        """A pruner is told which generation it just published; by the time it runs,
+        another publication may have replaced that one as current. It must ask the
+        pointer, not trust its argument, or it reclaims the entry's live generation."""
+        import threading
+        from haversack.serve import ResultCache
+        cache = self._cache(tmp_path)
+        self._held_generations(cache, tmp_path, cache.MAX_GENERATIONS)
+        real_prune = ResultCache._prune_generations
+        paused, go, failed, slow = threading.Event(), threading.Event(), [], []
+
+        def prune(self_, key, *, keep_gen):
+            if threading.current_thread() in slow:
+                paused.set()
+                go.wait(20)                    # fell behind: the pointer moved on
+            return real_prune(self_, key, keep_gen=keep_gen)
+
+        def slow_writer():
+            try:
+                self._publish_as(cache, tmp_path, "first")
+            except BaseException as e:                     # noqa: BLE001 - asserted below
+                failed.append(f"{type(e).__name__}: {e}")
+
+        monkeypatch.setattr(ResultCache, "_prune_generations", prune)
+        t = threading.Thread(target=slow_writer)
+        slow.append(t)
+        t.start()
+        try:
+            assert paused.wait(10), "the slow writer never reached its prune"
+            self._publish_as(cache, tmp_path, "second")    # current now, and never read
+        finally:
+            go.set()
+            t.join(30)
+        assert failed == [], failed
+        got = cache.get("k")
+        assert got is not None and got[0].read_bytes() == b"second", (
+            "a pruner reclaimed the generation that became current after it published")
+
+    def test_EVICTION_never_takes_an_entry_a_reader_holds(self, tmp_path):
+        """Eviction is cleanup too, and it removes whole entries. `get` touches the entry,
+        so a read makes it the newest - but a busy cache touches `keep` others inside one
+        lease, and then the least recently used entry is one a reader is holding."""
+        import os
+        from haversack.serve import ResultCache
+        cache = ResultCache(tmp_path / "rc", keep=2)
+        self._publish_as(cache, tmp_path, "A", key="a")
+        labels, _ = cache.get("a")                         # held
+        month = time.time() - 30 * 24 * 3600
+        os.utime(cache.root / "a", (month, month))         # ...and least recently used
+        self._publish_as(cache, tmp_path, "B", key="b")
+        self._publish_as(cache, tmp_path, "C", key="c")    # over `keep`: evicts
+        assert labels.exists() and labels.read_bytes() == b"A", (
+            "eviction removed an entry a reader was holding")
+
+    def test_eviction_still_bounds_entries_NOBODY_holds(self, tmp_path):
+        import os
+        from haversack.serve import ResultCache
+        cache = ResultCache(tmp_path / "rc", keep=2)
+        self._publish_as(cache, tmp_path, "A", key="a")
+        month = time.time() - 30 * 24 * 3600
+        os.utime(cache.root / "a", (month, month))
+        self._publish_as(cache, tmp_path, "B", key="b")
+        self._publish_as(cache, tmp_path, "C", key="c")
+        assert not (cache.root / "a").exists(), "an entry nobody holds survived past `keep`"
+        assert cache.get("b") is not None and cache.get("c") is not None
