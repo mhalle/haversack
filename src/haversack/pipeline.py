@@ -369,7 +369,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             if accumulate == "device" and where == "host":
                 from .result import deviation
                 prov["deviations"].append(deviation("accumulator placement", "device", "host",
-                                                    model.accumulate_choice.get("reason", "")))
+                                                    model.accumulate_choice.get("why", "")))
             T[f"network:{key}"] = time.perf_counter() - t
             models.release(model)
         return out, fr, og

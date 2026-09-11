@@ -218,6 +218,11 @@ before, and not solved.
 - Error messages name the fix (the extra to install, the flag to pass) in one line.
 - Deviations from what the user asked (accumulator moved to host, fp16 retry) are never
   silent: `note:` on the CLI, a progress stage on the server, `provenance.deviations` in the result.
+- An out-of-memory handler retries AFTER its `except` block, never inside it: until the block
+  exits, the traceback pins every frame's tensors, so `empty_cache()` frees nothing and the
+  retry runs beside the failed attempt (an fp32 run on a 22 GiB A10, 2026-09-11). Keep only
+  strings in the handler. `TorchModel._sliding_window_with_fallback` and SynthStrip's fp16
+  retry have this shape; `tests/test_oom_fallback.py` checks it with weak references.
 - Tests are `unittest` classes under pytest, with the device matrix fixture in `conftest.py`.
 - Don't commit this file, `data/`, `uv.lock`, or model weights. Don't vendor sibling repos.
 

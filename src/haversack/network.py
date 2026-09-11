@@ -139,6 +139,14 @@ def choose_batch(policy, *, device: torch.device, on_device: bool, held_bytes: i
     job, where five parts share one shape. Activations scale about linearly with batch, so
     the rule is: CUDA, accumulator on the device, and ``CUDA_AUTO_BATCH`` x the measured
     working set still fits beside the accumulator with margin.
+
+    The 0.5 GB margin is flat, and nothing has measured it against a failure. On 2026-09-11 a
+    CADS ResEnc-L checkpoint in fp32 (192^3 patch, K=18) on a 22 GiB A10 ran out of memory,
+    apparently at batch 4. It has not been reproduced, and ``batch_choice``, which holds the
+    figures this decided from, reaches no log and no provenance, so there is nothing yet to
+    size a proportional margin by. The fallback absorbs a miss instead: an out-of-memory error
+    at a batch above 1 is retried at batch 1 on the device before the accumulator moves to the
+    host (``TorchModel._sliding_window_with_fallback``).
     """
     if policy != "auto":
         b = max(1, int(policy))
@@ -458,17 +466,7 @@ class TorchModel:
         total = None
         for i in range(len(self.fold_params)):
             self._load_fold(i)
-            try:
-                acc = self._sliding_window(padded, slicers, report=report)
-            except (RuntimeError, torch.OutOfMemoryError) if hasattr(torch, "OutOfMemoryError") else RuntimeError as e:
-                if not self.accumulate_choice["on_device"] or "memory" not in str(e).lower():
-                    raise
-                warnings.warn(f"on-device accumulation ran out of memory ({e}); falling back to host", stacklevel=2)
-                if self.device.type == "mps":
-                    torch.mps.empty_cache()
-                elif self.device.type == "cuda":
-                    torch.cuda.empty_cache()
-                acc = self._sliding_window(padded, slicers, force_host=True, report=report)
+            acc = self._sliding_window_with_fallback(padded, slicers, report=report)
             total = acc if total is None else total.add_(acc)
         if len(self.fold_params) > 1:
             total /= len(self.fold_params)
@@ -486,16 +484,72 @@ class TorchModel:
         pred *= self.gaussian
         return pred
 
+    def _sliding_window_with_fallback(self, padded: torch.Tensor, slicers, *, report=None) -> torch.Tensor:
+        """:meth:`_sliding_window`, stepped down when it runs out of memory with the accumulator on
+        the device: a batch above 1 is retried at 1 on the device, and batch 1 with the
+        accumulator on the host. A forced ``"device"`` falls back the same way.
+
+        **Each retry runs after the ``except`` block, never inside it.** While an exception is
+        handled, its traceback references every frame between here and the failed allocation, and
+        each frame its locals - the device accumulator, the batched input, the activations. Until
+        2026-09-11 the host retry ran inside the handler, so ``empty_cache()`` could release none
+        of that and the retry ran beside it: on Modal, a CADS ResEnc-L checkpoint in fp32 on a
+        22 GiB A10 raised on an 864 MiB allocation with 19.08 GiB still allocated by PyTorch
+        (the PyTorch FAQ: "My out of memory exception handler can't allocate memory"). So the
+        handler keeps strings and ints and nothing else: holding the exception, its traceback, or
+        anything reached through them pins the failed attempt again. ``tests/test_oom_fallback.py``
+        checks with weak references.
+
+        The step to batch 1 before the host is there because batch 1 on the device is what the
+        measured placement policy approved; only the batch above it rests on an estimate (see
+        :func:`choose_batch`). An error in the first patch is raised as it is: no policy has
+        decided anything yet, and every fallback would run that same patch the same way first.
+        """
+        retry: dict = {}
+        failed: list[str] = []
+        while True:
+            # this attempt's choices, not the previous volume's: the model is shared through the cache
+            self.accumulate_choice = self.batch_choice = None
+            try:
+                return self._sliding_window(padded, slicers, report=report, **retry)
+            except RuntimeError as e:          # torch.OutOfMemoryError is one; MPS raises a bare RuntimeError
+                on_device = bool(self.accumulate_choice and self.accumulate_choice["on_device"])
+                if not on_device or "memory" not in str(e).lower():
+                    # raised in here, a retry's error was chained to the one before; now it is not
+                    for f in failed:
+                        e.add_note(f"haversack: this was a retry - an earlier attempt ran out of memory at {f}")
+                    raise
+                batch = self.batch_choice["batch"] if self.batch_choice else 1
+                oom = " ".join(str(e).split())
+                failed.append(f"batch {batch}, accumulator on {self.device}: {oom}")
+            # `e` is unbound here, and the failed attempt's tensors are garbage with it
+            if self.device.type == "mps":
+                torch.mps.empty_cache()
+            elif self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            if batch > 1:
+                warnings.warn(f"batch {batch} ran out of memory on {self.device} ({oom}); retrying at batch 1",
+                              stacklevel=2)
+                retry = {"batch": 1, "reason": f"batch 1: batch {batch} ran out of memory ({oom})"}
+            else:
+                warnings.warn(f"on-device accumulation ran out of memory ({oom}); falling back to host", stacklevel=2)
+                retry = {"force_host": True,
+                         "reason": f"forced host after an out-of-memory fallback ({'; '.join(failed)})"}
+
     def _sliding_window(self, padded: torch.Tensor, slicers, *, force_host: bool = False,
-                        report=None) -> torch.Tensor:
+                        batch: int | None = None, reason: str = "", report=None) -> torch.Tensor:
         """Placement is decided after the *first* patch has run, from what the network actually
         holds on the device - no extra compute, and no guessing at an activation reserve that
-        varies 2 GB between models."""
+        varies 2 GB between models.
+
+        ``force_host`` and ``batch`` are the out-of-memory fallback's overrides of the two
+        policies, and ``reason`` is recorded in place of the policy's why (see
+        :meth:`_sliding_window_with_fallback`)."""
         K, shape = self.K, padded.shape[1:]
         with torch.inference_mode():
             first = self._patch(padded, slicers[0])
         if force_host:
-            on_device, why = False, "forced host after an out-of-memory fallback"
+            on_device, why = False, reason or "forced host after an out-of-memory fallback"
         else:
             on_device, why = choose_accumulate(self.accumulate, device=self.device, K=K, shape=shape,
                                                activation_reserve_gb=self.activation_reserve_gb, measured=True)
@@ -505,8 +559,11 @@ class TorchModel:
         n = 1
         for d in shape:
             n *= int(d)
-        b, bwhy = choose_batch(self.batch_size, device=self.device, on_device=on_device, held_bytes=held,
-                               budget_bytes=budget, accumulator_bytes=(K + 1) * n * 2)
+        if batch is not None and on_device:
+            b, bwhy = batch, reason
+        else:
+            b, bwhy = choose_batch(self.batch_size, device=self.device, on_device=on_device, held_bytes=held,
+                                   budget_bytes=budget, accumulator_bytes=(K + 1) * n * 2)
         self.batch_choice = {"batch": b, "why": bwhy}
         return self._accumulate(padded, slicers, first, on_device, batch=b, report=report)
 
