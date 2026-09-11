@@ -207,6 +207,52 @@ class TheFetchDoorRecordsIt(unittest.TestCase):
             sole = next((pathlib.Path(td) / "series").iterdir())
             self.assertEqual(c["digest"], digest_file(sole))
 
+    def test_a_local_FILE_is_described_by_itself_never_by_its_folder(self):
+        """A local input's DICOM identifiers were read from the folder the file sits in,
+        which for a file given on the command line is wherever the caller keeps it. GDCM
+        scanned every file there - a NIfTI in ~/Downloads meant all of ~/Downloads - and
+        a DICOM file of another series lying beside a NIfTI input was recorded as THAT
+        input's series: a false claim in the result's provenance. Found 2026-09-11 by a
+        `uvx` smoke run, through the ITK warning the scan printed."""
+        import SimpleITK as sitk
+        scanned = []
+        real = sitk.ImageSeriesReader.GetGDCMSeriesIDs
+
+        def spy(directory, *a, **k):
+            scanned.append(pathlib.Path(directory))
+            return real(directory, *a, **k)
+
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(sitk.ImageSeriesReader, "GetGDCMSeriesIDs", staticmethod(spy)):
+            folder = pathlib.Path(td)
+            sitk.WriteImage(sitk.Image(8, 8, 8, sitk.sitkInt16), str(folder / "scan.nii.gz"))
+            neighbor = sitk.Image(8, 8, 1, sitk.sitkInt16)
+            neighbor.SetMetaData("0008|0060", "CT")
+            sitk.WriteImage(neighbor, str(folder / "someone_else.dcm"))
+            rec = sources.input_record(str(folder / "scan.nii.gz"))
+            self.assertIsNotNone(rec["content"], "the local file was not described at all")
+            self.assertNotIn("dicom", rec["content"],
+                             "a DICOM file lying beside the input was recorded as its series")
+            self.assertNotIn(folder, scanned, "describing one file scanned the folder it sits in")
+
+    def test_a_local_DICOM_file_still_carries_its_own_identifiers(self):
+        """The other half: one DICOM file given on the command line is described by its
+        own tags - read from the file, rather than from its folder or not at all."""
+        import SimpleITK as sitk
+        with tempfile.TemporaryDirectory() as td:
+            f = pathlib.Path(td) / "one.dcm"
+            img = sitk.Image(8, 8, 1, sitk.sitkInt16)
+            img.SetMetaData("0008|0060", "MR")
+            sitk.WriteImage(img, str(f))
+            r = sitk.ImageFileReader()
+            r.SetFileName(str(f))
+            r.ReadImageInformation()
+            uid = r.GetMetaData("0020|000e").strip()
+            self.assertTrue(uid, "the writer gave the file no SeriesInstanceUID to find")
+            dicom = sources.input_record(str(f))["content"]["dicom"]
+            self.assertEqual(dicom["series_instance_uid"], uid)
+            self.assertEqual(dicom["modality"], "MR")
+
     def test_the_sidecar_is_not_content(self):
         """`.input.json` lands in the entry beside `series/`, but a dotfile anywhere in
         the content must not make a one-file entry look like two. Nothing pinned the

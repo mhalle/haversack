@@ -290,27 +290,54 @@ def sole_file(directory) -> Path | None:
     return files[0] if len(files) == 1 else None
 
 
-def _dicom_facts(directory) -> dict | None:
+def _is_dicom_file(path) -> bool:
+    """A DICOM Part 10 file announces itself: ``DICM`` at byte 128. Asked of the ONE
+    file before anything reads it as DICOM, so a NIfTI is never handed to GDCM."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(132)
+    except OSError:
+        return False
+    return len(head) == 132 and head[128:132] == b"DICM"
+
+
+def _dicom_facts(where) -> dict | None:
     """The identifiers a DICOM series carries in its own files, or None.
 
-    Read from the DIRECTORY the files sit in, whichever number of them there is.
-    This lived inside the many-files branch, so a series stored as ONE file - an
-    enhanced multiframe volume, or any of IDC's 85k single-instance series - lost
-    exactly the identifiers that pin a result whose source identity is not
-    cache-grade (`tcia:` is not version-pinned; its SeriesInstanceUID is the
-    durable fact). Found 2026-09-07 by review.
+    A DIRECTORY is read whichever number of files it holds. That rule lived inside the
+    many-files branch, so a series stored as ONE file - an enhanced multiframe volume,
+    or any of IDC's 85k single-instance series - lost exactly the identifiers that pin
+    a result whose source identity is not cache-grade (`tcia:` is not version-pinned;
+    its SeriesInstanceUID is the durable fact). Found 2026-09-07 by review.
+
+    A FILE is read by itself, and only if it is DICOM. It used to be read through its
+    parent directory, which for a local input is whatever folder the caller keeps it
+    in: GDCM scanned every file there - a NIfTI in ~/Downloads meant all of ~/Downloads
+    - and a DICOM file of another series lying beside a NIfTI input was recorded as
+    THAT input's series, a false claim in the result's provenance (2026-09-11, found by
+    a `uvx` smoke run through the ITK warning the scan printed).
     """
     try:
         from . import io as nio
-        d = Path(directory)
-        uids = nio.dicom_series_ids(d)
-        if not uids:
+        p = Path(where)
+        if p.is_dir():
+            uids = nio.dicom_series_ids(p)
+            if not uids:
+                return None
+            files = sorted(f for f in p.iterdir() if f.is_file() and not f.name.startswith("."))
+            first, out = files[0], {"series_instance_uid": uids[0] if len(uids) == 1 else uids}
+        elif _is_dicom_file(p):
+            first, out = p, {}
+        else:
             return None
-        files = sorted(f for f in d.iterdir() if f.is_file() and not f.name.startswith("."))
-        out = {"series_instance_uid": uids[0] if len(uids) == 1 else uids}
         reader = nio._sitk().ImageFileReader()
-        reader.SetFileName(str(files[0]))
+        reader.SetFileName(str(first))
         reader.ReadImageInformation()
+        if "series_instance_uid" not in out:  # a file: its own tag, or no claim at all
+            uid = reader.GetMetaData("0020|000e").strip() if reader.HasMetaDataKey("0020|000e") else ""
+            if not uid:
+                return None
+            out["series_instance_uid"] = uid
         for key, tag in (("study_instance_uid", "0020|000d"), ("modality", "0008|0060"),
                          ("series_description", "0008|103e")):
             if reader.HasMetaDataKey(tag) and reader.GetMetaData(tag).strip():
@@ -330,9 +357,6 @@ def _content_facts(fetched) -> dict | None:
         return None
     from .content import digest_dir, digest_file
     p = Path(fetched)
-    # The directory the bytes sit in, kept whatever the digest turns out to
-    # describe: the DICOM identifiers are read from it either way.
-    holder = p if p.is_dir() else p.parent
     one = sole_file(p) if p.is_dir() else (p if p.is_file() else None)
     if one is not None:                         # one file is a file: see sole_file
         out = {"digest": digest_file(one), "bytes": one.stat().st_size, "files": 1}
@@ -342,7 +366,9 @@ def _content_facts(fetched) -> dict | None:
                "files": len(files)}
     else:
         return None
-    dicom = _dicom_facts(holder)
+    # identifiers from what the bytes ARE - a directory's from the directory, a file's
+    # from the file - and never from a file's parent: see _dicom_facts
+    dicom = _dicom_facts(p)
     if dicom:
         out["dicom"] = dicom
     return out

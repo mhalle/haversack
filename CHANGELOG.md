@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+- **A local input's provenance could name a DICOM series it was not.** The DICOM
+  identifiers recorded for an input were read from the directory it sits in, and for a
+  file given on the command line that is whatever folder the caller keeps it in - so a
+  NIfTI beside a DICOM file of another scan was recorded as THAT series, and GDCM parsed
+  every file in the folder on the way (a scan in `~/Downloads` meant all of
+  `~/Downloads`, with an ITK warning on stderr when none of it was DICOM). A file is now
+  described by itself, and only a DICOM file carries DICOM identifiers; a directory is
+  read as before, whatever number of files it holds.
+
 ## [0.9.0] - 2026-09-11
 
 Acting on an external review of 0.8.0, on three adversarial reviews of the fixes, and on
