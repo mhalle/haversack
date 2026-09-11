@@ -4,9 +4,15 @@ A user segmenting a remote dataset usually wants the data too. `get` fetches a s
 the cache (or out to a file, converting a DICOM series to one volume), and `cache`/`weights`
 list and clean what is on disk. Fakes and a local DICOM-ish series - nothing leaves the machine.
 """
+import os
 import subprocess
 import sys
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -99,6 +105,87 @@ def test_get_local_path_is_a_noop(tmp_path, capsys):
     (tmp_path / "scan.nii.gz").touch()
     assert cli.main(["get", str(tmp_path / "scan.nii.gz")]) == 0
     assert capsys.readouterr().out.strip() == str(tmp_path / "scan.nii.gz")
+
+
+def sitk_series(dirpath, zs):
+    """A CT series as SimpleITK writes it: one 4x4 slice per z, its position in the IPP tag.
+    ``KeepOriginalImageUIDOn`` so the UIDs given are the ones written."""
+    import SimpleITK as sitk
+    dirpath.mkdir(parents=True)
+    w = sitk.ImageFileWriter()
+    w.KeepOriginalImageUIDOn()
+    uid = "1.2.826.0.1.3680043.2.1125.9"
+    for i, z in enumerate(zs):
+        sl = sitk.GetImageFromArray(np.full((4, 4), i, np.int16))
+        for tag, val in (("0008|0060", "CT"), ("0020|000d", f"{uid}.1"), ("0020|000e", f"{uid}.2"),
+                         ("0008|0018", f"{uid}.3.{i}"), ("0020|0013", str(i + 1)),
+                         ("0020|0032", f"-266\\-138\\{z:g}"), ("0020|0037", "1\\0\\0\\0\\1\\0")):
+            sl.SetMetaData(tag, val)
+        w.SetFileName(str(dirpath / f"slice_{i:03d}.dcm"))
+        w.Execute(sl)
+    return dirpath
+
+
+GAPPED = (31.0, 32.0, 33.0, 35.0, 36.0)          # 34 is missing
+
+
+class Gapped(sources.DataSource):
+    prefix = "gapped"
+    id_pattern = r"[a-z0-9]+"
+    description = "test double: a CT series with one slice missing"
+
+    def fetch(self, identifier, dest_dir, *, credentials=None):
+        return sitk_series(Path(dest_dir) / "series", GAPPED)
+
+
+class ConvertRefusesWhatSegmentRefuses(unittest.TestCase):
+    """`get SOURCE -o scan.nii.gz` converts through io.convert, which until 2026-09-11 read a
+    series with a bare ImageSeriesReader: a series with a missing slice came out regridded onto
+    ITK's mean step, with a warning on stderr and nothing else (IDC eay131, 3 mm slices with
+    four 6 mm gaps, was written at 3.0577 mm with slices up to ~2.9 mm off). The NIfTI is then a
+    clean uniform grid, so `segment` on it cannot see what it refuses on the source."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.tmp = Path(td.name)
+        for p in (mock.patch.object(sources, "default_sources", lambda: [Gapped()]),
+                  mock.patch.dict(os.environ, {"HAVERSACK_CACHE_DIR": str(self.tmp / "cache")})):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def segment_says(self, series) -> str:
+        with self.assertRaises(InputError) as said:      # `segment` reads through read_image
+            io.read_image(series)
+        return str(said.exception)
+
+    def test_convert_raises_segments_error_and_writes_nothing(self):
+        src = sitk_series(self.tmp / "series", GAPPED)
+        dst = self.tmp / "out" / "scan.nii.gz"
+        with self.assertRaises(InputError) as said:
+            io.convert(src, dst)
+        self.assertEqual(str(said.exception), self.segment_says(src))
+        self.assertIn("missing or duplicate slices", str(said.exception))
+        self.assertFalse(dst.exists())
+
+    def test_get_refuses_in_one_line_that_names_the_raw_copy(self):
+        dst = self.tmp / "scan.nii.gz"
+        err = StringIO()
+        with redirect_stderr(err):
+            rc = cli.main(["get", "gapped:case1", "-o", str(dst)])
+        self.assertEqual(rc, 2)
+        self.assertFalse(dst.exists())
+        said = [ln for ln in err.getvalue().splitlines() if ln.startswith("haversack:")]
+        self.assertEqual(len(said), 1)
+        self.assertIn(self.segment_says(sources.materialize("gapped:case1")), said[0])
+        self.assertIn("-o <directory>/", said[0])
+
+    def test_the_raw_copy_it_names_still_takes_the_series(self):
+        """The way out the refusal names must work on the very series it refused."""
+        with redirect_stderr(StringIO()), redirect_stdout(StringIO()):
+            rc = cli.main(["get", "gapped:case1", "-o", str(self.tmp / "raw") + "/"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(list((self.tmp / "raw" / "case1").glob("*.dcm"))), len(GAPPED))
 
 
 def test_cache_list_and_clean(fake, tmp_path, capsys):

@@ -377,6 +377,13 @@ multi-hour job fares against the 3600 s function timeout.
   digested as that file (`sources.sole_file`), which is every bare duckn volume: a zarr v3
   array is one `zarr.json` over a `c/` chunk tree, so the record pins the metadata and not
   a voxel. The demo stores escape only because a `README.md` sits beside their `zarr.json`.
+- **A NIfTI cannot hold a slightly tilted series (found 2026-09-11, not decided).**
+  `_series_geometry` accepts a slice chord up to 2.56° off the image normal (`|dot| >= 0.999`)
+  and gives it a sheared direction, exact in memory and in NRRD; ITK's NIfTI writer squares it
+  off with only a stderr warning. On a synthetic 40-slice 2 mm series tilted 1.5°, the NIfTI
+  from `get -o` misplaces the worst voxel corner by 1.02 mm (the bare series reader `get`
+  used before: 2.04 mm; NRRD: 0). `segment`'s NIfTI labels on such a series carry the same
+  squaring. Refusing it would need a tolerance that applies to NIfTI output only.
 
 ### Verified on a real filesystem (2026-09-07)
 
@@ -422,6 +429,13 @@ treat a failed apply as a HARNESS ERROR, not a survivor; run the unmutated basel
 require it to pass; and prefer killing a mutant that the guard should NOT catch as a sanity
 check. Also: mutate the facts the test does NOT check — 8 easy kills said nothing about the
 gaps that mattered.
+
+The reverse happens too (2026-09-11): a failing unittest `subTest` prints its parent test
+`PASSED` and the failure on a line that STARTS with `SUBFAILED[<name>]`, so a harness matching
+lines by their leading node id read two real kills as survivors. Require the exit status to
+agree with the parsed outcomes, record which `haversack` was imported from INSIDE the session
+(a `-p` plugin's `pytest_sessionstart`, not a separate `python -c`), and prefer separate test
+methods to `subTest` where a mutant has to see each case.
 
 ## The 2026-09-09 review round — what it cost and what it taught
 

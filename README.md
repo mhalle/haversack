@@ -264,7 +264,7 @@ What `-o` and `--format` do, in order:
 |---|---|
 | no `-o` | fetched into the cache; the cache path is printed (a later `segment` of the same id reuses it) |
 | `-o` a **directory** (or a path ending `/`) | the raw fetched content copied in - a DICOM series stays a directory of files, named by the source |
-| `-o` a **file** with an image extension | read and written as that one volume (a DICOM series collapses to a single NIfTI/NRRD), geometry preserved |
+| `-o` a **file** with an image extension | read and written as that one volume (a DICOM series collapses to a single NIfTI/NRRD), geometry preserved. A series is read as `segment` reads it, so one `segment` would refuse - a missing or duplicate slice, a tilted gantry - is refused here too, rather than regridded; `-o` a directory still takes it as fetched |
 | `--format <type>` | convert to that type (`nifti`, `nrrd`, `seg.nrrd`, `mha`); with `-o` a directory the file is auto-named `<source>.<ext>` |
 | `--no-cache` | fetch straight to `-o` and leave nothing in the cache (for a large one-off); requires `-o` |
 

@@ -374,17 +374,25 @@ def image_suffix(name) -> str | None:
 def convert(src, dst, *, compress: bool = True) -> Path:
     """Read ``src`` (an image file or a DICOM series directory) and write it to ``dst`` as one
     volume, its format taken from ``dst``'s extension. Geometry (spacing, direction, origin) is
-    preserved - a plain SimpleITK read/write, not the model-side canonicalization ``read_image``
-    does for the pipeline. Returns ``dst``."""
+    preserved: nothing is reoriented or resampled. Returns ``dst``.
+
+    A directory is read by :func:`read_image`, exactly as ``segment`` reads it: the geometry
+    comes from the slice positions, and a series that is not one uniform grid (a missing or
+    duplicate slice, a tilted gantry) raises the same :class:`InputError` before anything is
+    written. Until 2026-09-11 this was a bare ``ImageSeriesReader``, which regrids a gapped
+    series onto its mean step with only a stderr warning (IDC series
+    33754f28-f0fe-4bbe-bba9-a98e4a4926ef, eay131: 3 mm slices with four 6 mm gaps, written at
+    3.0577 mm with slices up to ~2.9 mm from where they were acquired) and takes the slice
+    axis's sign from a negative (0018,0088) - so ``get -o scan.nii.gz`` wrote series that
+    ``segment`` refuses, or places differently, as clean uniform grids on which ``segment``
+    could no longer see anything wrong.
+
+    A file is read as it stands. :func:`read_image` would also refuse one that is not 3D (a 4D
+    NIfTI converts to NRRD fine) and snap a near-orthonormal affine, which is a geometry change."""
     sitk = _sitk()
     src = Path(src)
     if src.is_dir():
-        reader = sitk.ImageSeriesReader()
-        ids = reader.GetGDCMSeriesIDs(str(src))
-        files = reader.GetGDCMSeriesFileNames(str(src), ids[0]) if ids else \
-            [str(f) for f in sorted(src.iterdir()) if f.is_file()]
-        reader.SetFileNames(files)
-        img = reader.Execute()
+        img = read_image(src)
     else:
         _readable(src)
         try:

@@ -387,7 +387,8 @@ def _command_line() -> click.Group:
               'reuses it. With -o, it is also written there: a directory gets the raw fetched '
               'content (a DICOM series stays a directory), an image-extension file (or '
               '--format) is converted to that one volume (a DICOM series -> one NIfTI/NRRD), '
-              'geometry preserved. The raw data stays cached unless --no-cache.'),
+              'geometry preserved; a series `segment` would refuse (a missing slice, a tilted '
+              'gantry) is refused, not regridded. The raw data stays cached unless --no-cache.'),
         epilog=_verbatim("""examples:
   haversack get idc:<crdc_series_uuid>                     into cache; prints the path
   haversack get idc:<crdc_series_uuid> -o case1/scan.nii.gz  the series as one NIfTI
@@ -969,7 +970,19 @@ def _cmd_get(args) -> int:
                 return src
             out, want_convert = out_target
             if want_convert:
-                io.convert(src, out)
+                try:
+                    io.convert(src, out)
+                except InputError as e:
+                    if not Path(src).is_dir():
+                        raise
+                    # A series `segment` refuses is refused here in its words, and no flag
+                    # writes it anyway (decided 2026-09-11): one volume of a gapped series
+                    # either misplaces slices (ITK's mean step) or invents them (a filled gap),
+                    # and once it is a NIfTI the gap is gone - `segment` on that file cannot
+                    # see what it refuses on the source, and a `note:` here would not travel
+                    # with the file. The fetched series keeps everything, so name the way to it.
+                    raise InputError(f"{e}; `-o <directory>/` without --format copies the "
+                                     "series as fetched") from None
             elif Path(src).is_dir():
                 shutil.copytree(src, out, dirs_exist_ok=True)
             else:

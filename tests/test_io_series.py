@@ -8,6 +8,10 @@ physical span the scan never occupies and the network sees a head-down body
 constructs series geometry from the geometric tags; these fixtures encode the
 failure and the grid contract without shipping patient data.
 """
+import tempfile
+import unittest
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -194,3 +198,38 @@ def test_near_orthonormal_affine_snaps_and_sheared_refuses(tmp_path):
     nib.save(nib.Nifti1Image(a, sheared), str(p2))
     with pytest.raises(InputError, match="sheared|orthonormal"):
         read_image(p2)
+
+
+class ConvertTakesTheSameGeometry(unittest.TestCase):
+    """`get -o scan.nii.gz` converts through io.convert, which until 2026-09-11 read a series
+    with a bare ImageSeriesReader and so never met the override above: the Philips series came
+    out with its slice axis reversed about the first slice. SimpleITK cannot write this
+    fixture - GDCM fills (0018,0088) from the image's own spacing, whatever the metadata says,
+    and SimpleITK refuses a negative spacing - so it is pydicom's (write_series)."""
+
+    def converts_to_where_its_slices_are(self, ipps):
+        import SimpleITK as sitk
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "series"
+            src.mkdir()
+            write_series(src, ipps, sbs=-1.0)
+            dst = Path(td) / "scan.nii.gz"
+            io.convert(src, dst)
+            out = sitk.ReadImage(str(dst))
+            arr = sitk.GetArrayFromImage(out)
+            for k in range(arr.shape[0]):         # write_series fills slice i with the value i
+                np.testing.assert_allclose(out.TransformIndexToPhysicalPoint((0, 0, k)),
+                                           ipps[int(arr[k, 0, 0])], atol=1e-4)
+            ref = io.read_image(src)              # and it is what `segment` reads
+            np.testing.assert_allclose(out.GetOrigin(), ref.GetOrigin(), atol=1e-4)
+            np.testing.assert_allclose(out.GetDirection(), ref.GetDirection(), atol=1e-6)
+            np.testing.assert_allclose(out.GetSpacing(), ref.GetSpacing(), atol=1e-6)
+            np.testing.assert_array_equal(arr, sitk.GetArrayFromImage(ref))
+
+    def test_a_negative_sbs_series_converts_to_where_its_slices_are(self):
+        self.converts_to_where_its_slices_are(ascending(n=6))
+
+    def test_file_order_does_not_change_that(self):
+        """The same series with its files written top-first: GDCM sorts by position, so the
+        order they were stored in must not matter."""
+        self.converts_to_where_its_slices_are(list(reversed(ascending(n=6))))

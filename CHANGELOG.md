@@ -1,5 +1,25 @@
 # Changelog
 
+## [Unreleased]
+
+- **`get -o scan.nii.gz` wrote DICOM series that `segment` refuses, as if nothing were wrong.**
+  Converting a series read it with a bare SimpleITK series reader, which skipped the two
+  things `segment`'s reader does to every series: build the geometry from the slice
+  positions, and refuse a stack of them that is not one uniform grid. ITK instead regrids a
+  series with missing slices onto its mean step and says so only on stderr - IDC series
+  `33754f28-f0fe-4bbe-bba9-a98e4a4926ef` (eay131), 3 mm slices with four 6 mm gaps, came out
+  on a 3.0577 mm grid with slices up to ~2.9 mm from where they were acquired - and it takes
+  the slice axis's sign from a negative SpacingBetweenSlices, the Philips head-to-foot
+  convention behind 2026-08's head-down CPTAC-CCRCC body; on a synthetic series of that kind
+  it reversed the axis about the first slice, putting the last of six 10 mm from its place.
+  Once written, the NIfTI is a clean uniform grid, so `segment` on it could no longer see
+  what it refuses on the source. A series is now read as `segment` reads it: the same
+  refusal, before anything is written, and the geometry from the positions. There is
+  deliberately no flag to write a gapped series anyway - any one volume of it misplaces or
+  invents slices - so the refusal names the way out instead: `-o <directory>/` still copies
+  the series as fetched. Where ITK was already right the output is unchanged, voxels and
+  header geometry identical. Nothing `segment` computes changes, so no cache is invalidated.
+
 ## [0.10.0] - 2026-09-11
 
 The command line moves onto click, which gives it `--version` and shell completion and changes
