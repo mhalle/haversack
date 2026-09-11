@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [0.10.2] - 2026-09-11
+
+One fix: a Ctrl-C now ends every command by SIGINT, wherever it lands. The flaky CI test that
+found it waits for a waiting command now. Nothing `segment` computes changes, so no cache is
+invalidated.
 
 - **A Ctrl-C while a command was starting up ended it with "Aborted!" and exit 1.** Since the
   command line moved to click, a Ctrl-C inside a command is held and raised again once click

@@ -69,7 +69,7 @@ def __dir__():
 # the version threw every stored result away at every release. It is the User-Agent and
 # what /v1/version reports. (Before 0.8.0 a bump did invalidate the cache, which is how
 # 0.2.0 retired `total` results computed on the first model's normalization.)
-__version__ = "0.10.1"
+__version__ = "0.10.2"
 __all__ = [
     # the API most callers need
     "segment", "Segmenter", "Segmentation", "Job", "Progress", "CancelToken", "ModelCache", "TaskCatalog", "TaskSpec", "io",
