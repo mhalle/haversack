@@ -19,6 +19,23 @@
   invents slices - so the refusal names the way out instead: `-o <directory>/` still copies
   the series as fetched. Where ITK was already right the output is unchanged, voxels and
   header geometry identical. Nothing `segment` computes changes, so no cache is invalidated.
+- **The out-of-memory fallback could not free the memory that had run out.** When the sliding
+  window ran out of GPU memory with the accumulator on the device, the host retry ran inside
+  the `except` block. There the exception's traceback still held the failed attempt's
+  activations and accumulator, so `empty_cache()` released nothing and the retry ran beside
+  them. A CADS ResEnc-L checkpoint in fp32 on a 22 GiB A10 failed an 864 MiB allocation that
+  way with 19 GB still held (2026-09-11). The retry now runs after the handler. A batch above 1
+  is first retried at batch 1 on the device, which is what the measured placement policy
+  approved, before the accumulator moves to the host. The deviation recorded when a forced
+  `--accumulate device` falls back had always given an empty reason, because it read a key that
+  was never set; it now says why.
+- **Two patch outputs sat on the device where the working set was measured with one.** The
+  first patch's output stayed on the device for the whole sliding window, kept alive by an
+  argument binding: about 510 MB for an fp32 K=18 model at a 192³ patch. Every later patch's
+  output also stayed alive through the next forward pass; on the batched path, a leftover row
+  view kept the whole batch's. Each is now freed once it has been added. Neither change alters
+  a voxel: both lower the peak that the placement and batch policies decide from, so no cache
+  is invalidated.
 
 ## [0.10.0] - 2026-09-11
 
