@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+- **A Ctrl-C while a command was starting up ended it with "Aborted!" and exit 1.** Since the
+  command line moved to click, a Ctrl-C inside a command is held and raised again once click
+  is done, so the process dies of SIGINT - the status on which a shell's `for` loop over a
+  folder of scans stops. One that landed in click's own code instead (parsing the command line,
+  a lazy import, the dispatch before the command's function runs) became click's "Aborted!"
+  and exit 1, and the loop went on to the next scan. Raised at 1006 points across the startup
+  of `remote status`, the interrupt came out that way at 996. It now ends the process by
+  SIGINT as well; click still prints its "Aborted!" first.
+
 ## [0.10.1] - 2026-09-11
 
 Two groups of fixes. Three give back GPU memory the sliding window was holding - above all an

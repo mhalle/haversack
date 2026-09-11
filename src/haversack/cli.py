@@ -193,9 +193,17 @@ def _run(argv=None) -> int:
     state = {}
     try:
         COMMAND_LINE.main(args=argv, prog_name="haversack", obj=state)
-    except SystemExit:
+    except SystemExit as e:
         if "interrupted" in state:
             raise state["interrupted"] from None
+        # A Ctrl-C in click's own code - parsing, a lazy import, the dispatch before the
+        # command's function runs - never reaches `_dispatch`: click turns it into Abort, prints
+        # "Aborted!" and exits 1, with the interrupt as the Abort's cause. It is the same Ctrl-C,
+        # so it ends the process the same way (2026-09-11: raised at 1006 points across the
+        # startup of `remote status`, the interrupt came out as exit 1 at 996).
+        abort = e.__context__
+        if isinstance(abort, click.Abort) and isinstance(abort.__cause__, KeyboardInterrupt):
+            raise abort.__cause__ from None
         if "rc" not in state:
             raise
     return state.get("rc", 0)

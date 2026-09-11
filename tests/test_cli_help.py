@@ -10,6 +10,7 @@ import signal
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -115,28 +116,106 @@ def test_the_shell_completes_task_names_from_the_catalog():
     assert all(i.startswith("total_f") for i in items), items
 
 
+#: The entry point as a terminal starts it. A foreground job gets SIGINT at its default, so the
+#: interpreter installs its KeyboardInterrupt handler; a test runner started in the background
+#: by a shell without job control (`pytest ... &` in a script) hands its children SIGINT
+#: IGNORED, and the command would shrug off the signal whatever it did. And SIGUSR1 has
+#: faulthandler print every thread's stack, for a run that outlives its signal.
+INTERRUPTIBLE = [sys.executable, "-c",
+                 "import faulthandler, signal; "
+                 "signal.signal(signal.SIGINT, signal.default_int_handler); "
+                 "faulthandler.register(signal.SIGUSR1, all_threads=True); "
+                 "from haversack.cli import main; raise SystemExit(main())"]
+
+
+def _state(pid: int) -> str:
+    """The kernel's one-letter state for a process - `S` asleep in a wait, `R` running - or ''
+    once it is gone."""
+    r = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True)
+    return r.stdout.strip()[:1]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="a POSIX signal and exit status")
 def test_ctrl_c_still_ends_the_process_by_sigint(tmp_path):
     """Click turns Ctrl-C into "Aborted!" and exit 1. Under argparse it reached the interpreter
     and the process died of SIGINT - the status on which a shell's `for` loop over a folder of
     scans stops, where exit 1 goes on to the next scan. The command waits on a server that
-    accepts the connection and never answers; the signal goes only once it has connected, so
-    it lands in the command rather than in the imports, where it would pass either way."""
+    accepts the connection and never answers; the signal goes only once the whole request has
+    arrived, so it lands in the command rather than in the imports, where it would pass either
+    way - and only once the command is asleep in its wait for the answer.
+
+    Sent as soon as the connection was accepted, it timed out this test on CI (2026-09-11).
+    CPython acts on a signal at its next check between bytecodes, or when a blocking call it is
+    in gets interrupted, so one that arrives in the few instructions between the last check and
+    the poll() under `recv` stays pending until that poll ends - here the client's 60 s read
+    timeout. Looped, that timing hung 19 runs in 1500 (signalling just after the request: 7 in
+    1600), on 3.12 and 3.14, and every one sat in that recv and died of SIGINT the moment
+    another signal woke it: pending, not swallowed. haversack routes it right; every blocking
+    Python call has the window, microseconds wide, which a person's Ctrl-C all but never hits
+    and a second one gets past (AGENTS.md, "Known open").
+    """
     with socket.create_server(("127.0.0.1", 0)) as srv:
         srv.settimeout(60)
         url = f"http://127.0.0.1:{srv.getsockname()[1]}"
-        p = subprocess.Popen([*ENTRY, "remote", "--server", url, "status", "abc"],
+        p = subprocess.Popen([*INTERRUPTIBLE, "remote", "--server", url, "status", "abc"],
                              env=_env(HAVERSACK_CACHE_DIR=str(tmp_path)),
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            conn, _ = srv.accept()
-        except socket.timeout:
-            p.kill()
-            pytest.fail(f"the command never reached the server: {p.communicate()[1][-300:]}")
-        with conn:
-            p.send_signal(signal.SIGINT)
-            err = p.communicate(timeout=60)[1]
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                pytest.fail("the command never reached the server")
+            with conn:
+                conn.settimeout(60)
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    chunk = conn.recv(65536)
+                    assert chunk, "the command hung up before its request was complete"
+                    request += chunk
+                deadline = time.monotonic() + 30
+                while (state := _state(p.pid)) != "S":
+                    assert p.poll() is None and time.monotonic() < deadline, (
+                        f"the command never settled into waiting for the answer (ps: {state!r})")
+                    time.sleep(0.01)
+                p.send_signal(signal.SIGINT)
+                try:
+                    err = p.communicate(timeout=20)[1]
+                except subprocess.TimeoutExpired:
+                    # where it is, from faulthandler. SIGUSR1 also interrupts the wait it sits
+                    # in, so a SIGINT that was only pending ends it now; a swallowed one does not
+                    p.send_signal(signal.SIGUSR1)
+                    try:
+                        err = p.communicate(timeout=10)[1]
+                        after = f"then ended with status {p.returncode}"
+                        if p.returncode == -signal.SIGINT:
+                            after += " - the SIGINT was pending, not swallowed"
+                    except subprocess.TimeoutExpired:
+                        p.kill()
+                        err = p.communicate()[1]
+                        after = "was still running, and was killed"
+                    pytest.fail(f"alive 20 s after SIGINT; woken by a stack dump, it {after}:\n"
+                                f"{err[-12000:]}")
+        finally:
+            if not p.stderr.closed:           # it failed before the command's output was read
+                p.kill()
+                print(p.communicate()[1][-12000:], file=sys.stderr)
     assert p.returncode == -signal.SIGINT, (p.returncode, err[-300:])
+
+
+def test_a_ctrl_c_in_clicks_own_code_ends_the_process_by_sigint_too(monkeypatch):
+    """A Ctrl-C before the command's own function runs - while click parses the command line,
+    imports what it imports lazily, or dispatches - never reaches `_dispatch`: click makes it
+    "Aborted!" and exit 1, the status a shell loop goes on after: raised at 1006 points across
+    the startup of `remote status` (2026-09-11), the interrupt came out that way at 996. The
+    stand-in is a parameter callback, which click runs while it parses."""
+    server = next(p for p in cli.COMMAND_LINE.commands["remote"].params if p.name == "server")
+
+    def ctrl_c(ctx, param, value):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(server, "callback", ctrl_c)
+    with pytest.raises(KeyboardInterrupt):
+        cli.main(["remote", "--server", "http://127.0.0.1:9", "status", "abc"])
 
 
 def test_docs_prints_the_guide_whole_and_by_section(capsys):

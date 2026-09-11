@@ -299,7 +299,8 @@ that routine is made lazy. Binding them as lambda defaults would remove both.
 0.10.1 is tagged and pushed with CI green BEFORE the tag (run 34627834734 on `4dc79e8`: 1204
 passed, 20 skipped - on its second attempt: the first failed only
 `test_ctrl_c_still_ends_the_process_by_sigint`, which timed out on the runner, passed on the
-re-run and locally 5 of 5, and exercises a path 0.10.1 did not touch; filed as intermittent),
+re-run and locally 5 of 5, and exercises a path 0.10.1 did not touch - the test's own timing
+against a CPython signal window, diagnosed since: see "Known open"),
 as 0.10.0 (run 34614181942 on `8b3a1ee`: 1143 passed), 0.9.1 (run 34594374478 on `5677f36`:
 1137 passed), 0.9.0 (run 34585608278 on `50caae6`: 1135 passed) and 0.8.0 (985 passed) were -
 the whole lesson of 0.7.0 and 0.7.1, both tagged onto a red CI and then deleted from origin.
@@ -405,6 +406,24 @@ multi-hour job fares against the 3600 s function timeout.
   from `get -o` misplaces the worst voxel corner by 1.02 mm (the bare series reader `get`
   used before: 2.04 mm; NRRD: 0). `segment`'s NIfTI labels on such a series carry the same
   squaring. Refusing it would need a tolerance that applies to NIfTI output only.
+- **A Ctrl-C can still be late or lost in CPython's own windows (2026-09-11, not fixable
+  here).** CPython runs a signal's Python handler at its next check between bytecodes, or when
+  a blocking call it is in fails with EINTR. One arriving in the few instructions between the
+  last check and the `poll()` under a socket `recv` stays pending until that poll ends - the
+  client's 60 s read timeout; one landing while a weakref callback or `__del__` runs (importlib's
+  module-lock `cb`, on every import) is printed as "Exception ignored" and dropped. Both were
+  reproduced. The first: signalled at `accept()`, as the test used to, 19 runs in 1500 hung,
+  and just after the request arrived 7 in 1600; every child sat in that `recv` and died of
+  SIGINT the moment another signal woke it. The second: 31 of 5746 points where a sweep raised
+  the interrupt in `remote status`, all in importlib's callbacks - some after the connection,
+  where the request imports the `idna` codec for the host name. None of the 19 was that kind.
+  The first is what timed out `test_ctrl_c_still_ends_the_process_by_sigint` on CI; it now
+  signals only once `ps` shows the command asleep in its wait (past the request's imports
+  too), and on a timeout prints the child's faulthandler stack. Every
+  other point the sweeps tried ends by SIGINT - since the same day also a Ctrl-C in click's
+  own code, which `_run` takes back from click's Abort. Closing the windows would need a
+  periodic wakeup (a SIGALRM heartbeat, or the request on a worker thread): not worth it for
+  microseconds that a second Ctrl-C gets past.
 
 ### Verified on a real filesystem (2026-09-07)
 
@@ -457,6 +476,18 @@ lines by their leading node id read two real kills as survivors. Require the exi
 agree with the parsed outcomes, record which `haversack` was imported from INSIDE the session
 (a `-p` plugin's `pytest_sessionstart`, not a separate `python -c`), and prefer separate test
 methods to `subTest` where a mutant has to see each case.
+
+**A backgrounded harness hands its children SIGINT ignored** (2026-09-11). A shell without job
+control - a script's `cmd &`, and an agent's own shell - starts a background job with SIGINT
+set to SIG_IGN; Python then installs no KeyboardInterrupt handler, and every process it starts
+inherits the same. Four `&` workers looping the Ctrl-C test hung 60 of 60 for that alone. Reset
+it in the child (`preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL)`); the test's
+own entry now does, the way a terminal's foreground job gets it. To mutation-test a guard
+against the pending-signal window ("Known open"), widen the window with check-free C work just
+before the blocking call - a `bytes` repeat holds a signal until it ends, while a big-int
+multiply lets one through in 3.14, so a first stall mutant built on it passed everything. With
+50-100 ms of it before `recv`, signalling 2 ms after the request stayed pending 5 of 5 and the
+test's wait-until-asleep passed 5 of 5.
 
 ## The 2026-09-09 review round — what it cost and what it taught
 
