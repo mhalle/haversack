@@ -188,12 +188,17 @@ VoxTell refuses cache serving.
 (`<key>/g-<gen>/`) behind one `current` pointer, switched by one rename. No cleanup path —
 per-key pruning, the ceiling, eviction — deletes what a reader holds (a `.lease` file inside
 the directory it was handed, touched on every resolve, valid `GENERATION_GRACE_S`) or what a
-writer is publishing (`<key>/.writer-<gen>`, flock'd from before its staging exists until its
-pointer moves). Death is proved, never inferred from age: only a pruner on the host named in
-the claim may take its lock and conclude anything. Unclaimed staging stays forever (litter
-over data loss), so a failed `put` removes its own. Each deletion moves the directory to a
-`.reclaim-*` tomb and asks again before committing. `delete` and `cache clean` are explicit
-and ignore leases. On Modal, `cache_get` never commits, so a lease taken in the API container
+writer may still be publishing (`<key>/.writer-<gen>`, flock'd from before its staging exists
+until its pointer moves; kept and marked `unlocked` where no lock can be taken). A reader's
+acquisition (pointer → lease → check) holds `<key>/.lock` shared and reclamation holds it
+exclusive, so nothing is decided while a reader is mid-acquisition; the `.reclaim-*` tomb and
+second question remain only for entries no lock reaches. Death is proved, never inferred:
+only a pruner on the host named in a locked claim may take its lock and conclude anything.
+Unknown ownership — an unlocked or foreign claim, unclaimed staging — is protected on every
+path, so it can pin an entry until an operator clears it; a failed `put` removes its own
+work. Eviction skips what it may not take and evicts the next least recently used instead.
+`delete` and `cache clean` are explicit and ignore all of this. On Modal, `cache_get` never
+commits, so a lease taken in the API container
 reaches worker-side pruning only if the volume commits it some other way — no worse than
 before, and not solved.
 
@@ -473,3 +478,13 @@ something else.
 - **Strictness moves the cost somewhere: find where.** Once unclaimed staging is never
   reclaimed, a failed `put` that left its staging would leave it forever — so it removes its
   own, and a test says so.
+- **A second question narrows a check-then-act; only exclusion closes it.** Moving a
+  directory aside and asking again still left a move and a move back, and a reader already
+  handed its path could open it in between (the review's third pass). Readers now acquire
+  under the entry's lock held shared, reclamation takes it exclusive, and the second
+  question remains only where no lock can be taken.
+- **"Cannot verify" is not "nobody's".** The first version deleted a lockless writer's
+  claim, reasoning that an unlocked claim looks like a dead writer's — which left its
+  staging looking like nobody's, and eviction, honoring only claims it could verify, took
+  the entry. A claim that cannot prove death still proves presence: keep it, mark it, and
+  protect it on every path.
