@@ -256,6 +256,7 @@ haversack get idc:<crdc_series_uuid>                          # into the cache; 
 haversack get idc:<crdc_series_uuid> -o case1/scan.nii.gz     # the DICOM series as one NIfTI
 haversack get idc:<crdc_series_uuid> --format nrrd -o out/    # converted, auto-named <id>.nrrd
 haversack get idc:<crdc_series_uuid> -o raw_dicom/            # the raw DICOM series directory
+haversack get ./dicom_dir -o scan.nii.gz                      # a local series, converted the same way
 ```
 
 What `-o` and `--format` do, in order:
@@ -268,6 +269,12 @@ What `-o` and `--format` do, in order:
 | `--format <type>` | convert to that type (`nifti`, `nrrd`, `seg.nrrd`, `mha`); with `-o` a directory the file is auto-named `<source>.<ext>` |
 | `--no-cache` | fetch straight to `-o` and leave nothing in the cache (for a large one-off); requires `-o` |
 
+A local path - a file, or a folder holding one DICOM series - is written the same way, which
+makes `get` a converter (`haversack get ./dicom_dir -o scan.nii.gz`); given neither `-o` nor
+`--format` it is only printed back, since there is nothing to fetch. `--format` without `-o`
+converts into the current directory. A write that would land on its own source - `get
+./scan.nii.gz -o .`, or a folder copied into itself - is refused.
+
 **Batch** - pass several sources at once:
 
 ```bash
@@ -278,7 +285,9 @@ haversack get idc:<uuid-a> idc:<uuid-b> -o raw/                 # raw-copy each 
 
 With more than one source, `-o` is a directory (default: the current directory); `--format`
 converts each into it, and without `--format` each is raw-copied. As with `segment`, a failing
-source is reported and the run exits non-zero without stopping the rest.
+source is reported and the run exits non-zero without stopping the rest. Two sources that would
+write one name (`a/scan.nii.gz` and `b/scan.nii.gz`) never overwrite each other: the second
+fails, naming the first.
 
 ## Citing the models
 

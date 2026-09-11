@@ -36,6 +36,33 @@
   view kept the whole batch's. Each is now freed once it has been added. Neither change alters
   a voxel: both lower the peak that the placement and batch policies decide from, so no cache
   is invalidated.
+- **`get` wrote nothing for a local path, and exited 0.** `haversack get ./series -o
+  scan.nii.gz` printed the folder back: a local path was returned before `-o` was looked at,
+  and a batch with `--format` printed its local paths and converted none. A local path - a
+  file, or a folder holding one DICOM series - is now written as a fetched source is, converted
+  for an image extension or `--format` and copied for a directory `-o`, which makes `get` a
+  converter. Given neither option it is printed back as before, since there is nothing to
+  fetch.
+- **Three more ways `get` did less than it was asked, each exiting 0.** `--format` without
+  `-o` converted several sources into the current directory but was dropped for one, which
+  printed where the data was; it converts into the current directory either way now.
+  `--no-cache` held only for conversions: every raw copy (`-o dir/`, `-o` a file, a batch
+  without `--format`) fetched into the cache and left it there. And two sources of one batch
+  that name one output - `a/scan.nii.gz` and `b/scan.nii.gz`, the ordinary layout of a folder
+  of cases once local paths are written - went to one file, the second replacing the first,
+  or, copied raw, into one folder, file over file; the second now fails, naming the first,
+  and the run exits 1. Names are compared as APFS and FAT compare them, so `Scan` and `scan`
+  are one.
+- **`get` never writes a source into itself.** Reachable only now that local paths are
+  written: `get ./scan.nii.gz -o .` would copy the file onto itself, `-o scan.nii.gz` rewrite
+  it in place, and a folder copied into itself nest a copy one level deeper on every run. Each
+  is refused in one line, decided by the filesystem, so a symlink or a case-folded spelling
+  counts.
+- **A local `.` is named by the folder it is** where an output is named after its source,
+  and a `!` in a local name is part of the name: `segment . --format seg.nrrd -o out/` wrote
+  `out/._<task>.seg.nrrd`, a hidden file, and `get` would have written `out/..nrrd`.
+
+Nothing `segment` computes changes, so no cache is invalidated.
 
 ## [0.10.0] - 2026-09-11
 

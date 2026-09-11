@@ -245,6 +245,268 @@ def test_get_batch_one_failure_does_not_sink_the_rest(fake, tmp_path, capsys):
     assert (tmp_path / "o" / "good.nrrd").is_file()               # the good one still landed
 
 
+# -- a local path is written as a fetched one is (2026-09-11) -----------------------------
+def dicom_series(dirpath, n=4, dz=2.5):
+    """A CT series as a scanner's folder holds it: one 4x4 slice per file, pixels 0.5 mm,
+    each slice placed by its ImagePositionPatient ``dz`` mm along z and filled with its
+    index. SimpleITK writes it, keeping the UIDs given, so the files are one series."""
+    import SimpleITK as sitk
+    dirpath.mkdir(parents=True)
+    w = sitk.ImageFileWriter()
+    w.KeepOriginalImageUIDOn()
+    uid = "1.2.826.0.1.3680043.2.1125.7"
+    for i in range(n):
+        sl = sitk.GetImageFromArray(np.full((4, 4), i, np.int16))
+        sl.SetSpacing((0.5, 0.5))
+        for tag, val in (("0008|0060", "CT"), ("0020|000d", f"{uid}.1"), ("0020|000e", f"{uid}.2"),
+                         ("0008|0018", f"{uid}.3.{i}"), ("0020|0013", str(i + 1)),
+                         ("0020|0032", f"0\\0\\{i * dz:g}"), ("0020|0037", "1\\0\\0\\0\\1\\0")):
+            sl.SetMetaData(tag, val)
+        w.SetFileName(str(dirpath / f"slice_{i:03d}.dcm"))
+        w.Execute(sl)
+    return dirpath
+
+
+def nrrd(path, fill):
+    """A 4x4x4 int16 volume of ``fill`` (a number, or an array that shape), spacing (1, 1.2, 1.5)."""
+    import SimpleITK as sitk
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img = sitk.GetImageFromArray(np.broadcast_to(np.asarray(fill, np.int16), (4, 4, 4)).copy())
+    img.SetSpacing((1.0, 1.2, 1.5))
+    sitk.WriteImage(img, str(path))
+    return path
+
+
+def voxels(path):
+    import SimpleITK as sitk
+    return sitk.GetArrayFromImage(sitk.ReadImage(str(path)))
+
+
+class _Get(unittest.TestCase):
+    """`haversack get` in process, with the fake remote source and a cache of the test's own:
+    a probe must never reach the real one (AGENTS.md - one deleted 421 MB of it)."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.tmp = Path(td.name)
+        for p in (mock.patch.object(sources, "default_sources", lambda: [FakeSource()]),
+                  mock.patch.dict(os.environ, {"HAVERSACK_CACHE_DIR": str(self.tmp / "cache")})):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def get(self, *argv):
+        """``(exit status, stdout lines, stderr)``."""
+        out, err = StringIO(), StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = cli.main(["get", *map(str, argv)])
+        return rc, out.getvalue().splitlines(), err.getvalue()
+
+    def chdir(self, where):
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(where)
+
+
+class LocalSourceIsWritten(_Get):
+    """`get ./series -o x.nii.gz` exited 0 having written nothing until 2026-09-11: a local path
+    was printed and returned before -o was looked at, and a batch with --format printed each
+    local path and converted none. A local path is a fetch already done, and is written as a
+    fetched source is - converted for an image extension or --format, copied for a directory -o."""
+
+    def setUp(self):
+        super().setUp()
+        self.series = dicom_series(self.tmp / "cases" / "ct_series")
+        self.scan = nrrd(self.tmp / "cases" / "scan.nrrd", np.arange(64).reshape(4, 4, 4))
+
+    def test_a_series_converts_to_the_file_named(self):
+        dst = self.tmp / "out" / "x.nii.gz"
+        rc, printed, _ = self.get(self.series, "-o", dst)
+        self.assertEqual((rc, printed), (0, [str(dst)]))
+        import SimpleITK as sitk
+        img = sitk.ReadImage(str(dst))
+        self.assertEqual(img.GetSize(), (4, 4, 4))
+        np.testing.assert_allclose(img.GetSpacing(), (0.5, 0.5, 2.5))
+        self.assertEqual(voxels(dst)[:, 0, 0].tolist(), [0, 1, 2, 3])        # every slice, in order
+
+    def test_a_file_converts_by_extension(self):
+        dst = self.tmp / "x.nii.gz"
+        rc, printed, _ = self.get(self.scan, "-o", dst)
+        self.assertEqual((rc, printed), (0, [str(dst)]))
+        np.testing.assert_array_equal(voxels(dst), voxels(self.scan))
+
+    def test_format_into_a_directory_names_it_by_the_source(self):
+        d = self.tmp / "d"
+        rc, printed, _ = self.get(self.series, "--format", "nrrd", "-o", f"{d}/")
+        self.assertEqual((rc, printed), (0, [str(d / "ct_series.nrrd")]))
+        self.assertTrue((d / "ct_series.nrrd").is_file())
+
+    def test_format_alone_converts_into_the_current_directory(self):
+        self.chdir(self.tmp)
+        rc, printed, _ = self.get(self.scan, "--format", "nifti")
+        self.assertEqual((rc, printed), (0, ["scan.nii.gz"]))
+        self.assertTrue((self.tmp / "scan.nii.gz").is_file())
+
+    def test_a_directory_output_copies_the_series(self):
+        rc, printed, _ = self.get(self.series, "-o", f"{self.tmp / 'raw'}/")
+        copied = self.tmp / "raw" / "ct_series"
+        self.assertEqual((rc, printed), (0, [str(copied)]))
+        self.assertEqual(sorted(p.read_bytes() for p in copied.iterdir()),
+                         sorted(p.read_bytes() for p in self.series.iterdir()))
+
+    def test_a_batch_converts_local_and_fetched_sources_alike(self):
+        out = self.tmp / "out"
+        rc, printed, _ = self.get(self.scan, self.series, "fake:case1", "--format", "nifti", "-o", out)
+        want = [out / "scan.nii.gz", out / "ct_series.nii.gz", out / "case1.nii.gz"]
+        self.assertEqual((rc, printed), (0, [str(p) for p in want]))
+        self.assertTrue(all(p.is_file() for p in want))
+
+    def test_a_batch_copies_local_and_fetched_sources_alike(self):
+        out = self.tmp / "raw"
+        rc, printed, _ = self.get(self.scan, self.series, "fake:case1", "-o", out)
+        self.assertEqual((rc, printed), (0, [str(out / n) for n in ("scan.nrrd", "ct_series", "case1.nrrd")]))
+        self.assertEqual(len(list((out / "ct_series").iterdir())), 4)
+
+    def test_dot_is_named_by_the_folder_it_is(self):
+        """`.` was named `.`, so this would have written `d/..nrrd` - a hidden file."""
+        self.chdir(self.series)
+        rc, printed, _ = self.get(".", "--format", "nrrd", "-o", f"{self.tmp / 'd'}/")
+        self.assertEqual((rc, printed), (0, [str(self.tmp / "d" / "ct_series.nrrd")]))
+
+    def test_a_bang_is_part_of_a_local_name(self):
+        """Only a remote spec has `!member`; a local `a!b.nrrd` was named `b`."""
+        self.assertEqual(sources.source_stem(self.tmp / "a!b.nrrd"), "a!b")
+        self.assertEqual(sources.source_stem("zenodo:1/c.zip!d.nii.gz"), "d")
+
+    def test_a_missing_path_is_refused_in_one_line(self):
+        rc, printed, err = self.get(self.tmp / "nope", "-o", self.tmp / "x.nii.gz")
+        self.assertEqual((rc, printed), (2, []))
+        self.assertEqual(err.splitlines(),
+                         [f"haversack: not a remote source and not a local path: {self.tmp / 'nope'}"])
+
+    def test_a_refused_series_is_refused_in_segments_words_alone(self):
+        """io.convert refuses a series `segment` would refuse (a missing slice, a tilted gantry)
+        with `segment`'s own error. A fetched series refused that way can still be had as a
+        directory - `-o <dir>/` copies it as fetched - and saying so is the fix for it. A local
+        series is a directory already, the user's own: that copy would be of their folder, which
+        `segment` refuses just the same, so nothing may be appended for a local source."""
+        refusal = "non-uniform slice spacing (steps 2.500-5.000 mm): missing or duplicate slices"
+
+        def refuse(src, dst, **kw):
+            raise InputError(refusal)
+        with mock.patch.object(io, "convert", refuse):
+            rc, printed, err = self.get(self.series, "-o", self.tmp / "x.nii.gz")
+        self.assertEqual((rc, printed, err.splitlines()), (2, [], [f"haversack: {refusal}"]))
+
+
+class NeverIntoItself(_Get):
+    """Once a local path is written, -o can name the source itself. Refused in one line, and
+    decided by the filesystem (`os.path.samefile`): a symlink, a hard link or - on APFS and
+    FAT - a spelling in another case reaches the same bytes."""
+
+    def setUp(self):
+        super().setUp()
+        self.series = dicom_series(self.tmp / "cases" / "ct_series")
+        self.scan = nrrd(self.tmp / "cases" / "scan.nrrd", 7)
+        self.before = self.scan.read_bytes()
+
+    def assert_refused(self, *argv):
+        rc, printed, err = self.get(*argv)
+        self.assertEqual((rc, printed), (2, []))
+        self.assertEqual(len(err.splitlines()), 1, err)
+        self.assertIn("into itself", err)
+
+    def test_a_file_copied_onto_itself(self):
+        """Ends in shutil's SameFileError, a traceback, without the refusal."""
+        self.assert_refused(self.scan, "-o", f"{self.scan.parent}/")
+        self.assertEqual(self.scan.read_bytes(), self.before)
+
+    def test_a_file_converted_onto_itself(self):
+        """Would rewrite the input in place, compressed, through SimpleITK's header."""
+        self.assert_refused(self.scan, "-o", self.scan)
+        self.assertEqual(self.scan.read_bytes(), self.before)
+
+    def test_a_folder_copied_into_itself(self):
+        """Nests a copy of the folder inside itself, one level deeper on every run."""
+        self.assert_refused(self.series, "-o", f"{self.series}/")
+        self.assertFalse((self.series / "ct_series").exists())
+
+    def test_a_folder_copied_into_itself_from_below(self):
+        """A relative -o from inside the source: only its absolute path shows where it lands."""
+        below = self.series / "sub"
+        below.mkdir()
+        self.chdir(below)
+        self.assert_refused(self.series, "-o", "out/")
+        self.assertFalse((below / "out").exists())
+
+    def test_the_same_file_by_another_name(self):
+        alias = self.tmp / "alias"
+        alias.symlink_to(self.scan.parent, target_is_directory=True)
+        self.assert_refused(self.scan, "-o", f"{alias}/")
+        self.assertEqual(self.scan.read_bytes(), self.before)
+
+    def test_writing_beside_the_source_is_not_into_it(self):
+        """Not a ban on the source's own folder: a conversion may land in it."""
+        dst = self.series / "scan.nii.gz"
+        rc, printed, _ = self.get(self.series, "-o", dst)
+        self.assertEqual((rc, printed), (0, [str(dst)]))
+
+
+class GetDoesWhatItIsAsked(_Get):
+    """Three more ways `get` exited 0 having done less than it was asked, found beside the
+    local-path fix (2026-09-11)."""
+
+    def test_format_alone_converts_one_source_into_the_current_directory(self):
+        """As it always did for several; for one it printed the cache path and converted nothing."""
+        self.chdir(self.tmp)
+        rc, printed, _ = self.get("fake:case1", "--format", "nifti")
+        self.assertEqual((rc, printed), (0, ["case1.nii.gz"]))
+        self.assertTrue((self.tmp / "case1.nii.gz").is_file())
+
+    def test_no_cache_holds_for_a_raw_copy_into_a_directory(self):
+        """Every raw copy fetched into the cache and left it there; only conversions honored it."""
+        rc, printed, _ = self.get("fake:case1", "--no-cache", "-o", f"{self.tmp / 'raw'}/")
+        self.assertEqual((rc, printed), (0, [str(self.tmp / "raw" / "case1.nrrd")]))
+        self.assertFalse((self.tmp / "cache" / "inputs" / "fake").exists())
+
+    def test_no_cache_holds_for_a_raw_copy_to_a_file(self):
+        rc, printed, _ = self.get("fake:case1", "--no-cache", "-o", self.tmp / "case1.bin")
+        self.assertEqual((rc, printed), (0, [str(self.tmp / "case1.bin")]))
+        self.assertFalse((self.tmp / "cache" / "inputs" / "fake").exists())
+
+    def test_no_cache_holds_for_a_batch_of_raw_copies(self):
+        out = self.tmp / "raw"
+        rc, printed, _ = self.get("fake:case1", "fake:case2", "--no-cache", "-o", out)
+        self.assertEqual((rc, printed), (0, [str(out / "case1.nrrd"), str(out / "case2.nrrd")]))
+        self.assertFalse((self.tmp / "cache" / "inputs" / "fake").exists())
+
+    def test_two_sources_onto_one_name_fail_the_second(self):
+        """`a/scan.nrrd b/scan.nrrd --format nifti -o out` wrote out/scan.nii.gz twice, b over a,
+        and exited 0 - the ordinary layout of a folder of cases, once local paths are written."""
+        a, b = nrrd(self.tmp / "a" / "scan.nrrd", 1), nrrd(self.tmp / "b" / "scan.nrrd", 2)
+        out = self.tmp / "out"
+        rc, printed, err = self.get(a, b, "--format", "nifti", "-o", out)
+        self.assertEqual((rc, printed), (1, [str(out / "scan.nii.gz")]))
+        self.assertTrue((voxels(out / "scan.nii.gz") == 1).all())            # a's, kept
+        self.assertIn(f"FAILED {b}: {out / 'scan.nii.gz'} was already written for {a}", err)
+
+    def test_names_differing_only_in_case_are_one_name(self):
+        """On APFS and FAT `Scan.nii.gz` IS `scan.nii.gz`: a check by `==` lets b over a."""
+        a, b = nrrd(self.tmp / "a" / "scan.nrrd", 1), nrrd(self.tmp / "b" / "Scan.nrrd", 2)
+        rc, printed, _ = self.get(a, b, "--format", "nifti", "-o", self.tmp / "out")
+        self.assertEqual((rc, len(printed)), (1, 1))
+        self.assertTrue((voxels(self.tmp / "out" / "scan.nii.gz") == 1).all())
+
+    def test_two_series_are_not_copied_into_one_folder(self):
+        """A raw copy merged the second series into the first's folder, file over file."""
+        a = dicom_series(self.tmp / "a" / "series")
+        b = dicom_series(self.tmp / "b" / "series", dz=3.0)
+        raw = self.tmp / "raw"
+        rc, printed, _ = self.get(a, b, "-o", raw)
+        self.assertEqual((rc, printed), (1, [str(raw / "series")]))
+        self.assertEqual(sorted(p.read_bytes() for p in (raw / "series").iterdir()),
+                         sorted(p.read_bytes() for p in a.iterdir()))
+
+
 def test_segment_batch_writes_named_outputs(monkeypatch, tmp_path, capsys):
     from haversack import cli, pipeline
     import numpy as np

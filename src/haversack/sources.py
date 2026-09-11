@@ -1527,11 +1527,14 @@ def default_input_cache() -> Path:
 def source_stem(spec) -> str:
     """A filename stem for a source, for naming a converted output into a directory: the
     member/file basename for zenodo/http/etc. (minus any image extension), or the bare
-    identifier for IDC (only a UUID exists). Falls back to the whole spec for a local path."""
+    identifier for IDC (only a UUID exists). A local path is named by what it is, which the
+    spec as typed need not say: `.` is the folder it names - it was named `.`, so `get .
+    --format nrrd -o out/` would write `out/..nrrd` and `segment`'s batch
+    `out/._<task>.seg.nrrd`, both hidden - and a `!` is part of a local name, since only a
+    remote spec has members."""
     from .io import image_suffix
     parsed = parse_input(spec)
-    text = parsed[1] if parsed else str(spec)
-    text = text.split("!")[-1] if "!" in text else text
+    text = parsed[1].split("!")[-1] if parsed else os.path.abspath(spec)
     name = Path(text).name or text
     suf = image_suffix(name)
     return name[: -len(suf)] if suf else name

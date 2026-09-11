@@ -393,20 +393,21 @@ def _command_line() -> click.Group:
   haversack get idc:<crdc_series_uuid>                     into cache; prints the path
   haversack get idc:<crdc_series_uuid> -o case1/scan.nii.gz  the series as one NIfTI
   haversack get idc:<crdc_series_uuid> --format nrrd -o out/  converted, auto-named <uuid>.nrrd
-  haversack get idc:<crdc_series_uuid> -o raw_dicom/         the raw DICOM series directory"""),
+  haversack get idc:<crdc_series_uuid> -o raw_dicom/         the raw DICOM series directory
+  haversack get ./dicom_dir -o scan.nii.gz                   a local series, converted"""),
         params=[
             click.Argument(['source'], nargs=-1, required=True,
                            help=('one or more remote inputs (several = batch): idc:<uuid>, '
                                  'zenodo:<recid>/<file>[!member], tcia:, openneuro:, '
                                  'hf:<org>/<repo>@<sha>/<path>, s3:<bucket>/<key>[!member], '
                                  'github:<owner>/<repo>@<tag>/<asset>[!member], or an http(s) '
-                                 'URL')),
+                                 'URL; or a local file or DICOM folder, written the same way')),
             click.Option(['-o', '--output'],
                          help=('where to put it: a directory (raw copy) or a file (converted by '
                                'extension)')),
             click.Option(['--format'],
                          help=('output format (nifti, nrrd, seg.nrrd, mha): convert, and name '
-                               'by it into a directory')),
+                               'by it into a directory (-o, or else the current one)')),
             click.Option(['--no-cache'], is_flag=True,
                          help='do not keep the raw data in the cache (only with -o)'),
         ])
@@ -944,36 +945,67 @@ def _cmd_tasks(args) -> int:
     return 0
 
 
+def _not_into_itself(spec, src, out, convert: bool) -> None:
+    """Refuse a `get` write that lands on its own source, which a local source can do by
+    accident (`get ./scan.nii.gz -o .`, `get . -o out/`). Every way of landing there is bad: a
+    file copied onto itself ends in shutil's traceback, a folder copied into itself nests a
+    copy one level deeper on every run, and a conversion onto itself rewrites the input in
+    place. Asked of the filesystem, never of the names: on APFS or FAT `Scan.nii` IS
+    `scan.nii`, and a symlink or a hard link reaches the same bytes by another name."""
+    import os
+    from pathlib import Path
+    from .errors import InputError
+    # A conversion reads all of its source before it writes, so only the file itself is at
+    # risk; a copied folder must not land anywhere inside itself. Absolute, so that every
+    # folder above a relative -o is asked too (`get .. -o out/` from inside the source).
+    here = Path(os.path.abspath(out))
+    for p in [here] if convert else [here, *here.parents]:
+        try:
+            same = os.path.samefile(p, src)
+        except OSError:                                  # not there (yet), so not the source
+            continue
+        if same:
+            raise InputError(f"{spec}: -o would write it into itself ({out}); give -o a path "
+                             "outside it")
+
+
 def _cmd_get(args) -> int:
     """`haversack get`."""
     import shutil
     import tempfile
+    import unicodedata
     from pathlib import Path
     from . import io, sources
     from .errors import InputError
     say = lambda m: print(f"  {m}", file=sys.stderr, flush=True)
     srcs = args.source
-    if len(srcs) > 1 and args.output and not args.format and not str(args.output).rstrip("/").endswith(tuple(io.IMAGE_SUFFIXES)):
-        pass  # multiple raw-copies into a directory is allowed; --format only needed to convert
 
-    def get_one(src_spec, out_target):
-        """Fetch one source; write per out_target (None=cache only). Returns the path produced."""
-        if sources.parse_input(src_spec) is None:
-            p = Path(src_spec)
-            if not p.exists():
-                raise InputError(f"not a remote source and not a local path: {src_spec}")
-            return p
-        tmp = tempfile.mkdtemp(prefix="haversack-get-") if args.no_cache else None
+    def get_one(src_spec, out_target=None):
+        """Fetch one source; with ``out_target``, write it where ``out_target(fetched path)``
+        says - a ``(path, convert)`` pair - and return that path, else the fetched one.
+
+        Every write `get` makes is made here. A local path is a fetch already done and is
+        written exactly as a fetched one; until 2026-09-11 it was returned before `-o` was
+        looked at, so `get ./series -o scan.nii.gz` exited 0 having written nothing. The raw
+        copies were written elsewhere, each fetching without the temporary cache below, so
+        `--no-cache` left their data cached."""
+        local = sources.parse_input(src_spec) is None
+        if local and not Path(src_spec).exists():
+            raise InputError(f"not a remote source and not a local path: {src_spec}")
+        tmp = tempfile.mkdtemp(prefix="haversack-get-") if args.no_cache and not local else None
         try:
-            src = sources.materialize(src_spec, cache_dir=tmp, progress=say)
+            src = Path(src_spec) if local else sources.materialize(src_spec, cache_dir=tmp, progress=say)
             if out_target is None:
                 return src
-            out, want_convert = out_target
+            out, want_convert = out_target(src)
+            _not_into_itself(src_spec, src, out, want_convert)
             if want_convert:
                 try:
                     io.convert(src, out)
                 except InputError as e:
-                    if not Path(src).is_dir():
+                    if local or not Path(src).is_dir():
+                        # a local folder was never fetched, so there is no "as fetched" to
+                        # point to: copying it gives back the folder `segment` refuses too
                         raise
                     # A series `segment` refuses is refused here in its words, and no flag
                     # writes it anyway (decided 2026-09-11): one volume of a gapped series
@@ -997,56 +1029,60 @@ def _cmd_get(args) -> int:
         raise InputError("--no-cache needs -o (there would be nowhere to put the data)")
     if not batch:
         src_spec = srcs[0]
-        if sources.parse_input(src_spec) is None:
-            p = Path(src_spec)
-            if not p.exists():
-                raise InputError(f"not a remote source and not a local path: {src_spec}")
-            print(p); return 0
-        if not args.output:
-            print(get_one(src_spec, None)); return 0
-        out = Path(args.output)
-        want_convert = bool(args.format) or bool(io.image_suffix(out.name))
-        if want_convert:
+        if not args.output and not args.format:       # fetched only; a local path is printed back
+            print(get_one(src_spec)); return 0
+        # --format alone converts into the current directory, as it always did for several
+        # sources; for one it was dropped, the cache path printed and nothing converted
+        out = Path(args.output or ".")
+        to_dir = not args.output or out.is_dir() or str(args.output).endswith("/")
+        if args.format or io.image_suffix(out.name):
             ext = io.format_extension(args.format) if args.format else io.image_suffix(out.name)
-            if out.is_dir() or str(args.output).endswith("/") or not io.image_suffix(out.name):
+            if to_dir or not io.image_suffix(out.name):
                 out = out / (sources.source_stem(src_spec) + ext)
-            print(get_one(src_spec, (out, True))); return 0
-        if out.is_dir() or str(args.output).endswith("/"):
+            print(get_one(src_spec, lambda src: (out, True))); return 0
+        if to_dir:                                    # the raw content, named by the source
             name = sources.source_stem(src_spec)
-            src = sources.materialize(src_spec, progress=say)
-            dest = out / (name if Path(src).is_dir() else Path(src).name)
-            if Path(src).is_dir():
-                shutil.copytree(src, dest, dirs_exist_ok=True)
-            else:
-                out.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest)
-            print(dest); return 0
-        src = sources.materialize(src_spec, progress=say)
-        if Path(src).is_dir():
-            raise InputError(f"{src_spec} is a DICOM series (a directory); give a directory -o, "
-                             "or a file with an image extension (or --format) to convert it")
-        out.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, out); print(out); return 0
+            print(get_one(src_spec, lambda src: (out / (name if src.is_dir() else src.name), False)))
+            return 0
+
+        def as_named(src):
+            if src.is_dir():
+                raise InputError(f"{src_spec} is a directory, not one file; give a directory -o to "
+                                 "copy it, or a file with an image extension (or --format) to convert it")
+            return out, False
+        print(get_one(src_spec, as_named)); return 0
 
     # batch: several sources
     if not args.output and not args.format:          # no destination: cache each, print paths
         for src_spec in srcs:
-            print(get_one(src_spec, None))
+            print(get_one(src_spec))
         return 0
     outdir = Path(args.output or ".")                # default the output directory to the cwd
     outdir.mkdir(parents=True, exist_ok=True)
     ext = io.format_extension(args.format) if args.format else None
+    # Each name this run has written, folded as APFS and FAT fold names (case, and unicode
+    # normalization), with the source written there. Two sources sharing a stem -
+    # `a/scan.nii.gz` and `b/scan.nii.gz`, the ordinary layout of a folder of cases once local
+    # paths are written at all - land on one name: a converted file replaced by the second, a
+    # copied series merged into the first's folder, file over file.
+    fold = lambda name: unicodedata.normalize("NFC", name).casefold()
+    written = {}
+
+    def into_outdir(src_spec):
+        def place(src):
+            stem = sources.source_stem(src_spec)
+            name = stem + ext if ext else (stem if src.is_dir() else src.name)
+            if fold(name) in written:
+                raise InputError(f"{outdir / name} was already written for {written[fold(name)]} "
+                                 f"in this run; get {src_spec} on its own, with -o naming another file")
+            return outdir / name, bool(ext)
+        return place
+
     failures = 0
     for src_spec in srcs:
         try:
-            if ext:                                   # convert each into the directory
-                out = get_one(src_spec, (outdir / (sources.source_stem(src_spec) + ext), True))
-            else:                                     # raw copy each into the directory
-                src = sources.materialize(src_spec, progress=say)
-                dest = outdir / (sources.source_stem(src_spec) if Path(src).is_dir() else Path(src).name)
-                if Path(src).is_dir():
-                    shutil.copytree(src, dest, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(src, dest)
-                out = dest
+            out = get_one(src_spec, into_outdir(src_spec))
+            written[fold(out.name)] = src_spec
             print(out)
         except Exception as e:
             failures += 1; print(f"  FAILED {src_spec}: {e}", file=sys.stderr)

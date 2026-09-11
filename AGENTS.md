@@ -371,6 +371,16 @@ multi-hour job fares against the 3600 s function timeout.
   refetch rewrites it.
 - `docs/totalvibe-region-names.md` records deferred work: naming TotalVibe's 11 regions,
   which needs deriving from a `ts:total` overlap table, NOT reading them off upstream's JPEG.
+- **`segment`'s batch writes two inputs that share a stem onto one output (found 2026-09-11,
+  not fixed).** `segment a/scan.nii.gz b/scan.nii.gz --format seg.nrrd -o out/` names both
+  `out/scan_<task>.seg.nrrd` and exits 0 with only b's labels there. `get`'s batch refuses the
+  second of such a pair, folding names as the filesystem does; `segment` has no such check.
+- **A local folder holding several DICOM series is read as its first (found 2026-09-11, not
+  fixed).** `io.read_image` asks GDCM for "the" series of a directory, so `segment ./study/`
+  segments one series of several without a word and `get ./study/ -o x.nii.gz` converts one.
+  `serve` refuses such a folder at upload (`dicom_series_ids`). Refusing in `read_image` would
+  cover both, and would also refuse a fetched archive holding several series, which takes the
+  same path today.
 - **Two provenance digests pin less than they say (found 2026-09-11, not fixed).** A
   detached header (`.nhdr`, probably `.mhd`) is digested alone - changing its data file
   leaves the digest the same - and a directory holding exactly ONE top-level file is
