@@ -63,8 +63,10 @@ def test_measured_mode_uses_what_the_network_actually_holds(monkeypatch):
     budget = N.device_budget_bytes(MPS)
     on, why = N.choose_accumulate("auto", device=MPS, K=25, shape=(480, 340, 340), measured=True)
     assert "measured" in why and "network holds 2.50 GB" in why
-    # 2.78 GB accumulator + 0.62 GB margin against the real budget
-    assert on is (2.78e9 + 0.625e9 <= budget), why
+    # the accumulator is (K + 1) x voxels x 2 B = 2.89 GB - the weight map is a channel too, which
+    # this missed until 2026-09-11 (2.78 GB) - plus a 0.62 GB margin, against the real budget
+    assert "accumulator 2.89 GB" in why, why
+    assert on is ((25 + 1) * 480 * 340 * 340 * 2 + 0.625e9 <= budget), why
     # the unmeasured path would have demanded a further 4.5 GB on top
     on_est, why_est = N.choose_accumulate("auto", device=MPS, K=25, shape=(480, 340, 340))
     assert "unmeasured" in why_est
@@ -90,6 +92,20 @@ def test_host_available_is_reported_here():
     from haversack.network import host_available_bytes
     host = host_available_bytes()
     assert host is not None and 0 < host < 10_000e9
+
+
+def test_host_memory_health_is_reported_here():
+    """The gate is only as good as this reading, and it fails open: any error comes back as None,
+    which choose_accumulate takes as "no veto". So a sysctl that stopped answering would remove
+    the gate without a word - probed 2026-09-11 with a failing sysctl first on PATH: None, no
+    warning, and nothing about the gate in the policy's why. On macOS it must be a percentage."""
+    import platform
+    from haversack.network import host_memory_health
+    level = host_memory_health()
+    if platform.system() == "Darwin":
+        assert isinstance(level, int) and 0 <= level <= 100, level
+    else:
+        assert level is None, level
 
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs MPS")
@@ -122,6 +138,22 @@ def test_tight_host_declines_the_device_whatever_the_budget_says(monkeypatch):
     on, why = N.choose_accumulate("auto", device=MPS, K=4, shape=(32, 32, 32), measured=True)
     assert on is False and "already tight" in why
     monkeypatch.setattr(N, "host_memory_health", lambda: 70)               # healthy host
+    on, why = N.choose_accumulate("auto", device=MPS, K=4, shape=(32, 32, 32), measured=True)
+    assert on is True, why
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs MPS")
+def test_the_pressure_gate_refuses_at_34_and_admits_at_35(monkeypatch):
+    """The gate's edge, pinned where it was met on 2026-09-10. The tight-host test's 20 and 70
+    would pass a `<=`, or any threshold from 21 to 70; this holds it at 35. Refusing at 34 is
+    the policy working - that day's failures were tests reading the machine, not the gate."""
+    import haversack.network as N
+    monkeypatch.setattr(N, "host_available_bytes", lambda: int(400e9))
+    monkeypatch.setattr(N, "device_working_set_bytes", lambda device: int(1e9))
+    monkeypatch.setattr(N, "host_memory_health", lambda: 34)
+    on, why = N.choose_accumulate("auto", device=MPS, K=4, shape=(32, 32, 32), measured=True)
+    assert on is False and "already tight" in why, why
+    monkeypatch.setattr(N, "host_memory_health", lambda: 35)
     on, why = N.choose_accumulate("auto", device=MPS, K=4, shape=(32, 32, 32), measured=True)
     assert on is True, why
 
