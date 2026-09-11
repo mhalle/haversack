@@ -117,8 +117,9 @@ them.
 haversack segment scan.nii.gz --task total_fast -o labels.nii.gz
 ```
 
-The input is a NIfTI, NRRD, or MetaImage file, or a DICOM series directory - local, or a
-remote source fetched on demand (see [Remote inputs](#remote-inputs)):
+The input is a NIfTI, NRRD, or MetaImage file, or a directory holding one DICOM series (a
+folder of several is refused, never read as one of them) - local, or a remote source fetched
+on demand (see [Remote inputs](#remote-inputs)):
 
 ```bash
 haversack segment idc:<crdc_series_uuid> --task total_fast -o labels.seg.nrrd

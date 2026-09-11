@@ -117,6 +117,9 @@ Two layers, enforced by `tests/test_layering.py`:
   `resolve()` to get `!member` zip-by-Range for free, or `ObjectStoreSource` (obstore: `s3:`,
   `gs:`; one object, `!member` over `get_range`, or `<prefix>/` for a whole series) + one
   line in `default_sources()`.
+  A prefix fetch (`!<folder>/`, `<bucket>/<prefix>/`) flattens whatever it names into one
+  directory, so it can land several DICOM series side by side; `io.read_image` refuses that
+  (one series per input, 2026-09-11), so a new source needs no check of its own.
   Strict fullmatch identifier, and the host chosen by us and never by the caller — that is
   the SSRF boundary and it is not negotiable. Prefer a pinned identity (a commit sha, a
   version-pinned uuid); where the repository offers none, `tcia:`, `s3:` and `github:` show

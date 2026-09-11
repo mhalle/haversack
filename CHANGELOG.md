@@ -62,7 +62,19 @@
   and a `!` in a local name is part of the name: `segment . --format seg.nrrd -o out/` wrote
   `out/._<task>.seg.nrrd`, a hidden file, and `get` would have written `out/..nrrd`.
 
-Nothing `segment` computes changes, so no cache is invalidated.
+- **A folder holding several DICOM series was read as one of them, without a word.** Asked
+  for the series in a directory, GDCM answers with the first it finds and says nothing of the
+  rest, so a folder of two series - 3 and 5 slices - read as the 3-slice one: `segment
+  ./study/` segmented one series of several, and `get -o scan.nii.gz` converted one. Both
+  now refuse such a folder in one line that names its series and the fix, a folder holding
+  one of them; there is no flag to pick one, since which was wanted is not something a reader
+  can know. The server already refused one at upload. The refusal also reaches what a fetch
+  can deliver: a zip's `!<folder>/` or a bucket's `<prefix>/` flattens every series under it
+  into one directory, and ending the source at one series' folder reads that series. A CT
+  beside its RTSTRUCT still reads, since an object without pixel data is not a series. A
+  folder that read before reads the same bytes, so the cache epoch is not bumped - which
+  means a server that cached a result from such a folder keeps serving it until it is
+  deleted, rather than every result being recomputed to drop it.
 
 ## [0.10.0] - 2026-09-11
 

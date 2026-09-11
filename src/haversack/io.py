@@ -134,6 +134,31 @@ def _readable(p) -> None:
         raise InputError(f"cannot read {p}: permission denied")
 
 
+def _refuse_several_series(directory, ids) -> None:
+    """One series per input: a directory holding several is refused, never read as one.
+
+    Asked with GDCM's series ids for the directory, which is one SeriesInstanceUID per
+    series. GDCM answers ``GetGDCMSeriesFileNames(directory)`` with the first series it
+    finds and says nothing of the rest, so until 2026-09-11 a folder of two series (3 and
+    5 slices) read as the 3-slice one without a word: ``segment ./study/`` segmented one
+    series of several and ``get`` converted one. That is the plausible, wrong result
+    :func:`dicom_series_ids` exists to prevent, and ``serve`` already refused such a
+    folder at upload. This is the same refusal for every other way a folder arrives: a
+    local path, and a fetch that flattens a prefix into one directory - ``!<folder>/``
+    inside an archive, ``<bucket>/<prefix>/`` - which lands a study's series side by
+    side. ``idc:`` and ``tcia:`` fetch one series by construction.
+
+    An object without pixel data is not a series to GDCM, so a CT beside its RTSTRUCT
+    still reads (probed 2026-09-11). Which series was wanted is not a question a reader
+    can answer, so there is no flag to pick one: the fix is a narrower folder.
+    """
+    if len(ids) > 1:
+        shown = ", ".join(ids[:3]) + (f" and {len(ids) - 3} more" if len(ids) > 3 else "")
+        raise InputError(f"{directory} holds {len(ids)} DICOM series ({shown}), and an input "
+                         "is one series: give the folder of one (fetching, end the source "
+                         "at one series' folder, as in ...zip!<folder>/ or <bucket>/<folder>/)")
+
+
 def read_image(path):
     """Read any SimpleITK-supported image (or a DICOM series directory) into a
     3D SimpleITK image **in its stored orientation**, with the IPP-derived
@@ -150,6 +175,7 @@ def read_image(path):
         image = read_duckn_image(p)
     elif p.is_dir():
         reader = sitk.ImageSeriesReader()
+        _refuse_several_series(p, reader.GetGDCMSeriesIDs(str(p)))
         files = reader.GetGDCMSeriesFileNames(str(p))
         if not files:
             # not a DICOM series - but a directory holding exactly one image
