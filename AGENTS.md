@@ -184,6 +184,19 @@ epoch when a build would compute different bytes from the same inputs (resamplin
 restore, label mapping, an engine's inference path); never for a release or a server change.
 VoxTell refuses cache serving.
 
+**Result-cache lifetimes (2026-09-10).** A result is a directory per generation
+(`<key>/g-<gen>/`) behind one `current` pointer, switched by one rename. No cleanup path —
+per-key pruning, the ceiling, eviction — deletes what a reader holds (a `.lease` file inside
+the directory it was handed, touched on every resolve, valid `GENERATION_GRACE_S`) or what a
+writer is publishing (`<key>/.writer-<gen>`, flock'd from before its staging exists until its
+pointer moves). Death is proved, never inferred from age: only a pruner on the host named in
+the claim may take its lock and conclude anything. Unclaimed staging stays forever (litter
+over data loss), so a failed `put` removes its own. Each deletion moves the directory to a
+`.reclaim-*` tomb and asks again before committing. `delete` and `cache clean` are explicit
+and ignore leases. On Modal, `cache_get` never commits, so a lease taken in the API container
+reaches worker-side pruning only if the volume commits it some other way — no worse than
+before, and not solved.
+
 ## Release procedure
 
 1. CHANGELOG entry at the top: `## [X.Y.Z] - YYYY-MM-DD`, prose bullets that say *why*.
@@ -434,3 +447,29 @@ Tell agents that probes touching cache admin, `clean`, or any `HAVERSACK_*` path
 with `HAVERSACK_CACHE_DIR` pointed at a temp directory, and have them echo the resolved
 root before the first destructive call. Two agents also ran concurrently and one read
 files the other had mutated; either serialize them or scope each to disjoint files.
+
+## The 2026-09-10 review round — lifetimes
+
+The external review's second pass reproduced three cleanup defects in the generation work of
+`e4e80b4`, and they were one mistake three times: cleanup judged by a timestamp that meant
+something else.
+
+- **A timestamp with two meanings protects neither.** A generation directory's mtime moved
+  when it was created AND when a reader resolved it, so the ceiling — which must reclaim
+  something — could not help taking exactly the generations readers had just resolved. The
+  lease is a file of its own now: creation still ages a generation, only a read holds it.
+- **Lookup and cleanup ask one marker, through one helper.** A legacy flat read touched the
+  key directory while cleanup judged the labels file. The marker lives beside what it
+  protects, and `_take_lease`/`_leased` are the only code that knows its name.
+- **Age is not liveness.** A quiet writer is not a dead one — one long copy, a suspended
+  laptop. Proof is a lock the kernel releases on exit, and only on the host that took it: an
+  advisory lock need not reach across machines sharing a volume.
+- **A fix can concentrate the hazard it did not look at.** Taking held generations out of the
+  ceiling made its remaining candidates the NEWEST, and the newest can be a concurrent
+  publication between its rename and its pointer switch; HEAD was safe from that only because
+  its ceiling took the oldest. The writer's claim covers that instant and the pruner re-reads
+  the pointer. Both tests pass on HEAD: a regression guard is written for what the fix could
+  break, not only for the finding.
+- **Strictness moves the cost somewhere: find where.** Once unclaimed staging is never
+  reclaimed, a failed `put` that left its staging would leave it forever — so it removes its
+  own, and a test says so.
