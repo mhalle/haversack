@@ -683,7 +683,7 @@ class TheCommandLineNamesEveryEngine(unittest.TestCase):
         from haversack import cli
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.suppress(SystemExit):
-            cli.main(["--help"])               # argparse prints the description, then exits
+            cli.main(["--help"])               # prints the description, then exits
         text = buf.getvalue()
         self.assertIn("haversack", text.lower(),
                       "`--help` produced nothing this guard can read")

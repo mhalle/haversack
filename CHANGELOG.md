@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+- **The command line is click's now, and says its version.** `haversack --version` prints the
+  release - argparse's command line had no such option, and a `uvx` smoke run found it
+  failing - and shell completion comes with it: commands, options, and task names from the
+  catalog (the README has the one line for a shell's startup file). One thing changes for
+  anyone scripting it: an option must be spelled out, since argparse took a unique prefix
+  (`--env 5` meant `--envelope 5`) and click refuses one. Exit statuses are unchanged,
+  a Ctrl-C's included - click would have made it exit 1, on which a shell's loop over a
+  folder of scans goes on to the next. Help reads a little differently: defaults print as
+  `[default: fp16]`, and no longer as `(default: None)` where there is none. The `weights`
+  line in the command list, cut off mid-sentence since it was written, is finished. `click`
+  becomes a core dependency, so the lean install adds it. Inside, `cli._run` stops being one
+  ~850-line function: each command is a function of its own.
+
 ## [0.9.1] - 2026-09-11
 
 A performance and correctness fix in how an input's provenance is recorded. The labels

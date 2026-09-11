@@ -31,11 +31,13 @@ jobs:
         # obstore is a CORE dependency, not an extra: `idc:` always needed it, and since 0.7.0
         # `s3:` and `gs:` read through it too - without it those sources report themselves
         # disabled and the allowlist tests get "missing dependency" where they expect a refusal.
+        # click is CORE too, since the command line moved onto it (2026-09-11); modal would
+        # bring it anyway, but a dependency CI only has by accident is one it can lose.
         run: |
           uv venv
           uv pip install --index-strategy unsafe-best-match \
             --extra-index-url https://download.pytorch.org/whl/cpu \
-            torch nnunetv2 scipy scikit-image 'SimpleITK>=2.3' obstore pytest \
+            torch nnunetv2 scipy scikit-image 'SimpleITK>=2.3' obstore 'click>=8.5' pytest \
             fastapi httpx python-multipart matplotlib modal pydicom 'zarr>=3' \
             'duckn @ git+https://github.com/mhalle/duckn.git@v0.3.2' \
             'rankfield @ git+https://github.com/mhalle/rankfield.git@v0.3.2'

@@ -137,7 +137,8 @@ Two layers, enforced by `tests/test_layering.py`:
 
 Key entry points: `pipeline.segment()` (the run), `Segmenter` (policy + warm `ModelCache`),
 `tasks._resolve_spec` (torch-free task resolution used by `describe()` and the server),
-`cli._run` (hand-rolled argparse, not typer decorators).
+`cli` (click since 2026-09-11: `_command_line()` builds every command, each handing what it
+parsed to a `_cmd_*` function, and `_run` returns that function's status).
 
 ## Rules the tests enforce — keep them
 
@@ -148,7 +149,7 @@ Key entry points: `pipeline.segment()` (the run), `Segmenter` (policy + warm `Mo
 3. `describe()` / `/v1/tasks/{task}` stays in torch-free modules (`tasks`, `weights`, `values`,
    `errors`, `schemas`).
 4. pydantic stops at the wire (`schemas`, `serve`, `registry`): never in value types or the kernel.
-5. The lean install (README "Lean install": `--no-deps` + numpy SimpleITK pydantic typer tqdm
+5. The lean install (README "Lean install": `--no-deps` + numpy SimpleITK pydantic click tqdm
    httpx obstore) must run `haversack tasks`, `remote`, `modal deploy`; `segment` must fail
    in one line naming what to add. A test blocks torch/nnunetv2/scipy/skimage/duckn to prove it.
 6. The default path `segment IN -o labels.nii.gz` imports none of duckn/zarr/rankfield.

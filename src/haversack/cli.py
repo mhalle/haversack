@@ -1,8 +1,9 @@
 """haversack segment IN --task total_fast -o OUT [--spacing 1.0] [--interp nearest|linear]"""
 from __future__ import annotations
 
-import argparse
 import sys
+
+import click
 
 
 def main(argv=None) -> int:
@@ -177,8 +178,8 @@ def _run(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
     if argv[:1] == ["view"]:
         # undocumented, with the ranked store it shows: the slice preview served locally.
-        # Parsed apart so it is not listed among the commands (argparse prints a
-        # suppressed subcommand's help as '==SUPPRESS==' under this formatter).
+        # It parses its own command line, so it gets the rest before click sees any - which
+        # also keeps it out of the listed commands.
         from .view import main_view
         return main_view(argv[1:])
     if argv[:1] == ["restore"]:
@@ -186,279 +187,546 @@ def _run(argv=None) -> int:
         _need_store_extra()
         from .ranked_restore import main_cli
         return main_cli(argv[1:])
-    args = _parser().parse_args(argv)
-    return COMMANDS[args.cmd](args)
+    # Standalone, so --help, --version and a usage error print and exit as a command line
+    # should, with argparse's exit codes. A command's own status comes back through `state`,
+    # because standalone mode discards it - and so does a Ctrl-C (see `_dispatch`).
+    state = {}
+    try:
+        COMMAND_LINE.main(args=argv, prog_name="haversack", obj=state)
+    except SystemExit:
+        if "interrupted" in state:
+            raise state["interrupted"] from None
+        if "rc" not in state:
+            raise
+    return state.get("rc", 0)
 
 
-def _parser() -> argparse.ArgumentParser:
-    """The whole command line's shape: every command, its options and their help."""
-    F = argparse.ArgumentDefaultsHelpFormatter
+#: What every command shares: `-h` works as it did under argparse, defaults show in the help,
+#: and a wide terminal gets up to 100 columns rather than click's 80.
+_CONTEXT = {"help_option_names": ["-h", "--help"], "show_default": True, "max_content_width": 100}
 
-    class Fmt(argparse.RawDescriptionHelpFormatter, F):
-        """Defaults in the help, and epilogs kept as written."""
 
-    ap = argparse.ArgumentParser(
-        prog="haversack", formatter_class=Fmt,
-        description="Medical-image segmentation with many model families behind one command: "
-                    "TotalSegmentator, MOOSE, MRSegmentator, stock nnU-Net, FastSurfer, "
-                    "SynthStrip, VoxTell, MONAI bundles. "
-                    "Runs on Apple Silicon (MPS), CUDA or CPU; also a local REST server and a client for one.",
-        epilog="""examples:
+def _verbatim(text: str) -> str:
+    """An epilog printed as written: click rewraps a paragraph unless it opens with ``\\b``."""
+    return "\b\n" + text
+
+
+class _Described:
+    """What a command and a group share. One with only a one-line summary shows it as its
+    description too, rather than an empty page. And `-h` is described in argparse's words,
+    lower case like every other option here, where click's are a capitalized sentence."""
+
+    def __init__(self, *args, **kwargs):
+        if kwargs.get("help") is None:
+            kwargs["help"] = kwargs.get("short_help")
+        super().__init__(*args, **kwargs)
+
+    def get_help_option(self, ctx):
+        option = super().get_help_option(ctx)
+        if option is not None:
+            option.help = "show this help message and exit"
+        return option
+
+
+class _Command(_Described, click.Command):
+    """Positionals print their own help - click 8.5 added that, argparse's command line had
+    it, and it is why 8.5 is the floor."""
+
+
+class _Group(_Described, click.Group):
+    """Subcommands in the order they are defined - `segment` first, as a new user needs them -
+    rather than alphabetical."""
+
+    def list_commands(self, ctx):
+        return list(self.commands)
+
+
+def _version_option() -> click.Option:
+    """`haversack --version`: the release, as `/v1/version` and the User-Agent report it. The
+    argparse command line had none, and a `uvx` smoke run found it failing (2026-09-11)."""
+    def show(ctx, param, value):
+        if value and not ctx.resilient_parsing:
+            from . import __version__
+            click.echo(f"haversack {__version__}")
+            ctx.exit()
+    return click.Option(["--version"], is_flag=True, expose_value=False, is_eager=True,
+                        callback=show, help="print the version and exit")
+
+
+def _complete_task(ctx, param, incomplete):
+    """Shell completion for a task name, from the catalog with nothing downloaded - as `tasks`
+    lists them - plus the short spelling of each TotalSegmentator task, which is what people
+    actually type."""
+    try:
+        from .ecosystems import EcosystemCatalog
+        from .weights import WeightsStore
+        names = EcosystemCatalog(root=WeightsStore(None, fetch=False).root).names()
+    except Exception:                      # completion must never put a traceback in a shell
+        return []
+    short = [n[len("ts:"):] for n in names if n.startswith("ts:")]
+    return [n for n in (*names, *short) if n.startswith(incomplete)]
+
+
+def _dispatch(handler, cmd: str, subkey: str | None = None):
+    """The callback for one command: it hands ``handler`` the parsed command line as one
+    namespace - the leaf's parameters over its groups', with the command and subcommand names
+    where argparse put them - so that moving to click changed none of the `_cmd_*` bodies."""
+    def callback(**_):
+        from types import SimpleNamespace
+        ctx = click.get_current_context()
+        params, c = {}, ctx
+        while c is not None:
+            params = {**c.params, **params}
+            c = c.parent
+        args = SimpleNamespace(cmd=cmd, **params)
+        if subkey:
+            setattr(args, subkey, ctx.info_name)
+        try:
+            rc = handler(args)
+        except KeyboardInterrupt as e:
+            if not isinstance(ctx.obj, dict):
+                raise
+            # Click turns Ctrl-C into "Aborted!" and exit 1. Under argparse it reached the
+            # interpreter and the process died of SIGINT - the status on which a shell's `for`
+            # loop over a folder of scans stops, where exit 1 goes on to the next scan. So it
+            # is held here, and `_run` raises it again once click is done.
+            ctx.obj["interrupted"] = e
+            return None
+        if isinstance(ctx.obj, dict):
+            ctx.obj["rc"] = rc
+        return rc
+    return callback
+
+
+def _command_line() -> click.Group:
+    """The whole command line's shape: every command, its options and their help. Built
+    once, at import; each command hands what it parsed to its `_cmd_*` function."""
+    root = _Group(
+        "haversack", context_settings=_CONTEXT, params=[_version_option()],
+        help=('Medical-image segmentation with many model families behind one command: '
+              'TotalSegmentator, MOOSE, MRSegmentator, stock nnU-Net, FastSurfer, SynthStrip, '
+              'VoxTell, MONAI bundles. Runs on Apple Silicon (MPS), CUDA or CPU; also a local '
+              'REST server and a client for one.'),
+        epilog=_verbatim("""examples:
   haversack tasks                                          what can be segmented
   haversack segment scan.nii.gz --task total_fast -o labels.seg.nrrd
   haversack segment idc:<crdc_series_uuid> --task total -o labels.seg.nrrd
   haversack serve --port 8790                              a local server (it generates a token); then: haversack remote submit ...
-  haversack docs                                           the user guide; `haversack docs weights` for one section""")
-    sub = ap.add_subparsers(dest="cmd", required=True, metavar="command", help="what to do")
-    s = sub.add_parser("segment", formatter_class=Fmt,
-                       help="segment one or more images: NIfTI, NRRD, MetaImage, a DICOM series directory, a URL or a hosted id",
-                       description="Segment one image and write the labels, or several into a directory (batch). "
-                                   "Weights download on first use. "
-                                   "The output format follows the extension (.nii.gz, .nrrd, .seg.nrrd, .mha); "
-                                   "labels come back on the input grid, in the input's orientation.",
-                       epilog="""examples:
+  haversack docs                                           the user guide; `haversack docs weights` for one section"""))
+
+    segment = _Command(
+        'segment', callback=_dispatch(_cmd_segment, 'segment'),
+        short_help=('segment one or more images: NIfTI, NRRD, MetaImage, a DICOM series '
+                    'directory, a URL or a hosted id'),
+        help=('Segment one image and write the labels, or several into a directory (batch). '
+              'Weights download on first use. The output format follows the extension (.nii.gz, '
+              ".nrrd, .seg.nrrd, .mha); labels come back on the input grid, in the input's "
+              'orientation.'),
+        epilog=_verbatim("""examples:
   haversack segment ct.nii.gz --task total_fast -o labels.seg.nrrd
   haversack segment dicom_dir/ --task total --spacing 1 -o labels.nii.gz
   haversack segment t1.nii.gz --task fastsurfer:brain -o brain.seg.nrrd      (from the fastsurfer venv)
   haversack segment "zenodo:<recid>/amos22.zip!amos22/imagesVa/amos_0575.nii.gz" --task mrsegmentator:base -o amos.seg.nrrd
-  haversack segment a.nii.gz b.nii.gz dicom_dir/ --task total_fast --format seg.nrrd -o out/   (batch: out/<name>_total_fast.seg.nrrd)""")
-    s.add_argument("input", nargs="+",
-                   help="one or more inputs; several = batch mode. Each is a NIfTI / NRRD / MetaImage file, a DICOM "
-                   "series directory, an http(s) URL (!member reads one file out of a remote zip), or a hosted "
-                   "identifier: idc:<crdc_series_uuid>, zenodo:<recid>/<file>[!member], tcia:..., openneuro:..., "
-                   "hf:<org>/<repo>@<sha>/<path>, s3:<bucket>/<key>, github:<owner>/<repo>@<tag>/<asset>")
-    s.add_argument("--task", required=True,
-                   help="what to segment: a name from `haversack tasks` (total_fast, total, fastsurfer:brain, ...), "
-                        "or a path to a stock nnU-Net model folder")
-    s.add_argument("-o", "--output", default=None,
-                   help="one input: the output file (its extension picks the format). Several inputs: an output "
-                   "directory (default: the current directory), each written as <input>_<task> in --format")
-    s.add_argument("--format", default=None,
-                   help="output type for batch mode (nifti, nrrd, seg.nrrd, mha) - required when segmenting several inputs")
-    s.add_argument("--spacing", type=float, default=None, help="isotropic output spacing in mm (default: the input grid)")
-    s.add_argument("--interp", choices=("linear", "nearest"), default="linear",
-                   help="logit interpolation for the restore: linear = sub-voxel boundaries; nearest = TotalSegmentator semantics")
-    s.add_argument("--device", default="auto", help="cuda, mps, cpu, or auto (the best available)")
-    s.add_argument("--dtype", choices=("fp16", "bf16", "fp32"), default="fp16",
-                   help="network precision on the nnU-Net path (fp16 runs on MPS; an explicit choice is never lowered)")
-    s.add_argument("--accumulate", choices=("auto", "device", "host"), default="auto",
-                   help="sliding-window accumulator placement: auto (from free device memory), device (fastest, needs headroom), host")
-    s.add_argument("--batch-size", default="auto", help="patches per forward pass: auto (default), or an int")
-    s.add_argument("--envelope", type=float, default=20.0,
-                   help="restrict inference to the body's bounding box plus this margin in mm; 0 or negative = whole volume")
-    s.add_argument("--model-root", default=None,
-                   help="where model weights live (default: TOTALSEG_WEIGHTS_PATH, nnUNet_results, "
-                        "or ~/.totalsegmentator/nnunet/results)")
-    s.add_argument("--allow-transpose", action="store_true",
-                   help="run a model whose plans permute the axes (transpose_forward). Refused by "
-                        "default because the transposed path had not been checked against an "
-                        "outside implementation; dentalsegmentator:base, totalvibe:vibe_sagittal "
-                        "and totalvibe:pancreas need it")
-    s.add_argument("--quiet", action="store_true", help="no progress or timings on stderr")
+  haversack segment a.nii.gz b.nii.gz dicom_dir/ --task total_fast --format seg.nrrd -o out/   (batch: out/<name>_total_fast.seg.nrrd)"""),
+        params=[
+            click.Argument(['input'], nargs=-1, required=True,
+                           help=('one or more inputs; several = batch mode. Each is a NIfTI / '
+                                 'NRRD / MetaImage file, a DICOM series directory, an http(s) '
+                                 'URL (!member reads one file out of a remote zip), or a hosted '
+                                 'identifier: idc:<crdc_series_uuid>, '
+                                 'zenodo:<recid>/<file>[!member], tcia:..., openneuro:..., '
+                                 'hf:<org>/<repo>@<sha>/<path>, s3:<bucket>/<key>, '
+                                 'github:<owner>/<repo>@<tag>/<asset>')),
+            click.Option(['--task'], required=True, shell_complete=_complete_task,
+                         help=('what to segment: a name from `haversack tasks` (total_fast, '
+                               'total, fastsurfer:brain, ...), or a path to a stock nnU-Net '
+                               'model folder')),
+            click.Option(['-o', '--output'],
+                         help=('one input: the output file (its extension picks the format). '
+                               'Several inputs: an output directory (default: the current '
+                               'directory), each written as <input>_<task> in --format')),
+            click.Option(['--format'],
+                         help=('output type for batch mode (nifti, nrrd, seg.nrrd, mha) - '
+                               'required when segmenting several inputs')),
+            click.Option(['--spacing'], type=float,
+                         help='isotropic output spacing in mm (default: the input grid)'),
+            click.Option(['--interp'], type=click.Choice(['linear', 'nearest']), default='linear',
+                         help=('logit interpolation for the restore: linear = sub-voxel '
+                               'boundaries; nearest = TotalSegmentator semantics')),
+            click.Option(['--device'], default='auto',
+                         help='cuda, mps, cpu, or auto (the best available)'),
+            click.Option(['--dtype'], type=click.Choice(['fp16', 'bf16', 'fp32']), default='fp16',
+                         help=('network precision on the nnU-Net path (fp16 runs on MPS; an '
+                               'explicit choice is never lowered)')),
+            click.Option(['--accumulate'], type=click.Choice(['auto', 'device', 'host']), default='auto',
+                         help=('sliding-window accumulator placement: auto (from free device '
+                               'memory), device (fastest, needs headroom), host')),
+            click.Option(['--batch-size'], default='auto',
+                         help='patches per forward pass: auto, or an int'),
+            click.Option(['--envelope'], type=float, default=20.0,
+                         help=("restrict inference to the body's bounding box plus this margin "
+                               'in mm; 0 or negative = whole volume')),
+            click.Option(['--model-root'],
+                         help=('where model weights live (default: TOTALSEG_WEIGHTS_PATH, '
+                               'nnUNet_results, or ~/.totalsegmentator/nnunet/results)')),
+            click.Option(['--allow-transpose'], is_flag=True,
+                         help=('run a model whose plans permute the axes (transpose_forward). '
+                               'Refused by default because the transposed path had not been '
+                               'checked against an outside implementation; '
+                               'dentalsegmentator:base, totalvibe:vibe_sagittal and '
+                               'totalvibe:pancreas need it')),
+            click.Option(['--quiet'], is_flag=True, help='no progress or timings on stderr'),
+        ])
+    root.add_command(segment)
 
-    g = sub.add_parser("get", formatter_class=Fmt, help="fetch source data (idc:/zenodo:/http...) into the cache, or out to a file",
-                       description="Acquire a remote input without segmenting it. With no -o, it lands in the cache "
-                                   "(~/.cache/haversack/inputs) and the path is printed; a later `segment <same id>` "
-                                   "reuses it. With -o, it is also written there: a directory gets the raw fetched "
-                                   "content (a DICOM series stays a directory), an image-extension file (or --format) "
-                                   "is converted to that one volume (a DICOM series -> one NIfTI/NRRD), geometry "
-                                   "preserved. The raw data stays cached unless --no-cache.",
-                       epilog="""examples:
+    get = _Command(
+        'get', callback=_dispatch(_cmd_get, 'get'),
+        short_help='fetch source data (idc:/zenodo:/http...) into the cache, or out to a file',
+        help=('Acquire a remote input without segmenting it. With no -o, it lands in the cache '
+              '(~/.cache/haversack/inputs) and the path is printed; a later `segment <same id>` '
+              'reuses it. With -o, it is also written there: a directory gets the raw fetched '
+              'content (a DICOM series stays a directory), an image-extension file (or '
+              '--format) is converted to that one volume (a DICOM series -> one NIfTI/NRRD), '
+              'geometry preserved. The raw data stays cached unless --no-cache.'),
+        epilog=_verbatim("""examples:
   haversack get idc:<crdc_series_uuid>                     into cache; prints the path
   haversack get idc:<crdc_series_uuid> -o case1/scan.nii.gz  the series as one NIfTI
   haversack get idc:<crdc_series_uuid> --format nrrd -o out/  converted, auto-named <uuid>.nrrd
-  haversack get idc:<crdc_series_uuid> -o raw_dicom/         the raw DICOM series directory""")
-    g.add_argument("source", nargs="+",
-                   help="one or more remote inputs (several = batch): idc:<uuid>, zenodo:<recid>/<file>[!member], "
-                   "tcia:, openneuro:, hf:<org>/<repo>@<sha>/<path>, s3:<bucket>/<key>[!member], "
-                   "github:<owner>/<repo>@<tag>/<asset>[!member], or an http(s) URL")
-    g.add_argument("-o", "--output", default=None, help="where to put it: a directory (raw copy) or a file (converted by extension)")
-    g.add_argument("--format", default=None, help="output format (nifti, nrrd, seg.nrrd, mha): convert, and name by it into a directory")
-    g.add_argument("--no-cache", action="store_true", help="do not keep the raw data in the cache (only with -o)")
-    # (batch: -o is an output directory, default the current one; --format names each converted file)
+  haversack get idc:<crdc_series_uuid> -o raw_dicom/         the raw DICOM series directory"""),
+        params=[
+            click.Argument(['source'], nargs=-1, required=True,
+                           help=('one or more remote inputs (several = batch): idc:<uuid>, '
+                                 'zenodo:<recid>/<file>[!member], tcia:, openneuro:, '
+                                 'hf:<org>/<repo>@<sha>/<path>, s3:<bucket>/<key>[!member], '
+                                 'github:<owner>/<repo>@<tag>/<asset>[!member], or an http(s) '
+                                 'URL')),
+            click.Option(['-o', '--output'],
+                         help=('where to put it: a directory (raw copy) or a file (converted by '
+                               'extension)')),
+            click.Option(['--format'],
+                         help=('output format (nifti, nrrd, seg.nrrd, mha): convert, and name '
+                               'by it into a directory')),
+            click.Option(['--no-cache'], is_flag=True,
+                         help='do not keep the raw data in the cache (only with -o)'),
+        ])
+    root.add_command(get)
 
-    tl = sub.add_parser("tasks", formatter_class=Fmt, help="list every task the catalog can segment, or one task's structures",
-                        description="One line per task: name, engine, modality, and whether its weights are on disk "
-                                    "(or, for an engine task, whether the engine's runtime is installed here). "
-                                    "With a task name, prints that task's structures, one per line, in label order.",
-                        epilog="""examples:
+    tasks = _Command(
+        'tasks', callback=_dispatch(_cmd_tasks, 'tasks'),
+        short_help="list every task the catalog can segment, or one task's structures",
+        help=('One line per task: name, engine, modality, and whether its weights are on disk '
+              "(or, for an engine task, whether the engine's runtime is installed here). With a "
+              "task name, prints that task's structures, one per line, in label order."),
+        epilog=_verbatim("""examples:
   haversack tasks                        every task
   haversack tasks --installed            what runs without a download
   haversack tasks total_fast             the 117 structure names total_fast produces
   haversack tasks --json                 full records: name, ecosystem, engine, modality, structures, installed;
                                          `materialized` = the task's definition is known here without a download,
-                                         `task_spec` = it is an nnU-Net model (false for FastSurfer, SynthStrip, ...)""")
-    tl.add_argument("task", nargs="?", default=None,
-                    help="a task name: print its structures instead of the list. An nnU-Net "
-                         "task prints `<label>\t<name>` in label order; an engine task, whose "
-                         "labels are its own, prints names only")
-    tl.add_argument("--model-root", default=None, help="weights root to check for installed models")
-    tl.add_argument("--installed", action="store_true", help="only tasks whose weights are already on disk")
-    tl.add_argument("--json", action="store_true", help="the full per-task info records")
+                                         `task_spec` = it is an nnU-Net model (false for FastSurfer, SynthStrip, ...)"""),
+        params=[
+            click.Argument(['task'], required=False, shell_complete=_complete_task,
+                           help=('a task name: print its structures instead of the list. An '
+                                 'nnU-Net task prints `<label>\t<name>` in label order; an '
+                                 'engine task, whose labels are its own, prints names only')),
+            click.Option(['--model-root'], help='weights root to check for installed models'),
+            click.Option(['--installed'], is_flag=True,
+                         help='only tasks whose weights are already on disk'),
+            click.Option(['--json'], is_flag=True, help='the full per-task info records'),
+        ])
+    root.add_command(tasks)
 
-    ci = sub.add_parser("cite", formatter_class=Fmt, help="who made a task's model, its license, and what to cite",
-                        description="The credit for one task, from all three layers: the task's own facts (a "
-                                    "bundle's authors, a per-model license), its ecosystem (the group, the "
-                                    "repository, the license, the papers) and the engine that runs it (nnU-Net "
-                                    "asks to be cited alongside every model trained with it). Every reference "
-                                    "carries its DOI and PubMed ID where one exists. Nothing is downloaded.",
-                        epilog="""examples:
+    cite = _Command(
+        'cite', callback=_dispatch(_cmd_cite, 'cite'),
+        short_help="who made a task's model, its license, and what to cite",
+        help=("The credit for one task, from all three layers: the task's own facts (a bundle's "
+              'authors, a per-model license), its ecosystem (the group, the repository, the '
+              'license, the papers) and the engine that runs it (nnU-Net asks to be cited '
+              'alongside every model trained with it). Every reference carries its DOI and '
+              'PubMed ID where one exists. Nothing is downloaded.'),
+        epilog=_verbatim("""examples:
   haversack cite total_fast              TotalSegmentator's CT paper, nnU-Net, the license
   haversack cite totalvibe:body_regions  the TUM group, European Radiology 2026, Apache-2.0
-  haversack cite monai:brats_mri_segmentation --json   the bundle's own references, as data""")
-    ci.add_argument("task", help="a task name, in any accepted form")
-    ci.add_argument("--json", action="store_true", help="the full attribution record")
+  haversack cite monai:brats_mri_segmentation --json   the bundle's own references, as data"""),
+        params=[
+            click.Argument(['task'], shell_complete=_complete_task,
+                           help='a task name, in any accepted form'),
+            click.Option(['--json'], is_flag=True, help='the full attribution record'),
+        ])
+    root.add_command(cite)
 
-    ri = sub.add_parser("rights", formatter_class=Fmt, help="where a remote input comes from, its license, and what to cite - without fetching it",
-                        description="What one input's repository says about it: where it came from (the "
-                                    "collection or dataset, its identifier, DOI and version), under what license, "
-                                    "and the citation its publisher asks for. Metadata only - nothing is "
-                                    "downloaded. The same record, plus the bytes' own digest, is written beside "
-                                    "every fetched input and into every result's provenance as `inputs`.",
-                        epilog="""examples:
+    rights = _Command(
+        'rights', callback=_dispatch(_cmd_rights, 'rights'),
+        short_help=('where a remote input comes from, its license, and what to cite - without '
+                    'fetching it'),
+        help=("What one input's repository says about it: where it came from (the collection or "
+              'dataset, its identifier, DOI and version), under what license, and the citation '
+              'its publisher asks for. Metadata only - nothing is downloaded. The same record, '
+              "plus the bytes' own digest, is written beside every fetched input and into every "
+              "result's provenance as `inputs`."),
+        epilog=_verbatim("""examples:
   haversack rights idc:19ecafc9-d05a-4c6c-8727-ce1a78190d11   the NLST collection, CC BY 4.0, its DOI
   haversack rights zenodo:7262581/amos22.zip                 the record's license, creators and DOI
-  haversack rights openneuro:ds000114/x.nii.gz               CC0, by OpenNeuro's policy""")
-    ri.add_argument("input", help="a remote input: idc:, tcia:, zenodo:, openneuro:, hf:, s3:, gs:, github:")
-    ri.add_argument("--json", action="store_true", help="the record as JSON")
+  haversack rights openneuro:ds000114/x.nii.gz               CC0, by OpenNeuro's policy"""),
+        params=[
+            click.Argument(['input'],
+                           help=('a remote input: idc:, tcia:, zenodo:, openneuro:, hf:, s3:, '
+                                 'gs:, github:')),
+            click.Option(['--json'], is_flag=True, help='the record as JSON'),
+        ])
+    root.add_command(rights)
 
-    w = sub.add_parser("weights", formatter_class=Fmt, help="download model weights ahead of time, or see what can be",
-                       description="Weights download on first use; these commands do it ahead of time, or report "
-                                   "what the manifest can provision (some TotalSegmentator tasks are behind its license).")
-    wsub = w.add_subparsers(dest="wcmd", required=True, metavar="action", help="what to do with the weights")
-    wf = wsub.add_parser("fetch", help="download everything a task needs")
-    wf.add_argument("task", help="a task name from `haversack tasks`; every model it needs is fetched")
-    wf.add_argument("--root", "--model-root", dest="root", default=None,
-                    help="weights root (default: the ecosystem's location)")
-    wsub.add_parser("coverage", help="which catalog tasks the manifest can provision")
-    wl = wsub.add_parser("list", help="installed model weights on disk, with sizes")
-    wl.add_argument("--root", "--model-root", dest="root", default=None,
-                    help="weights root (default: the ecosystem's location)")
-    wrm = wsub.add_parser("remove", help="delete one dataset's installed weights")
-    wrm.add_argument("weights_id", help="a dataset id, e.g. 297 (see `weights list`)")
-    wrm.add_argument("--root", "--model-root", dest="root", default=None,
-                     help="weights root (default: the ecosystem location)")
-    wrm.add_argument("--yes", action="store_true", help="do not prompt")
-    wr = wsub.add_parser("refresh", formatter_class=Fmt, help="merge newly published weights into the manifest",
-                         description="Reads TotalSegmentator's GitHub releases and records new datasets and versions. "
-                                     "From an installed package this writes YOUR manifest "
-                                     "(~/.config/haversack/ts_weights.json, or HAVERSACK_TS_MANIFEST), laid over the "
-                                     "packaged one and kept across upgrades; in a source checkout it edits the "
-                                     "repository's file. Set GITHUB_TOKEN to lift GitHub's 60 requests/hour.")
-    wr.add_argument("--repo", default=None, help="GitHub repo to read releases from")
-    wr.add_argument("--to", default=None, help="write this file instead of the default target")
-    wr.add_argument("--dry-run", action="store_true", help="report what would change, write nothing")
-    wr.add_argument("--update-existing", action="store_true",
-                    help="also repoint datasets at newer releases (changes which weights download)")
+    weights = _Group(
+        'weights', short_help='download model weights ahead of time, or see what can be fetched',
+        help=('Weights download on first use; these commands do it ahead of time, or report '
+              'what the manifest can provision (some TotalSegmentator tasks are behind its '
+              'license).'))
+    root.add_command(weights)
+    weights_fetch = _Command(
+        'fetch', callback=_dispatch(_cmd_weights, 'weights', 'wcmd'),
+        short_help='download everything a task needs',
+        params=[
+            click.Argument(['task'], shell_complete=_complete_task,
+                           help=('a task name from `haversack tasks`; every model it needs is '
+                                 'fetched')),
+            click.Option(['--root', '--model-root'],
+                         help="weights root (default: the ecosystem's location)"),
+        ])
+    weights.add_command(weights_fetch)
+    weights_coverage = _Command(
+        'coverage', callback=_dispatch(_cmd_weights, 'weights', 'wcmd'),
+        short_help='which catalog tasks the manifest can provision')
+    weights.add_command(weights_coverage)
+    weights_list = _Command(
+        'list', callback=_dispatch(_cmd_weights, 'weights', 'wcmd'),
+        short_help='installed model weights on disk, with sizes',
+        params=[
+            click.Option(['--root', '--model-root'],
+                         help="weights root (default: the ecosystem's location)"),
+        ])
+    weights.add_command(weights_list)
+    weights_remove = _Command(
+        'remove', callback=_dispatch(_cmd_weights, 'weights', 'wcmd'),
+        short_help="delete one dataset's installed weights",
+        params=[
+            click.Argument(['weights_id'], help='a dataset id, e.g. 297 (see `weights list`)'),
+            click.Option(['--root', '--model-root'],
+                         help='weights root (default: the ecosystem location)'),
+            click.Option(['--yes'], is_flag=True, help='do not prompt'),
+        ])
+    weights.add_command(weights_remove)
+    weights_refresh = _Command(
+        'refresh', callback=_dispatch(_cmd_weights, 'weights', 'wcmd'),
+        short_help='merge newly published weights into the manifest',
+        help=("Reads TotalSegmentator's GitHub releases and records new datasets and versions. "
+              'From an installed package this writes YOUR manifest '
+              '(~/.config/haversack/ts_weights.json, or HAVERSACK_TS_MANIFEST), laid over the '
+              'packaged one and kept across upgrades; in a source checkout it edits the '
+              "repository's file. Set GITHUB_TOKEN to lift GitHub's 60 requests/hour."),
+        params=[
+            click.Option(['--repo'], help='GitHub repo to read releases from'),
+            click.Option(['--to'], help='write this file instead of the default target'),
+            click.Option(['--dry-run'], is_flag=True,
+                         help='report what would change, write nothing'),
+            click.Option(['--update-existing'], is_flag=True,
+                         help=('also repoint datasets at newer releases (changes which weights '
+                               'download)')),
+        ])
+    weights.add_command(weights_refresh)
 
-    sv = sub.add_parser("serve", formatter_class=Fmt, help="run the REST job server on this machine (needs the serve extra)",
-                        description="A job server with warm models, progress streaming and a durable result cache; "
-                                    "the same protocol haversack deploys on Modal. Computation needs a bearer "
-                                    "token; reads never do. Without --token the server generates one, prints it, "
-                                    "and leaves it in a file only you can read, which `haversack remote` on this "
-                                    "machine picks up by itself - so personal use has no ceremony, and a proxy or "
-                                    "tunnel in front of the server still faces a token. --no-token runs open, with "
-                                    "no protection of any kind.",
-                        epilog="""examples:
+    serve = _Command(
+        'serve', callback=_dispatch(_cmd_serve, 'serve'),
+        short_help='run the REST job server on this machine (needs the serve extra)',
+        help=('A job server with warm models, progress streaming and a durable result cache; '
+              'the same protocol haversack deploys on Modal. Computation needs a bearer token; '
+              'reads never do. Without --token the server generates one, prints it, and leaves '
+              'it in a file only you can read, which `haversack remote` on this machine picks '
+              'up by itself - so personal use has no ceremony, and a proxy or tunnel in front '
+              'of the server still faces a token. --no-token runs open, with no protection of '
+              'any kind.'),
+        epilog=_verbatim("""examples:
   haversack serve                                                   (a token is generated for you)
   HAVERSACK_SERVER=http://127.0.0.1:8790 haversack remote submit scan.nii.gz --task total_fast
-  haversack serve --host 0.0.0.0 --token secret                      (other machines pass --token secret)""")
-    sv.add_argument("--host", default="127.0.0.1", help="interface to listen on (0.0.0.0 for the whole network)")
-    sv.add_argument("--port", type=int, default=8790, help="port to listen on")
-    sv.add_argument("--device", default="auto", help="cuda, mps, cpu, or auto")
-    sv.add_argument("--dtype", choices=("fp16", "bf16", "fp32"), default="fp16", help="network precision on the nnU-Net path")
-    sv.add_argument("--cache-models", type=int, default=5,
-                    help="models kept warm across jobs (5 covers a total union)")
-    sv.add_argument("--model-root", default=None, help="where model weights live (see `segment --model-root`)")
-    sv.add_argument("--max-pending", type=int, default=16, help="queue bound; past it POST returns 429")
-    sv.add_argument("--keep-finished", type=int, default=50, help="finished jobs (and files) retained")
-    sv.add_argument("--jobs-ttl-hours", type=float, default=24.0,
-                    help="how long a job RECORD lasts (keep-finished bounds memory "
-                         "and files; this bounds the durable record)")
-    sv.add_argument("--workdir", default=None, help="job storage (default: a temp directory)")
-    sv.add_argument("--cache-dir", default=None,
-                    help="result cache (default: ~/.cache/haversack/results; durable, unlike the workdir)")
-    sv.add_argument("--no-result-cache", action="store_true", help="compute every request; keep nothing durable")
-    sv.add_argument("--token", default=None,
-                    help="the bearer token that gates computation (reads stay open); generated when omitted")
-    sv.add_argument("--allow-transpose", action="store_true",
-                    help="serve tasks whose plans permute the axes (dentalsegmentator:base, "
-                         "totalvibe:vibe_sagittal, totalvibe:pancreas). Deployment policy, so "
-                         "it cannot come from a request; without it those tasks are listed and "
-                         "described but refuse to run")
-    sv.add_argument("--no-token", action="store_true",
-                    help="run WITHOUT a token: anything that can reach the port can compute, a proxy or "
-                         "tunnel in front included. No guards of any kind - a machine you trust end to end")
+  haversack serve --host 0.0.0.0 --token secret                      (other machines pass --token secret)"""),
+        params=[
+            click.Option(['--host'], default='127.0.0.1',
+                         help='interface to listen on (0.0.0.0 for the whole network)'),
+            click.Option(['--port'], type=int, default=8790, help='port to listen on'),
+            click.Option(['--device'], default='auto', help='cuda, mps, cpu, or auto'),
+            click.Option(['--dtype'], type=click.Choice(['fp16', 'bf16', 'fp32']), default='fp16',
+                         help='network precision on the nnU-Net path'),
+            click.Option(['--cache-models'], type=int, default=5,
+                         help='models kept warm across jobs (5 covers a total union)'),
+            click.Option(['--model-root'],
+                         help='where model weights live (see `segment --model-root`)'),
+            click.Option(['--max-pending'], type=int, default=16,
+                         help='queue bound; past it POST returns 429'),
+            click.Option(['--keep-finished'], type=int, default=50,
+                         help='finished jobs (and files) retained'),
+            click.Option(['--jobs-ttl-hours'], type=float, default=24.0,
+                         help=('how long a job RECORD lasts (keep-finished bounds memory and '
+                               'files; this bounds the durable record)')),
+            click.Option(['--workdir'], help='job storage (default: a temp directory)'),
+            click.Option(['--cache-dir'],
+                         help=('result cache (default: ~/.cache/haversack/results; durable, '
+                               'unlike the workdir)')),
+            click.Option(['--no-result-cache'], is_flag=True,
+                         help='compute every request; keep nothing durable'),
+            click.Option(['--token'],
+                         help=('the bearer token that gates computation (reads stay open); '
+                               'generated when omitted')),
+            click.Option(['--allow-transpose'], is_flag=True,
+                         help=('serve tasks whose plans permute the axes '
+                               '(dentalsegmentator:base, totalvibe:vibe_sagittal, '
+                               'totalvibe:pancreas). Deployment policy, so it cannot come from '
+                               'a request; without it those tasks are listed and described but '
+                               'refuse to run')),
+            click.Option(['--no-token'], is_flag=True,
+                         help=('run WITHOUT a token: anything that can reach the port can '
+                               'compute, a proxy or tunnel in front included. No guards of any '
+                               'kind - a machine you trust end to end')),
+        ])
+    root.add_command(serve)
 
-    mo = sub.add_parser("modal", formatter_class=Fmt, help="deploy the server to your Modal account (needs the modal extra)",
-                        description="Deploys the same server to Modal, one GPU worker per engine. Images build in Modal's "
-                                    "cloud; the deploy prints the URL. Costs run while a worker is warm; stop with "
-                                    "`modal app stop haversack-serve --yes`.")
-    mosub = mo.add_subparsers(dest="mcmd", required=True, metavar="action", help="what to do")
-    md = mosub.add_parser("deploy", help="deploy the packaged app to your Modal account")
-    md.add_argument("--gpu", default=None, help="worker GPU (default L40S; A10 is the economical fast-mode choice)")
-    md.add_argument("--app-name", default=None, help="Modal app name (default: haversack-serve)")
-    md.add_argument("--scaledown", type=int, default=None,
-                    help="seconds a warm worker lingers after its last job (Modal caps at 1200)")
-    md.add_argument("--no-proxy-auth", action="store_true",
-                    help="deploy WITHOUT auth - smoke tests only; anyone with the URL can spend your GPU credit")
-    mosub.add_parser("app-path", help="print the deployable app file's path")
+    modal = _Group(
+        'modal', short_help='deploy the server to your Modal account (needs the modal extra)',
+        help=('Deploys the same server to Modal, one GPU worker per engine. Images build in '
+              "Modal's cloud; the deploy prints the URL. Costs run while a worker is warm; stop "
+              'with `modal app stop haversack-serve --yes`.'))
+    root.add_command(modal)
+    modal_deploy = _Command(
+        'deploy', callback=_dispatch(_cmd_modal, 'modal', 'mcmd'),
+        short_help='deploy the packaged app to your Modal account',
+        params=[
+            click.Option(['--gpu'],
+                         help=('worker GPU (default L40S; A10 is the economical fast-mode '
+                               'choice)')),
+            click.Option(['--app-name'], help='Modal app name (default: haversack-serve)'),
+            click.Option(['--scaledown'], type=int,
+                         help=('seconds a warm worker lingers after its last job (Modal caps at '
+                               '1200)')),
+            click.Option(['--no-proxy-auth'], is_flag=True,
+                         help=('deploy WITHOUT auth - smoke tests only; anyone with the URL can '
+                               'spend your GPU credit')),
+        ])
+    modal.add_command(modal_deploy)
+    modal_app_path = _Command(
+        'app-path', callback=_dispatch(_cmd_modal, 'modal', 'mcmd'),
+        short_help="print the deployable app file's path")
+    modal.add_command(modal_app_path)
 
-    rc = sub.add_parser("remote", formatter_class=Fmt, help="talk to a haversack server, local or on Modal (needs the remote extra)",
-                        description="The client: upload an image (or name a hosted one) to a server, follow progress, "
-                                    "download the labels. The server is --server or HAVERSACK_SERVER.")
-    rc.add_argument("--server", default=None,
-                    help="server URL, e.g. http://gpu-box:8790 (or set HAVERSACK_SERVER)")
-    rc.add_argument("--token", default=None,
-                    help="bearer token (or HAVERSACK_TOKEN); a server on this machine that generated its own "
-                         "token needs neither - the client reads it from the file the server left")
-    rsub = rc.add_subparsers(dest="rcmd", required=True, metavar="action", help="what to ask the server")
-    rs = rsub.add_parser("submit", help="upload, wait with progress, download the labels")
-    rs.add_argument("input", help="a local image file, or idc:<crdc_series_uuid> to segment straight from the Imaging Data Commons")
-    rs.add_argument("--task", required=True, help="a task name the server lists (`haversack remote tasks`)")
-    rs.add_argument("-o", "--output", default=None, help="where to save the labels (default: <input>_<task>.seg.nrrd)")
-    rs.add_argument("--no-wait", action="store_true", help="print the job id and return")
-    rst = rsub.add_parser("status", help="one job's status, as JSON")
-    rst.add_argument("job_id", help="the id `submit --no-wait` printed")
-    rf = rsub.add_parser("fetch", help="download a finished job's labels")
-    rf.add_argument("job_id", help="the id `submit --no-wait` printed")
-    rf.add_argument("-o", "--output", required=True, help="where to save the labels")
-    rx = rsub.add_parser("cancel", help="cancel an active job / delete a finished one")
-    rx.add_argument("job_id", help="the id `submit --no-wait` printed")
-    rsub.add_parser("tasks", help="what the server can segment")
+    remote = _Group(
+        'remote', short_help=('talk to a haversack server, local or on Modal (needs the remote '
+                            'extra)'),
+        help=('The client: upload an image (or name a hosted one) to a server, follow progress, '
+              'download the labels. The server is --server or HAVERSACK_SERVER.'),
+        params=[
+            click.Option(['--server'],
+                         help='server URL, e.g. http://gpu-box:8790 (or set HAVERSACK_SERVER)'),
+            click.Option(['--token'],
+                         help=('bearer token (or HAVERSACK_TOKEN); a server on this machine '
+                               'that generated its own token needs neither - the client reads '
+                               'it from the file the server left')),
+        ])
+    root.add_command(remote)
+    remote_submit = _Command(
+        'submit', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+        short_help='upload, wait with progress, download the labels',
+        params=[
+            click.Argument(['input'],
+                           help=('a local image file, or idc:<crdc_series_uuid> to segment '
+                                 'straight from the Imaging Data Commons')),
+            click.Option(['--task'], required=True,
+                         help='a task name the server lists (`haversack remote tasks`)'),
+            click.Option(['-o', '--output'],
+                         help='where to save the labels (default: <input>_<task>.seg.nrrd)'),
+            click.Option(['--no-wait'], is_flag=True, help='print the job id and return'),
+        ])
+    remote.add_command(remote_submit)
+    remote_status = _Command(
+        'status', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+        short_help="one job's status, as JSON",
+        params=[
+            click.Argument(['job_id'], help='the id `submit --no-wait` printed'),
+        ])
+    remote.add_command(remote_status)
+    remote_fetch = _Command(
+        'fetch', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+        short_help="download a finished job's labels",
+        params=[
+            click.Argument(['job_id'], help='the id `submit --no-wait` printed'),
+            click.Option(['-o', '--output'], required=True, help='where to save the labels'),
+        ])
+    remote.add_command(remote_fetch)
+    remote_cancel = _Command(
+        'cancel', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+        short_help='cancel an active job / delete a finished one',
+        params=[
+            click.Argument(['job_id'], help='the id `submit --no-wait` printed'),
+        ])
+    remote.add_command(remote_cancel)
+    remote_tasks = _Command(
+        'tasks', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+        short_help='what the server can segment')
+    remote.add_command(remote_tasks)
 
-    dc = sub.add_parser("docs", formatter_class=Fmt, help="print a guide (Markdown), whole or one section",
-                        description="The guides that ship with the package. The user guide: requirements, install, "
-                                    "weights, the command line, the Python API, engines. The server guide (--server): "
-                                    "the job protocol, its rules, results by path, sources, caches, deploying to Modal. "
-                                    "Pipe either to a pager or a Markdown viewer; a running server's /docs has the "
-                                    "route-by-route OpenAPI reference.",
-                        epilog="""examples:
+    docs = _Command(
+        'docs', callback=_dispatch(_cmd_docs, 'docs'),
+        short_help='print a guide (Markdown), whole or one section',
+        help=('The guides that ship with the package. The user guide: requirements, install, '
+              'weights, the command line, the Python API, engines. The server guide (--server): '
+              'the job protocol, its rules, results by path, sources, caches, deploying to '
+              "Modal. Pipe either to a pager or a Markdown viewer; a running server's /docs has "
+              'the route-by-route OpenAPI reference.'),
+        epilog=_verbatim("""examples:
   haversack docs | less
   haversack docs weights            just the section whose heading contains 'weights'
   haversack docs --sections         the section headings
   haversack docs --server           the server guide
-  haversack docs --server jobs      one section of it""")
-    dc.add_argument("topic", nargs="?", default=None, help="print only the section whose heading contains this (case-insensitive)")
-    dc.add_argument("--sections", action="store_true", help="list the section headings and exit")
-    dc.add_argument("--server", action="store_true", help="the server guide instead of the user guide")
+  haversack docs --server jobs      one section of it"""),
+        params=[
+            click.Argument(['topic'], required=False,
+                           help=('print only the section whose heading contains this '
+                                 '(case-insensitive)')),
+            click.Option(['--sections'], is_flag=True,
+                         help='list the section headings and exit'),
+            click.Option(['--server'], is_flag=True,
+                         help='the server guide instead of the user guide'),
+        ])
+    root.add_command(docs)
 
-    ca = sub.add_parser("cache", formatter_class=Fmt, help="show and clean haversack's on-disk stores",
-                        description="Lists every store haversack keeps (fetched inputs, server results, engine "
-                                    "checkpoints, and the model-weights root) with sizes, and cleans the transient "
-                                    "ones. Weights are never swept here - remove a model with `weights remove`.")
-    casub = ca.add_subparsers(dest="ccmd", required=True, metavar="action", help="what to do")
-    casub.add_parser("list", help="every store, its location and size")
-    casub.add_parser("path", help="print the store locations, one per line")
-    cc = casub.add_parser("clean", formatter_class=Fmt, help="remove cached inputs / results / checkpoints",
-                          description="Sweeps a transient cache. Shows what would go and needs --yes to act.")
-    cc.add_argument("category", choices=("inputs", "results", "checkpoints", "all"), help="which cache to sweep")
-    cc.add_argument("item", nargs="?", default=None, help="one input to drop, by its spec (only with `inputs`)")
-    cc.add_argument("--older-than", default=None, help="keep entries touched within this window, e.g. 30d, 12h")
-    cc.add_argument("--dry-run", action="store_true", help="report what would be removed, delete nothing")
-    cc.add_argument("--yes", action="store_true", help="actually delete (without this, it is a dry run)")
-
-    return ap
+    cache = _Group(
+        'cache', short_help="show and clean haversack's on-disk stores",
+        help=('Lists every store haversack keeps (fetched inputs, server results, engine '
+              'checkpoints, and the model-weights root) with sizes, and cleans the transient '
+              'ones. Weights are never swept here - remove a model with `weights remove`.'))
+    root.add_command(cache)
+    cache_list = _Command(
+        'list', callback=_dispatch(_cmd_cache, 'cache', 'ccmd'),
+        short_help='every store, its location and size')
+    cache.add_command(cache_list)
+    cache_path = _Command(
+        'path', callback=_dispatch(_cmd_cache, 'cache', 'ccmd'),
+        short_help='print the store locations, one per line')
+    cache.add_command(cache_path)
+    cache_clean = _Command(
+        'clean', callback=_dispatch(_cmd_cache, 'cache', 'ccmd'),
+        short_help='remove cached inputs / results / checkpoints',
+        help='Sweeps a transient cache. Shows what would go and needs --yes to act.',
+        params=[
+            click.Argument(['category'], type=click.Choice(['inputs', 'results', 'checkpoints', 'all']),
+                           help='which cache to sweep'),
+            click.Argument(['item'], required=False,
+                           help='one input to drop, by its spec (only with `inputs`)'),
+            click.Option(['--older-than'],
+                         help='keep entries touched within this window, e.g. 30d, 12h'),
+            click.Option(['--dry-run'], is_flag=True,
+                         help='report what would be removed, delete nothing'),
+            click.Option(['--yes'], is_flag=True,
+                         help='actually delete (without this, it is a dry run)'),
+        ])
+    cache.add_command(cache_clean)
+    return root
 
 
 def _cmd_docs(args) -> int:
@@ -1067,21 +1335,8 @@ def _cmd_weights(args) -> int:
     return 0
 
 
-#: Which function carries out each command - a table, not a lookup by name, so a command
-#: whose function is missing fails at import rather than on the day someone runs it.
-COMMANDS = {
-    "docs": _cmd_docs,
-    "modal": _cmd_modal,
-    "serve": _cmd_serve,
-    "remote": _cmd_remote,
-    "rights": _cmd_rights,
-    "cite": _cmd_cite,
-    "tasks": _cmd_tasks,
-    "get": _cmd_get,
-    "cache": _cmd_cache,
-    "segment": _cmd_segment,
-    "weights": _cmd_weights,
-}
+#: The command line, built once: `_run` invokes it, and the help tests walk it.
+COMMAND_LINE = _command_line()
 
 
 if __name__ == "__main__":

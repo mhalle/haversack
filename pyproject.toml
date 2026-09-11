@@ -33,6 +33,11 @@ dependencies = [
     # install, and the IDC source is how the demo cases come in. A small Rust wheel, no
     # further dependencies.
     "obstore",
+    # The command line (2026-09-11): click gives each command its own function, `--version`,
+    # shell completion, and help for positionals, which click added in 8.5 - hence the floor.
+    # typer was weighed: it is click underneath plus rich, shellingham and a pre-1.0 API, for
+    # help this project prints plain, and it had been dropped on 2026-09-07, imported nowhere.
+    "click>=8.5",
 ]
 # NOTE: mlx is NOT a core dependency (moved to the `mlx` extra below, 2026-08-26).
 # The product is torch/MPS-first (haversack); MLX is the oracle-only path. Keeping mlx

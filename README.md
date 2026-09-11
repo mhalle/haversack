@@ -61,7 +61,7 @@ it SimpleITK:
 
 ```bash
 uv pip install --no-deps "haversack @ git+https://github.com/mhalle/haversack"
-uv pip install numpy SimpleITK pydantic tqdm httpx obstore   # add `modal` to deploy the server
+uv pip install numpy SimpleITK pydantic click tqdm httpx obstore   # add `modal` to deploy the server
 ```
 
 That environment runs `haversack tasks`, `haversack remote ...`, `haversack modal deploy`, and
@@ -155,6 +155,14 @@ still), and `total` runs the five 1.5 mm models. Useful options:
 | `--envelope 20` | restrict inference to the body plus this margin in mm; `0` for the whole volume |
 | `--allow-transpose` | run a model whose plans permute the axes; refused by default |
 | `--accumulate device|host` | force the sliding-window accumulator's placement; `auto` decides from free memory |
+
+`haversack --version` prints the release. Shell completion is click's: one line in the shell's
+startup file and commands, options and task names complete on Tab:
+
+```bash
+eval "$(_HAVERSACK_COMPLETE=zsh_source haversack)"    # ~/.zshrc (bash_source in ~/.bashrc)
+_HAVERSACK_COMPLETE=fish_source haversack | source    # fish
+```
 
 What to expect on an M2 for `total_fast` on a 709 x 768 x 768 chest CT, one run per process:
 

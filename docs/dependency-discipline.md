@@ -91,7 +91,7 @@ Each Modal image installs **only the extras its role needs**, via
 
 Consequences to respect:
 - **A dependency in `[project] dependencies` (core) weighs down *every* image.** Keep core
-  minimal (`numpy, tqdm, typer, SimpleITK, pydantic`). This is why **mlx is an extra, not core** — the
+  minimal (`numpy, tqdm, click, SimpleITK, pydantic`). This is why **mlx is an extra, not core** — the
   torch product installs mlx-free everywhere.
 - **A dependency in an extra weighs down every image that installs that extra.** Put a dep in
   the *narrowest* extra that needs it (e.g. `triton` is in `cuda`, not `torch`; `matplotlib`
