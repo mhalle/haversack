@@ -1,6 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.1] - 2026-09-11
+
+A performance and correctness fix in how an input's provenance is recorded. The labels
+computed are the same bytes, so no cache is invalidated and nothing is recomputed.
 
 - **A local input's provenance could name a DICOM series it was not.** The DICOM
   identifiers recorded for an input were read from the directory it sits in, and for a
