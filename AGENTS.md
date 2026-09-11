@@ -117,15 +117,20 @@ Two layers, enforced by `tests/test_layering.py`:
   license release is nine ResEnc-L checkpoints (T551-T559, `fold_all`, 1.5 mm, one CT channel)
   and fits `ZipManifestEcosystem` - except that CADS reorients to RAS and resamples the
   TotalSegmentator way while its plans say `SimpleITKIO` and its `dataset.json` states no
-  orientation, so `spec()` must set lineage `ts`. Measured against upstream on an A10: the stock
-  `from_model_folder` path scored mean Dice 0.034 with every side swapped; lineage `ts` 0.994 on
-  T551, 0.975-0.9999 on the rest, and MPS fp16 was within 226 voxels of CUDA. Upstream gates
-  T557/T558 on a brain found by T553 (T552's cervical spine as fallback), which haversack cannot
-  express yet and which is unexercised on a scan without head or neck; one combined label map
-  would need a transparent LUT value, since a label dropped from a union remap paints 0 over
-  earlier parts. Licenses: `open` CC BY-SA 4.0 and `research` CC BY-NC-SA 4.0 agree everywhere;
-  `reference` and the region suite say "customized" with no text, and the region checkpoints'
-  own `dataset.json` says CC BY-NC-SA 4.0.
+  orientation, so `spec()` must set lineage `ts`: the stock `from_model_folder` path scored
+  mean Dice 0.034 against upstream with every side swapped. With lineage `ts`, on the whole
+  volume (`envelope_mm=None`), all nine open tasks matched upstream at 0.998-1.0 on a
+  chest-abdomen-pelvis and a whole-body CT on an A10, fp16 or fp32 alike. One resampling fact
+  differs from TotalSegmentator: CADS's copy of `change_spacing` has no `mode="nearest"`, so it
+  pads with scipy's `constant` 0 HU. A 34-slice head CT feels it (0.977-0.998 as is, 0.9997-1.0
+  in constant mode), so a CADS catalog should carry it. Upstream gates T557/T558 on a brain
+  found by T553; on abdomen-only, whole-body and head scans the gate removed nothing. One
+  combined label map would need a transparent LUT value, since a label dropped from a union
+  remap paints 0 over earlier parts. Licenses: `open` CC BY-SA 4.0 and `research` CC BY-NC-SA
+  4.0 agree everywhere; `reference` and the region suite say "customized" with no text, and
+  the region checkpoints' own `dataset.json` says CC BY-NC-SA 4.0. The 0.10.1 note gave
+  0.975-0.994 here: those were measured with `envelope_mm=0`, the body envelope flush to the
+  skin, which in the Python API is not the whole volume.
 - **Adding a data source** = a `DataSource` subclass, or `ArchiveReadingSource` + one
   `resolve()` to get `!member` zip-by-Range for free, or `ObjectStoreSource` (obstore: `s3:`,
   `gs:`; one object, `!member` over `get_range`, or `<prefix>/` for a whole series) + one
