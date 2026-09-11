@@ -75,6 +75,16 @@
   folder that read before reads the same bytes, so the cache epoch is not bumped - which
   means a server that cached a result from such a folder keeps serving it until it is
   deleted, rather than every result being recomputed to drop it.
+- **`segment`'s batch wrote two inputs onto one output, and exited 0.** Each output is named
+  `<stem>_<task><ext>` in `-o`, so two inputs sharing a stem - `a/scan.nii.gz` and
+  `b/scan.nii.gz`, the ordinary layout of a folder of cases, or two Zenodo records each holding
+  a `scan.nii.gz` - were both written to `out/scan_<task>.seg.nrrd`, and only the second's
+  labels were there at the end, the first's inference spent for nothing. Such a pair is now
+  refused in one line naming the fix, before anything is fetched or run: an output's name
+  depends only on its input as given, so every name in the batch is known before the first
+  input starts. Names are compared as APFS and FAT compare them, so `Scan` and `scan` are one,
+  as is a name typed composed and decomposed. A lean install, asked for torch only after these
+  checks, now also hears about a mistyped `--format` rather than about torch.
 
 ## [0.10.0] - 2026-09-11
 

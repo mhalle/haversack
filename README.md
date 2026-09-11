@@ -136,8 +136,10 @@ haversack segment a.nii.gz b.nii.gz dicom_dir/ --task total_fast --format seg.nr
 With more than one input, `-o` is a directory (default: the current directory) and `--format`
 names the output type; each result is written as `<name>_<task>.<ext>`, where `<name>` is the
 input's filename stem (or the identifier for a remote source), so an output never overwrites
-its input. If one input fails it is reported and the run exits non-zero, but the others still
-complete. A single input keeps the plain form (`-o` the file, its extension picking the format).
+its input. Two inputs that would write one name (`a/scan.nii.gz` and `b/scan.nii.gz`, or
+`Scan` and `scan`) are refused before anything runs. If one input fails it is reported and the
+run exits non-zero, but the others still complete. A single input keeps the plain form (`-o`
+the file, its extension picking the format).
 
 Output format follows the extension
 (`.nii.gz`, `.nrrd`, `.seg.nrrd`, `.mha`); labels come back on the input grid, in the input's

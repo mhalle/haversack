@@ -1167,6 +1167,23 @@ def _cmd_segment(args) -> int:
                              "name says something else")
         if args.format is None:
             raise InputError("segmenting several inputs needs --format (the output type, e.g. seg.nrrd)")
+        # An output's name depends only on its spec, so every name in the batch is known here,
+        # and the loop below writes to exactly these. Until 2026-09-11 two inputs sharing a stem
+        # - `a/scan.nii.gz b/scan.nii.gz`, the ordinary layout of a folder of cases - were both
+        # written to out/scan_<task><ext>, exiting 0 with only b's labels there. Compared as the
+        # filesystem compares names, not by `==`: on APFS or FAT `Scan` and `scan` are one file.
+        from .content import _fs_equivalent
+        outdir = Path(args.output or ".")
+        task_tag = str(args.task).replace(":", "-")
+        ext = io.format_extension(args.format)
+        outs = [outdir / f"{source_stem(spec)}_{task_tag}{ext}" for spec in inputs]
+        first = {}
+        for spec, out in zip(inputs, outs):
+            key = _fs_equivalent(out.name)
+            if key in first:
+                raise InputError(f"{first[key][1]} would be written for both {first[key][0]} and "
+                                 f"{spec}; segment {spec} on its own, with -o naming another file")
+            first[key] = spec, out
     bs = args.batch_size if args.batch_size == "auto" else int(args.batch_size)
     _need_inference_stack(args.task)
     engine_task = registry.engine_for_task(args.task).name != registry.NNUNETV2
@@ -1235,12 +1252,9 @@ def _cmd_segment(args) -> int:
             r.save(args.output)
             report(r, args.output)
     else:
-        ext = io.format_extension(args.format)
-        outdir = Path(args.output or "."); outdir.mkdir(parents=True, exist_ok=True)
-        task_tag = str(args.task).replace(":", "-")
+        outdir.mkdir(parents=True, exist_ok=True)     # outdir and outs: named, and checked, above
         failures = 0
-        for spec in inputs:
-            out = outdir / f"{source_stem(spec)}_{task_tag}{ext}"
+        for spec, out in zip(inputs, outs):
             if not args.quiet:
                 print(f"[{spec}] -> {out}", file=sys.stderr)
             try:

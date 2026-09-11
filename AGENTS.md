@@ -472,7 +472,8 @@ case AND unicode normalization; exFAT and FAT32 fold case, and a cache root on o
 those is a supported way to run this. `T1.nii` and `t1.nii` are one file here. Anything
 deciding "are these two names the same" must fold: `unicodedata.normalize("NFC",
 n).casefold()`. This lost DICOM slices in a 32-thread prefix fetch — the survivor was an
-interleaving of two objects, not either one.
+interleaving of two objects, not either one. That fold is `content._fs_equivalent`; call it
+rather than restate it (`segment`'s batch does, since 2026-09-11).
 
 **A dotfile is invisible to `cache_admin`.** `_entries` skips them at both levels, so
 `cache clean` cannot sweep what you hide there and `cache usage` counts its bytes without
