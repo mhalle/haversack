@@ -27,9 +27,13 @@ def test_cpu_is_always_host():
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs MPS")
 def test_auto_scales_with_the_budget(monkeypatch):
     """Same volume, different budgets: the policy is about the machine, not the model.
-    The host figure is pinned so the test measures the policy and not the moment it ran."""
+    Both host readings are pinned so the test measures the policy and not the moment it ran.
+    Pinning only the available bytes was not enough: the pressure gate in front of the budget
+    read the live kern.memorystatus_level, so on 2026-09-10 this failed at 34 % (the gate
+    refuses below 35) and passed minutes later at 37 %."""
     import haversack.network as N
     monkeypatch.setattr(N, "host_available_bytes", lambda: int(400e9))     # roomy host: the Metal ceiling binds
+    monkeypatch.setattr(N, "host_memory_health", lambda: 80)               # healthy host: the budget decides, not the gate
     budget = N.device_budget_bytes(MPS)
     assert budget > 4e9
     # K=118 chest at 3 mm: 1.57 GB accumulator. Whether it fits depends on what else must fit.
@@ -49,9 +53,12 @@ def test_auto_scales_with_the_budget(monkeypatch):
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs MPS")
 def test_measured_mode_uses_what_the_network_actually_holds(monkeypatch):
     """After the first patch the network is resident, so the budget already reflects it and only
-    a transient margin is reserved - instead of a constant that is 2 GB wrong for some models."""
+    a transient margin is reserved - instead of a constant that is 2 GB wrong for some models.
+    The pressure level is pinned too, as in test_auto_scales_with_the_budget: left live, this
+    failed on 2026-09-10 at 34 %, the gate refusing before either branch under test ran."""
     import haversack.network as N
     monkeypatch.setattr(N, "host_available_bytes", lambda: int(400e9))     # take the Metal ceiling
+    monkeypatch.setattr(N, "host_memory_health", lambda: 80)               # healthy host: the budget decides, not the gate
     monkeypatch.setattr(N, "device_working_set_bytes", lambda device: int(2.5e9))
     budget = N.device_budget_bytes(MPS)
     on, why = N.choose_accumulate("auto", device=MPS, K=25, shape=(480, 340, 340), measured=True)
