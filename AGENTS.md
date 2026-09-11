@@ -272,12 +272,20 @@ are deleted later in the function; the consumer (`junction_sparse` → `_triple_
 closures never outlive the call. Real hazard class, not a real bug — it becomes one the day
 that routine is made lazy. Binding them as lambda defaults would remove both.
 
-## Still unverified, as of 0.8.0
+## Still unverified, as of 0.9.0
 
-0.8.0 is tagged and pushed, with CI green BEFORE the tag this time (985 passed, 13 skipped,
-rankfield 0.3.2 resolved from the tag) - which is the whole lesson of 0.7.0 and 0.7.1, both
-tagged onto a red CI and then deleted from origin. What follows is what this work never
-proved, kept because it is still true.
+0.9.0 is tagged and pushed with CI green BEFORE the tag (run 34585608278 on `50caae6`: 1135
+passed, 19 skipped), as 0.8.0 was (985 passed, 13 skipped) - the whole lesson of 0.7.0 and
+0.7.1, both tagged onto a red CI and then deleted from origin. What follows is what the work
+never proved, kept because it is still true.
+
+- **The result cache's locks have run only on APFS.** Writer claims and the entry lock rely
+  on flock; nothing has exercised them on a network filesystem or a Modal volume, where a
+  lock may not reach across hosts. The design falls back to the move-aside and second
+  question there, and never to taking what it cannot prove abandoned - but that fallback,
+  too, has only run here.
+- **None of 0.9.0's publication and lifetime code has been deployed to Modal** — the last
+  deploy was the sixth round, before `6965e68`.
 
 - **Engine venvs have not been run locally** (synthstrip, voxtell, monai, fastsurfer) since
   the shared code moved. All four DID run on Modal (see below), which exercises the same
@@ -334,10 +342,11 @@ in process, and a subprocess per entry point. Then, deployed: all five workers r
 each of the four adapters, and `/v1/version` reported their packages as
 unknown-because-remote.
 
-Modal has no untouched PATH this file knows of, but it has untouched CODE: the three
-publication commits after the sixth round (`6965e68`, `a256114`, `e4e80b4`) record no
-deploy, so generation-at-a-time publication and reclaim-by-lifetime have run only in the
-local suite. Beyond that, what remains is judgment, not coverage: every smoke has been
+Modal has no untouched PATH this file knows of, but it has untouched CODE: none of the
+result-cache publication and lifetime commits after the sixth round (`6965e68` through
+`3ec6699`, all released in 0.9.0) records a deploy, so generation-at-a-time publication,
+leases, writer claims and the entry lock have run only in the local suite and CI. Beyond
+that, what remains is judgment, not coverage: every smoke has been
 small and short, so nothing says how the queue behaves under sustained load or how a
 multi-hour job fares against the 3600 s function timeout.
 
