@@ -547,7 +547,10 @@ class TorchModel:
         :meth:`_sliding_window_with_fallback`)."""
         K, shape = self.K, padded.shape[1:]
         with torch.inference_mode():
-            first = self._patch(padded, slicers[0])
+            # In a list that _accumulate empties, so that nothing here keeps it once it is added
+            # (see _accumulate). It stays alive until then on purpose: the memory reads below are
+            # taken with it resident, and choose_accumulate and choose_batch decide from them.
+            first = [self._patch(padded, slicers[0])]
         if force_host:
             on_device, why = False, reason or "forced host after an out-of-memory fallback"
         else:
@@ -568,15 +571,25 @@ class TorchModel:
         return self._accumulate(padded, slicers, first, on_device, batch=b, report=report)
 
     @torch.inference_mode()
-    def _accumulate(self, padded: torch.Tensor, slicers, first: torch.Tensor, on_device: bool,
+    def _accumulate(self, padded: torch.Tensor, slicers, first: list[torch.Tensor], on_device: bool,
                     batch: int = 1, report=None) -> torch.Tensor:
+        """``first`` is the output of the first patch, which :meth:`_sliding_window` ran to
+        measure the device, as the only item of a list that this pops.
+
+        A list, and not the tensor, because an argument stays referenced for the whole call. Until
+        2026-09-11 ``first`` was the tensor, and the ``del first`` here dropped only this frame's
+        name: the caller's local still bound it, and so did the ``args`` tuple of the
+        inference-mode wrapper around this method. So the first patch's output - a view of the
+        network's whole output, K x patch x dtype, about 510 MB for an fp32 K=18 model at a 192^3
+        patch - stayed on the device for the whole loop. ``tests/test_first_patch_release.py``
+        checks with a weak reference.
+        """
         K, shape = self.K, padded.shape[1:]
         if on_device:
             acc = torch.zeros((K, *shape), dtype=torch.half, device=self.device)
             n_pred = torch.zeros(shape, dtype=torch.half, device=self.device)
-            acc[slicers[0]] += first
+            acc[slicers[0]] += first.pop()
             n_pred[slicers[0][1:]] += self.gaussian
-            del first
             rest = slicers[1:]
             B = batch
             if B == 1:
@@ -623,8 +636,7 @@ class TorchModel:
 
         t = threading.Thread(target=worker, daemon=True)
         t.start()
-        q.put((first.to("cpu"), slicers[0]))
-        del first
+        q.put((first.pop().to("cpu"), slicers[0]))
         try:
             for i, sl in enumerate(slicers[1:]):
                 if report is not None:
