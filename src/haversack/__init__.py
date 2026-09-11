@@ -65,10 +65,11 @@ def __dir__():
     return sorted([*globals(), *_LAZY])
 
 
-# Part of the result-cache key (serve.result_key): bumping it invalidates cached results.
-# 0.2.0 does exactly that - multi-model tasks before it ran parts 2..N on the first
-# model's normalization, so every cached `total` result predating it is degraded.
-__version__ = "0.8.0"
+# NOT part of the result-cache key since 0.8.0 - `serve.CACHE_EPOCH` is, because keying on
+# the version threw every stored result away at every release. It is the User-Agent and
+# what /v1/version reports. (Before 0.8.0 a bump did invalidate the cache, which is how
+# 0.2.0 retired `total` results computed on the first model's normalization.)
+__version__ = "0.9.0"
 __all__ = [
     # the API most callers need
     "segment", "Segmenter", "Segmentation", "Job", "Progress", "CancelToken", "ModelCache", "TaskCatalog", "TaskSpec", "io",

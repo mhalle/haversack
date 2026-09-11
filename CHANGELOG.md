@@ -1,12 +1,14 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.0] - 2026-09-11
 
-Acting on an external review of 0.8.0, and on three adversarial reviews of the fixes.
-Twelve findings were raised; all twelve held under verification, and checking them turned
+Acting on an external review of 0.8.0, on three adversarial reviews of the fixes, and on
+the external review's further passes over the result cache those fixes rebuilt. Twelve
+findings were raised first; all twelve held under verification, and checking them turned
 up four more the review had missed. **Anyone running a server or the CLI should take this
 one**: three of the defects silently changed what was segmented or what a result claimed
-about itself.
+about itself. Both cache epochs move, so stored results are recomputed and fetched inputs
+fetched again, once.
 
 ### Bytes that were lost, mixed, or claimed wrongly
 
