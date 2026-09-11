@@ -599,6 +599,12 @@ class TorchModel:
                     pred = self._patch(padded, sl)
                     acc[sl] += pred
                     n_pred[sl[1:]] += self.gaussian
+                    # Unbound here, and not when the next _patch returns: until 2026-09-11 each
+                    # patch's output - K x patch x dtype, about 510 MB for an fp32 K=18 model at a
+                    # 192^3 patch - was still on the device during the next forward pass, one more
+                    # than _sliding_window measured the working set with. Checked by weak reference
+                    # in tests/test_patch_output_release.py, as are the two loops below.
+                    del pred
             else:
                 data = padded.to(self.device)
                 for i in range(0, len(rest), B):
@@ -611,7 +617,10 @@ class TorchModel:
                     for pred, sl in zip(preds, group):
                         acc[sl] += pred
                         n_pred[sl[1:]] += self.gaussian
-                    del x, preds
+                    # pred too: the loop leaves it on the batch's last row, a view that keeps the
+                    # whole batch's storage, so until 2026-09-11 `del preds` freed nothing and the
+                    # next batch ran beside all B of this one's outputs
+                    del x, preds, pred
             torch.div(acc, n_pred, out=acc)
             return acc
         acc = torch.zeros((K, *shape), dtype=torch.half)
@@ -643,6 +652,7 @@ class TorchModel:
                     report.tick(i + 1, len(slicers))                   # the cancellation point
                 pred = self._patch(padded, sl)
                 q.put((pred.to("cpu"), sl))                            # the copy is cheap; the add overlaps the next forward
+                del pred                                               # the device tensor: see the batch-1 loop above
         finally:
             q.put(None)                                                # never leave the worker parked on get()
             t.join()
