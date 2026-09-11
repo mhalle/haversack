@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [0.10.0] - 2026-09-11
+
+The command line moves onto click, which gives it `--version` and shell completion and changes
+one thing for scripts: an option must be spelled out in full. Nothing computed changes, so no
+cache is invalidated and nothing is recomputed.
 
 - **The command line is click's now, and says its version.** `haversack --version` prints the
   release - argparse's command line had no such option, and a `uvx` smoke run found it
