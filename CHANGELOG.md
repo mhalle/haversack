@@ -35,10 +35,13 @@ about itself.
   that is opened later, when the response streams, so cleanup has to know who is holding
   what. A superseded result now stays while any reader holds it - a lease renewed on every
   read and honored by every cleanup path, the per-key ceiling and eviction included - and
-  a publication still being written is recognized by an advisory lock its writer holds,
-  never by its age: a writer quiet through one long copy or a suspended laptop is not
-  taken for dead, and the lock is trusted only on the host that took it. Eviction's
-  `keep` becomes a target that an entry in use can exceed until its lease runs out.
+  a reader's acquisition and a reclamation exclude each other on the entry's lock, so a
+  path is never briefly missing either. A publication still being written is recognized
+  by its writer's claim, never by its age: a writer quiet through one long copy or a
+  suspended laptop is not taken for dead - only a lock the kernel released proves that,
+  and only on the host that took it. Where nothing can be proved (no locks, another
+  host's claim, staging from an older build) nothing is taken. Eviction's `keep` becomes
+  a target: an entry in use outlives it, and the next least recently used goes instead.
 
 - **Multi-input provenance paired roles with the wrong digests.** The cache identity is
   sorted so that permuting the source list cannot split a key, while the source entries

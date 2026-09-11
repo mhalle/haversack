@@ -4836,15 +4836,16 @@ class TestReclamationRespectsLifetimes:
                 raise OSError(28, "No space left on device")
             return real_copy(src, dst, *a, **k)
 
+        before = sorted(p.name for p in (cache.root / "k").iterdir())
         shutil.copy2 = failing_copy
         try:
             with pytest.raises(OSError):
                 cache.put("k", bad, {"who": "bad"}, {"who": "bad"})
         finally:
             shutil.copy2 = real_copy
-        left = sorted(p.name for p in (cache.root / "k").iterdir()
-                      if not p.name.startswith(("g-", "current")))
-        assert left == [], f"a failed publication left {left} behind"
+        after = sorted(p.name for p in (cache.root / "k").iterdir())
+        assert after == before, (
+            f"a failed publication left {sorted(set(after) - set(before))} behind")
         assert cache.get("k")[0].read_bytes() == b"A", "and the previous result still serves"
 
     def test_staging_whose_writer_cannot_be_VERIFIED_is_left_alone_however_old(self, tmp_path):
@@ -4866,7 +4867,9 @@ class TestReclamationRespectsLifetimes:
         that read `current` just before a publication can take its lease in between, be
         told its path is good, and then lose it. Reclamation moves the directory out of
         reach and asks again - so a lease that lands exactly in that gap brings the
-        generation back rather than letting it go."""
+        generation back rather than letting it go. A real reader now leases under the
+        entry's lock and cannot land there at all; this lease is taken directly, standing
+        in for what the second question is still for: an entry no lock can be held on."""
         import os
         cache = self._cache(tmp_path)
         gone = self._publish_as(cache, tmp_path, "A")
@@ -4895,6 +4898,18 @@ class TestReclamationRespectsLifetimes:
         pointer not yet moved. Reclaimed there, the pointer then names nothing and a
         publication that succeeded reads as a miss. The writer's claim lasts until its
         pointer has moved, and a live claim is not reclaimed."""
+        self._in_flight_survives_a_full_ceiling(tmp_path, monkeypatch)
+
+    def test_a_LOCKLESS_publication_in_flight_is_not_reclaimed_either(self, tmp_path, monkeypatch):
+        """Where no lock can be taken a claim cannot prove its writer dead - but it still
+        says a writer is publishing, which is all the ceiling needs to stay off a
+        generation whose pointer has not moved yet. A writer that could not lock used to
+        publish with no claim at all, and then nothing marked it in flight."""
+        from haversack import filelock
+        monkeypatch.setattr(filelock, "SUPPORTED", False)
+        self._in_flight_survives_a_full_ceiling(tmp_path, monkeypatch)
+
+    def _in_flight_survives_a_full_ceiling(self, tmp_path, monkeypatch):
         import os
         import threading
         cache = self._cache(tmp_path)
@@ -4996,3 +5011,264 @@ class TestReclamationRespectsLifetimes:
         self._publish_as(cache, tmp_path, "C", key="c")
         assert not (cache.root / "a").exists(), "an entry nobody holds survived past `keep`"
         assert cache.get("b") is not None and cache.get("c") is not None
+
+    # -- the review's third pass (2026-09-10): a second question narrows a check-then-act,
+    # -- exclusion closes it; and unknown ownership is protected on EVERY path
+
+    def _pause_a_reader_mid_acquisition(self, cache, key, monkeypatch):
+        """Start a reader whose `get` stops after reading the pointer and before taking its
+        lease, and wait until it has. Returns (release, thread, results, failures)."""
+        import threading
+        from haversack.serve import ResultCache
+        real_take = ResultCache._take_lease
+        started, release, got, failed, mine = (threading.Event(), threading.Event(),
+                                               [], [], [])
+
+        def take_lease(self_, where):
+            if threading.current_thread() in mine:
+                started.set()                  # the pointer is read; the lease is not taken
+                release.wait(20)
+            return real_take(self_, where)
+
+        def reader():
+            try:
+                got.append(cache.get(key))
+            except BaseException as e:                     # noqa: BLE001 - asserted by callers
+                failed.append(f"{type(e).__name__}: {e}")
+
+        monkeypatch.setattr(ResultCache, "_take_lease", take_lease)
+        t = threading.Thread(target=reader)
+        mine.append(t)
+        t.start()
+        assert started.wait(10), "the reader never reached its lease"
+        return release, t, got, failed
+
+    def test_a_reader_mid_acquisition_EXCLUDES_reclamation(self, tmp_path, monkeypatch):
+        """Moving a directory aside and asking again narrowed the check-then-act to one
+        move and one move back - and in that instant a path a reader had already been
+        handed did not exist, so it could get FileNotFoundError (2026-09-10). A reader's
+        acquisition (pointer, lease, check) and a reclamation's decision and move now
+        exclude each other on the entry's lock: no reclamation starts while a reader is
+        between the pointer and its lease, so none ever has to be undone."""
+        import os
+        import threading
+        cache = self._cache(tmp_path)
+        gone = self._publish_as(cache, tmp_path, "A")
+        a_dir = cache._generation_dir("k", gone)
+        month = time.time() - 30 * 24 * 3600
+        os.utime(a_dir, (month, month))                    # unleased and aged: fair game
+        real_rename, moves = os.rename, []
+
+        def rename(src, dst, *a, **k):
+            if Path(src) == a_dir:
+                moves.append(str(dst))
+            return real_rename(src, dst, *a, **k)
+
+        monkeypatch.setattr(os, "rename", rename)
+        release, reader, got, failed = self._pause_a_reader_mid_acquisition(cache, "k", monkeypatch)
+        w = threading.Thread(target=lambda: self._publish_as(cache, tmp_path, "B"))
+        try:
+            w.start()                          # publishes, then prunes A - or waits its turn
+            time.sleep(0.5)                    # ample time for a pruner nothing holds back
+            moved_meanwhile = list(moves)
+        finally:
+            release.set()
+            reader.join(20)
+            w.join(20)
+        assert failed == [], failed
+        assert moved_meanwhile == [], (
+            "reclamation moved the generation a reader was in the middle of acquiring")
+        labels, result = got[0]
+        assert labels.read_bytes() == b"A" and result == {"who": "A"}
+        assert moves == [], "a generation a reader held was moved - and moved back, too late"
+
+    def test_a_reader_mid_acquisition_EXCLUDES_eviction(self, tmp_path, monkeypatch):
+        """The same exclusion on the path that removes whole entries."""
+        import os
+        import threading
+        from haversack.serve import ResultCache
+        cache = ResultCache(tmp_path / "rc", keep=2)
+        self._publish_as(cache, tmp_path, "A", key="a")
+        month = time.time() - 30 * 24 * 3600
+        os.utime(cache.root / "a", (month, month))         # least recently used, unheld
+        release, reader, got, failed = self._pause_a_reader_mid_acquisition(cache, "a", monkeypatch)
+        w = threading.Thread(target=lambda: (self._publish_as(cache, tmp_path, "B", key="b"),
+                                             self._publish_as(cache, tmp_path, "C", key="c")))
+        try:
+            w.start()                          # over `keep`: evicts - or waits its turn
+            time.sleep(0.5)
+            there_meanwhile = (cache.root / "a").is_dir()
+        finally:
+            release.set()
+            reader.join(20)
+            w.join(20)
+        assert failed == [], failed
+        assert there_meanwhile, "eviction removed an entry a reader was in the middle of acquiring"
+        assert got[0] is not None and got[0][0].read_bytes() == b"A"
+
+    def test_EVICTION_leaves_a_live_writer_alone_where_no_lock_can_be_taken(
+            self, tmp_path, monkeypatch):
+        """Without locks a writer's claim can prove nothing about its death - but the
+        writer is still there, and eviction removed its entry, staging and all, because it
+        looked only for claims it could verify. A lock is how death is PROVED; it is not
+        the only way a writer is seen. Unknown ownership is protected here as in pruning."""
+        import os
+        import shutil
+        import threading
+        from haversack import filelock
+        from haversack.serve import ResultCache
+        monkeypatch.setattr(filelock, "SUPPORTED", False)  # no locks, for anyone
+        cache = ResultCache(tmp_path / "rc", keep=2)
+        self._publish_as(cache, tmp_path, "A", key="a")
+        slow = tmp_path / "slow.seg.nrrd"
+        slow.write_bytes(b"slow")
+        inside, released, failed = threading.Event(), threading.Event(), []
+        real_copy = shutil.copy2
+
+        def stalled_copy(src, dst, *a, **k):
+            if str(src).endswith("slow.seg.nrrd"):
+                inside.set()
+                released.wait(20)
+            return real_copy(src, dst, *a, **k)
+
+        def writer():
+            try:
+                cache.put("a", slow, {"who": "slow"}, {"who": "slow"})
+            except BaseException as e:                     # noqa: BLE001 - asserted below
+                failed.append(f"{type(e).__name__}: {e}")
+
+        t = threading.Thread(target=writer)
+        shutil.copy2 = stalled_copy
+        try:
+            t.start()
+            assert inside.wait(10), "the writer never reached its copy"
+            month = time.time() - 30 * 24 * 3600
+            os.utime(cache.root / "a", (month, month))     # its entry: least recently used
+            self._publish_as(cache, tmp_path, "B", key="b")
+            self._publish_as(cache, tmp_path, "C", key="c")     # over `keep`: evicts
+            assert (cache.root / "a").is_dir(), (
+                "eviction removed the entry a live, unlockable writer is publishing into")
+        finally:
+            released.set()
+            shutil.copy2 = real_copy
+            t.join(30)
+        assert failed == [], f"the writer lost its work: {failed}"
+        assert cache.get("a")[0].read_bytes() == b"slow"
+
+    def test_eviction_leaves_UNCLAIMED_staging_alone_and_takes_the_next_entry(self, tmp_path):
+        """Staging nobody claims - from a build before claims - is unknown ownership, as
+        protected from eviction as from pruning. And an entry eviction may not take must
+        not use up its turn: the next least recently used goes instead, or the cache
+        grows past `keep` by one for every entry it has to leave alone."""
+        import os
+        from haversack.serve import ResultCache
+        cache = ResultCache(tmp_path / "rc", keep=2)
+        self._publish_as(cache, tmp_path, "A", key="a")
+        unclaimed = cache._staging_dir("a", "0" * 32)
+        unclaimed.mkdir()
+        month = time.time() - 30 * 24 * 3600
+        os.utime(cache.root / "a", (month, month))
+        self._publish_as(cache, tmp_path, "B", key="b")
+        self._publish_as(cache, tmp_path, "C", key="c")    # over `keep`: evicts
+        assert unclaimed.is_dir(), "eviction removed staging whose writer nobody can vouch for"
+        assert not (cache.root / "b").exists(), "the entry left alone used up eviction's turn"
+        assert cache.get("c") is not None
+
+    def test_the_entry_lock_follows_the_ENTRY_not_the_file_it_first_opened(
+            self, tmp_path, monkeypatch):
+        """Eviction moves a whole entry, lock file included, and a publication can recreate
+        the key at once. A reader that was waiting on the old file then holds a lock on a
+        file that has left - one no pruner of the new entry will ever contend for. So the
+        lock, once held, is checked to still be the entry's, and taken again if not."""
+        import os
+        import threading
+        from haversack import filelock
+        cache = self._cache(tmp_path)
+        self._publish_as(cache, tmp_path, "A")
+        entry = cache.root / "k"
+        real_lock = filelock.lock
+        waiting, held, release = threading.Event(), threading.Event(), threading.Event()
+
+        def lock(handle, *a, **k):
+            if k.get("shared"):
+                waiting.set()                  # the reader has the OLD file open, and waits
+            return real_lock(handle, *a, **k)
+
+        def reader():
+            with cache._entry_lock("k", shared=True):
+                held.set()
+                release.wait(10)
+
+        monkeypatch.setattr(filelock, "lock", lock)
+        r = threading.Thread(target=reader)
+        try:
+            with cache._entry_lock("k", shared=False):
+                r.start()
+                assert waiting.wait(10), "the reader never reached the lock"
+                os.rename(entry, cache.root / ".moved-away")   # eviction takes the entry...
+                entry.mkdir()                                  # ...a publication recreates it
+                # ...and its lock file already exists. Without it the waiting reader's check
+                # fails on a missing file and retries for THAT reason, so a mutant with no
+                # identity check at all survived this test (2026-09-10)
+                (entry / cache.LOCK_NAME).touch()
+            assert held.wait(10), "the reader never got the lock"
+            fd = os.open(entry / cache.LOCK_NAME, os.O_CREAT | os.O_RDWR, 0o644)
+            try:
+                assert not real_lock(fd, blocking=False), (
+                    "the reader holds a lock on the file that left, not on the entry's")
+            finally:
+                os.close(fd)
+        finally:
+            release.set()
+            r.join(10)
+
+    def test_a_writer_that_could_NOT_LOCK_is_not_taken_for_dead(self, tmp_path, monkeypatch):
+        """Locking can fail for one process and work for the next - a full lock table, a
+        mount that refuses one kind of lock. So a claim its writer could not lock says so:
+        to a pruner that CAN lock, an unlocked claim is exactly what a dead writer leaves -
+        take the lock, conclude death, delete live work."""
+        import errno
+        import shutil
+        import threading
+        from haversack import filelock
+        cache = self._cache(tmp_path)
+        self._publish_as(cache, tmp_path, "A")
+        slow = tmp_path / "slow.seg.nrrd"
+        slow.write_bytes(b"slow")
+        inside, released, failed, mine = threading.Event(), threading.Event(), [], []
+        real_lock, real_copy = filelock.lock, shutil.copy2
+
+        def lock(handle, *a, **k):
+            if threading.current_thread() in mine:
+                raise OSError(errno.ENOLCK, "No locks available")   # for this writer only
+            return real_lock(handle, *a, **k)
+
+        def stalled_copy(src, dst, *a, **k):
+            if str(src).endswith("slow.seg.nrrd"):
+                inside.set()
+                released.wait(20)
+            return real_copy(src, dst, *a, **k)
+
+        def writer():
+            try:
+                cache.put("k", slow, {"who": "slow"}, {"who": "slow"})
+            except BaseException as e:                     # noqa: BLE001 - asserted below
+                failed.append(f"{type(e).__name__}: {e}")
+
+        monkeypatch.setattr(filelock, "lock", lock)
+        t = threading.Thread(target=writer)
+        mine.append(t)
+        shutil.copy2 = stalled_copy
+        try:
+            t.start()
+            assert inside.wait(10), "the writer never reached its copy"
+            staging = [p for p in (cache.root / "k").iterdir() if p.name.startswith("s-")]
+            assert len(staging) == 1, staging
+            self._publish_as(cache, tmp_path, "B")         # prunes, and CAN lock
+            assert staging[0].is_dir(), "a writer that could not lock was taken for dead"
+        finally:
+            released.set()
+            shutil.copy2 = real_copy
+            t.join(30)
+        assert failed == [], f"the writer lost its work: {failed}"
+        assert cache.get("k")[0].read_bytes() == b"slow"

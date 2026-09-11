@@ -988,6 +988,9 @@ class ResultCache:
     MAX_GENERATIONS = 16
     #: The lease file, inside the directory whose files a reader was handed.
     LEASE_NAME = ".lease"
+    #: The entry's lock: readers hold it shared while they acquire a path, reclamation
+    #: holds it exclusive while it decides and moves. See ``_entry_lock``.
+    LOCK_NAME = ".lock"
     #: ``<key>/.writer-<gen>``: a writer's claim on the generation it is publishing, locked
     #: from before its staging exists until its pointer names it. See ``_claim``.
     CLAIM_PREFIX = ".writer-"
@@ -1032,23 +1035,86 @@ class ResultCache:
         directory while cleanup judged the labels file (2026-09-10). ``list`` passes
         False - it hands out no path, and it used to renew every entry's lease per call.
         """
+        import contextlib
         d = self.root / key
-        for _ in range(8):                     # a publication can land between any two reads
+        # the pointer, the lease and the check are ONE acquisition: see _entry_lock
+        with (self._entry_lock(key, shared=True) if lease else contextlib.nullcontext()):
+            for _ in range(8):                 # a publication can land between any two reads
+                try:
+                    gen = (d / CURRENT_NAME).read_text(encoding="utf-8").strip()
+                except OSError:
+                    where = d                  # a legacy flat entry, or nothing at all
+                else:
+                    where = self._generation_dir(key, gen)
+                if not (where / RESULT_NAME).exists():
+                    if where == d:
+                        return None
+                    continue                   # the pointer moved on, or dangles: ask again
+                if lease and not self._take_lease(where):
+                    continue                   # reclaimed before the lease could land
+                if (where / RESULT_NAME).exists():
+                    return where
+            return None
+
+    def _entry_lock(self, key: str, *, shared: bool):
+        """Exclusion between a reader's ACQUISITION and reclamation, on one entry. Readers
+        hold ``<key>/.lock`` shared from reading the pointer until their lease has landed;
+        pruning and eviction hold it exclusive while they decide and move.
+
+        Moving a directory aside and asking again (``_reclaim``) narrowed that
+        check-then-act to one move and one move back - and in that instant a path a reader
+        had already been handed did not exist: FileNotFoundError, reproduced by review
+        (2026-09-10). Under the lock no reclamation decides while a reader is between the
+        pointer and its lease, and a lease that landed first is seen, so nothing is ever
+        moved and then put back. The second question stays for where no lock can be
+        taken - no locking facility, a lock file this process cannot open, a lock that
+        does not reach across hosts on a shared volume.
+
+        Yields whether exclusion is really held. The lock file is checked to still be the
+        entry's once it is locked: eviction moves a whole entry, lock file included, and a
+        lock on a file that has left is a lock on nothing.
+        """
+        import contextlib
+        import os
+        from . import filelock
+        path = self.root / key / self.LOCK_NAME
+
+        def _open():
+            for flags in (os.O_CREAT | os.O_RDWR, os.O_RDONLY):   # a read-only cache: shared
+                try:
+                    return os.open(path, flags, 0o644)
+                except OSError:
+                    continue
+            return None
+
+        @contextlib.contextmanager
+        def held():
+            fd = None
+            if filelock.SUPPORTED:
+                for _ in range(8):
+                    fd = _open()
+                    if fd is None:
+                        break                  # no entry at all: nothing to exclude
+                    try:
+                        filelock.lock(fd, shared=shared)
+                    except OSError:
+                        os.close(fd)
+                        fd = None
+                        break                  # this filesystem does not lock
+                    try:
+                        mine, now = os.fstat(fd), os.stat(path)
+                        if (mine.st_dev, mine.st_ino) == (now.st_dev, now.st_ino):
+                            break
+                    except OSError:
+                        pass                   # the entry moved while this waited
+                    os.close(fd)
+                    fd = None
             try:
-                gen = (d / CURRENT_NAME).read_text(encoding="utf-8").strip()
-            except OSError:
-                where = d                      # a legacy flat entry, or nothing at all
-            else:
-                where = self._generation_dir(key, gen)
-            if not (where / RESULT_NAME).exists():
-                if where == d:
-                    return None
-                continue                       # the pointer moved on, or dangles: ask again
-            if lease and not self._take_lease(where):
-                continue                       # reclaimed before the lease could land
-            if (where / RESULT_NAME).exists():
-                return where
-        return None
+                yield fd is not None
+            finally:
+                if fd is not None:
+                    os.close(fd)               # closing releases the lock
+        return held()
 
     def _take_lease(self, where: Path) -> bool:
         """Lease ``where`` to a reader, now. False only when ``where`` is gone: a lease
@@ -1072,8 +1138,9 @@ class ResultCache:
         return age < self.GENERATION_GRACE_S
 
     def _claim(self, d: Path, gen: str):
-        """Claim generation ``gen`` of the entry at ``d`` for this writer: the open,
-        locked descriptor, or None where no lock can be taken.
+        """Claim generation ``gen`` of the entry at ``d`` for this writer: the claim's
+        open descriptor - locked where a lock can be taken - or None when not even the
+        file can be written.
 
         Staging used to be judged dead once its directory had been quiet for the lease.
         An mtime says when something last changed, not whether its writer is alive: one
@@ -1082,32 +1149,33 @@ class ResultCache:
         its work under it (2026-09-10). The kernel releases a lock when its holder dies,
         so being able to take it is proof - see ``_writer_gone``.
 
-        Locked BEFORE the host is written into it: a pruner that can read which host took
+        Locked BEFORE anything is written into it: a pruner that can read which host took
         a claim therefore always finds it held, and one that reads nothing cannot tell
-        whose it is and leaves it alone. Where the lock cannot be taken the claim is
-        removed again, because an unlocked claim is exactly what a dead writer leaves.
+        whose it is and leaves it alone. Where no lock can be taken the claim is KEPT,
+        marked ``unlocked``: it cannot prove its writer's death, but it still says a
+        writer is there, which eviction and the ceiling must see. The first version
+        removed it, and a lockless writer's staging then looked like nobody's - so
+        eviction took the entry it was publishing into (2026-09-10, reproduced by review).
         """
         import os
         from . import filelock
-        if not filelock.SUPPORTED:
-            return None
         path = d / f"{self.CLAIM_PREFIX}{gen}"
         try:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o644)
         except OSError:
             return None
+        locked = False
+        if filelock.SUPPORTED:
+            try:
+                locked = filelock.lock(fd, blocking=False)
+            except OSError:
+                locked = False                 # this filesystem does not lock
         try:
-            if filelock.lock(fd, blocking=False):
-                os.write(fd, f"{_host_identity()}\n{os.getpid()}\n".encode("utf-8"))
-                return fd
+            os.write(fd, f"{_host_identity()}\n{os.getpid()}\n"
+                         f"{'locked' if locked else 'unlocked'}\n".encode("utf-8"))
         except OSError:
-            pass
-        os.close(fd)
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        return None
+            pass                               # an empty claim is unverifiable: still kept
+        return fd
 
     def _release(self, d: Path, gen: str, fd) -> None:
         """Give up a claim: once the pointer names the generation, or once a failed
@@ -1131,8 +1199,9 @@ class ResultCache:
         claims existed. True only when this host takes the lock the writer held, which the
         kernel releases when the writer dies. False when the writer is alive - and also
         when nothing here can say: a claim from another host (an advisory lock need not
-        reach across machines sharing a volume), a filesystem without locks, a claim that
-        cannot be read. Only True licenses reclaiming anything.
+        reach across machines sharing a volume), a claim its writer could not lock, a
+        filesystem without locks, a claim that cannot be read. Only True licenses
+        reclaiming anything.
         """
         import os
         from . import filelock
@@ -1144,10 +1213,11 @@ class ResultCache:
             return False
         try:
             try:
-                host = os.read(fd, 512).decode("utf-8", "replace").split("\n", 1)[0]
+                lines = os.read(fd, 512).decode("utf-8", "replace").split("\n")
             except OSError:
                 return False
-            if not filelock.SUPPORTED or host != _host_identity():
+            if (not filelock.SUPPORTED or lines[0] != _host_identity()
+                    or (len(lines) > 2 and lines[2] == "unlocked")):
                 return False
             try:
                 if not filelock.lock(fd, blocking=False):
@@ -1247,7 +1317,12 @@ class ResultCache:
 
     def _key_in_use(self, where: Path) -> bool:
         """Is anything in the entry at ``where`` still held - a reader's lease on its
-        legacy flat files or on any generation, or a writer alive or not provably dead?"""
+        legacy flat files or on any generation, or a writer not provably dead?
+
+        Staging counts on its own, claimed or not: staging nobody claims - a build from
+        before claims - is unknown ownership, protected on this path as it is from
+        pruning. Eviction used to look only for claims it could verify, so a writer that
+        could not lock had its entry taken from under it (2026-09-10)."""
         if self._leased(where):
             return True
         try:
@@ -1256,6 +1331,8 @@ class ResultCache:
             return False
         for c in children:
             if c.name.startswith("g-") and self._leased(c):
+                return True
+            if c.name.startswith("s-") and self._writer_gone(where, c.name[2:]) is not True:
                 return True
             if (c.name.startswith(self.CLAIM_PREFIX)
                     and self._writer_gone(where, c.name[len(self.CLAIM_PREFIX):]) is not True):
@@ -1385,7 +1462,13 @@ class ResultCache:
         (``_writer_gone``); staging nobody claims - a build from before claims, or a
         filesystem without locks - is left where it is. A legacy flat entry is treated
         as a generation: kept while a reader holds it, aged out after that.
+
+        All of it under the entry's lock, held exclusive - see ``_entry_lock``.
         """
+        with self._entry_lock(key, shared=False):
+            self._prune_locked(key, keep_gen=keep_gen)
+
+    def _prune_locked(self, key: str, *, keep_gen: str) -> None:
         import shutil
         import time as _time
 
@@ -1479,7 +1562,9 @@ class ResultCache:
         holds or a writer is still publishing. Eviction removes whole entries, and a read
         making an entry the most recently used protects it only until ``keep`` others
         have been touched, which a busy cache does inside one lease (2026-09-10). So
-        ``keep`` is a target: an entry in use outlives it until its lease runs out."""
+        ``keep`` is a target: an entry in use outlives it until its lease runs out, and the
+        next least recently used goes in its place - an entry eviction may not take does
+        not use up its turn, or the cache would grow past ``keep`` by one per such entry."""
 
         def _mtime(d):                         # entries can vanish between
             try:                               # iterdir and stat (concurrent
@@ -1492,9 +1577,14 @@ class ResultCache:
         except OSError:
             return
         dirs = [d for d in entries if d.is_dir() and not d.name.startswith(".")]
-        if len(dirs) > self.keep:
-            for d in sorted(dirs, key=_mtime)[: len(dirs) - self.keep]:
-                self._reclaim(d, self._key_in_use)
+        excess = len(dirs) - self.keep
+        for d in sorted(dirs, key=_mtime):
+            if excess <= 0:
+                break
+            # decided and moved under the entry's lock: no reader is mid-acquisition
+            with self._entry_lock(d.name, shared=False):
+                if self._reclaim(d, self._key_in_use):
+                    excess -= 1
         if any(p.name.startswith(self.TOMB_PREFIX) for p in entries):
             self._sweep_tombs(self.root)
 

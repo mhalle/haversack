@@ -36,13 +36,19 @@ def _fileno(handle) -> int:
     return handle if isinstance(handle, int) else handle.fileno()
 
 
-def lock(handle, *, blocking: bool = True, poll_s: float = 0.1) -> bool:
-    """Take the exclusive lock. Returns True once held; False only when
-    ``blocking`` is False and another holder has it."""
+def lock(handle, *, blocking: bool = True, poll_s: float = 0.1, shared: bool = False) -> bool:
+    """Take the lock - exclusive, or ``shared`` with other shared holders. Returns True
+    once held; False only when ``blocking`` is False and another holder has it.
+
+    ``shared`` is for many readers against one writer: the result cache's readers take an
+    entry's lock shared while they acquire a path, and its reclamation takes it exclusive.
+    Windows has no shared mode here, so there it is exclusive - readers of one entry
+    serialize for the instant they hold it, which costs time and never safety."""
     fd = _fileno(handle)
     if _fcntl is not None:
+        mode = _fcntl.LOCK_SH if shared else _fcntl.LOCK_EX
         try:
-            _fcntl.flock(fd, _fcntl.LOCK_EX | (0 if blocking else _fcntl.LOCK_NB))
+            _fcntl.flock(fd, mode | (0 if blocking else _fcntl.LOCK_NB))
         except BlockingIOError:
             return False
         return True
