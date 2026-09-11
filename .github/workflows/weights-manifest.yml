@@ -22,8 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
       - run: uv venv && uv pip install pytest
 
       - name: Refresh the manifest and check for divergence
@@ -55,7 +55,7 @@ jobs:
       - name: Open a pull request if anything changed
         # A PR, never a direct push: a newly published dataset usually needs a ts_tasks.json
         # entry too, and that is a judgment call.
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@v8
         with:
           branch: chore/weights-manifest
           title: "chore: refresh the weights manifest"
