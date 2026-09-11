@@ -1,6 +1,13 @@
 # Changelog
 
-## [Unreleased]
+## [0.10.1] - 2026-09-11
+
+Two groups of fixes. Three give back GPU memory the sliding window was holding - above all an
+out-of-memory fallback that could not free what had run out. The rest stop `get` and `segment`
+from quietly doing less than they were asked, or something else: a DICOM series converted
+without the checks `segment` applies, a folder of several series read as one of them, a local
+path not written at all, two outputs written over each other. None of them changes what
+`segment` computes from an input it accepts, so the cache epoch stays where it is.
 
 - **`get -o scan.nii.gz` wrote DICOM series that `segment` refuses, as if nothing were wrong.**
   Converting a series read it with a bare SimpleITK series reader, which skipped the two
@@ -61,7 +68,6 @@
 - **A local `.` is named by the folder it is** where an output is named after its source,
   and a `!` in a local name is part of the name: `segment . --format seg.nrrd -o out/` wrote
   `out/._<task>.seg.nrrd`, a hidden file, and `get` would have written `out/..nrrd`.
-
 - **A folder holding several DICOM series was read as one of them, without a word.** Asked
   for the series in a directory, GDCM answers with the first it finds and says nothing of the
   rest, so a folder of two series - 3 and 5 slices - read as the 3-slice one: `segment
