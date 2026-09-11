@@ -186,6 +186,12 @@ def _run(argv=None) -> int:
         _need_store_extra()
         from .ranked_restore import main_cli
         return main_cli(argv[1:])
+    args = _parser().parse_args(argv)
+    return COMMANDS[args.cmd](args)
+
+
+def _parser() -> argparse.ArgumentParser:
+    """The whole command line's shape: every command, its options and their help."""
     F = argparse.ArgumentDefaultsHelpFormatter
 
     class Fmt(argparse.RawDescriptionHelpFormatter, F):
@@ -452,578 +458,630 @@ def _run(argv=None) -> int:
     cc.add_argument("--dry-run", action="store_true", help="report what would be removed, delete nothing")
     cc.add_argument("--yes", action="store_true", help="actually delete (without this, it is a dry run)")
 
-    args = ap.parse_args(argv)
-    if args.cmd == "docs":
-        return _docs(args.topic, args.sections, "server" if args.server else "user")
-    if args.cmd == "modal":
-        from importlib.resources import files
-        apppath = str(files("haversack").joinpath("modal_app.py"))
-        if args.mcmd == "app-path":
-            print(apppath)
-            return 0
-        try:
-            import modal  # noqa: F401
-        except ImportError:
-            print("needs the modal extra: uv sync --extra modal "
-                  "(or pip install 'haversack[modal]')", file=sys.stderr)
-            return 2
-        import os
-        import subprocess
-        env = dict(os.environ)
-        if args.gpu:
-            env["HAVERSACK_GPU"] = args.gpu
-        if args.app_name:
-            env["HAVERSACK_APP_NAME"] = args.app_name
-        if args.scaledown:
-            env["HAVERSACK_SCALEDOWN"] = str(args.scaledown)
-        if args.no_proxy_auth:
-            env["HAVERSACK_PROXY_AUTH"] = "0"
-        return subprocess.call([sys.executable, "-m", "modal", "deploy", apppath], env=env)
-    if args.cmd == "serve":
-        if args.token and args.no_token:
-            from .errors import InputError
-            raise InputError("--token and --no-token contradict each other")
-        _need_inference_stack()          # the local server runs models in-process
-        from .serve import main_serve
-        return main_serve(args)
-    if args.cmd == "remote":
-        import json
-        import os
-        from .client import RemoteClient
-        server = args.server or os.environ.get("HAVERSACK_SERVER")
-        if not server:
-            print("no server: pass --server or set HAVERSACK_SERVER", file=sys.stderr)
-            return 2
-        from .cache_admin import local_token_for, serve_token_path
-        from urllib.parse import urlsplit
-        token, token_source = args.token, "--token"
-        if not token and os.environ.get("HAVERSACK_TOKEN"):
-            token, token_source = os.environ["HAVERSACK_TOKEN"], "HAVERSACK_TOKEN"
-        if not token:
-            token = local_token_for(server)
-            port = urlsplit(server if "://" in server else f"http://{server}").port or 80
-            token_source = f"the local server's file {serve_token_path(port)}"
-        c = RemoteClient(server, token=token, token_source=token_source if token else None)
-        if args.rcmd == "tasks":
-            for t in c.tasks():
-                print(t)
-        elif args.rcmd == "status":
-            print(json.dumps(c.status(args.job_id), indent=2))
-        elif args.rcmd == "fetch":
-            print(c.fetch(args.job_id, args.output))
-        elif args.rcmd == "cancel":
-            print(json.dumps(c.cancel(args.job_id)))
-        elif args.rcmd == "submit":
-            if args.no_wait:
-                print(c.submit(args.input, args.task))
-                return 0
-            stem = args.input[4:16] if args.input.startswith("idc:") else args.input.rsplit(".nii", 1)[0].rstrip("/")
-            out = args.output or f"{stem}_{args.task}.seg.nrrd"
-            last = {}
-            def show(s, _last=last):
-                p = s.get("progress") or {}
-                line = (f"  {s['state']:9s} " + (f"[queue {s['queue_position']}] " if s.get("queue_position") is not None else "")
-                        + f"{p.get('stage', '')} {p.get('detail', '')} "
-                        + (f"{p.get('fraction', 0) * 100:3.0f}%" if p else ""))
-                if line != _last.get("line"):
-                    print(line, file=sys.stderr, flush=True)
-                    _last["line"] = line
-            final = c.run(args.input, args.task, out, on_status=show)
-            if final["state"] == "done":
-                print("  done      100%", file=sys.stderr, flush=True)
-                print(f"wrote {out}", file=sys.stderr, flush=True)
-                print(out)
-            else:
-                print(f"job ended {final['state']}", file=sys.stderr)
-                return 1
+    return ap
+
+
+def _cmd_docs(args) -> int:
+    """`haversack docs`."""
+    return _docs(args.topic, args.sections, "server" if args.server else "user")
+
+
+def _cmd_modal(args) -> int:
+    """`haversack modal`."""
+    from importlib.resources import files
+    apppath = str(files("haversack").joinpath("modal_app.py"))
+    if args.mcmd == "app-path":
+        print(apppath)
         return 0
-    if args.cmd == "rights":
-        import json
+    try:
+        import modal  # noqa: F401
+    except ImportError:
+        print("needs the modal extra: uv sync --extra modal "
+              "(or pip install 'haversack[modal]')", file=sys.stderr)
+        return 2
+    import os
+    import subprocess
+    env = dict(os.environ)
+    if args.gpu:
+        env["HAVERSACK_GPU"] = args.gpu
+    if args.app_name:
+        env["HAVERSACK_APP_NAME"] = args.app_name
+    if args.scaledown:
+        env["HAVERSACK_SCALEDOWN"] = str(args.scaledown)
+    if args.no_proxy_auth:
+        env["HAVERSACK_PROXY_AUTH"] = "0"
+    return subprocess.call([sys.executable, "-m", "modal", "deploy", apppath], env=env)
+
+
+def _cmd_serve(args) -> int:
+    """`haversack serve`."""
+    if args.token and args.no_token:
         from .errors import InputError
-        from .sources import HttpSource, check_identifier, default_sources, parse_input, registry
-        reg = registry(default_sources() + [HttpSource()])
-        parsed = parse_input(args.input, known=reg)
-        if parsed is None:
-            raise InputError(f"{args.input}: a local file; haversack cannot know its origin or license")
-        kind, ident = parsed
-        src = reg["http" if kind == "https" else kind]
-        check_identifier(src, ident)
-        said = src.describe_input(ident)
-        record = {"kind": kind, "identity": f"{kind}:{ident}",
-                  **(said or {"origin": None, "license": None, "cite": []})}
-        if args.json:
-            print(json.dumps(record, indent=2, ensure_ascii=False))
+        raise InputError("--token and --no-token contradict each other")
+    _need_inference_stack()          # the local server runs models in-process
+    from .serve import main_serve
+    return main_serve(args)
+
+
+def _cmd_remote(args) -> int:
+    """`haversack remote`."""
+    import json
+    import os
+    from .client import RemoteClient
+    server = args.server or os.environ.get("HAVERSACK_SERVER")
+    if not server:
+        print("no server: pass --server or set HAVERSACK_SERVER", file=sys.stderr)
+        return 2
+    from .cache_admin import local_token_for, serve_token_path
+    from urllib.parse import urlsplit
+    token, token_source = args.token, "--token"
+    if not token and os.environ.get("HAVERSACK_TOKEN"):
+        token, token_source = os.environ["HAVERSACK_TOKEN"], "HAVERSACK_TOKEN"
+    if not token:
+        token = local_token_for(server)
+        port = urlsplit(server if "://" in server else f"http://{server}").port or 80
+        token_source = f"the local server's file {serve_token_path(port)}"
+    c = RemoteClient(server, token=token, token_source=token_source if token else None)
+    if args.rcmd == "tasks":
+        for t in c.tasks():
+            print(t)
+    elif args.rcmd == "status":
+        print(json.dumps(c.status(args.job_id), indent=2))
+    elif args.rcmd == "fetch":
+        print(c.fetch(args.job_id, args.output))
+    elif args.rcmd == "cancel":
+        print(json.dumps(c.cancel(args.job_id)))
+    elif args.rcmd == "submit":
+        if args.no_wait:
+            print(c.submit(args.input, args.task))
             return 0
-        print(f"{kind}:{ident}")
-        if said is None:
-            print(f"  not determined - the {kind} source cannot say where this input came "
-                  "from or what license it is under")
-            return 0
-        for k, v in (said.get("origin") or {}).items():
-            if v:
-                print(f"  {k + ':':<14}{', '.join(map(str, v)) if isinstance(v, list) else v}")
-        lic = said.get("license")
-        print("  license:      " + ((lic.get("name", "") + (f"  {lic['url']}" if lic.get("url") else ""))
-                                    if lic else "not stated"))
-        for ref in said.get("cite") or []:
-            print(f"  cite ({ref.get('for', '')}): {ref.get('text')}")
+        stem = args.input[4:16] if args.input.startswith("idc:") else args.input.rsplit(".nii", 1)[0].rstrip("/")
+        out = args.output or f"{stem}_{args.task}.seg.nrrd"
+        last = {}
+        def show(s, _last=last):
+            p = s.get("progress") or {}
+            line = (f"  {s['state']:9s} " + (f"[queue {s['queue_position']}] " if s.get("queue_position") is not None else "")
+                    + f"{p.get('stage', '')} {p.get('detail', '')} "
+                    + (f"{p.get('fraction', 0) * 100:3.0f}%" if p else ""))
+            if line != _last.get("line"):
+                print(line, file=sys.stderr, flush=True)
+                _last["line"] = line
+        final = c.run(args.input, args.task, out, on_status=show)
+        if final["state"] == "done":
+            print("  done      100%", file=sys.stderr, flush=True)
+            print(f"wrote {out}", file=sys.stderr, flush=True)
+            print(out)
+        else:
+            print(f"job ended {final['state']}", file=sys.stderr)
+            return 1
+    return 0
+
+
+def _cmd_rights(args) -> int:
+    """`haversack rights`."""
+    import json
+    from .errors import InputError
+    from .sources import HttpSource, check_identifier, default_sources, parse_input, registry
+    reg = registry(default_sources() + [HttpSource()])
+    parsed = parse_input(args.input, known=reg)
+    if parsed is None:
+        raise InputError(f"{args.input}: a local file; haversack cannot know its origin or license")
+    kind, ident = parsed
+    src = reg["http" if kind == "https" else kind]
+    check_identifier(src, ident)
+    said = src.describe_input(ident)
+    record = {"kind": kind, "identity": f"{kind}:{ident}",
+              **(said or {"origin": None, "license": None, "cite": []})}
+    if args.json:
+        print(json.dumps(record, indent=2, ensure_ascii=False))
         return 0
-    if args.cmd == "cite":
-        import json
-        from . import attribution
-        from .ecosystems import EcosystemCatalog
-        from .weights import WeightsStore
-        cat = EcosystemCatalog(root=WeightsStore(None, fetch=False).root)
+    print(f"{kind}:{ident}")
+    if said is None:
+        print(f"  not determined - the {kind} source cannot say where this input came "
+              "from or what license it is under")
+        return 0
+    for k, v in (said.get("origin") or {}).items():
+        if v:
+            print(f"  {k + ':':<14}{', '.join(map(str, v)) if isinstance(v, list) else v}")
+    lic = said.get("license")
+    print("  license:      " + ((lic.get("name", "") + (f"  {lic['url']}" if lic.get("url") else ""))
+                                if lic else "not stated"))
+    for ref in said.get("cite") or []:
+        print(f"  cite ({ref.get('for', '')}): {ref.get('text')}")
+    return 0
+
+
+def _cmd_cite(args) -> int:
+    """`haversack cite`."""
+    import json
+    from . import attribution
+    from .ecosystems import EcosystemCatalog
+    from .weights import WeightsStore
+    cat = EcosystemCatalog(root=WeightsStore(None, fetch=False).root)
+    info = cat.info(args.task)
+    if args.json:
+        print(json.dumps(info["attribution"], indent=2, ensure_ascii=False))
+    else:
+        print(attribution.format(info["name"], info))
+    return 0
+
+
+def _cmd_tasks(args) -> int:
+    """`haversack tasks`."""
+    import json
+    from .ecosystems import EcosystemCatalog
+    from .weights import WeightsStore
+    store = WeightsStore(args.model_root, fetch=False)
+    cat = EcosystemCatalog(root=store.root)
+    if args.task:
         info = cat.info(args.task)
+        names = info.get("structures") or []
+        if not names:
+            from .errors import InputError
+            if info.get("unresolved"):
+                # installed, but not runnable as it stands - `weights fetch`
+                # would do nothing, so say what actually helps
+                raise InputError(f"{info['name']}: {info['unresolved']}")
+            raise InputError(f"{info['name']}: no structure list until its model is installed "
+                             f"(haversack weights fetch {args.task})")
         if args.json:
-            print(json.dumps(info["attribution"], indent=2, ensure_ascii=False))
+            out = {"name": info["name"], "structures": list(names)}
+            if info.get("label_map"):
+                out["label_map"] = info["label_map"]   # what a JSON consumer needs most
+            print(json.dumps(out, indent=2))
         else:
-            print(attribution.format(info["name"], info))
-        return 0
-    if args.cmd == "tasks":
-        import json
-        from .ecosystems import EcosystemCatalog
-        from .weights import WeightsStore
-        store = WeightsStore(args.model_root, fetch=False)
-        cat = EcosystemCatalog(root=store.root)
-        if args.task:
-            info = cat.info(args.task)
-            names = info.get("structures") or []
-            if not names:
-                from .errors import InputError
-                if info.get("unresolved"):
-                    # installed, but not runnable as it stands - `weights fetch`
-                    # would do nothing, so say what actually helps
-                    raise InputError(f"{info['name']}: {info['unresolved']}")
-                raise InputError(f"{info['name']}: no structure list until its model is installed "
-                                 f"(haversack weights fetch {args.task})")
-            if args.json:
-                out = {"name": info["name"], "structures": list(names)}
-                if info.get("label_map"):
-                    out["label_map"] = info["label_map"]   # what a JSON consumer needs most
-                print(json.dumps(out, indent=2))
+            # label order, with the label - which is what a caller needs to read
+            # a result, and the only way to make sense of a catalog whose
+            # checkpoints name their structures with numbers
+            labels = info.get("label_map")
+            if labels:
+                for k in sorted(labels, key=int):
+                    print(f"{k}\t{labels[k]}")
             else:
-                # label order, with the label - which is what a caller needs to read
-                # a result, and the only way to make sense of a catalog whose
-                # checkpoints name their structures with numbers
-                labels = info.get("label_map")
-                if labels:
-                    for k in sorted(labels, key=int):
-                        print(f"{k}\t{labels[k]}")
-                else:
-                    for n in names:
-                        print(n)
-            return 0
-
-        def installed(info) -> bool:
-            # "materialized" is "the spec is answerable without installing" - for TS that is
-            # always true (the catalog ships the specs), so ask the store about the weights
-            # themselves. Never call cat.get() on an unmaterialized task: it would install.
-            if not info.get("materialized"):
-                return False
-            if not info.get("task_spec", True):
-                from .engines import registry     # an engine: installed = its runtime is here
-                return registry.available(info.get("engine", ""))
-            try:
-                return all(store.have(w) for w in cat.get(info["name"]).weights_ids)
-            except Exception:
-                return False
-
-        rows = []
-        for name in cat.names():
-            try:
-                info = cat.info(name)
-            except Exception as e:                      # one broken catalog entry must not hide the rest
-                info = {"name": name, "error": str(e)}
-            info["installed"] = installed(info)
-            if args.installed and not info["installed"]:
-                continue
-            rows.append(info)
-        if args.json:
-            print(json.dumps(rows, indent=2, default=str))
-        else:
-            for i in rows:
-                print(f"{i['name']:44s} {i.get('engine', ''):12s} {i.get('modality') or '':4s} "
-                      f"{'installed' if i['installed'] else ''}".rstrip())
+                for n in names:
+                    print(n)
         return 0
-    if args.cmd == "get":
-        import shutil
-        import tempfile
-        from pathlib import Path
-        from . import io, sources
-        from .errors import InputError
-        say = lambda m: print(f"  {m}", file=sys.stderr, flush=True)
-        srcs = args.source
-        if len(srcs) > 1 and args.output and not args.format and not str(args.output).rstrip("/").endswith(tuple(io.IMAGE_SUFFIXES)):
-            pass  # multiple raw-copies into a directory is allowed; --format only needed to convert
 
-        def get_one(src_spec, out_target):
-            """Fetch one source; write per out_target (None=cache only). Returns the path produced."""
-            if sources.parse_input(src_spec) is None:
-                p = Path(src_spec)
-                if not p.exists():
-                    raise InputError(f"not a remote source and not a local path: {src_spec}")
-                return p
-            tmp = tempfile.mkdtemp(prefix="haversack-get-") if args.no_cache else None
-            try:
-                src = sources.materialize(src_spec, cache_dir=tmp, progress=say)
-                if out_target is None:
-                    return src
-                out, want_convert = out_target
-                if want_convert:
-                    io.convert(src, out)
-                elif Path(src).is_dir():
-                    shutil.copytree(src, out, dirs_exist_ok=True)
-                else:
-                    out.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, out)
-                return out
-            finally:
-                if tmp:
-                    shutil.rmtree(tmp, ignore_errors=True)
+    def installed(info) -> bool:
+        # "materialized" is "the spec is answerable without installing" - for TS that is
+        # always true (the catalog ships the specs), so ask the store about the weights
+        # themselves. Never call cat.get() on an unmaterialized task: it would install.
+        if not info.get("materialized"):
+            return False
+        if not info.get("task_spec", True):
+            from .engines import registry     # an engine: installed = its runtime is here
+            return registry.available(info.get("engine", ""))
+        try:
+            return all(store.have(w) for w in cat.get(info["name"]).weights_ids)
+        except Exception:
+            return False
 
-        batch = len(srcs) > 1
-        if args.no_cache and not args.output:
-            raise InputError("--no-cache needs -o (there would be nowhere to put the data)")
-        if not batch:
-            src_spec = srcs[0]
-            if sources.parse_input(src_spec) is None:
-                p = Path(src_spec)
-                if not p.exists():
-                    raise InputError(f"not a remote source and not a local path: {src_spec}")
-                print(p); return 0
-            if not args.output:
-                print(get_one(src_spec, None)); return 0
-            out = Path(args.output)
-            want_convert = bool(args.format) or bool(io.image_suffix(out.name))
+    rows = []
+    for name in cat.names():
+        try:
+            info = cat.info(name)
+        except Exception as e:                      # one broken catalog entry must not hide the rest
+            info = {"name": name, "error": str(e)}
+        info["installed"] = installed(info)
+        if args.installed and not info["installed"]:
+            continue
+        rows.append(info)
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str))
+    else:
+        for i in rows:
+            print(f"{i['name']:44s} {i.get('engine', ''):12s} {i.get('modality') or '':4s} "
+                  f"{'installed' if i['installed'] else ''}".rstrip())
+    return 0
+
+
+def _cmd_get(args) -> int:
+    """`haversack get`."""
+    import shutil
+    import tempfile
+    from pathlib import Path
+    from . import io, sources
+    from .errors import InputError
+    say = lambda m: print(f"  {m}", file=sys.stderr, flush=True)
+    srcs = args.source
+    if len(srcs) > 1 and args.output and not args.format and not str(args.output).rstrip("/").endswith(tuple(io.IMAGE_SUFFIXES)):
+        pass  # multiple raw-copies into a directory is allowed; --format only needed to convert
+
+    def get_one(src_spec, out_target):
+        """Fetch one source; write per out_target (None=cache only). Returns the path produced."""
+        if sources.parse_input(src_spec) is None:
+            p = Path(src_spec)
+            if not p.exists():
+                raise InputError(f"not a remote source and not a local path: {src_spec}")
+            return p
+        tmp = tempfile.mkdtemp(prefix="haversack-get-") if args.no_cache else None
+        try:
+            src = sources.materialize(src_spec, cache_dir=tmp, progress=say)
+            if out_target is None:
+                return src
+            out, want_convert = out_target
             if want_convert:
-                ext = io.format_extension(args.format) if args.format else io.image_suffix(out.name)
-                if out.is_dir() or str(args.output).endswith("/") or not io.image_suffix(out.name):
-                    out = out / (sources.source_stem(src_spec) + ext)
-                print(get_one(src_spec, (out, True))); return 0
-            if out.is_dir() or str(args.output).endswith("/"):
-                name = sources.source_stem(src_spec)
+                io.convert(src, out)
+            elif Path(src).is_dir():
+                shutil.copytree(src, out, dirs_exist_ok=True)
+            else:
+                out.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, out)
+            return out
+        finally:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+    batch = len(srcs) > 1
+    if args.no_cache and not args.output:
+        raise InputError("--no-cache needs -o (there would be nowhere to put the data)")
+    if not batch:
+        src_spec = srcs[0]
+        if sources.parse_input(src_spec) is None:
+            p = Path(src_spec)
+            if not p.exists():
+                raise InputError(f"not a remote source and not a local path: {src_spec}")
+            print(p); return 0
+        if not args.output:
+            print(get_one(src_spec, None)); return 0
+        out = Path(args.output)
+        want_convert = bool(args.format) or bool(io.image_suffix(out.name))
+        if want_convert:
+            ext = io.format_extension(args.format) if args.format else io.image_suffix(out.name)
+            if out.is_dir() or str(args.output).endswith("/") or not io.image_suffix(out.name):
+                out = out / (sources.source_stem(src_spec) + ext)
+            print(get_one(src_spec, (out, True))); return 0
+        if out.is_dir() or str(args.output).endswith("/"):
+            name = sources.source_stem(src_spec)
+            src = sources.materialize(src_spec, progress=say)
+            dest = out / (name if Path(src).is_dir() else Path(src).name)
+            if Path(src).is_dir():
+                shutil.copytree(src, dest, dirs_exist_ok=True)
+            else:
+                out.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest)
+            print(dest); return 0
+        src = sources.materialize(src_spec, progress=say)
+        if Path(src).is_dir():
+            raise InputError(f"{src_spec} is a DICOM series (a directory); give a directory -o, "
+                             "or a file with an image extension (or --format) to convert it")
+        out.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, out); print(out); return 0
+
+    # batch: several sources
+    if not args.output and not args.format:          # no destination: cache each, print paths
+        for src_spec in srcs:
+            print(get_one(src_spec, None))
+        return 0
+    outdir = Path(args.output or ".")                # default the output directory to the cwd
+    outdir.mkdir(parents=True, exist_ok=True)
+    ext = io.format_extension(args.format) if args.format else None
+    failures = 0
+    for src_spec in srcs:
+        try:
+            if ext:                                   # convert each into the directory
+                out = get_one(src_spec, (outdir / (sources.source_stem(src_spec) + ext), True))
+            else:                                     # raw copy each into the directory
                 src = sources.materialize(src_spec, progress=say)
-                dest = out / (name if Path(src).is_dir() else Path(src).name)
+                dest = outdir / (sources.source_stem(src_spec) if Path(src).is_dir() else Path(src).name)
                 if Path(src).is_dir():
                     shutil.copytree(src, dest, dirs_exist_ok=True)
                 else:
-                    out.mkdir(parents=True, exist_ok=True); shutil.copy2(src, dest)
-                print(dest); return 0
-            src = sources.materialize(src_spec, progress=say)
-            if Path(src).is_dir():
-                raise InputError(f"{src_spec} is a DICOM series (a directory); give a directory -o, "
-                                 "or a file with an image extension (or --format) to convert it")
-            out.parent.mkdir(parents=True, exist_ok=True); shutil.copy2(src, out); print(out); return 0
-
-        # batch: several sources
-        if not args.output and not args.format:          # no destination: cache each, print paths
-            for src_spec in srcs:
-                print(get_one(src_spec, None))
-            return 0
-        outdir = Path(args.output or ".")                # default the output directory to the cwd
-        outdir.mkdir(parents=True, exist_ok=True)
-        ext = io.format_extension(args.format) if args.format else None
-        failures = 0
-        for src_spec in srcs:
-            try:
-                if ext:                                   # convert each into the directory
-                    out = get_one(src_spec, (outdir / (sources.source_stem(src_spec) + ext), True))
-                else:                                     # raw copy each into the directory
-                    src = sources.materialize(src_spec, progress=say)
-                    dest = outdir / (sources.source_stem(src_spec) if Path(src).is_dir() else Path(src).name)
-                    if Path(src).is_dir():
-                        shutil.copytree(src, dest, dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(src, dest)
-                    out = dest
-                print(out)
-            except Exception as e:
-                failures += 1; print(f"  FAILED {src_spec}: {e}", file=sys.stderr)
-        if failures:
-            print(f"{failures} of {len(srcs)} sources failed", file=sys.stderr); return 1
-        return 0
-    if args.cmd == "cache":
-        from .cache_admin import check_cache_root
-        check_cache_root()
-        import json
-        from . import cache_admin as ca
-        if args.ccmd == "path":
-            for st in ca.stores():
-                print(st["path"])
-            return 0
-        if args.ccmd == "list":
-            for r in ca.usage():
-                tag = ("" if r["sweepable"] else "  (weights - use `weights remove`)"
-                       if r["name"] == "weights" else "  (not swept by clean)")
-                print(f"{r['name']:12s} {r['human']:>10s}  {r['items']:>4d} items  {r['path']}{tag}")
-            return 0
-        if args.ccmd == "clean":
-            days = None
-            if args.older_than:
-                m = {"d": 1, "h": 1 / 24, "w": 7, "m": 30}.get(args.older_than[-1].lower())
-                if m is None:
-                    from .errors import InputError
-                    raise InputError(f"--older-than {args.older_than!r}: use a number then d/h/w/m, e.g. 30d")
-                days = float(args.older_than[:-1]) * m
-            r = ca.clean(args.category, older_than_days=days, item=args.item, dry_run=not args.yes)
-            verb = "would remove" if not args.yes else "removed"
-            print(f"{verb} {len(r['removed'])} entr{'y' if len(r['removed']) == 1 else 'ies'}, {r['human']}",
-                  file=sys.stderr)
-            for pth in r["removed"]:
-                print(f"  {pth}", file=sys.stderr)
-            if not args.yes and r["removed"]:
-                print("  (dry run - pass --yes to delete)", file=sys.stderr)
-            return 0
-    if args.cmd == "segment":
-        import json as _json
-        from pathlib import Path
-        from . import io
-        from .errors import InputError
-        from .engines import registry
-        from .sources import materialize, parse_input, source_stem
-        progress = None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
-        inputs = args.input
-        batch = len(inputs) > 1 or args.format is not None
-        # The cheap mistakes first - before the inference stack is demanded (a lean
-        # install should hear about its typo, not about torch) and before any input is
-        # downloaded or a minute of inference is spent on an output the writer cannot name.
-        from .io import is_store_output
-        if not batch:
-            if not args.output:
-                raise InputError("segment needs -o (the output file), or --format with -o a directory for batch")
-            if not is_store_output(args.output) and io.image_suffix(args.output) is None:
-                raise InputError(f"{args.output}: not an output haversack writes; labels take "
-                                 ".seg.nrrd, .nrrd, .nii.gz, .nii or .mha (a directory or a bare "
-                                 "name is not a file), and a ranked store is named .duckn or "
-                                 ".duckn.zip")
-            if is_store_output(args.output):
-                # the store's grid is the model's; a label spacing has nothing to apply to,
-                # and the target has to be writable BEFORE minutes of inference
-                if args.spacing:
-                    raise InputError("a ranked store is written on the model grid; --spacing applies "
-                                     "to labels only")
-                _need_store_extra()
-                from .ranked_store import check_target
-                check_target(args.output)
-        else:
-            if is_store_output(args.output or "."):
-                raise InputError("a ranked store output takes exactly one input and no --format")
-            if str(args.output or "").lower().endswith((".zarr", ".zip", ".duckn")):
-                raise InputError(f"{args.output}: a batch output is a directory of labels; that "
-                                 "name says something else")
-            if args.format is None:
-                raise InputError("segmenting several inputs needs --format (the output type, e.g. seg.nrrd)")
-        bs = args.batch_size if args.batch_size == "auto" else int(args.batch_size)
-        _need_inference_stack(args.task)
-        engine_task = registry.engine_for_task(args.task).name != registry.NNUNETV2
-
-        def resolve(spec):
-            if parse_input(spec) is not None:
-                return str(materialize(spec, progress=progress))
-            if not Path(spec).exists():
-                raise InputError(f"input not found: {spec}")
-            return spec
-
-        def run_one(spec):
-            r = _run_one(spec)
-            from .sources import input_record
-            prov = getattr(r, "provenance", None)      # in place: Segmentation is frozen
-            if isinstance(prov, dict):
-                prov["inputs"] = [input_record(spec)]
-            return r
-
-        def _run_one(spec):
-            img = resolve(spec)
-            if engine_task:
-                from .segmenter import Segmenter
-                return Segmenter(device=args.device, weights=args.model_root, batch_size=bs,
-                                 allow_transpose=args.allow_transpose).segment(
-                    img, args.task, progress=progress)
-            from .pipeline import segment
-            return segment(img, args.task, weights=args.model_root, device=args.device, dtype=args.dtype,
-                           grid=args.spacing if args.spacing else "input", interp=args.interp,
-                           accumulate=args.accumulate, batch_size=bs,
-                           envelope_mm=args.envelope if args.envelope > 0 else None,
-                           allow_transpose=args.allow_transpose, progress=progress)
-
-        def report(r, where):
-            if args.quiet:
-                return
-            for k, v in r.timings.items():
-                print(f"  {v:7.2f} s  {k}", file=sys.stderr)
-            for d in (r.provenance or {}).get("deviations", ()):
-                print(f"  note: {d['what']}: asked {d['requested']}, ran {d['effective']} - {d['why']}", file=sys.stderr)
-            print(f"wrote {where}: {tuple(r.grid.shape)}, {len(r.present())}/{len(r.schema.names)} structures present",
-                  file=sys.stderr)
-
-        if not batch:
-            if is_store_output(args.output):
-                # undocumented: a `.duckn` / `.duckn.zip` output is a ranked store - the whole
-                # output distribution, not the labels (see haversack.ranked_output)
-                if engine_task:
-                    raise InputError("a ranked store output is available for nnU-Net tasks only")
-                from .ranked_output import input_source, segment_to_store
-                img = resolve(inputs[0])
-                r, out = segment_to_store(
-                    img, args.task, args.output, case=source_stem(inputs[0]),
-                    source=input_source(inputs[0]),          # the spec as given, not the cache path
-                    weights=args.model_root, device=args.device, dtype=args.dtype,
-                    grid=args.spacing if args.spacing else "input", interp=args.interp,
-                    accumulate=args.accumulate, batch_size=bs,
-                    envelope_mm=args.envelope if args.envelope > 0 else None, progress=progress)
-                if not args.quiet:
-                    for k, v in r.timings.items():
-                        print(f"  {v:7.2f} s  {k}", file=sys.stderr)
-                    print(f"wrote {out}: ranked store on the model grid, "
-                          f"{len(r.present())}/{len(r.schema.names)} structures present", file=sys.stderr)
-            else:
-                r = run_one(inputs[0])
-                r.save(args.output)
-                report(r, args.output)
-        else:
-            ext = io.format_extension(args.format)
-            outdir = Path(args.output or "."); outdir.mkdir(parents=True, exist_ok=True)
-            task_tag = str(args.task).replace(":", "-")
-            failures = 0
-            for spec in inputs:
-                out = outdir / f"{source_stem(spec)}_{task_tag}{ext}"
-                if not args.quiet:
-                    print(f"[{spec}] -> {out}", file=sys.stderr)
-                try:
-                    r = run_one(spec)
-                    r.save(out)
-                    report(r, out)
-                except Exception as e:                    # one bad input must not sink the batch
-                    failures += 1
-                    print(f"  FAILED {spec}: {e}", file=sys.stderr)
-            if failures:
-                print(f"{failures} of {len(inputs)} inputs failed", file=sys.stderr)
-                return 1
-    if args.cmd == "weights":
-        from pathlib import Path
-        from . import weights_fetch as wfm
-        say = lambda m: print(m, file=sys.stderr, flush=True)
-        if args.wcmd == "fetch":
-            # through the ecosystem catalog, not TotalSegmentator's manifest: every
-            # catalog installs its own weights, and `tasks` sends people here for
-            # any of them. TS still ends up in ensure_task_weights - via its own
-            # ecosystem - so nothing about that path changes.
-            from .ecosystems import EcosystemCatalog
-            from .weights import WeightsStore
-            store = WeightsStore(args.root, fetch=False)
-            cat = EcosystemCatalog(root=store.root)
-            info = cat.prepare(args.task, progress=lambda m: say(f"  {m}"))
-            # No count. `weights_installed` is only populated by engine ecosystems,
-            # and the spec's own weights_ids omits the crop_from_task chains a
-            # cascade installs - ts:teeth pulls three models and either number
-            # says one. `weights list` reports what is actually on disk.
-            if info.get("task_spec", True):
-                print(f"{info['name']}: weights ready under {store.root}")
-            else:
-                # an engine's weights ship inside its image; nothing was installed
-                # here and nothing is under this root
-                print(f"{info['name']}: runs on the {info.get('engine')} engine, whose weights "
-                      "ship with it - nothing to fetch")
-        elif args.wcmd == "list":
-            from .tasks import weights_root
-            from .cache_admin import _du, _human
-            root = Path(args.root or weights_root("ts")).expanduser()
-            if not root.exists():
-                print(f"no weights installed under {root}"); return 0
-            datasets = _installed_datasets(root)
-            total = 0
-            for d in datasets:
-                _, b = _du(d); total += b
-                ver = (wfm.installed_version(d) or {}).get("tag", "")
-                shown = str(d.relative_to(root))      # <bucket>/Dataset* for a catalog
-                print(f"  {shown:52s} {_human(b):>10s}  {ver}")
-            print(f"{len(datasets)} dataset(s), {_human(total)} under {root}")
-            return 0
-        elif args.wcmd == "remove":
-            import re
-            import shutil
-            from .tasks import weights_root, _dataset_dirs
-            from .errors import InputError
-            root = Path(args.root or weights_root("ts")).expanduser()
-            wanted = str(args.weights_id)
-            # The id reaches a glob and then an rmtree. `weights remove '*'` matched
-            # and deleted every dataset; `weights remove moose` deleted a whole
-            # ecosystem bucket - and the "listed as <ecosystem>/Dataset<id>" hint
-            # makes typing the bucket name the natural mistake.
-            seg = r"[A-Za-z0-9][A-Za-z0-9._-]*"
-            if not re.fullmatch(rf"{seg}(?:/{seg})?", wanted):
-                raise InputError(
-                    f"{wanted!r} is not a dataset id - give an id, or the name "
-                    "`haversack weights list` prints (`Dataset297_total`, or "
-                    "`totalvibe/Dataset278` for a catalog's)")
-            # `_dataset_dirs` falls back to globbing the id, which matches a
-            # bucket directory by name: `weights remove moose` deleted the whole
-            # ecosystem. Only a Dataset folder is a thing this command removes.
-            dirs = [d for d in _dataset_dirs(root, wanted)
-                    if re.match(r"Dataset\d+", d.name)]
-            if not dirs:                       # the ecosystem catalogs' own subtrees
-                def names(d):
-                    """The spellings that identify one installed dataset folder:
-                    its own name, its `<bucket>/<name>` path as `weights list`
-                    prints it, and the dataset id with or without zero padding
-                    (`Dataset001_x` answers to 1, 001 and Dataset001_x)."""
-                    yield d.name
-                    yield str(d.relative_to(root))
-                    m = re.match(r"Dataset(\d+)", d.name)
-                    if m:
-                        yield m.group(1)
-                        yield str(int(m.group(1)))
-                        yield f"Dataset{m.group(1)}"
-
-                dirs = [d for d in _installed_datasets(root)
-                        if wanted in set(names(d))
-                        or d.name.startswith(f"Dataset{wanted}_")]
-            if not dirs:
-                raise InputError(
-                    f"no installed weights match {wanted!r} under {root} - `haversack weights "
-                    "list` names what is there - give a name exactly as it prints it, "
-                    "including the <ecosystem>/ prefix, since one dataset id can appear "
-                    "in more than one catalog")
-            # nothing outside the root, whatever the match was
-            base = root.resolve()
-            for d in dirs:
-                if not d.resolve().is_relative_to(base):
-                    raise InputError(f"{d} resolves outside {root}; refusing to delete it")
-            for d in dirs:
-                print(f"  {d}", file=sys.stderr)
-            if not args.yes:
-                print(f"pass --yes to delete the above", file=sys.stderr); return 1
-            for d in dirs:
-                shutil.rmtree(d, ignore_errors=True)
-            print(f"removed {len(dirs)} folder(s) for dataset {args.weights_id}", file=sys.stderr)
-            return 0
-        elif args.wcmd == "coverage":
-            c = wfm.coverage()
-            src = c["sources"]
-            where = (f"{src['package']} packaged" + (f" + {src['user']} from {src['user_path']}"
-                                                     f"{' (overriding ' + ', '.join(src['user_overrides']) + ')' if src['user_overrides'] else ''}"
-                                                     if src["user"] else ""))
-            print(f"{len(c['covered'])}/{c['n_tasks']} tasks provisionable from {c['n_weights']} manifest entries ({where})")
-            for name, ids in sorted(c["license_required"].items()):
-                print(f"  LICENSE  {name:32s} {','.join(ids)}  (TotalSegmentator licensed backend)")
-            for name, ids in sorted(c["missing"].items()):
-                print(f"  MISSING  {name:32s} {','.join(ids)}")
-            return 1 if c["missing"] else 0
-        elif args.wcmd == "refresh":
-            kw = {"write": not args.dry_run, "update_existing": args.update_existing, "progress": say,
-                  "path": args.to or wfm.refresh_target()}
-            say(f"target: {kw['path']}" + (" (dry run)" if args.dry_run else ""))
-            if args.repo:
-                kw["repo"] = args.repo
-            r = wfm.refresh_manifest(**kw)
-            for wid, e in sorted(r["added"].items(), key=lambda kv: int(kv[0])):
-                print(f"  + {wid:5s} new dataset, default {e['default']}")
-            for wid, tags in sorted(r["new_versions"].items(), key=lambda kv: int(kv[0])):
-                print(f"  v {wid:5s} versions recorded: {', '.join(tags)}")
-            for wid, (ours, theirs) in sorted(r["behind_upstream"].items(), key=lambda kv: int(kv[0])):
-                print(f"  ~ {wid:5s} default {ours}, TotalSegmentator pins {theirs}"
-                      + ("" if args.update_existing else "   [not repointed]"))
+                    shutil.copy2(src, dest)
+                out = dest
+            print(out)
+        except Exception as e:
+            failures += 1; print(f"  FAILED {src_spec}: {e}", file=sys.stderr)
+    if failures:
+        print(f"{failures} of {len(srcs)} sources failed", file=sys.stderr); return 1
     return 0
+
+
+def _cmd_cache(args) -> int:
+    """`haversack cache`."""
+    from .cache_admin import check_cache_root
+    check_cache_root()
+    import json
+    from . import cache_admin as ca
+    if args.ccmd == "path":
+        for st in ca.stores():
+            print(st["path"])
+        return 0
+    if args.ccmd == "list":
+        for r in ca.usage():
+            tag = ("" if r["sweepable"] else "  (weights - use `weights remove`)"
+                   if r["name"] == "weights" else "  (not swept by clean)")
+            print(f"{r['name']:12s} {r['human']:>10s}  {r['items']:>4d} items  {r['path']}{tag}")
+        return 0
+    if args.ccmd == "clean":
+        days = None
+        if args.older_than:
+            m = {"d": 1, "h": 1 / 24, "w": 7, "m": 30}.get(args.older_than[-1].lower())
+            if m is None:
+                from .errors import InputError
+                raise InputError(f"--older-than {args.older_than!r}: use a number then d/h/w/m, e.g. 30d")
+            days = float(args.older_than[:-1]) * m
+        r = ca.clean(args.category, older_than_days=days, item=args.item, dry_run=not args.yes)
+        verb = "would remove" if not args.yes else "removed"
+        print(f"{verb} {len(r['removed'])} entr{'y' if len(r['removed']) == 1 else 'ies'}, {r['human']}",
+              file=sys.stderr)
+        for pth in r["removed"]:
+            print(f"  {pth}", file=sys.stderr)
+        if not args.yes and r["removed"]:
+            print("  (dry run - pass --yes to delete)", file=sys.stderr)
+        return 0
+    return 0
+
+
+def _cmd_segment(args) -> int:
+    """`haversack segment`."""
+    import json as _json
+    from pathlib import Path
+    from . import io
+    from .errors import InputError
+    from .engines import registry
+    from .sources import materialize, parse_input, source_stem
+    progress = None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
+    inputs = args.input
+    batch = len(inputs) > 1 or args.format is not None
+    # The cheap mistakes first - before the inference stack is demanded (a lean
+    # install should hear about its typo, not about torch) and before any input is
+    # downloaded or a minute of inference is spent on an output the writer cannot name.
+    from .io import is_store_output
+    if not batch:
+        if not args.output:
+            raise InputError("segment needs -o (the output file), or --format with -o a directory for batch")
+        if not is_store_output(args.output) and io.image_suffix(args.output) is None:
+            raise InputError(f"{args.output}: not an output haversack writes; labels take "
+                             ".seg.nrrd, .nrrd, .nii.gz, .nii or .mha (a directory or a bare "
+                             "name is not a file), and a ranked store is named .duckn or "
+                             ".duckn.zip")
+        if is_store_output(args.output):
+            # the store's grid is the model's; a label spacing has nothing to apply to,
+            # and the target has to be writable BEFORE minutes of inference
+            if args.spacing:
+                raise InputError("a ranked store is written on the model grid; --spacing applies "
+                                 "to labels only")
+            _need_store_extra()
+            from .ranked_store import check_target
+            check_target(args.output)
+    else:
+        if is_store_output(args.output or "."):
+            raise InputError("a ranked store output takes exactly one input and no --format")
+        if str(args.output or "").lower().endswith((".zarr", ".zip", ".duckn")):
+            raise InputError(f"{args.output}: a batch output is a directory of labels; that "
+                             "name says something else")
+        if args.format is None:
+            raise InputError("segmenting several inputs needs --format (the output type, e.g. seg.nrrd)")
+    bs = args.batch_size if args.batch_size == "auto" else int(args.batch_size)
+    _need_inference_stack(args.task)
+    engine_task = registry.engine_for_task(args.task).name != registry.NNUNETV2
+
+    def resolve(spec):
+        if parse_input(spec) is not None:
+            return str(materialize(spec, progress=progress))
+        if not Path(spec).exists():
+            raise InputError(f"input not found: {spec}")
+        return spec
+
+    def run_one(spec):
+        r = _run_one(spec)
+        from .sources import input_record
+        prov = getattr(r, "provenance", None)      # in place: Segmentation is frozen
+        if isinstance(prov, dict):
+            prov["inputs"] = [input_record(spec)]
+        return r
+
+    def _run_one(spec):
+        img = resolve(spec)
+        if engine_task:
+            from .segmenter import Segmenter
+            return Segmenter(device=args.device, weights=args.model_root, batch_size=bs,
+                             allow_transpose=args.allow_transpose).segment(
+                img, args.task, progress=progress)
+        from .pipeline import segment
+        return segment(img, args.task, weights=args.model_root, device=args.device, dtype=args.dtype,
+                       grid=args.spacing if args.spacing else "input", interp=args.interp,
+                       accumulate=args.accumulate, batch_size=bs,
+                       envelope_mm=args.envelope if args.envelope > 0 else None,
+                       allow_transpose=args.allow_transpose, progress=progress)
+
+    def report(r, where):
+        if args.quiet:
+            return
+        for k, v in r.timings.items():
+            print(f"  {v:7.2f} s  {k}", file=sys.stderr)
+        for d in (r.provenance or {}).get("deviations", ()):
+            print(f"  note: {d['what']}: asked {d['requested']}, ran {d['effective']} - {d['why']}", file=sys.stderr)
+        print(f"wrote {where}: {tuple(r.grid.shape)}, {len(r.present())}/{len(r.schema.names)} structures present",
+              file=sys.stderr)
+
+    if not batch:
+        if is_store_output(args.output):
+            # undocumented: a `.duckn` / `.duckn.zip` output is a ranked store - the whole
+            # output distribution, not the labels (see haversack.ranked_output)
+            if engine_task:
+                raise InputError("a ranked store output is available for nnU-Net tasks only")
+            from .ranked_output import input_source, segment_to_store
+            img = resolve(inputs[0])
+            r, out = segment_to_store(
+                img, args.task, args.output, case=source_stem(inputs[0]),
+                source=input_source(inputs[0]),          # the spec as given, not the cache path
+                weights=args.model_root, device=args.device, dtype=args.dtype,
+                grid=args.spacing if args.spacing else "input", interp=args.interp,
+                accumulate=args.accumulate, batch_size=bs,
+                envelope_mm=args.envelope if args.envelope > 0 else None, progress=progress)
+            if not args.quiet:
+                for k, v in r.timings.items():
+                    print(f"  {v:7.2f} s  {k}", file=sys.stderr)
+                print(f"wrote {out}: ranked store on the model grid, "
+                      f"{len(r.present())}/{len(r.schema.names)} structures present", file=sys.stderr)
+        else:
+            r = run_one(inputs[0])
+            r.save(args.output)
+            report(r, args.output)
+    else:
+        ext = io.format_extension(args.format)
+        outdir = Path(args.output or "."); outdir.mkdir(parents=True, exist_ok=True)
+        task_tag = str(args.task).replace(":", "-")
+        failures = 0
+        for spec in inputs:
+            out = outdir / f"{source_stem(spec)}_{task_tag}{ext}"
+            if not args.quiet:
+                print(f"[{spec}] -> {out}", file=sys.stderr)
+            try:
+                r = run_one(spec)
+                r.save(out)
+                report(r, out)
+            except Exception as e:                    # one bad input must not sink the batch
+                failures += 1
+                print(f"  FAILED {spec}: {e}", file=sys.stderr)
+        if failures:
+            print(f"{failures} of {len(inputs)} inputs failed", file=sys.stderr)
+            return 1
+    return 0
+
+
+def _cmd_weights(args) -> int:
+    """`haversack weights`."""
+    from pathlib import Path
+    from . import weights_fetch as wfm
+    say = lambda m: print(m, file=sys.stderr, flush=True)
+    if args.wcmd == "fetch":
+        # through the ecosystem catalog, not TotalSegmentator's manifest: every
+        # catalog installs its own weights, and `tasks` sends people here for
+        # any of them. TS still ends up in ensure_task_weights - via its own
+        # ecosystem - so nothing about that path changes.
+        from .ecosystems import EcosystemCatalog
+        from .weights import WeightsStore
+        store = WeightsStore(args.root, fetch=False)
+        cat = EcosystemCatalog(root=store.root)
+        info = cat.prepare(args.task, progress=lambda m: say(f"  {m}"))
+        # No count. `weights_installed` is only populated by engine ecosystems,
+        # and the spec's own weights_ids omits the crop_from_task chains a
+        # cascade installs - ts:teeth pulls three models and either number
+        # says one. `weights list` reports what is actually on disk.
+        if info.get("task_spec", True):
+            print(f"{info['name']}: weights ready under {store.root}")
+        else:
+            # an engine's weights ship inside its image; nothing was installed
+            # here and nothing is under this root
+            print(f"{info['name']}: runs on the {info.get('engine')} engine, whose weights "
+                  "ship with it - nothing to fetch")
+    elif args.wcmd == "list":
+        from .tasks import weights_root
+        from .cache_admin import _du, _human
+        root = Path(args.root or weights_root("ts")).expanduser()
+        if not root.exists():
+            print(f"no weights installed under {root}"); return 0
+        datasets = _installed_datasets(root)
+        total = 0
+        for d in datasets:
+            _, b = _du(d); total += b
+            ver = (wfm.installed_version(d) or {}).get("tag", "")
+            shown = str(d.relative_to(root))      # <bucket>/Dataset* for a catalog
+            print(f"  {shown:52s} {_human(b):>10s}  {ver}")
+        print(f"{len(datasets)} dataset(s), {_human(total)} under {root}")
+        return 0
+    elif args.wcmd == "remove":
+        import re
+        import shutil
+        from .tasks import weights_root, _dataset_dirs
+        from .errors import InputError
+        root = Path(args.root or weights_root("ts")).expanduser()
+        wanted = str(args.weights_id)
+        # The id reaches a glob and then an rmtree. `weights remove '*'` matched
+        # and deleted every dataset; `weights remove moose` deleted a whole
+        # ecosystem bucket - and the "listed as <ecosystem>/Dataset<id>" hint
+        # makes typing the bucket name the natural mistake.
+        seg = r"[A-Za-z0-9][A-Za-z0-9._-]*"
+        if not re.fullmatch(rf"{seg}(?:/{seg})?", wanted):
+            raise InputError(
+                f"{wanted!r} is not a dataset id - give an id, or the name "
+                "`haversack weights list` prints (`Dataset297_total`, or "
+                "`totalvibe/Dataset278` for a catalog's)")
+        # `_dataset_dirs` falls back to globbing the id, which matches a
+        # bucket directory by name: `weights remove moose` deleted the whole
+        # ecosystem. Only a Dataset folder is a thing this command removes.
+        dirs = [d for d in _dataset_dirs(root, wanted)
+                if re.match(r"Dataset\d+", d.name)]
+        if not dirs:                       # the ecosystem catalogs' own subtrees
+            def names(d):
+                """The spellings that identify one installed dataset folder:
+                its own name, its `<bucket>/<name>` path as `weights list`
+                prints it, and the dataset id with or without zero padding
+                (`Dataset001_x` answers to 1, 001 and Dataset001_x)."""
+                yield d.name
+                yield str(d.relative_to(root))
+                m = re.match(r"Dataset(\d+)", d.name)
+                if m:
+                    yield m.group(1)
+                    yield str(int(m.group(1)))
+                    yield f"Dataset{m.group(1)}"
+
+            dirs = [d for d in _installed_datasets(root)
+                    if wanted in set(names(d))
+                    or d.name.startswith(f"Dataset{wanted}_")]
+        if not dirs:
+            raise InputError(
+                f"no installed weights match {wanted!r} under {root} - `haversack weights "
+                "list` names what is there - give a name exactly as it prints it, "
+                "including the <ecosystem>/ prefix, since one dataset id can appear "
+                "in more than one catalog")
+        # nothing outside the root, whatever the match was
+        base = root.resolve()
+        for d in dirs:
+            if not d.resolve().is_relative_to(base):
+                raise InputError(f"{d} resolves outside {root}; refusing to delete it")
+        for d in dirs:
+            print(f"  {d}", file=sys.stderr)
+        if not args.yes:
+            print(f"pass --yes to delete the above", file=sys.stderr); return 1
+        for d in dirs:
+            shutil.rmtree(d, ignore_errors=True)
+        print(f"removed {len(dirs)} folder(s) for dataset {args.weights_id}", file=sys.stderr)
+        return 0
+    elif args.wcmd == "coverage":
+        c = wfm.coverage()
+        src = c["sources"]
+        where = (f"{src['package']} packaged" + (f" + {src['user']} from {src['user_path']}"
+                                                 f"{' (overriding ' + ', '.join(src['user_overrides']) + ')' if src['user_overrides'] else ''}"
+                                                 if src["user"] else ""))
+        print(f"{len(c['covered'])}/{c['n_tasks']} tasks provisionable from {c['n_weights']} manifest entries ({where})")
+        for name, ids in sorted(c["license_required"].items()):
+            print(f"  LICENSE  {name:32s} {','.join(ids)}  (TotalSegmentator licensed backend)")
+        for name, ids in sorted(c["missing"].items()):
+            print(f"  MISSING  {name:32s} {','.join(ids)}")
+        return 1 if c["missing"] else 0
+    elif args.wcmd == "refresh":
+        kw = {"write": not args.dry_run, "update_existing": args.update_existing, "progress": say,
+              "path": args.to or wfm.refresh_target()}
+        say(f"target: {kw['path']}" + (" (dry run)" if args.dry_run else ""))
+        if args.repo:
+            kw["repo"] = args.repo
+        r = wfm.refresh_manifest(**kw)
+        for wid, e in sorted(r["added"].items(), key=lambda kv: int(kv[0])):
+            print(f"  + {wid:5s} new dataset, default {e['default']}")
+        for wid, tags in sorted(r["new_versions"].items(), key=lambda kv: int(kv[0])):
+            print(f"  v {wid:5s} versions recorded: {', '.join(tags)}")
+        for wid, (ours, theirs) in sorted(r["behind_upstream"].items(), key=lambda kv: int(kv[0])):
+            print(f"  ~ {wid:5s} default {ours}, TotalSegmentator pins {theirs}"
+                  + ("" if args.update_existing else "   [not repointed]"))
+    return 0
+
+
+#: Which function carries out each command - a table, not a lookup by name, so a command
+#: whose function is missing fails at import rather than on the day someone runs it.
+COMMANDS = {
+    "docs": _cmd_docs,
+    "modal": _cmd_modal,
+    "serve": _cmd_serve,
+    "remote": _cmd_remote,
+    "rights": _cmd_rights,
+    "cite": _cmd_cite,
+    "tasks": _cmd_tasks,
+    "get": _cmd_get,
+    "cache": _cmd_cache,
+    "segment": _cmd_segment,
+    "weights": _cmd_weights,
+}
 
 
 if __name__ == "__main__":
