@@ -62,6 +62,32 @@ time. Results computed with the default options change, so the cache epoch moves
   reports on data sources; a prefix naming a model catalog now exits 2 pointing at
   `haversack cite <task>`, and any other unknown prefix exits 2 listing the source kinds
   `rights` takes. What it reports for a real source is unchanged.
+- **FastSurfer runs a scan finer than 0.7 mm at 0.7 mm**, the finest voxel size FastSurfer
+  validated (its own help calls finer "experimental"), and restores the labels onto the
+  scan's own grid, with a deviation saying so. A 0.5 mm scan ran on a 512^3 grid whose
+  79-class field is 21 GB of fp16 and cannot exist as one MPS buffer. A genuine 0.7 mm scan
+  is not floored: a header's float32 0.7 is compared at FastSurfer's own precision.
+- **A FastSurfer field too big for one MPS buffer is aggregated on the host**, as FastSurfer's
+  `viewagg_device=cpu` does, with a deviation; `view_aggregation_device` in provenance is
+  where the field actually lived. The host path keeps the field in fp16 instead of widening
+  and transposing it: peak memory at 384^3 went from 51.5 to 24.7 GB, and the CPU restore is
+  4x faster. Labels and ranked arrays are byte-identical to before on a 1 mm T1.
+- **FastSurfer's GPU restore works a group of channels and a slab of the target at a time.**
+  It widened the whole field to fp32 and sampled all 79 channels at once - 42 GB for a
+  512^3 target - so a Modal A10G ran out of memory above 256^3. Labels are unchanged (0 of
+  899,376 differ over four geometries); 384^3 and 512^3 inputs complete on an L40S at 14.4 GB.
+- **An engine can move its own cache epoch.** The FastSurfer floor changes FastSurfer's bytes
+  alone, so it bumps `Engine.cache_epoch` for FastSurfer (`fastsurfer@epoch=1` in the key)
+  rather than the global epoch, and no nnU-Net result is recomputed for it. The Modal worker
+  keyed FastSurfer results without that epoch, publishing them where the API never looked;
+  it keys them as the API does now.
+- **A Modal deploy made with `--app-name` runs as itself.** Its containers did not receive
+  `HAVERSACK_APP_NAME` and ran as `haversack-serve`: the FastSurfer worker committed a scratch
+  volume that was not mounted, so every job failed "volume ... not attached", and job records
+  went into the default app's store. Every setting the module reads at import now reaches the
+  container, checked by a test that reads those reads from the module's source.
+- **An engine parameter that shadows a processing option is refused** when the wire model is
+  built. The documented "loud error" had no test, and pydantic silently merged the two.
 
 ## [0.10.2] - 2026-09-11
 
