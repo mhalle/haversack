@@ -843,8 +843,21 @@ def _cmd_rights(args) -> int:
     from .sources import HttpSource, check_identifier, default_sources, parse_input, registry
     reg = registry(default_sources() + [HttpSource()])
     parsed = parse_input(args.input, known=reg)
+    # A task name is shaped like a remote input, and `totalvibe:vibe` reached
+    # `reg[kind]` as a raw KeyError (2026-09-12); `ts:total` is too short a prefix
+    # to parse as one and was called a local file. Both are models, whose rights
+    # `cite` reports - say so before either refusal.
+    kind = parsed[0] if parsed else str(args.input).partition(":")[0]
+    if kind not in reg:
+        from .ecosystems import registry as ecosystems
+        if kind in ecosystems():
+            raise InputError(f"{args.input}: {kind} is a model catalog, not a data source; a model's "
+                             f"license and citation come from `haversack cite {args.input}`")
     if parsed is None:
         raise InputError(f"{args.input}: a local file; haversack cannot know its origin or license")
+    if kind not in reg:
+        raise InputError(f"{args.input}: unknown source kind {kind!r}; rights takes "
+                         + ", ".join(f"{p}:" for p in reg if p != "http") + " or an http(s):// URL")
     kind, ident = parsed
     src = reg["http" if kind == "https" else kind]
     check_identifier(src, ident)

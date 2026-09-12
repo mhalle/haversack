@@ -360,3 +360,31 @@ def test_remove_refuses_a_match_that_resolves_outside_the_root(tmp_path, capsys)
     assert cli.main(["weights", "remove", "999", "--root", str(root), "--yes"]) != 0
     assert "resolves outside" in capsys.readouterr().err
     assert (outside / "weights.pth").read_bytes() == b"data"
+
+
+def test_rights_given_a_task_name_points_at_cite(capsys):
+    """`rights totalvibe:vibe` died of a raw KeyError (2026-09-12): a task name is shaped
+    like a remote input, and `rights` looked its prefix up among the data sources. Every
+    ecosystem the catalog serves - read from its registry, so a new catalog is covered the
+    day it lands - is now a one-line refusal naming the `cite` command, and that command
+    works. `ts` is in the loop on purpose: a two-letter prefix does not parse as a remote
+    input at all, and was called a local file."""
+    from haversack.ecosystems import registry
+    for eco in registry():
+        assert cli.main(["rights", f"{eco}:sometask"]) == 2, eco
+        err = capsys.readouterr().err
+        assert err.count("\n") == 1 and "Traceback" not in err, err
+        assert f"`haversack cite {eco}:sometask`" in err, err
+    assert cli.main(["cite", "totalvibe:vibe"]) == 0
+    assert "totalvibe" in capsys.readouterr().out
+
+
+def test_rights_names_the_source_kinds_it_takes(capsys):
+    """An unknown prefix that is not a model either is refused in one line listing the
+    kinds `rights` does take, and says nothing of `cite`."""
+    assert cli.main(["rights", "nosuchkind:x"]) == 2
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1 and "Traceback" not in err, err
+    assert "unknown source kind 'nosuchkind'" in err
+    assert "idc:" in err and "zenodo:" in err and "http(s)://" in err
+    assert "cite" not in err

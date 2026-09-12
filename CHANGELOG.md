@@ -52,10 +52,16 @@ time. Results computed with the default options change, so the cache epoch moves
   volume with `--interp nearest`, which is how upstream restores its labels (`cads:organs`
   through the catalog on MPS: 99.9995 % of voxels). The default linear restore moves
   boundaries off upstream's - `organs` at mean Dice 0.970, its adrenals at 0.91 - so a
-  comparison with upstream wants `--interp nearest`. Each task is one model and there is no combined task, because the nine overlap by
-  design (upstream's own combined map paints the thoracic cavity over every lung lobe).
-  haversack does not gate `head` and `headneck` on a brain or post-process, and it pads the
-  edge of a short volume the TotalSegmentator way (a 34-slice head CT: 0.977-0.998).
+  comparison with upstream wants `--interp nearest`. Each task is one model and there is no
+  combined task, because the nine overlap by design (upstream's own combined map paints the
+  thoracic cavity over every lung lobe). haversack does not gate `head` and `headneck` on a
+  brain or post-process, and it pads the edge of a short volume the TotalSegmentator way (a
+  34-slice head CT: 0.977-0.998).
+- **`haversack rights` given a model task name says to use `cite`.** `rights totalvibe:vibe`
+  ended in a raw `KeyError`, and `rights ts:total` called the task a local file. `rights`
+  reports on data sources; a prefix naming a model catalog now exits 2 pointing at
+  `haversack cite <task>`, and any other unknown prefix exits 2 listing the source kinds
+  `rights` takes. What it reports for a real source is unchanged.
 
 ## [0.10.2] - 2026-09-11
 
