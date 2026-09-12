@@ -186,7 +186,7 @@ VoxTell. `parameters.processing` is haversack's, offered only where haversack ow
 |---|---|
 | `grid` | output grid: `"input"` (default), `"model"` for the network's own spacing, or an isotropic size in mm |
 | `interp` | how the result is restored to the output grid: `linear` (sub-voxel boundaries) or `nearest` |
-| `envelope_mm` | crop the network's field of view to this margin around the body, in mm |
+| `envelope_mm` | crop the network's field of view to this margin around the body, in mm: faster, and not the same labels. Unset, `0` or `null` runs the whole volume (the default) |
 | `folds` | which trained folds to ensemble |
 | `configuration` | nnU-Net configuration, when a model ships more than one |
 | `resampling_order` | spline order of the forward resample |

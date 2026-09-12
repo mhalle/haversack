@@ -1,4 +1,4 @@
-"""Restrict inference to the body: the largest single speedup available for CT.
+"""Restrict inference to the body: the largest single speedup available for CT, off by default.
 
 On a chest CT the labeled anatomy occupies about a third of the volume; the rest is air and
 table, and nnU-Net's sliding window tiles all of it. A body envelope - the bounding box of the
@@ -10,9 +10,13 @@ largest connected component above it is the patient, and that outline includes s
 which is the context the fine model's boundary patches need. A coarse *model* could do this
 too, but it inherits that model's blind spots; the threshold cannot miss a body.
 
-The margin is the one real parameter. Too small and the patches at the envelope edge lose
-context they had in the full volume; the test sweeps it and asserts the labels inside the
-body are unchanged.
+The envelope is a speedup, not a no-op. Cropping re-tiles the sliding window, and labels move
+with the tiles: measured 2026-09-11 against whole-volume inference, a chest CT's 20 mm crop
+moved 0.1 % of voxels, all within a few voxels of the skin, and 17 % of TotalSegmentator's
+``body_extremities`` (``worth_cropping`` has the numbers). Three rules keep it honest: a crop
+must save network tiles or the whole grid runs (``worth_cropping``), a crop narrower than the
+patch is grown with real voxels rather than padded with tissue (``at_least``), and ``0`` means
+no envelope at every door (``envelope_margin``).
 """
 from __future__ import annotations
 
@@ -34,6 +38,10 @@ class Envelope:
     @property
     def slices(self) -> tuple[slice, slice, slice]:
         return tuple(slice(int(a), int(b)) for a, b in zip(self.start, self.stop))
+
+    @property
+    def extent(self) -> tuple[int, int, int]:
+        return tuple(int(b) - int(a) for a, b in zip(self.start, self.stop))
 
     @property
     def fraction(self) -> float:
@@ -79,19 +87,74 @@ def envelope_of(mask_zyx: np.ndarray, *, margin_voxels) -> Envelope:
     return Envelope(start, stop, shape)
 
 
-def worth_cropping(env: Envelope, *, min_saving: float = 0.05) -> Envelope:
-    """Collapse a barely-cropping box back to the whole grid.
+def at_least(env: Envelope, extent_zyx) -> Envelope:
+    """Grow each axis of ``env`` to at least ``extent_zyx`` voxels, clipped to the grid.
 
-    A crop that still covers most of the grid buys almost no network time but re-tiles the
-    sliding window - shifting patch seams - which is the *only* thing that perturbs labels
-    (near-tie churn at the new seams). Below ``min_saving`` fractional saving the crop is not
-    worth that, so run the whole grid instead: the envelope becomes strictly no-op-or-win. This
-    is common on MR, whose tight FOV leaves little air to remove (CT crops are far below the
-    threshold, so this never fires there).
+    ``extent_zyx`` is the network's patch on this grid. nnU-Net's sliding window pads anything
+    narrower than a patch with 0 *after* normalization, which is the model's mean foreground
+    intensity - +120 HU for CADS's head model, -89 HU (fat) for TotalSegmentator's breasts
+    model - so a crop narrower than the patch showed the network tissue where the image has
+    air, a margin's width outside the skin. Growing the crop fills those voxels from the image
+    instead, and costs nothing: along an axis no longer than the patch the window takes one
+    step either way, and the grown crop is the same shape as the padded one. Where the grid
+    itself is narrower than the patch, the crop spans that axis and pads exactly as
+    whole-volume inference (and upstream) does.
+
+    The growth is centered on the box, as the padding is, and shifted to stay on the grid.
     """
-    if env.is_whole() or (1.0 - env.fraction) < min_saving:
+    start, stop = list(env.start), list(env.stop)
+    for ax in range(3):
+        want = min(int(extent_zyx[ax]), env.shape[ax])
+        short = want - (stop[ax] - start[ax])
+        if short > 0:
+            a = min(max(0, start[ax] - short // 2), env.shape[ax] - want)
+            start[ax], stop[ax] = a, a + want
+    return Envelope(tuple(start), tuple(stop), env.shape)
+
+
+def worth_cropping(env: Envelope, *, saving: float | None = None,
+                   min_saving: float = 0.05) -> Envelope:
+    """Collapse a crop that saves too little network work back to the whole grid.
+
+    ``saving`` is the fraction of the network's work the crop removes; the pipeline passes it
+    in tiles (``1 - tiles(crop) / tiles(grid)``, see :func:`haversack.network.window_tiles`).
+    Without it, the box's volume stands in, which is what the pipeline used until 2026-09-11 -
+    and volume is the wrong measure: the sliding window steps half a patch, so a crop that
+    removes a third of the volume can still need every tile. On a chest-abdomen-pelvis CT at
+    TotalSegmentator's 128^3 patch, the 10-40 mm crops needed all 54 of the whole volume's.
+
+    A crop is never free, because it re-tiles the window, and the labels move with the tiles:
+    not only near-ties at the new seams, but whole stretches of a class whose boundary is a
+    judgment of context. On a chest CT the 20 mm envelope relabeled 17 % of TotalSegmentator's
+    ``body_extremities`` as trunk with no padding involved (0 mm: 5 %; 40 mm: 3 %; not
+    monotone, so no margin buys it off). Below ``min_saving`` the crop is not worth that, and
+    the whole grid runs: the result is then identical to whole-volume inference.
+    """
+    if saving is None:
+        saving = 1.0 - env.fraction
+    if env.is_whole() or saving < min_saving:
         return Envelope((0, 0, 0), env.shape, env.shape)
     return env
+
+
+def envelope_margin(envelope_mm) -> float | None:
+    """What an ``envelope_mm`` asks for: a margin in mm, or ``None`` for the whole volume.
+
+    ``None``, ``0`` and anything below run the whole volume. Until 2026-09-11 that held only on
+    the command line (``--envelope 0``); the Python API and the server read 0 as a crop flush to
+    the skin, and CADS scored 0.64-0.82 Dice on face, head muscles and mammary glands against
+    upstream that way while the whole volume scored 0.95-1.0. One number had two meanings, so
+    every door now reads it here: ``segment()`` calls this first, and ``Segmenter``, the server
+    and the Modal worker all reach it through ``segment()``.
+    """
+    if envelope_mm is None:
+        return None
+    mm = float(envelope_mm)
+    if not np.isfinite(mm):
+        from .errors import InputError
+        raise InputError(f"envelope_mm must be a margin in mm, or 0 / None for the whole volume; "
+                         f"got {envelope_mm!r}")
+    return mm if mm > 0 else None
 
 
 def margin_in_voxels(margin_mm: float, spacing_zyx) -> tuple[int, int, int]:

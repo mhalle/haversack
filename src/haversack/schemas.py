@@ -212,7 +212,7 @@ class ProcessingParams(Params):
                           "than one.")
     envelope_mm: float | None = Field(
         None, description="Crop the network's field of view to this margin around "
-                          "the body, in mm.")
+                          "the body, in mm; 0 runs the whole volume.")
     resampling_order: int | None = Field(
         None, ge=0, le=5, description="Spline order for the forward resample.")
     interp: Literal["linear", "nearest"] | None = Field(

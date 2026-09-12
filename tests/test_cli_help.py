@@ -76,7 +76,8 @@ def test_segment_help_shows_defaults_and_examples(capsys):
     with pytest.raises(SystemExit):
         cli.main(["segment", "--help"])
     out = " ".join(capsys.readouterr().out.split())            # click wraps; compare unwrapped
-    assert "[default: fp16]" in out and "[default: 20.0]" in out and "examples:" in out
+    # --envelope defaults to 0, the whole volume, since 2026-09-11 (it was 20 mm)
+    assert "[default: fp16]" in out and "[default: 0.0]" in out and "examples:" in out
     assert "--output" in out and "extension picks the format" in out
     assert out.count("one or more inputs; several = batch mode") == 1, (
         "the positional's help is printed more than once")

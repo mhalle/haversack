@@ -1,5 +1,48 @@
 # Changelog
 
+## [Unreleased]
+
+The body envelope - inference cropped to the patient's bounding box - is off by default now,
+and `0` means "no envelope" everywhere. It was on at 20 mm and documented as costing nothing
+where it mattered; measured against whole-volume inference, it changes labels wherever it saves
+time. Results computed with the default options change, so the cache epoch moves to 3.
+
+- **`envelope_mm=0` cropped inference flush to the skin in Python and on the server, while
+  `--envelope 0` ran the whole volume.** One number, two meanings: a CADS parity study passed 0
+  believing it meant "no envelope" and measured, against upstream, mean Dice 0.64 on the face,
+  0.69 on head muscles, 0.72-0.78 on the mammary glands and 0.82 on CSF, where the whole volume
+  gives 0.95-1.0. `0` (or less, or `None`) now runs the whole volume at every door - `segment()`,
+  `Segmenter`, the server's `envelope_mm` and the command line - and provenance records
+  `envelope_mm: null` for it. A margin that is not a finite number is refused.
+- **The envelope is off by default; it was 20 mm.** Cropping re-tiles nnU-Net's sliding window
+  and the labels move with the tiles - not only near-ties at the new seams. On a chest CT (0.7
+  mm, 465 slices), against the whole volume, the 20 mm envelope moved 0.50 % of `total_fast`'s
+  voxels (pancreas Dice 0.74, portal and splenic vein 0.83), relabeled 17 % of `body`'s
+  `body_extremities` as trunk (Dice 0.87), and left `breasts` at 0.995. No margin buys it off:
+  `body_extremities` went 0.95, 0.94, 0.87 and 0.97 at 0, 10, 20 and 40 mm. The speedup is real -
+  up to half the patches on the chest and whole-body CTs measured, none on some - and
+  `--envelope 20` / `envelope_mm=20` still asks for it, but it is a trade and not a free win. The
+  default now tiles the whole volume, as nnU-Net's own predictor does.
+- **An envelope crop narrower than the network's patch is grown to it from the image.** nnU-Net
+  pads such a crop with 0 after normalization, which is the model's mean foreground intensity -
+  +120 HU for CADS's head model, -89 HU for TotalSegmentator's breasts model - so the network saw
+  tissue a margin's width outside the skin. On a head CT that happens at any margin: at 1.5 mm a
+  head is smaller than CADS's 160-192 voxel patch on every axis. The grown crop is the shape the
+  padded one was, so it costs no network time; on the chest `total_fast` it took the pancreas
+  from 0.74 to 0.91. Padding with air instead was tried and rejected: it also changes
+  whole-volume runs, which pad a volume shorter than the patch with 0 just as upstream does (0.89
+  % of voxels on an abdominal CT).
+- **A crop that saves no patches runs the whole volume.** The envelope judged a crop by the box's
+  volume, but the window steps half a patch, so a crop that removes a third of the volume can
+  still need every tile: on a chest-abdomen-pelvis CT the 10-40 mm crops ran all 54 of the whole
+  volume's tiles at TotalSegmentator's 128^3 patch, re-tiling for nothing. It counts tiles now,
+  and a crop that saves fewer than 5 % of them gives way to the whole volume.
+- **A cascade's crop follows the same two rules.** The fine model of a cascade task
+  (`lung_vessels`, `abdominal_muscles`, ...) still runs only inside the box its coarse stage
+  found - that crop is not the body envelope and stays on - but a box narrower than the patch is
+  now grown from the image rather than padded, and one that saves no tiles runs the whole volume.
+  Both can change a cascade's labels.
+
 ## [0.10.2] - 2026-09-11
 
 One fix: a Ctrl-C now ends every command by SIGINT, wherever it lands. The flaky CI test that

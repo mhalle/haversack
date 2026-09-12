@@ -8,8 +8,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .envelope import (Envelope, body_mask, body_threshold, envelope_of, label_roi,
-                       margin_in_voxels, worth_cropping)
+from .envelope import (Envelope, at_least, body_mask, body_threshold, envelope_margin,
+                       envelope_of, label_roi, margin_in_voxels, worth_cropping)
 from .frame import Frame
 from .mapping import Mapping
 from .restore import to_labels
@@ -84,7 +84,7 @@ def _attribution(spec) -> dict:
 def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto", dtype: str = "fp16",
             grid="input", interp="linear", outside: str = "background", convention: str = "auto",
             folds=(0,), accumulate: str = "auto", resampling_order: int = 3, batch_size="auto",
-            envelope_mm: float | None = 20.0, configuration: str | None = None,
+            envelope_mm: float | None = None, configuration: str | None = None,
             allow_transpose: bool = False,
             probabilities=None,
             models=None, cancel=None, progress=None):
@@ -108,10 +108,13 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     a mild train/test mismatch that grows with the downsampling factor.
 
     ``envelope_mm`` restricts inference to the patient's bounding box (air removed, largest
-    connected component, plus this margin in mm) - on a chest CT that is a third of the
-    volume and ~3x fewer patches per model. The air cut is the CT -500 HU threshold for CT
-    models and a data-driven (Otsu) split for per-image-normalized MRI. ``None`` runs the
-    full volume.
+    connected component, plus this margin in mm): up to half the patches on a CT with air
+    around the body, and NOT the same labels - cropping re-tiles the sliding window
+    and the labels move with it (see :func:`~haversack.envelope.worth_cropping`), so it is off
+    by default since 2026-09-11, when it was 20 mm. The air cut is the CT -500 HU threshold for
+    CT models and a data-driven (Otsu) split for per-image-normalized MRI. ``None`` or ``0``
+    runs the full volume, as ``--envelope 0`` does on the command line (before 2026-09-11, 0
+    here meant a crop flush to the skin; see :func:`~haversack.envelope.envelope_margin`).
 
     ``batch_size`` is patches per forward pass: an int, or ``"auto"`` - 1 on Apple silicon
     (measured fastest), 4 on CUDA when the measured working set says it fits (18 % faster
@@ -145,6 +148,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
 
     from .resample import resolve_device
     device = str(resolve_device(device))                  # "auto" -> cuda / mps / cpu, once
+    envelope_mm = envelope_margin(envelope_mm)            # 0 -> None, before anything reads it
     report = Reporter.of(progress, cancel=cancel)
     _warm_restore_kernel(device)
     T: dict[str, float] = {}
@@ -265,8 +269,24 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         stop = [min(n, v) for n, v in zip(shape, stop)]
         if any(b <= a for a, b in zip(start, stop)):          # empty -> fall back to whole grid
             return Envelope((0, 0, 0), shape, shape)
-        # a box that barely crops only re-tiles the window (churn, ~no speedup): run whole instead
-        return worth_cropping(Envelope(tuple(start), tuple(stop), shape))
+        env = Envelope(tuple(start), tuple(stop), shape)
+        if not env.is_whole():
+            # never narrower than the patch: the window would pad the rest with normalized 0,
+            # the model's mean tissue, where the image has air (at_least says why). The patch is
+            # in the network's axis order; network axis j is model axis transpose_forward[j].
+            # A 2D model's patch covers the last two network axes and nnU-Net runs every slice
+            # of the first through it, so that axis asks for 1 voxel and is never grown.
+            net_patch = (1,) * (3 - len(model.patch)) + tuple(int(p) for p in model.patch)
+            patch = [0, 0, 0]
+            for j, a in enumerate(model.transpose_forward):
+                patch[a] = net_patch[j]
+            env = at_least(env, patch)
+            # A crop re-tiles the window and the labels move with the tiles, so it has to buy
+            # network time to be worth it - counted in the tiles the network runs, not in the
+            # box's volume: at half-patch steps a crop can remove a third of the volume and
+            # still need every tile (worth_cropping says what that cost).
+            return worth_cropping(env, saving=1.0 - model.tiles(env.extent) / model.tiles(shape))
+        return env
 
     def emit_probabilities(model, logits, frame, env, *, lut, part, weights=None):
         """Encode this part's output distribution while the logits are still here.

@@ -257,6 +257,30 @@ def checkpoint_name(folder, folds) -> str:
         + (", ".join(have) if have else "no checkpoint_*.pth at all"))
 
 
+def window_tiles(extent_zyx, patch, transpose_forward=(0, 1, 2), step: float = 0.5) -> int:
+    """How many patches the sliding window runs over an input of ``extent_zyx`` (model grid).
+
+    What :meth:`TorchModel.predict_logits` does, counted rather than run: the input is permuted
+    into the network's axis order (``patch`` is stated in that order), padded up to the patch
+    where it is shorter, and tiled by nnU-Net's own step rule. The body envelope asks this,
+    not the box's volume, whether a crop saves any network time (see
+    :func:`~haversack.envelope.worth_cropping`).
+
+    A 2D model's patch has two entries: nnU-Net runs every slice of the first network axis
+    through a 2D window over the other two, so that axis multiplies the count unpadded.
+    """
+    from nnunetv2.inference.sliding_window_prediction import compute_steps_for_sliding_window
+    size = [int(extent_zyx[a]) for a in transpose_forward]
+    patch = [int(p) for p in patch]
+    n = 1
+    if len(patch) == len(size) - 1:
+        n, size = size[0], size[1:]
+    size = [max(s, p) for s, p in zip(size, patch)]
+    for s in compute_steps_for_sliding_window(size, patch, step):
+        n *= len(s)
+    return n
+
+
 def available_folds(folder, folds) -> tuple:
     """The requested folds, restricted to the ``fold_*`` directories that exist.
 
@@ -440,6 +464,11 @@ class TorchModel:
             return
         self.net.load_state_dict(state)
         self.net.to(self.dtype)
+
+    def tiles(self, extent_zyx) -> int:
+        """Patches :meth:`predict_logits` runs, per fold, over an input of ``extent_zyx``."""
+        return window_tiles(extent_zyx, self.patch, self.transpose_forward,
+                            self.predictor.tile_step_size)
 
     @torch.inference_mode()
     def predict_logits(self, x: torch.Tensor, *, report=None) -> torch.Tensor:

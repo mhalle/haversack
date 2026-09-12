@@ -38,7 +38,7 @@ class Segmenter:
 
     def __init__(self, *, device: str = "auto", dtype: str = "fp16", weights=None,
                  catalog=None, folds=(0,), accumulate: str = "auto", batch_size="auto",
-                 resampling_order: int = 3, envelope_mm: float | None = 20.0,
+                 resampling_order: int = 3, envelope_mm: float | None = None,
                  convention: str = "auto", interp: str = "linear", grid="input",
                  configuration: str | None = None, cache_models: int = 1,
                  allow_transpose: bool = False):

@@ -146,12 +146,17 @@ def test_zscore_models_are_interchangeable_despite_differing_statistics():
 class _StubModel(_Model):
     """A model just real enough for segment(): it records the input it is asked to predict on."""
 
-    def __init__(self, props, K=3):
+    def __init__(self, props, K=3, patch=(4, 4, 4)):
         super().__init__(props)
         self.K = K
+        self.patch = patch                    # small: an envelope crop is grown to at least this
         self.transpose_forward = (0, 1, 2)
         self.accumulate_choice = {"on_device": False}
         self.received = None
+
+    def tiles(self, extent_zyx):
+        from haversack.network import window_tiles
+        return window_tiles(extent_zyx, self.patch, self.transpose_forward)
 
     def predict_logits(self, crop, report=None):
         import torch

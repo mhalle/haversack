@@ -113,6 +113,26 @@ def test_body_threshold_mr_ignores_stray_ct_properties():
     assert -1.0 < t < 2.0                        # Otsu, not the (-700-100)/250 HU value
 
 
+def test_at_least_grows_a_short_axis_centered_and_leaves_long_ones_alone():
+    from haversack.envelope import at_least
+    env = Envelope((10, 20, 5), (20, 60, 45), (100, 100, 100))
+    grown = at_least(env, (16, 32, 32))
+    assert grown.start == (7, 20, 5) and grown.stop == (23, 60, 45)   # z: 10 -> 16, centered
+
+
+def test_at_least_stays_on_the_grid_and_stops_at_its_edge():
+    from haversack.envelope import at_least
+    near_edge = at_least(Envelope((0, 0, 94), (4, 4, 100), (50, 10, 100)), (16, 16, 16))
+    assert near_edge.start == (0, 0, 84) and near_edge.stop == (16, 10, 100)
+    # y: the grid (10) is narrower than the patch, so the crop spans it and no more
+
+
+def test_at_least_does_not_touch_a_box_already_wide_enough():
+    from haversack.envelope import at_least
+    env = Envelope((1, 2, 3), (40, 41, 42), (50, 50, 50))
+    assert at_least(env, (8, 8, 8)) == env
+
+
 def test_worth_cropping_collapses_a_near_whole_box():
     from haversack.envelope import worth_cropping
     shape = (100, 100, 100)
@@ -127,6 +147,14 @@ def test_worth_cropping_keeps_a_real_crop():
     real = Envelope((0, 0, 0), (100, 100, 70), shape)     # crops 30%
     out = worth_cropping(real)
     assert out is real and not out.is_whole()
+
+
+def test_worth_cropping_judges_the_saving_it_is_given_over_the_volume():
+    from haversack.envelope import worth_cropping
+    shape = (100, 100, 100)
+    real = Envelope((0, 0, 0), (100, 100, 70), shape)     # 30 % of the volume...
+    assert worth_cropping(real, saving=0.0).is_whole()    # ...and not one tile fewer
+    assert worth_cropping(real, saving=0.3) is real
 
 
 def test_worth_cropping_passes_through_whole_and_respects_min_saving():

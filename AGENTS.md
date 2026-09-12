@@ -129,8 +129,9 @@ Two layers, enforced by `tests/test_layering.py`:
   remap paints 0 over earlier parts. Licenses: `open` CC BY-SA 4.0 and `research` CC BY-NC-SA
   4.0 agree everywhere; `reference` and the region suite say "customized" with no text, and
   the region checkpoints' own `dataset.json` says CC BY-NC-SA 4.0. The 0.10.1 note gave
-  0.975-0.994 here: those were measured with `envelope_mm=0`, the body envelope flush to the
-  skin, which in the Python API is not the whole volume.
+  0.975-0.994 here: those were measured with `envelope_mm=0`, which in the Python API was then
+  the body envelope flush to the skin - it has meant the whole volume at every door since the
+  envelope work below, and the whole volume is the default.
 - **Adding a data source** = a `DataSource` subclass, or `ArchiveReadingSource` + one
   `resolve()` to get `!member` zip-by-Range for free, or `ObjectStoreSource` (obstore: `s3:`,
   `gs:`; one object, `!member` over `get_range`, or `<prefix>/` for a whole series) + one
@@ -195,6 +196,36 @@ parsed to a `_cmd_*` function, and `_run` returns that function's status).
   (corner rule → `node`). Never hardcode it. Use duckn as a library, not hand-written dicts.
 - Any change to orientation, transpose or resampling needs a bit-exactness check against a
   known reference before it is believed. Geometry bugs here are silent, not loud.
+
+## The body envelope — measured 2026-09-11, don't relitigate
+
+`envelope_mm` crops inference to the body's box plus a margin. It is **off by default** (it
+was 20 mm) because it is not a no-op, and cannot be made one while it saves time:
+
+- **Cropping re-tiles the sliding window, and labels move with the tiles** - whole stretches of
+  a class decided by context, not just near-ties at seams. Chest CT (0.7 mm, 465 slices) vs the
+  whole volume at 20 mm: `total_fast` 0.50 % of voxels, pancreas 0.74 (0.91 once grown, below);
+  `body` relabeled 17 % of `body_extremities` as trunk, 3 voxels from the skin (median), with
+  no padding involved; `breasts` 0.995. Not monotone in the margin (extremities 0.95 / 0.94 /
+  0.87 / 0.97 at 0 / 10 / 20 / 40 mm), so no margin fixes it. The old "deep interior 0.002 %"
+  figure (`../medseg/docs/backend-decision.md`) was `total` at 1.5 mm, where a patch is small
+  against the body; at 3 mm one patch spans the chest and nothing is interior.
+- **Running only the whole volume's own tiles that touch the box** would be bit-exact inside it
+  - and saves nothing: at half-patch steps every tile touched body+margin on all four CTs
+  counted (chest 27/27, whole-body 208/208, chest-abdomen-pelvis 54/54). Don't rebuild it.
+- **Padding a short crop with normalized air** changes whole-volume runs too, which pad a grid
+  shorter than the patch with 0 exactly as upstream does (0.89 % of voxels on CT_Abdo at 3 mm).
+  Rejected. A short crop is grown to the patch from the image instead (`envelope.at_least`):
+  same tensor shape, one tile either way, real voxels.
+- A crop is judged by the **tiles** it saves (`network.window_tiles`, nnU-Net's own step rule),
+  not the box's volume: the chest-abdomen-pelvis CT's 10-40 mm crops needed all 54 tiles.
+- `0` is the whole volume at every door through `envelope.envelope_margin`, called first in
+  `segment()`; each door is pinned in `tests/test_envelope_doors.py`.
+
+The measurement harness (scratch, not tracked) ran each variant as a monkeypatch against a
+`git archive HEAD` copy first on `PYTHONPATH`: a measurement importing the editable tree picks
+up whatever the session edits mid-run, which silently turned one batch's `e0` into the whole
+volume here.
 
 ## Server semantics (the three rules)
 

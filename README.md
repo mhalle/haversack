@@ -155,7 +155,7 @@ still), and `total` runs the five 1.5 mm models. Useful options:
 | `--interp nearest` | TotalSegmentator's label semantics; the default `linear` gives sub-voxel boundaries from the logits |
 | `--device mps|cuda|cpu` | default `auto` |
 | `--dtype fp16|bf16|fp32` | default `fp16` (the network runs fp16 on MPS) |
-| `--envelope 20` | restrict inference to the body plus this margin in mm; `0` for the whole volume |
+| `--envelope 20` | restrict inference to the body plus this margin in mm: up to half the patches on a CT with air around the body, but not the same labels (cropping re-tiles the sliding window; on a chest CT `total_fast` moved 0.45 % of voxels). Default `0`, the whole volume, as upstream runs it; `envelope_mm=0` means the same in Python and on the server |
 | `--allow-transpose` | run a model whose plans permute the axes; refused by default |
 | `--accumulate device|host` | force the sliding-window accumulator's placement; `auto` decides from free memory |
 

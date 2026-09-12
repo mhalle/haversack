@@ -158,7 +158,13 @@ _ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack 
 #: IDENTIFIER, not the bytes' digest, so the same `idc:`/`s3:`/`gs:` identifier now
 #: computes from a complete series where it used to compute from a truncated one -
 #: different bytes under an unchanged key, which is exactly what this exists for.
-CACHE_EPOCH = "2"
+#: 3 (2026-09-11): the body envelope. Unset, `envelope_mm` meant a 20 mm crop and now
+#: means the whole volume; `{"envelope_mm": 0}` ran inference cropped flush to the skin
+#: and now runs the whole volume too, as `--envelope 0` always did; an envelope crop
+#: narrower than the network's patch is grown to it with real voxels, where the sliding
+#: window padded it with normalized 0 (the model's mean tissue); and a crop that saves no
+#: tiles runs the whole volume. Each changes labels under an unchanged key.
+CACHE_EPOCH = "3"
 
 
 def result_key(identity, task, options, weights_versions, epoch=None) -> str:

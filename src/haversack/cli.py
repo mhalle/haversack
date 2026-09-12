@@ -371,9 +371,10 @@ def _command_line() -> click.Group:
                                'memory), device (fastest, needs headroom), host')),
             click.Option(['--batch-size'], default='auto',
                          help='patches per forward pass: auto, or an int'),
-            click.Option(['--envelope'], type=float, default=20.0,
+            click.Option(['--envelope'], type=float, default=0.0,
                          help=("restrict inference to the body's bounding box plus this margin "
-                               'in mm; 0 or negative = whole volume')),
+                               'in mm: faster, and not the same labels (cropping re-tiles the '
+                               'sliding window); 0 = the whole volume')),
             click.Option(['--model-root'],
                          help=('where model weights live (default: TOTALSEG_WEIGHTS_PATH, '
                                'nnUNet_results, or ~/.totalsegmentator/nnunet/results)')),
@@ -1222,7 +1223,7 @@ def _cmd_segment(args) -> int:
         return segment(img, args.task, weights=args.model_root, device=args.device, dtype=args.dtype,
                        grid=args.spacing if args.spacing else "input", interp=args.interp,
                        accumulate=args.accumulate, batch_size=bs,
-                       envelope_mm=args.envelope if args.envelope > 0 else None,
+                       envelope_mm=args.envelope,
                        allow_transpose=args.allow_transpose, progress=progress)
 
     def report(r, where):
@@ -1249,7 +1250,7 @@ def _cmd_segment(args) -> int:
                 weights=args.model_root, device=args.device, dtype=args.dtype,
                 grid=args.spacing if args.spacing else "input", interp=args.interp,
                 accumulate=args.accumulate, batch_size=bs,
-                envelope_mm=args.envelope if args.envelope > 0 else None, progress=progress)
+                envelope_mm=args.envelope, progress=progress)
             if not args.quiet:
                 for k, v in r.timings.items():
                     print(f"  {v:7.2f} s  {k}", file=sys.stderr)

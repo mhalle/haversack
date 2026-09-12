@@ -141,7 +141,7 @@ def _emit_junction(part, code, out, dist_meta):
             "junction_span": 127}
 
 
-def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=20.0, *, quiet=False,
+def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=None, *, quiet=False,
          **segment_kw):
     """Emit ``task``'s ranked output for ``image`` into ``outdir`` (arrays as ``.npy``, the
     parts' metadata in ``meta.json``) and return the :class:`~haversack.result.Segmentation`.
@@ -217,7 +217,7 @@ def segment_to_store(image, task, out, *, case=None, depth=6, clip=8.0, parts="a
     out.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=out.name + ".emit-", dir=out.parent))
     try:
-        envelope_mm = segment_kw.pop("envelope_mm", 20.0)
+        envelope_mm = segment_kw.pop("envelope_mm", None)          # segment()'s default: none
         seg = main(image, task, staging, depth, clip, envelope_mm, quiet=quiet, **segment_kw)
         if names is None:
             names = {int(v): str(n) for v, n in seg.schema.names.items()}
@@ -244,8 +244,8 @@ def main_cli(argv=None):
     ap.add_argument("outdir")
     ap.add_argument("--depth", type=int, default=6)
     ap.add_argument("--clip", type=float, default=8.0)
-    ap.add_argument("--envelope-mm", default="20.0",
-                    help='margin in mm, or "none" to run the full model grid')
+    ap.add_argument("--envelope-mm", default="none",
+                    help='margin in mm, or "none" (the default) to run the full model grid')
     a = ap.parse_args(argv)
     main(a.image, a.task, a.outdir, a.depth, a.clip, a.envelope_mm)
 
