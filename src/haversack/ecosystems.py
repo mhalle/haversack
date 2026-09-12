@@ -1646,12 +1646,19 @@ class EcosystemCatalog:
         eco = self.ecosystem_of(name)
         return None if eco is None else engine_of(eco)
 
-    def get(self, name) -> TaskSpec:
+    def installed(self, name) -> bool:
+        """Whether ``get(name)`` finds the task's weights in place, so it installs nothing."""
+        eco, short, canonical, version = self.resolve(name)
+        return eco.materialized(short, self.root)
+
+    def get(self, name, progress=None) -> TaskSpec:
+        """The task's spec, installing its weights first if they are not in place.
+        ``progress`` reaches the install (a job's Reporter, a message callback, or None)."""
         if isinstance(name, TaskSpec):
             return name
         eco, short, canonical, version = self.resolve(name)
         if version is not None or not eco.materialized(short, self.root):
-            eco.ensure(short, self.root, version=version)
+            eco.ensure(short, self.root, progress=progress, version=version)
         spec = eco.spec(short, self.root)
         if spec.name != canonical:
             import dataclasses

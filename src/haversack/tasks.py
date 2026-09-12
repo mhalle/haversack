@@ -259,15 +259,17 @@ def resolve_model_folder(weights_id: WeightsId, *, layout: str = "ts", model_roo
         + (f" - unsupported: {why}" if why else "") + ". Pass configuration=... to choose.")
 
 
-def _resolve_spec(task, catalog) -> "TaskSpec":
+def _resolve_spec(task, catalog, progress=None) -> "TaskSpec":
     """A TaskSpec, a catalog name, or a path to a stock nnU-Net model folder. Lives here
     (torch-free) rather than in pipeline so `describe()` and the serve front-end can resolve
-    a task without importing the inference stack (torch)."""
+    a task without importing the inference stack (torch). ``progress`` goes to a first-use
+    install, and is passed only when given: a plain TaskCatalog's ``get`` takes no such
+    argument."""
     if isinstance(task, TaskSpec):
         return task
     if isinstance(task, Path) or (isinstance(task, str) and Path(task).expanduser().is_dir()):
         return TaskSpec.from_model_folder(task)
-    return catalog.get(task)
+    return catalog.get(task) if progress is None else catalog.get(task, progress=progress)
 
 
 def _uses_nnunet_preprocessing(spec) -> bool:

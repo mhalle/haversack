@@ -111,6 +111,13 @@ time. Results computed with the default options change, so the cache epoch moves
   command line, a `restore` progress stage on the server, and an entry in
   `provenance.deviations`. `to_labels(backend="auto")` called directly warns instead; a
   backend asked for by name still refuses a field it cannot take, naming `backend='torch'`.
+- **A weights install on first use is its own step in `segment`'s timings and progress.**
+  `segment` resolved the task inside its `read+canonical` timer, and resolving a catalog task
+  whose weights are not in place downloads them: on a fresh Modal container, 29 s of a
+  `cads:headneck` run's "read+canonical" was its 760 MB weights, with no progress while they
+  came, where the read itself takes about half a second. The install is now timed as
+  `weights:<task>` and reported as a `weights` stage carrying its download progress, and
+  `read+canonical` times the read. A cascade's coarse stage resolves the same way.
 
 ## [0.10.2] - 2026-09-11
 

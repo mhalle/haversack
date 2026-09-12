@@ -153,13 +153,31 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     report = Reporter.of(progress, cancel=cancel)
     _warm_restore_kernel(device)
     T: dict[str, float] = {}
-    t0 = time.perf_counter()
+    t_start = time.perf_counter()                         # `total` covers resolution and install too
     lock = device_lock(device)                            # reentrant: a Job already holds it
     if catalog is None:
         from .ecosystems import EcosystemCatalog
         catalog = EcosystemCatalog(root=as_store(weights).root)
     models = models if models is not None else ModelCache()   # no caching unless asked
-    spec = _resolve_spec(task, catalog)
+
+    def resolve(name):
+        """The task's spec, with an install on first use timed and reported as its own step.
+        It used to run inside the `read+canonical` timer, unreported: on a fresh Modal
+        container, 29 s of a `cads:headneck` run's read+canonical was its 760 MB weights
+        (2026-09-12), where the read itself takes about half a second."""
+        installed = getattr(catalog, "installed", None)
+        if not (isinstance(name, str) and callable(installed)
+                and not Path(name).expanduser().is_dir() and not installed(name)):
+            return _resolve_spec(name, catalog)
+        t = time.perf_counter()
+        report.stage("weights", f"installing {name}")
+        # the install reports INSIDE this run's position: handed `report` itself, the installer
+        # rewrote its part, part count and fraction (Reporter.nested says what that did)
+        spc = _resolve_spec(name, catalog, progress=report.nested("weights"))
+        T[f"weights:{spc.name}"] = time.perf_counter() - t
+        return spc
+
+    spec = resolve(task)
     # nnU-Net-native models were trained on their own preprocessing: skimage's half-pixel
     # ("center") resample and crop-to-nonzero. TS bypasses both (corner-aligned change_spacing,
     # no crop). Getting this backwards is a silent geometry error, so it follows the task's
@@ -183,6 +201,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             # identifiers only; `describe()` has the full record
             "attribution": _attribution(spec)}
 
+    t0 = time.perf_counter()                              # the read, and nothing before it
     report.stage("read", Path(image).name if isinstance(image, (str, Path)) else "in-memory image")
     if isinstance(image, (str, Path)):
         data_zyx, geometry, orientation = nio.read(image, reorient=reorient,
@@ -413,7 +432,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             last = i == len(stages) - 1
             if step.crop_from_task is not None:
                 report.stage("cascade", f"{tag} stage {i + 1}/{len(stages)}: crop from {step.crop_from_task!r}")
-                sub_labels, sub_fr, sub_og = run_task_canonical(catalog.get(step.crop_from_task), f"{tag}:{step.crop_from_task}")
+                sub_labels, sub_fr, sub_og = run_task_canonical(resolve(step.crop_from_task), f"{tag}:{step.crop_from_task}")
                 e = label_roi(sub_labels.cpu().numpy(), step.crop_to_classes,
                               margin_voxels=margin_in_voxels(step.dilation_mm, sub_og.spacing))
                 roi_mm = None if e.is_whole() else ((tuple(float(v) for v in sub_og.index_to_mm(e.start)),
@@ -456,7 +475,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     arr, geo = nio.reorient(labels, frame.output_geometry(out_grid), frame.original_orientation)
     out_img = nio.to_image(arr, geo)
     T["to input orientation"] = time.perf_counter() - t
-    T["total"] = time.perf_counter() - t0
+    T["total"] = time.perf_counter() - t_start
     prov.update(input_orientation=orientation, output_grid=tuple(out_grid.shape),
                 cropped_to_nonzero=frame.model_source is not None,
                 probabilities=(None if probabilities is None else

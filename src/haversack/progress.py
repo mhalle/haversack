@@ -125,6 +125,28 @@ class Reporter:
         if self._cb is not None:
             self._cb(p)
 
+    def nested(self, stage: str) -> "Reporter":
+        """A Reporter for work nested inside this run's current step - a weights install on
+        first use. Its snapshots reach this run's callback as ``stage``, carrying their detail
+        and step/n_steps (bytes received, for an install), but at this run's own part, part
+        count and fraction: the nested work's parts and fraction are its own. Handed this
+        Reporter itself, an installer rewrote those - a job showed 100 % before any inference
+        and then went backwards, and a cascade whose coarse task installed spent its fine stage
+        at 100 % (2026-09-12). The child shares this run's cancel token."""
+        parent = self
+
+        def forward(p: Progress) -> None:
+            parent.stage_name = stage
+            snap = Progress(stage=stage, detail=p.detail, part=parent.part,
+                            n_parts=parent.n_parts, step=p.step, n_steps=p.n_steps,
+                            fraction=parent.last.fraction if parent.last is not None else 0.0,
+                            elapsed=time.perf_counter() - parent.t0)
+            parent.last = snap
+            if parent._cb is not None:
+                parent._cb(snap)
+
+        return Reporter(progress=forward, cancel=self.cancel)
+
     @staticmethod
     def of(progress=None, cancel=None, n_parts: int = 1) -> "Reporter":
         """Accept a Reporter, a callback, or nothing, and always get a Reporter."""
