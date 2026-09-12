@@ -153,7 +153,8 @@ artifacts = ["src/haversack/data/*.json", "src/haversack/data/*.md", "src/havers
 # overridden (2026-09-12). Verified on Modal: a VoxTell worker on torch 2.14.0+cu130 (L40S)
 # segmented an NLST chest CT - four prompts, plausible volumes, ~8 GB GPU memory of 46.
 # An override replaces EVERY torch requirement in the graph - synthstrip-torch's and monai's
-# too, neither yet run on 2.14 - so all engines resolve one torch (2.14 today).
+# too, both since run on 2.14 on Modal (SynthStrip beside surfa's numpy 1.26; two MONAI
+# bundles) - so all engines resolve one torch (2.14 today).
 override-dependencies = ["torch>=2.10"]
 conflicts = [
     [

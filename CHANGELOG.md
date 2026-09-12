@@ -32,8 +32,10 @@
   and 2.11 fine. `[tool.uv] override-dependencies = ["torch>=2.10"]` lifts the pin, and a
   VoxTell worker on torch 2.14 (CUDA 13, L40S) was run on Modal: a chest CT, four prompts,
   plausible volumes, about 8 GB of GPU memory. An override applies to the whole graph, so
-  SynthStrip and MONAI move to 2.14 too; neither has been run on it yet. The FastSurfer fork
-  asks for torch 2.14 and its torchvision (0.29) as its floor.
+  SynthStrip and MONAI move to 2.14 too, and both were run on it on Modal: SynthStrip (torch
+  2.14 beside the numpy 1.26 surfa needs) stripped a T1 to a 1282 mL brain, and MONAI 1.6
+  ran `spleen_ct_segmentation` and `wholeBody_ct_segmentation` (all 81 labels non-empty) on a
+  chest CT. The FastSurfer fork asks for torch 2.14 and its torchvision (0.29) as its floor.
 - **haversack runs on Python 3.12, for now (`requires-python = ">=3.12,<3.13"`).** FastSurfer
   fails on 3.14 - it passes `str | None` as an argparse type, which 3.14's argparse refuses -
   and upstream lists nothing past 3.13. The suite passes on 3.13 too, but every Modal image,
