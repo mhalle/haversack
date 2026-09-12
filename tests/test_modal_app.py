@@ -366,6 +366,40 @@ def test_the_engine_shim_reports_the_weights_identity_the_api_reports(monkeypatc
     assert checked, "no engine ecosystems were checked"
 
 
+def test_every_import_time_knob_reaches_the_container():
+    """A Modal container re-imports modal_app, and a HAVERSACK_* variable exists there only
+    if the image env forwards it (_RUNTIME_KNOBS). One that is not silently takes its
+    default in the container. HAVERSACK_APP_NAME was not (2026-09-12): a deploy with
+    --app-name had its worker commit the default app's scratch volume, which was not
+    mounted, and write every job record into the DEFAULT app's jobs Dict. Read the
+    variables the module actually reads, rather than keeping a second list of them."""
+    import ast
+    from pathlib import Path
+
+    from haversack import modal_app
+
+    tree = ast.parse(Path(modal_app.__file__).read_text(encoding="utf-8"))
+    read = set()
+    for stmt in tree.body:                          # module level: what an import runs
+        for node in ast.walk(stmt):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue                            # (their bodies run later, not at import)
+            name = None
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and ast.unparse(node.func.value) == "os.environ"):
+                name = node.args[0].value
+            elif (isinstance(node, ast.Subscript) and ast.unparse(node.value) == "os.environ"
+                    and isinstance(node.slice, ast.Constant)):
+                name = node.slice.value
+            if isinstance(name, str) and name.startswith("HAVERSACK_"):
+                read.add(name)
+    assert "HAVERSACK_APP_NAME" in read, "the scan no longer sees the module's env reads"
+    missing = sorted(read - set(modal_app._RUNTIME_KNOBS))
+    assert not missing, f"read at import but never forwarded into the container: {missing}"
+
+
 def test_volume_attach_preflight_fails_with_the_remedy(monkeypatch, tmp_path):
     """A deleted-under-snapshot volume once failed deep in a job with a cryptic
     'volume vo-... not attached' (2026-09-03); the preflight raises at startup with the fix."""

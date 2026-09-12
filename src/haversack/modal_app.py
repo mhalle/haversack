@@ -114,7 +114,21 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   "HAVERSACK_ALLOW_TRANSPOSE",
                   # Which cloud the idc: source fetches from first; a deployment
                   # in Google Cloud sets gcp and reads IDC's mirror without egress.
-                  "HAVERSACK_IDC_CLOUD", *_engines.engine_env_vars())
+                  "HAVERSACK_IDC_CLOUD",
+                  # EVERY other knob this module reads at import, because the container
+                  # re-imports it and a missing one silently takes its default there.
+                  # The app name did (2026-09-12): a deploy with --app-name ran its
+                  # containers as "haversack-serve", so a worker committed a volume that
+                  # was not mounted and every job failed - and the job records went to
+                  # the DEFAULT app's `haversack-serve-jobs` Dict, which is looked up by
+                  # name and so did not fail at all. INPUTS_GB and GPU_SNAPSHOT are read
+                  # at runtime too; the decorator-only ones are forwarded so a container
+                  # never disagrees with its deploy. test_every_import_time_knob_reaches_
+                  # the_container keeps this list and the reads below in step.
+                  "HAVERSACK_APP_NAME", "HAVERSACK_GPU", "HAVERSACK_PROXY_AUTH",
+                  "HAVERSACK_SCALEDOWN", "HAVERSACK_GPU_SNAPSHOT", "HAVERSACK_SNAPSHOT",
+                  "HAVERSACK_MAX_CONTAINERS", "HAVERSACK_INPUTS_GB",
+                  *_engines.engine_env_vars())
 
 # Base image (the ASGI api container + the nnU-Net GPU Worker). uv-NATIVE: the nnU-Net
 # worker's deps come from pyproject extras - `torch` (torch/nnunetv2/scipy/scikit-image),
