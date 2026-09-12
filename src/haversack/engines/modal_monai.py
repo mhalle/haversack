@@ -73,8 +73,13 @@ class MonaiWorker(_WorkerBase):
 
     def _prepare(self, task: str, progress=None) -> dict:
         from haversack.ecosystems import MonaiEcosystem
-        bundle = self._bundle_of(task)
-        MonaiEcosystem().ensure(bundle, WEIGHTS_ROOT, progress=progress)
+        from haversack.serve import split_run_name
+        # `task` may carry the caller's pin (serve.run_name). Split as the catalog does
+        # and hand the version on: `bundle@0.6.1` used to reach ensure() whole, as an
+        # unknown bundle, so every pinned MONAI job failed (review 2026-09-12).
+        name, version = split_run_name(task)
+        bundle = self._bundle_of(name)
+        MonaiEcosystem().ensure(bundle, WEIGHTS_ROOT, progress=progress, version=version)
         weights_vol.commit()
         self._ensured.add(task)
         return {"engine": self.engine, "task": task, "bundle": bundle}

@@ -494,3 +494,158 @@ def test_a_skipped_input_refresh_reaches_a_modal_caller():
     src = pathlib.Path(modal_app.__file__).read_text(encoding="utf-8")
     keys = src.split("keys = (")[1].split(")")[0]
     assert '"input_refresh_skipped"' in keys
+
+
+def test_the_modal_submit_carries_the_pin_and_the_worker_runs_it(monkeypatch, tmp_path):
+    """The Modal half of server-side pins (2026-09-12): the job record carries the caller's
+    version beside the canonical task, and the worker's weights step and compute both run
+    run_name(task, version), so its catalog installs that version or refuses it.
+
+    The worker's compute is driven for real through its plain class. _execute_job runs only
+    inside a Modal container, so its weights step is checked in the PARSED source - calls,
+    not text: the first version grepped for a string, and a review showed it passing with the
+    call reverted and the string left in a comment."""
+    import inspect
+    import types
+    m, fake = _swap_dict(monkeypatch)
+    monkeypatch.setattr(m, "scratch_vol", types.SimpleNamespace(commit=lambda: None))
+    monkeypatch.setattr(m, "_spawn_worker",
+                        lambda task, jid, tokens=None: types.SimpleNamespace(object_id="fc-1"))
+    monkeypatch.setattr(m, "_emit", lambda jid, d: None)
+    ex = m.ModalExecutor()
+    ex.submit("j1", tmp_path, None, "ts.v2:total_fast", {}, version="v9")
+    ex.submit("j2", tmp_path, None, "ts.v2:total_fast", {})
+    assert fake["j1"]["task"] == "ts.v2:total_fast" and fake["j1"]["version"] == "v9"
+    assert "version" not in fake["j2"]
+
+    assert ex.status_of("j1")["version"] == "v9"      # reported, as the local executor does
+    assert "version" not in ex.status_of("j2")
+
+    W = m.Worker._get_user_cls()                      # the nnU-Net worker, plain Python
+    w = W.__new__(W)
+    seen = []
+    w.seg = types.SimpleNamespace(segment=lambda image, task, **kw: seen.append(task))
+    W._compute(w, "in.nii.gz", {"task": "ts.v2:total_fast", "version": "v9"}, None, None)
+    W._compute(w, "in.nii.gz", {"task": "ts.v2:total_fast"}, None, None)
+    assert seen == ["ts.v2:total_fast@v9", "ts.v2:total_fast"]
+
+    import ast
+    import textwrap
+    tree = ast.parse(textwrap.dedent(inspect.getsource(m._execute_job)))
+    ensure_args = [c.args[0] for c in ast.walk(tree)
+                   if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                   and c.func.attr == "_ensure" and c.args]
+    assert ensure_args, "_execute_job no longer calls ctx._ensure"
+    for a in ensure_args:
+        assert isinstance(a, ast.Call) and getattr(a.func, "id", None) == "run_name", \
+            f"ctx._ensure is handed {ast.unparse(a)}, not run_name(...)"
+
+
+def test_split_run_name_is_run_name_inverted_as_the_catalog_parses():
+    from haversack.serve import run_name, split_run_name
+    for task, version in [("monai:spleen_ct_segmentation", "0.6.1"), ("ts.v2:total", None),
+                          ("fastsurfer:asegdkt", "2.5.4")]:
+        assert split_run_name(run_name(task, version)) == (task, version)
+    assert split_run_name("a@b@c") == ("a@b", "c")     # the LAST @, as EcosystemCatalog.resolve
+    assert split_run_name("a@") == ("a@", None)        # no version: nothing to hand on
+
+
+def test_an_unverified_pin_leaves_no_modal_inflight_marker(monkeypatch, tmp_path):
+    """Review 2026-09-12: the Modal twin of the local join - an unverifiable pin's job took
+    the `inflight:<key>` marker for the unpinned key, and the path surface's find_inflight
+    then handed its flight to plain asks."""
+    import types
+    m, fake = _swap_dict(monkeypatch)
+    monkeypatch.setattr(m, "scratch_vol", types.SimpleNamespace(commit=lambda: None))
+    monkeypatch.setattr(m, "_spawn_worker",
+                        lambda task, jid, tokens=None: types.SimpleNamespace(object_id="fc-1"))
+    monkeypatch.setattr(m, "_emit", lambda jid, d: None)
+    ex = m.ModalExecutor()
+    monkeypatch.setattr(ex, "_fresh_weights_versions", lambda task: ["w=unknown"])
+    monkeypatch.setattr(ex, "cache_get", lambda key: None)
+    ex.submit("j1", tmp_path, None, "ts.v2:total_fast", {}, identity=("idc:x",),
+              no_cache=True, version="v9")
+    assert not [k for k, v in fake.items() if k.startswith("inflight:") and v == "j1"]
+    ex.submit("j2", tmp_path, None, "ts.v2:total_fast", {}, identity=("idc:x",))
+    assert [k for k, v in fake.items() if k.startswith("inflight:") and v == "j2"]
+
+
+def test_the_pin_check_reloads_a_stale_weights_volume_once(monkeypatch):
+    """Review 2026-09-12: the API container's weights volume is frozen at start, and the pin
+    check read it without the reload the key's freshness gets - so a task a worker installed
+    since read as unknown, and every pinned read was refused. Same throttle as the key."""
+    from haversack import modal_app
+
+    class Vol:
+        n = 0
+
+        def reload(self):
+            Vol.n += 1
+
+    class Seg:
+        def describe(self, task):
+            if Vol.n:
+                return {"weights_installed": [{"id": "297", "version": "v2"}]}
+            return {"weights_installed": [{"id": "297"}]}
+
+    monkeypatch.setattr(modal_app, "weights_vol", Vol())
+    ex = modal_app.ModalExecutor()
+    ex.segmenter = Seg()
+    monkeypatch.setattr(type(ex), "_weights_reloaded_at", 0.0)
+    assert ex.installed_versions("t") == ["v2"] and Vol.n == 1
+    Vol.n = 0                                 # stale again, but inside the throttle window
+    assert ex.installed_versions("t") is None and Vol.n == 0
+
+
+def test_an_image_baked_worker_refuses_a_pin_its_own_build_does_not_run(monkeypatch):
+    """Review 2026-09-12: the API checks a pin against ITS registry, and a warm worker from an
+    older deploy is not preempted - so the worker checks against its own build too."""
+    from haversack import modal_app
+    from haversack.engines import registry
+    from haversack.errors import ModelNotFound
+    monkeypatch.setenv("HAVERSACK_FASTSURFER", "1")
+    have = registry.ENGINES["fastsurfer"].weights_identity()[0]["version"]
+    ensure = modal_app._WorkerBase._ensure
+    with pytest.raises(ModelNotFound, match=f"this build runs fastsurfer {have}"):
+        ensure(object(), "fastsurfer:asegdkt@0.0.0")
+    ensure(object(), f"fastsurfer:asegdkt@{have}")
+    ensure(object(), "fastsurfer:asegdkt")          # unpinned: nothing to check
+
+
+def test_the_monai_adapter_hands_the_pin_to_the_catalog():
+    """Review 2026-09-12 (confirmed): `monai:<bundle>@<v>` reached MonaiEcosystem.ensure whole,
+    as an unknown bundle, so every pinned MONAI job failed on Modal. Driven for real through
+    the adapter's plain class, in a subprocess: importing an adapter registers a Modal class,
+    which this test process must not carry. PYTHONPATH is prepended, never replaced (CI
+    gets haversack only from it)."""
+    import json
+    import os
+    import subprocess
+    import sys
+    code = "\n".join(['import json', 'from haversack import modal_app, ecosystems', 'from haversack.engines import modal_monai as mm', 'seen = []', 'ecosystems.MonaiEcosystem.ensure = (lambda self, bundle, root, progress=None, version=None:', '                                    seen.append([bundle, version]))', "mm.weights_vol = type('V', (), {'commit': lambda self: None})()", 'U = mm.MonaiWorker._get_user_cls()', 'w = U.__new__(U); w._ensured = set()', "U._prepare(w, 'monai:brats_mri_segmentation@0.5.4')", "U._prepare(w, 'monai:spleen_ct_segmentation')", 'print(json.dumps(seen))'])
+    src = str(pathlib.Path(__file__).resolve().parents[1] / "src")
+    env = {**os.environ, "HAVERSACK_MONAI": "1",
+           "PYTHONPATH": os.pathsep.join(p for p in (src, os.environ.get("PYTHONPATH")) if p)}
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True,
+                       text=True, timeout=300)
+    assert r.returncode == 0, r.stderr[-3000:]
+    assert json.loads(r.stdout.strip().splitlines()[-1]) == [
+        ["brats_mri_segmentation", "0.5.4"], ["spleen_ct_segmentation", None]]
+
+
+def test_a_pinned_ask_answered_from_the_modal_cache_reports_its_pin(monkeypatch, tmp_path):
+    """Seen on Modal (2026-09-12): a verified pin served from the cache came back with no
+    `version` - the cache-hit branch builds its own record, which left it out. The local
+    executor reports it either way, so this deployment must too."""
+    import types
+    m, fake = _swap_dict(monkeypatch)
+    monkeypatch.setattr(m, "scratch_vol", types.SimpleNamespace(commit=lambda: None))
+    ex = m.ModalExecutor()
+    monkeypatch.setattr(ex, "_fresh_weights_versions", lambda task: ["297=v2.0.0-weights"])
+    monkeypatch.setattr(ex, "cache_get", lambda key: ("/cache/labels.seg.nrrd", {"volumes_ml": {}}))
+    ex.submit("j1", tmp_path, None, "ts.v2:total_fast", {}, identity=("idc:x",),
+              version="v2.0.0-weights")
+    ex.submit("j2", tmp_path, None, "ts.v2:total_fast", {}, identity=("idc:x",))
+    assert fake["j1"]["cached"] is True and fake["j1"]["version"] == "v2.0.0-weights"
+    assert ex.status_of("j1")["version"] == "v2.0.0-weights"
+    assert "version" not in fake["j2"]

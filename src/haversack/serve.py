@@ -311,6 +311,36 @@ def weights_versions_of(segmenter, task) -> list:
     return out + _engine_epoch(segmenter, task)
 
 
+def installed_versions(segmenter, task) -> list | None:
+    """The weights versions this server would run for canonical ``task``, one per weights
+    entry ``describe()`` reports - or None when it cannot say (nothing installed yet, or an
+    entry with no version sidecar). None is "unknown", never "anything": every catalog's
+    own ``ensure`` refuses to let an unknown installed tag satisfy a pin, and so does the
+    wire (2026-09-12)."""
+    try:
+        entries = segmenter.describe(task).get("weights_installed") or []
+    except Exception:
+        return None
+    versions = [e.get("version") for e in entries]
+    return versions if versions and all(versions) else None
+
+
+def run_name(task: str, version: str | None) -> str:
+    """The name a worker hands the catalog: the canonical task, re-pinned when the caller
+    pinned it. The wire keys and routes on the canonical name, but the catalog is where a
+    pin is enforced (install that version, or refuse), so the pin has to arrive there -
+    dropping it here is how a pinned submit used to run whatever was installed."""
+    return f"{task}@{version}" if version else task
+
+
+def split_run_name(name: str) -> tuple:
+    """``run_name``'s inverse: ``(task, version or None)``. Split at the LAST ``@``, as
+    ``EcosystemCatalog.resolve`` does, so a worker that must hand the version on itself
+    (the MONAI adapter) parses a pin exactly as the catalog that enforces it would."""
+    task, sep, version = str(name).rpartition("@")
+    return (task, version) if sep and task and version else (str(name), None)
+
+
 def _engine_epoch(segmenter, task) -> list:
     """``["<engine>@epoch=<n>"]`` for an engine that declares a cache epoch, else nothing,
     so an engine that never bumps keeps exactly the keys it always had.
@@ -1906,6 +1936,10 @@ class JobRecord:
     #: use). Surfaced on the job so a caller can retry rather than trust a result
     #: computed from bytes it asked not to reuse.
     input_refresh_skipped: bool = False
+    #: The weights version the caller pinned (`task@version`), or None. `task` stays
+    #: canonical - it is what keys and routes - and the worker runs
+    #: ``run_name(task, version)``, so the catalog installs that version or refuses it.
+    version: str | None = None
 
 
 class _PrepareDone(Exception):
@@ -1987,6 +2021,7 @@ class LocalExecutor:
                 "labels_path": str(rec.labels_path) if rec.labels_path else None,
                 "refresh_input": bool(rec.refresh_input),
                 "input_refresh_skipped": bool(rec.input_refresh_skipped),
+                "version": rec.version,
                 "needed_credentials": bool(rec.source_tokens)}
 
     def _persist(self, rec: JobRecord) -> None:
@@ -2029,12 +2064,15 @@ class LocalExecutor:
                                               for a, b in (r.get("input_paths") or [])),
                             cache_key=r.get("cache_key"), created=r.get("created") or time.time(),
                             refresh_input=bool(r.get("refresh_input")),
-                            input_refresh_skipped=bool(r.get("input_refresh_skipped")))
+                            input_refresh_skipped=bool(r.get("input_refresh_skipped")),
+                            version=r.get("version"))
             self._jobs[rec.id] = rec
             self._pending.append(rec.id)
             # the single-flight marker, oldest first: without it a re-ask for the same
             # key after a restart starts a second job, and a DELETE cancels the wrong one
-            if rec.cache_key and rec.cache_key not in self._inflight:
+            # ...but not for a pinned job: whether its pin was verified is not recorded,
+            # and a marker is only exact for one that was (see submit)
+            if rec.cache_key and not rec.version and rec.cache_key not in self._inflight:
                 self._inflight[rec.cache_key] = rec.id
         # Positively identify a job directory before removing it, rather than
         # removing whatever is not recognized. The workdir legitimately holds
@@ -2072,11 +2110,11 @@ class LocalExecutor:
     def submit(self, jid: str, jdir: Path, input_path, task: str, options: dict,
                *, source=None, identity: tuple = (), no_cache: bool = False,
                source_tokens: dict | None = None, inputs: tuple = (),
-               refresh_input: bool = False) -> JobRecord:
+               refresh_input: bool = False, version: str | None = None) -> JobRecord:
         rec = JobRecord(id=jid, task=task, options=options, dir=jdir, input_path=input_path,
                         source=list(source or [{"kind": "upload"}]), input_identity=tuple(identity),
                         input_paths=tuple(inputs), source_tokens=source_tokens or None,
-                        refresh_input=bool(refresh_input))
+                        refresh_input=bool(refresh_input), version=version)
         if self.cache is not None and identity:
             rec.cache_key = result_key(identity, task, options,
                                        weights_versions_of(self.segmenter, task))
@@ -2111,7 +2149,12 @@ class LocalExecutor:
                 raise QueueFull(f"queue is full ({self.max_pending} pending)")
             self._jobs[jid] = rec
             self._pending.append(jid)
-            if rec.cache_key:
+            # A pin the route could not verify (it forced no_cache for it) is keyed on an
+            # UNKNOWN installed version, and its marker let an unpinned ask of the same
+            # bytes join it - inheriting a bad pin's failure, or a good pin's version
+            # (review 2026-09-12). It gets a marker only once it re-keys on what it
+            # actually installed (_migrate below), when joining it is exact.
+            if rec.cache_key and not (version and no_cache):
                 self._inflight[rec.cache_key] = jid
             # written inside the same _cv block as the in-memory insert, so the
             # durable record and the runtime view move together
@@ -2419,7 +2462,7 @@ class LocalExecutor:
                             inp = preread
                         else:
                             inp = rec.input_path
-                seg = self._segment(inp, rec.task, progress=reporter,
+                seg = self._segment(inp, run_name(rec.task, rec.version), progress=reporter,
                                     cancel=rec.cancel_token, **rec.options)
                 # what the result was computed FROM, and under what terms - the
                 # rights each fetch recorded beside its bytes, or "not
@@ -2696,6 +2739,8 @@ class LocalExecutor:
             d["queue_position"] = self.position(rec.id)
         if rec.progress is not None:
             d["progress"] = rec.progress
+        if rec.version:
+            d["version"] = rec.version     # what the caller pinned; `task` is canonical
         if rec.error is not None:
             d["error"] = rec.error
         if getattr(rec, "input_refresh_skipped", False):
@@ -2871,12 +2916,19 @@ class CacheOnlyExecutor:
             raise LookupError(f"unknown task {t!r}")
 
     def __init__(self, cache_get, key_fn, tasks_fn, *, inflight_fn=None,
-                 resolve_fn=None, list_fn=None, sources=None):
+                 resolve_fn=None, list_fn=None, sources=None, versions_fn=None):
         self._get, self._key, self._inflight = cache_get, key_fn, inflight_fn
+        self._versions = versions_fn
         self.segmenter = self._TaskView(tasks_fn, resolve_fn)
         self.sources = _source_registry(sources)
         if list_fn is not None:
             self.cache_list = list_fn
+
+    def installed_versions(self, task: str):
+        """What pin_status asks: the versions behind this twin's cache, from the operator's
+        ``versions_fn`` - None without one, which refuses every pin (a twin has no
+        describe() to read them from)."""
+        return self._versions(task) if self._versions is not None else None
 
     def resource_key(self, identity: str, task: str, opts=None) -> str:
         return self._key(identity, task, opts or {})
@@ -2966,10 +3018,15 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 out[prefix] = tok
         return out or None
 
-    def canon_task(t: str):
+    def canon_task(t: str, *, unverified_ok: bool = False):
         """Canonical task name for any accepted form (eco:name,
         eco:name@version) - None when unknown or bare. All forms converge to
         one canonical name and therefore one result-cache key.
+
+        A pin is checked on the way (see ``pin_status``): a version this server
+        provably does not run is a 409 on every route, and one it cannot verify
+        is a 409 too unless the caller can act on it - ``unverified_ok`` is for
+        submit and prepare, which carry the pin to the catalog.
 
         Path-bearing names are refused BEFORE resolution: the in-process
         API's freedom to run a model-folder path must not cross the wire,
@@ -2979,10 +3036,42 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             return None
         if hasattr(seg, "resolve_task"):
             try:
-                return seg.resolve_task(t)
+                canonical = seg.resolve_task(t)
             except LookupError:
                 return None
-        return t if t in seg.tasks() else None
+        else:
+            canonical = t if t in seg.tasks() else None
+        if canonical is not None and "@" in t:
+            pin_status(t, canonical, unverified_ok=unverified_ok)
+        return canonical
+
+    def pin_status(t: str, canonical: str, *, unverified_ok: bool = False) -> tuple:
+        """``(version, verified)`` for a pinned name, by the rule every catalog's ``ensure``
+        applies: the INSTALLED version decides, and an unknown one satisfies nothing.
+
+        Raises 409 when the server provably runs another version, and when it cannot tell
+        and ``unverified_ok`` is False - a read has no way to install anything, so
+        answering it would be serving an unproven version under the caller's pin. Until
+        2026-09-12 the wire dropped the pin entirely: `task@X` ran or served whatever was
+        installed, the silent wrong version the grammar exists to prevent."""
+        version = t.rpartition("@")[2]
+        # the executor's own answer when it has one: Modal's reloads a weights volume that
+        # is frozen at container start, and the public twin has no describe() at all
+        versions_of = getattr(executor, "installed_versions", None)
+        have = versions_of(canonical) if versions_of else installed_versions(seg, canonical)
+        if have is None:
+            if not unverified_ok:
+                remedy = ("this server only serves cached results" if read_only else
+                          "submit it as a job (POST /v1/jobs), which installs that "
+                          "version or refuses it")
+                raise HTTPException(409, (
+                    f"{t}: this server cannot confirm which version of {canonical} it has "
+                    f"installed, so it will not answer for a pin; {remedy}"))
+            return version, False
+        if any(v != version for v in have):
+            runs = " / ".join(sorted(set(map(str, have))))
+            raise HTTPException(409, f"{t}: this server runs {canonical} {runs}, not {version}")
+        return version, True
 
     def unknown_task(t: str) -> str:
         """What a 404 for task ``t`` says: the resolver's own words when it has them - a bare
@@ -3336,7 +3425,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         what first use does implicitly. Returns a job to watch; its result is
         the task's full description once materialized."""
         require_auth(request)
-        canonical = canon_task(task)
+        canonical = canon_task(task, unverified_ok=True)   # installing IS the answer
         if canonical is None:
             raise HTTPException(404, unknown_task(task))
         # canon_task drops @version by design (all wire forms converge to ONE
@@ -3412,7 +3501,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
     @app.get("/v1/tasks/{task}", tags=["tasks"])
     def describe(task: str):
-        canonical = canon_task(task)       # catalog names only, like every other route
+        # catalog names only, like every other route - and metadata, so a pin it cannot
+        # check yet is described (a provably other version is still a 409)
+        canonical = canon_task(task, unverified_ok=True)
         if canonical is None:
             raise HTTPException(404, unknown_task(task))
         try:
@@ -3463,15 +3554,29 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 raise HTTPException(422, f"source kind {kind!r} is not enabled on this "
                                          "server (missing dependency)")
         kind = src[0].get("kind", "upload") if src else "upload"
-        canonical = canon_task(task)
+        written = task
+        canonical = canon_task(task, unverified_ok=True)
         if canonical is None:              # catalog names only at the wire boundary
             why = unknown_task(task)
-            if "needs its catalog" not in why:
+            # Keep the resolver's own words whenever they name a fix - "needs its catalog",
+            # and a renamed catalog or task ("... is 'ts.v2' since 0.11.0: use ..."). Only a
+            # plain "unknown task" is replaced by a sample of what this server offers. The
+            # test used to be `"needs its catalog" not in why`, which swallowed the rename
+            # hints at submit (seen on Modal: fastsurfer:brain, 2026-09-12; ts: since 0.11.0).
+            if why.startswith("unknown task"):
                 names = seg.tasks()
                 why = (f"unknown task {task!r}; this server offers {len(names)} catalog "
                        "tasks, e.g. " + ", ".join(names[:4]))
             raise HTTPException(404, why)
         task = canonical
+        # The pin travels with the job so the worker's catalog installs that version or
+        # refuses it. One this server cannot verify yet must not be answered from cache or
+        # by joining a flight either: both are keyed on the version that IS installed,
+        # which is unknown here - the worker re-keys on what it actually ran.
+        version, verified = (pin_status(written, canonical, unverified_ok=True)
+                             if "@" in written else (None, True))
+        if not verified:
+            no_cache = True
         # ...and the engine may decline to be served from cache at all (see
         # engine_serves_from_cache): a per-engine default, overridable per request
         # only in the stricter direction - a caller cannot ask to be memoized.
@@ -3495,7 +3600,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         try:
             return await _accept(request, jid, jdir, binding, task, opts, src,
                                  file, no_cache, executor, seg,
-                                 caller_asked_no_cache)
+                                 caller_asked_no_cache, version=version)
         except QueueFull as e:
             _discard(jdir)
             raise HTTPException(429, str(e), headers={"Retry-After": "30"}) from e
@@ -3510,7 +3615,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise
 
     async def _accept(request, jid, jdir, binding, task, opts, src, file,
-                      no_cache, executor, seg, caller_asked_no_cache=False):
+                      no_cache, executor, seg, caller_asked_no_cache=False,
+                      version=None):
         multi = len(binding) > 1
         # Only a multi-input job needs to look past the declared `file` part;
         # re-parsing the form for the single case would change nothing and
@@ -3661,6 +3767,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                             # image, and that must mean channel 0 either way
                             source=[e for _, e in binding],
                             identity=identity, no_cache=no_cache,
+                            # passed only when set, so an executor that predates pins
+                            # keeps its signature
+                            **({"version": version} if version else {}),
                             refresh_input=caller_asked_no_cache,
                             source_tokens=source_tokens_of(request),
                             inputs=tuple(staged) if multi else ())
@@ -4289,7 +4398,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
 
 def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
-                      list_fn=None, resolve_fn=None):
+                      list_fn=None, resolve_fn=None, versions_fn=None):
     """The anonymous read-only twin: cache hits and nothing else.
 
     Since review R4 this is create_app itself over a CacheOnlyExecutor with
@@ -4310,7 +4419,7 @@ def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
     """
     ex = CacheOnlyExecutor(cache_get, key_fn, tasks_fn, inflight_fn=inflight,
                            resolve_fn=resolve_fn, list_fn=list_fn,
-                           sources=sources)
+                           sources=sources, versions_fn=versions_fn)
     return create_app(ex, read_only=True)
 
 

@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+- **The server honours `task@version`.** It dropped the pin before a job existed, so
+  `POST /v1/jobs` with `ts.v2:total@X`, and a pinned GET, ran or served whatever version was
+  installed - the silent wrong version the grammar exists to prevent; only `prepare` held it.
+  Now a pin the server provably does not run is a 409 naming what it runs, on every route. One
+  it cannot check yet (nothing installed, or no version record) is carried with the job to the
+  worker, locally and on Modal, whose catalog installs that version or refuses it. Such a job
+  is never answered from the cache or by joining another flight, and no other request joins
+  it until it has re-keyed on what it actually installed - a review found a plain request
+  riding a pinned job and inheriting its failure. A read cannot install, so an unverifiable
+  pin there is a 409 pointing at `POST /v1/jobs`; `GET /v1/tasks/{task}@v` still describes
+  it. Modal's API container reloads its frozen weights volume before calling a pin
+  unverifiable, the public twin checks pins against versions the deployment gives it, image-baked
+  workers re-check a pin against their own build, and the MONAI worker hands the pin to its
+  catalog (it used to read `bundle@version` as an unknown bundle). Jobs report `version`,
+  on Modal too, including a pinned ask answered from the cache. Run on Modal before release:
+  a wrong pin refused at submit on an installed task and by the worker's catalog on an
+  uninstalled one, a plain request kept out of a pinned job's flight, a pinned read
+  answered once the API's volume caught up with the worker's install, and pinned MONAI and
+  FastSurfer 2.5.4 jobs completed.
+- **`POST /v1/jobs` keeps a rename hint.** Submitting `fastsurfer:brain`, or `ts:total_fast`
+  since 0.11.0, answered a generic "unknown task ... this server offers N tasks": the route
+  kept the resolver's own words only when they said "needs its catalog". Now only a plain
+  unknown task is replaced by that sample; a renamed task or catalog is named with its new
+  form, as the CLI and the Python API already did.
 - **One torch for every engine: VoxTell's `torch<2.9` is overridden, and everything resolves
   torch 2.14.** VoxTell pinned below 2.9 because torch 2.9.0 slowed 3D convolutions under
   mixed precision (pytorch#166122); that was fixed in 2.10, and VoxTell's authors report 2.10

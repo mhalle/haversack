@@ -1577,7 +1577,8 @@ def test_prepare_requires_auth_when_token_set(tmp_path):
 def test_all_task_name_forms_converge_to_one_cache_key(tmp_path, monkeypatch):
     """short, eco:name, and eco:name@version address the same resource: the
     canonical name drives the result key, so a result computed under one form
-    is a cache hit under every other."""
+    is a cache hit under every other - the pinned form only when the server runs
+    that version (it reports v1 here); another version is a 409, never a hit."""
     from haversack import serve as serve_mod
     monkeypatch.setattr(serve_mod, "_idc_enabled", lambda: True)
 
@@ -1590,8 +1591,11 @@ def test_all_task_name_forms_converge_to_one_cache_key(tmp_path, monkeypatch):
     seg = FakeSegmenter()
     seg.resolve_task = lambda t: {"total_fast": "ts.v2:total_fast",
                                   "ts.v2:total_fast": "ts.v2:total_fast",
-                                  "ts.v2:total_fast@v1": "ts.v2:total_fast"}.get(t) or (
+                                  "ts.v2:total_fast@v1": "ts.v2:total_fast",
+                                  "ts.v2:total_fast@v2": "ts.v2:total_fast"}.get(t) or (
         (_ for _ in ()).throw(LookupError(t)))
+    seg.describe = lambda t: {"name": t, "structures": ["spleen", "kidney_right"],
+                              "weights_installed": [{"id": "w", "version": "v1"}]}
     ex = LocalExecutor(seg, workdir=tmp_path, cache_dir=tmp_path / "rc",
                        fetch_idc_fn=fake_fetch)
     client = TestClient(create_app(ex))
@@ -1605,6 +1609,8 @@ def test_all_task_name_forms_converge_to_one_cache_key(tmp_path, monkeypatch):
         r2 = client.get(f"/v1/idc/{u}/{form}/labels.seg.nrrd")
         assert r2.status_code == 200, form           # cache hit, no recompute
     assert len(seg.calls) == 1
+    r3 = client.get(f"/v1/idc/{u}/ts.v2:total_fast@v2/labels.seg.nrrd")
+    assert r3.status_code == 409 and "runs ts.v2:total_fast v1, not v2" in r3.text
     assert client.get(f"/v1/idc/{u}/bogus/labels.seg.nrrd").status_code == 404
 
 
@@ -5342,3 +5348,272 @@ class TestReclamationRespectsLifetimes:
             t.join(30)
         assert failed == [], f"the writer lost its work: {failed}"
         assert cache.get("k")[0].read_bytes() == b"slow"
+
+
+# -- server-side version pins (2026-09-12) ----------------------------------------------
+# The wire dropped `@version` before a job existed, so a pinned submit or read ran or served
+# whatever was installed. The rule now is every catalog's own: the INSTALLED version decides,
+# and an unknown one satisfies nothing.
+
+class _VersionedSeg(FakeSegmenter):
+    """A catalog that knows which weights version it has installed (None: it cannot say)."""
+
+    def __init__(self, installed=None, **kw):
+        super().__init__(**kw)
+        self.installed = installed
+
+    def resolve_task(self, t):
+        base = t.rpartition("@")[0] if "@" in t else t
+        if base not in self.tasks():
+            raise LookupError(t)
+        return base
+
+    def describe(self, task):
+        d = super().describe(task)
+        if self.installed:
+            # one version, or a list for a union task (None: an entry with no version record)
+            vs = self.installed if isinstance(self.installed, list) else [self.installed]
+            d["weights_installed"] = [{"id": f"w{i}", "version": v} for i, v in enumerate(vs)]
+        return d
+
+
+def _pin_app(tmp_path, installed, **kw):
+    seg = _VersionedSeg(installed)
+    ex = LocalExecutor(seg, workdir=tmp_path, cache_dir=tmp_path / "rc", **kw)
+    return seg, TestClient(create_app(ex))
+
+
+def _settle(client, jid, timeout=5.0):
+    s = {}
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        s = client.get(f"/v1/jobs/{jid}").json()
+        if s.get("state") in ("done", "failed", "cancelled"):
+            return s
+        time.sleep(0.02)
+    raise AssertionError(f"job {jid} did not settle: {s}")
+
+
+def test_a_pinned_submit_the_server_provably_does_not_run_is_refused(tmp_path):
+    """A 409 naming what the server runs, and nothing queued - not a job that runs v2
+    under the caller's v1."""
+    seg, client = _pin_app(tmp_path, installed="v2")
+    r = client.post("/v1/jobs", files={"file": ("scan.nii.gz", volume_bytes(41))},
+                    data={"task": "total_fast@v1", "options": "{}"})
+    assert r.status_code == 409, r.text
+    assert "runs total_fast v2, not v1" in r.text
+    time.sleep(0.05)
+    assert seg.calls == []
+
+
+def test_a_pin_the_server_runs_reaches_the_catalog_and_the_job_reports_it(tmp_path):
+    seg, client = _pin_app(tmp_path, installed="v1")
+    s = _settle(client, submit(client, task="total_fast@v1"))
+    assert s["state"] == "done", s
+    assert s["task"] == "total_fast" and s["version"] == "v1"   # canonical, plus the pin
+    assert seg.calls[0][1] == "total_fast@v1"                   # the catalog sees the pin
+
+
+def test_an_unverifiable_pin_goes_to_the_catalog_and_is_never_answered_from_cache(tmp_path):
+    """Nothing installed, or no version record: the server cannot check the pin, so the job
+    carries it to the worker's catalog (install that version, or refuse). The same bytes
+    submitted twice compute twice - the cache and any flight are keyed on the version that
+    IS installed, which is unknown here, so neither may answer for the pin."""
+    seg, client = _pin_app(tmp_path, installed=None)
+    for _ in range(2):
+        s = _settle(client, submit(client, task="total_fast@v1", fill=43))
+        assert s["state"] == "done" and s["version"] == "v1", s
+    assert [c[1] for c in seg.calls] == ["total_fast@v1", "total_fast@v1"]
+
+
+def test_an_unpinned_submit_is_untouched_by_the_pin_rule(tmp_path):
+    """No pin, no check: an unknown installed version is not a reason to refuse anything."""
+    seg, client = _pin_app(tmp_path, installed=None)
+    s = _settle(client, submit(client, task="total_fast"))
+    assert s["state"] == "done" and "version" not in s
+    assert seg.calls[0][1] == "total_fast"
+
+
+@pytest.mark.parametrize("installed, form, says", [
+    ("v2", "total_fast@v1", "runs total_fast v2, not v1"),
+    (None, "total_fast@v1", "POST /v1/jobs"),
+])
+def test_a_pinned_read_is_refused_unless_the_server_runs_that_version(
+        tmp_path, monkeypatch, installed, form, says):
+    """A read cannot install anything, so it answers a pin only for a version it can prove.
+    Refused before any compute, even with Prefer: wait."""
+    from haversack import serve as serve_mod
+    monkeypatch.setattr(serve_mod, "_idc_enabled", lambda: True)
+
+    def fake_fetch(series, jobdir):
+        d = jobdir / "series"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "s.dcm").write_bytes(volume_bytes())
+        return d
+
+    seg, client = _pin_app(tmp_path, installed, fetch_idc_fn=fake_fetch)
+    u = "0be27d1c-9410-47ff-9c9f-a44b26a4bd55"
+    for headers in ({}, {"Prefer": "wait=5"}):
+        r = client.get(f"/v1/idc/{u}/{form}/labels.seg.nrrd", headers=headers)
+        assert r.status_code == 409 and says in r.text, (headers, r.status_code, r.text)
+    assert seg.calls == []
+
+
+def test_an_unverified_pin_is_never_joined_by_an_unpinned_ask(tmp_path):
+    """Review 2026-09-12 (confirmed): an unverifiable pinned job registered the UNPINNED key's
+    in-flight marker, so a plain submit of the same bytes joined it - inheriting its failure
+    for a bad pin, or its version for a good one. Now the plain ask is its own job."""
+    import threading
+    gate = threading.Event()
+    seg = _VersionedSeg(None, gate=gate)
+    ex = LocalExecutor(seg, workdir=tmp_path, cache_dir=tmp_path / "rc")
+    client = TestClient(create_app(ex))
+    pinned = submit(client, task="total_fast@v1", fill=47)
+    plain = submit(client, task="total_fast", fill=47)          # same bytes, same key
+    assert plain != pinned
+    gate.set()
+    for jid in (pinned, plain):
+        assert _settle(client, jid)["state"] == "done"
+    assert sorted(c[1] for c in seg.calls) == ["total_fast", "total_fast@v1"]
+
+
+def test_describe_answers_a_pin_it_cannot_check_and_refuses_a_provably_other_one(tmp_path):
+    """Describe is metadata: an unverifiable pin is not a reason to refuse it."""
+    _, client = _pin_app(tmp_path / "a", installed=None)
+    assert client.get("/v1/tasks/total_fast@v1").status_code == 200
+    _, client = _pin_app(tmp_path / "b", installed="v2")
+    r = client.get("/v1/tasks/total_fast@v1")
+    assert r.status_code == 409 and "runs total_fast v2, not v1" in r.text
+
+
+def test_the_public_twin_checks_a_pin_against_the_versions_it_is_given(tmp_path):
+    """The twin has no describe(), so without a versions_fn every pin is unknown - refused,
+    and the refusal must not send the caller to a POST /v1/jobs this app does not have."""
+    from haversack.serve import ResultCache, create_public_app, result_key
+    cache = ResultCache(tmp_path / "c")
+    u = "0be27d1c-9410-47ff-9c9f-a44b26a4bd55"
+    key_fn = lambda identity, task, opts=None: result_key((identity,), task, opts or {}, ["w=v2"])
+    src = tmp_path / "labels.seg.nrrd"; src.write_bytes(volume_bytes())
+    cache.put(key_fn(f"idc:{u}", "total_fast"), src, {"volumes_ml": {"spleen": 1.0}}, {})
+    strip = lambda t: t.rpartition("@")[0] or t
+    tasks = lambda: ["total_fast"]
+    url = lambda form: f"/v1/idc/{u}/{form}/labels.seg.nrrd"
+
+    twin = TestClient(create_public_app(key_fn, cache.get, tasks, resolve_fn=strip,
+                                        versions_fn=lambda t: ["v2"]))
+    assert twin.get(url("total_fast@v2")).status_code == 200      # the version it holds
+    r = twin.get(url("total_fast@v1"))
+    assert r.status_code == 409 and "runs total_fast v2, not v1" in r.text
+
+    blind = TestClient(create_public_app(key_fn, cache.get, tasks, resolve_fn=strip))
+    r = blind.get(url("total_fast@v2"))
+    assert r.status_code == 409 and "POST /v1/jobs" not in r.text
+    assert "only serves cached results" in r.text
+
+
+def test_a_queued_pinned_job_keeps_its_pin_across_a_restart(tmp_path):
+    """Review 2026-09-12 (mutation survivor): `_restore` could drop `version` and nothing
+    noticed - the restarted job would then run whatever is installed under the caller's pin."""
+    gate = threading.Event()
+    seg = _VersionedSeg(None, gate=gate)
+    ex = LocalExecutor(seg, workdir=tmp_path)
+    client = TestClient(create_app(ex))
+    submit(client, fill=51)                                   # occupies the dispatcher
+    queued = submit(client, task="total_fast@v1", fill=52)    # still waiting, pinned
+    time.sleep(0.05)
+    ex._stop = True                                           # the process goes away
+    gate.set()
+
+    seg2 = _VersionedSeg(None)
+    client2 = TestClient(create_app(LocalExecutor(seg2, workdir=tmp_path)))
+    s = wait_state(client2, queued, ("done",))
+    assert s["state"] == "done" and s["version"] == "v1", s
+    # the restart re-runs the interrupted unpinned job too; the pinned one ran exactly once,
+    # under its pin (the input is a pre-read image, so it cannot be told apart by path)
+    assert [c[1] for c in seg2.calls].count("total_fast@v1") == 1, seg2.calls
+
+
+@pytest.mark.parametrize("installed, says", [(None, "cannot confirm"),
+                                             ("v2", "runs total_fast v2, not v1")])
+def test_a_pinned_artifact_read_is_refused_like_a_pinned_labels_read(
+        tmp_path, monkeypatch, installed, says):
+    """Review 2026-09-12 (mutation survivor): the artifact routes (meta, preview, statistics)
+    resolve through `keyed()`, a different path from the labels route, and letting an
+    unverified pin through there went unnoticed."""
+    from haversack import serve as serve_mod
+    monkeypatch.setattr(serve_mod, "_idc_enabled", lambda: True)
+    _, client = _pin_app(tmp_path, installed)
+    u = "0be27d1c-9410-47ff-9c9f-a44b26a4bd55"
+    r = client.get(f"/v1/idc/{u}/total_fast@v1/meta.json")
+    assert r.status_code == 409 and says in r.text, (r.status_code, r.text)
+
+
+def test_a_describe_that_fails_leaves_a_pin_unverified_not_verified(tmp_path, monkeypatch):
+    """Review 2026-09-12 (mutation survivor): installed_versions swallowing a describe()
+    failure as `[]` would verify EVERY pin - `any()` over no versions finds no mismatch.
+    A failure is unknown, and unknown answers no pin."""
+    from haversack import serve as serve_mod
+    monkeypatch.setattr(serve_mod, "_idc_enabled", lambda: True)
+
+    class Broken(_VersionedSeg):
+        def describe(self, task):
+            raise RuntimeError("weights volume unreadable")
+
+    ex = LocalExecutor(Broken(None), workdir=tmp_path, cache_dir=tmp_path / "rc")
+    client = TestClient(create_app(ex))
+    u = "0be27d1c-9410-47ff-9c9f-a44b26a4bd55"
+    r = client.get(f"/v1/idc/{u}/total_fast@v1/labels.seg.nrrd")
+    assert r.status_code == 409 and "cannot confirm" in r.text, (r.status_code, r.text)
+    from haversack.serve import installed_versions
+    assert installed_versions(Broken(None), "total_fast") is None
+
+
+def test_a_union_task_satisfies_a_pin_only_if_every_weights_entry_is_that_version(tmp_path):
+    """Review 2026-09-12 (mutation survivor): no test had more than one weights entry, so
+    comparing only the first went unnoticed. A union task runs several models; a pin is a
+    claim about all of them, as TSEcosystem.ensure checks every installed path."""
+    seg, client = _pin_app(tmp_path, installed=["v1", "v2"])
+    r = client.post("/v1/jobs", files={"file": ("scan.nii.gz", volume_bytes(61))},
+                    data={"task": "total_fast@v1", "options": "{}"})
+    assert r.status_code == 409 and "runs total_fast v1 / v2, not v1" in r.text, r.text
+    assert seg.calls == []
+
+
+def test_a_union_task_with_an_unrecorded_entry_cannot_verify_a_pin(tmp_path, monkeypatch):
+    """Review 2026-09-12 (mutation survivor): one entry with no version record makes the whole
+    answer unknown - not a mismatch against "None", and never a match."""
+    from haversack import serve as serve_mod
+    monkeypatch.setattr(serve_mod, "_idc_enabled", lambda: True)
+    _, client = _pin_app(tmp_path, installed=["v1", None])
+    u = "0be27d1c-9410-47ff-9c9f-a44b26a4bd55"
+    r = client.get(f"/v1/idc/{u}/total_fast@v1/labels.seg.nrrd")
+    assert r.status_code == 409 and "cannot confirm" in r.text, (r.status_code, r.text)
+
+
+@pytest.mark.parametrize("task, says", [
+    ("fastsurfer:brain", "is 'fastsurfer:asegdkt' since 0.12.0: use fastsurfer:asegdkt"),
+    ("ts:total_fast", "is 'ts.v2' since 0.11.0: use ts.v2:total_fast"),
+    ("nosuch:thing", "this server offers"),
+])
+def test_submit_keeps_the_resolvers_rename_hint(tmp_path, task, says):
+    """Seen on Modal (2026-09-12): POST /v1/jobs with fastsurfer:brain answered a generic
+    "unknown task ... offers N tasks" - the route kept the resolver's words only when they
+    said "needs its catalog", so every rename hint was swallowed at submit, ts:'s since
+    0.11.0. Only a plain unknown task gets the sample of what the server offers."""
+    from haversack.ecosystems import RENAMED_ECOSYSTEMS, RENAMED_TASKS
+
+    class Renaming(_VersionedSeg):
+        def resolve_task(self, t):
+            eco, _, short = t.partition(":")
+            if t in RENAMED_TASKS:
+                raise LookupError(f"task {t!r} is {RENAMED_TASKS[t]!r} since 0.12.0: "
+                                  f"use {RENAMED_TASKS[t]}")
+            if eco in RENAMED_ECOSYSTEMS:
+                new = RENAMED_ECOSYSTEMS[eco]
+                raise LookupError(f"catalog {eco!r} is {new!r} since 0.11.0: use {new}:{short}")
+            raise LookupError(f"unknown task {t!r}")
+
+    client = TestClient(create_app(LocalExecutor(Renaming(None), workdir=tmp_path)))
+    r = client.post("/v1/jobs", files={"file": ("scan.nii.gz", volume_bytes(71))},
+                    data={"task": task, "options": "{}"})
+    assert r.status_code == 404 and says in r.json()["detail"], r.text

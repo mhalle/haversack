@@ -651,7 +651,9 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
             result = ctx._prepare(meta["task"], progress=rep)
             _emit(jid, {"state": "done", "finished": time.time(), "result": result})
             return
-        ctx._ensure(meta["task"])   # per-container weights provisioning (engine's own)
+        from haversack.serve import run_name
+        # per-container weights provisioning (engine's own), under the caller's pin if any
+        ctx._ensure(run_name(meta["task"], meta.get("version")))
         entries = meta.get("source") or [{"kind": "upload"}]
         if len(entries) > 1:
             # A multi-input task. Everything needed is already on `source`: each
@@ -914,7 +916,13 @@ class _WorkerBase:
                 "note": "weights ship with the engine image"}
 
     def _ensure(self, task: str) -> None:
-        return None
+        """Nothing to install - but a PINNED name is checked against this container's own
+        build through its catalog (ImageBakedEcosystem.ensure refuses a version it does not
+        run). The API checked the pin against ITS registry, and a redeploy does not preempt
+        a warm worker still running the previous build."""
+        if "@" in str(task):
+            from haversack.ecosystems import EcosystemCatalog
+            EcosystemCatalog().prepare(task)
 
     def _compute(self, input_path, meta, on_progress, token):
         raise NotImplementedError
@@ -985,7 +993,9 @@ class Worker(_WorkerBase):
             self._ensured.add(task)
 
     def _compute(self, input_path, meta, on_progress, token):
-        return self.seg.segment(input_path, meta["task"], progress=on_progress,
+        from haversack.serve import run_name
+        return self.seg.segment(input_path, run_name(meta["task"], meta.get("version")),
+                                progress=on_progress,
                                 cancel=token, **(meta.get("options") or {}))
 
 
@@ -1227,18 +1237,41 @@ class ModalExecutor:
                                            # volume walk per row
         wv = weights_versions_of(self.segmenter, task)
         if any("unknown" in str(v) for v in wv):
-            with cls._weights_reload_lock:
-                if time.time() - cls._weights_reloaded_at < 30.0:
-                    return wv
-                cls._weights_reloaded_at = time.time()
-                try:
-                    weights_vol.reload()
-                except Exception:
-                    cls._wv_cache[task] = (wv, time.time())
-                    return wv
+            reloaded = self._reload_weights()
+            if reloaded is None:           # throttled: answer as-is, uncached
+                return wv
+            if not reloaded:               # the reload failed
+                cls._wv_cache[task] = (wv, time.time())
+                return wv
             wv = weights_versions_of(self.segmenter, task)
         cls._wv_cache[task] = (wv, time.time())
         return wv
+
+    def _reload_weights(self):
+        """Reload the frozen weights volume, throttled to once per 30 s per container:
+        True reloaded, False the reload failed, None throttled. One throttle for the key's
+        freshness and the pin check, so together they reload no more often than before."""
+        cls = type(self)
+        with cls._weights_reload_lock:
+            if time.time() - cls._weights_reloaded_at < 30.0:
+                return None
+            cls._weights_reloaded_at = time.time()
+            try:
+                weights_vol.reload()
+            except Exception:
+                return False
+        return True
+
+    def installed_versions(self, task):
+        """serve.installed_versions, stale-proof the way _fresh_weights_versions is: this
+        container's weights volume is frozen at start, so a task a worker has installed
+        since reads as unknown - and unknown refuses every pinned read and keeps every
+        pinned submit out of the cache until something reloads it (review 2026-09-12)."""
+        from haversack.serve import installed_versions
+        have = installed_versions(self.segmenter, task)
+        if have is None and self._reload_weights():
+            have = installed_versions(self.segmenter, task)
+        return have
 
     def resource_key(self, identity: str, task: str, opts=None) -> str:
         from haversack.serve import result_key
@@ -1247,7 +1280,8 @@ class ModalExecutor:
 
     def submit(self, jid, jdir, input_path, task, options, *, source=None,
                identity=(), no_cache: bool = False, source_tokens=None,
-               inputs: tuple = (), refresh_input: bool = False):
+               inputs: tuple = (), refresh_input: bool = False,
+               version: str | None = None):
         # `refresh_input` is recorded on the job meta and read by the worker's
         # fetch (`_refresh_series`), the way the local executor's dispatcher does.
         # `inputs` (the role -> local path binding) is accepted for signature
@@ -1270,16 +1304,24 @@ class ModalExecutor:
                             "input_identity": list(identity), "state": "done",
                             "cached": True, "created": time.time(),
                             "started": time.time(), "finished": time.time(),
-                            "result": hit[1], "cache_path": str(hit[0])}
+                            "result": hit[1], "cache_path": str(hit[0]),
+                            # a pinned ask answered from the cache still reports its pin,
+                            # as the local executor does (seen missing on Modal, 2026-09-12)
+                            **({"version": version} if version else {})}
                     jobs_dict[jid] = meta
                     return meta
         meta = {"id": jid, "task": task, "options": options,
                 "source": list(source or [{"kind": "upload"}]),
                 "input_identity": list(identity), "cache_key": key,
                 "refresh_input": bool(refresh_input),
+                # the caller's pin: the worker runs run_name(task, version), so its
+                # catalog installs that version or refuses it (see serve.run_name)
+                **({"version": version} if version else {}),
                 "state": "queued", "created": time.time()}
         jobs_dict[jid] = meta
-        if key:
+        # no marker for a pin the API could not verify: it is keyed on an UNKNOWN
+        # installed version (see LocalExecutor.submit); the worker's re-key installs one
+        if key and not (version and no_cache):
             jobs_dict[f"inflight:{key}"] = jid
         call = _spawn_worker(task, jid, source_tokens)
         _emit(jid, {"call_id": call.object_id})   # merge, never clobber worker emits
@@ -1322,7 +1364,10 @@ class ModalExecutor:
                 "cache_key", "options",
                 # the caller asked for fresh bytes and did not get them; the
                 # local executor reports this, so this deployment must too
-                "input_refresh_skipped")
+                "input_refresh_skipped",
+                # the caller's pin beside the canonical task - the local executor reports
+                # it, and a whitelist without it dropped it here (review 2026-09-12)
+                "version")
         d = {k: meta.get(k) for k in keys if meta.get(k) is not None}
         if meta.get("state") == "done" and meta.get("result") is not None:
             d["result"] = meta["result"]
@@ -1417,8 +1462,8 @@ if PUBLIC:
         _pkg_dir()
         os.environ["TOTALSEG_WEIGHTS_PATH"] = WEIGHTS_ROOT
         from haversack import Segmenter
-        from haversack.serve import (ResultCache, create_public_app, result_key,
-                                 weights_versions_of)
+        from haversack.serve import (ResultCache, create_public_app, installed_versions,
+                                 result_key, weights_versions_of)
         seg = Segmenter(device="cpu", weights=WEIGHTS_ROOT)
         cache = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP)
 
@@ -1450,4 +1495,6 @@ if PUBLIC:
             return ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).list()
 
         return create_public_app(key_fn, get, seg.tasks, inflight=inflight,
-                                 list_fn=list_fn, resolve_fn=seg.resolve_task)
+                                 list_fn=list_fn, resolve_fn=seg.resolve_task,
+                                 # so a pinned read can be answered, not refused outright
+                                 versions_fn=lambda t: installed_versions(seg, t))

@@ -82,7 +82,7 @@ def test_the_shipped_lut_still_matches_the_one_fastsurfer_ships():
 
 def test_the_weights_identity_is_the_release_the_fork_is_pinned_to():
     """The result key says which FastSurfer ran (`fastsurfer=2.5.4`), and pyproject decides
-    which one is installed (`fastsurfer-lean` at `v2.5.4-lean1`). Two independent facts: a
+    which one is installed (`fastsurfer-lean` at `v2.5.4-lean2`). Two independent facts: a
     tag bump that forgot the registry would publish new code's bytes under the old release's
     key - served to anyone who asked for the old one - and nothing else would notice.
 
@@ -480,6 +480,9 @@ def test_emit_probabilities_is_a_noop_without_a_spec():
 
 
 def test_checkpoint_dir_follows_env_then_xdg(monkeypatch, tmp_path):
+    # HAVERSACK_CACHE_DIR outranks XDG_CACHE_HOME, and a review agent following the notes
+    # exports it - which failed this test for a reason that had nothing to do with it
+    monkeypatch.delenv("HAVERSACK_CACHE_DIR", raising=False)
     monkeypatch.setenv("HAVERSACK_FASTSURFER_CHECKPOINTS", str(tmp_path / "mine"))
     assert fs.checkpoint_dir() == tmp_path / "mine"
     monkeypatch.delenv("HAVERSACK_FASTSURFER_CHECKPOINTS")

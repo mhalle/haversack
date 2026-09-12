@@ -176,8 +176,14 @@ without the bytes passing through the client. No route ever hands input bytes ba
 `parameters` as two JSON Schemas, and its `behavior`. Task names cross the wire as qualified catalog
 names only (a bare `total_fast` is a 404 that names `ts.v2:total_fast`); the in-process API's ability to run a model folder by path stops at this
 boundary. The grammar `eco:name@version` names an ecosystem, a task, and a weights version;
-all spellings of one task converge on one cache key, except in `POST /v1/tasks/{task}/prepare`,
-which installs a task's weights ahead of first use and honors the exact version asked for.
+all spellings of one task converge on one cache key. A version is a pin, and the server holds
+it the way every catalog does: the INSTALLED version decides, and an unknown one satisfies
+nothing. A pin the server provably does not run is a `409` on every route, naming what it runs.
+One it cannot check yet - the weights are not installed, or carry no version record - is
+accepted by `POST /v1/jobs` and `POST /v1/tasks/{task}/prepare`, which carry it to the
+worker's catalog to install that version or refuse it (such a job is never answered from the
+cache); on a read, which cannot install anything, it is a `409` pointing at `POST /v1/jobs`.
+A job submitted with a pin reports it as `version` beside the canonical `task`.
 
 `parameters.algorithm` is the engine's own knobs, empty for nnU-Net tasks, a `prompt` for
 VoxTell. `parameters.processing` is haversack's, offered only where haversack owns the chain:
