@@ -408,8 +408,13 @@ download once from Zenodo into `~/.cache/haversack/fastsurfer-checkpoints`:
 
 ```bash
 uv pip install "haversack[fastsurfer] @ git+https://github.com/mhalle/haversack"   # or --extra fastsurfer with uv sync
-haversack segment t1.nii.gz --task fastsurfer:brain -o brain.seg.nrrd
+haversack segment t1.nii.gz --task fastsurfer:asegdkt -o brain.seg.nrrd
 ```
+
+`asegdkt` is FastSurfer's own name for its whole-brain parcellation (aseg + DKT atlas); the
+task was `fastsurfer:brain` before 0.12.0, which is now refused with the new name. haversack
+runs FastSurfer 2.5.4: `fastsurfer:asegdkt@2.5.4` pins it, and a build running any other
+release refuses the pin rather than running what it has.
 
 SynthStrip's dependencies pin numpy below 2, so it owns a separate environment:
 

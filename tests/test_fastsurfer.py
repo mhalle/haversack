@@ -80,6 +80,28 @@ def test_the_shipped_lut_still_matches_the_one_fastsurfer_ships():
          f"{sorted(set(upstream) - set(shipped) - {0})}")
 
 
+def test_the_weights_identity_is_the_release_the_fork_is_pinned_to():
+    """The result key says which FastSurfer ran (`fastsurfer=2.5.4`), and pyproject decides
+    which one is installed (`fastsurfer-lean` at `v2.5.4-lean1`). Two independent facts: a
+    tag bump that forgot the registry would publish new code's bytes under the old release's
+    key - served to anyone who asked for the old one - and nothing else would notice.
+
+    The pin must be a TAG of the `v<release>-lean<n>` shape, cut from upstream's release
+    (2026-09-12). A bare rev says nothing about the release, which is how the fork sat on
+    an unreleased dev snapshot while the identity said only `vinn-v2`."""
+    import re
+    import tomllib
+    from pathlib import Path
+    from haversack.engines import registry as R
+    root = Path(__file__).resolve().parents[1]
+    src = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    pin = src["tool"]["uv"]["sources"]["fastsurfer-lean"]
+    assert "tag" in pin and "rev" not in pin, f"fastsurfer-lean must be pinned by a release tag: {pin}"
+    m = re.fullmatch(r"v(\d+\.\d+\.\d+)-lean\d+", pin["tag"])
+    assert m, f"tag {pin['tag']!r} is not v<release>-lean<n>"
+    assert R.ENGINES["fastsurfer"].weights_identity() == [{"id": "fastsurfer", "version": m.group(1)}]
+
+
 @pytest.mark.parametrize("override", [None, "/tmp/haversack-ckpt-probe"])
 def test_the_engine_and_cache_admin_agree_where_checkpoints_live(monkeypatch, override):
     """Two modules answer "where are the checkpoints?" and both must say the same thing.
@@ -395,7 +417,7 @@ def test_emit_probabilities_hands_over_the_field_with_both_grids():
 
     assert len(got) == 1
     part, code = got[0]
-    assert part == "brain"
+    assert part == "asegdkt"
     assert code.meta["engine"] == "fastsurfer"          # a reader must know what made it
     assert code.meta["labels"] == list(range(K))
     assert code.meta["source_grid"]["origin_xyz"] == [-1.5, 2.0, 0.25]   # world: xyz

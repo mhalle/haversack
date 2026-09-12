@@ -4,7 +4,12 @@ version = "0.11.0"
 description = "Medical-image segmentation models, many families behind one door: TotalSegmentator, MOOSE, MRSegmentator, stock nnU-Net and more, on MPS, CUDA or CPU, with a CLI and a local REST server"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.12"
+# 3.12 only, for now (2026-09-12). 3.12 is the floor (zarr 3.3 and duckn need it), and the
+# ceiling is FastSurfer: its argparse types (`str | None`) are refused as not callable by
+# 3.14's argparse, and upstream lists nothing past 3.13. The suite passes on 3.13, but every
+# Modal image, the dev env and every measured run is 3.12, so that is what ships until
+# FastSurfer is brought up to current Python. `.python-version` picks the newest 3.12.
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "numpy",
     "tqdm",
@@ -92,8 +97,9 @@ synthstrip = ["synthstrip-torch", "scipy"]
 # the fork. Heavy tree dropped in the fork; conflicts with the other engines below.
 fastsurfer = ["fastsurfer-lean"]
 # The VoxTell engine (haversack.engines.voxtell): free-text promptable segmentation from
-# MIC-DKFZ. Its own environment because it pins `torch>=2.0,<2.9` while the torch extra
-# is unbounded (and resolves well past that) - declared conflicting below. The package
+# MIC-DKFZ. It pins `torch>=2.0,<2.9`, which override-dependencies below lifts (2026-09-12,
+# verified on torch 2.14); it keeps its own environment, in the conflicts group below, until
+# it is shown to install beside the others. The package
 # brings its own tree (nnunetv2, dynamic-network-architectures, transformers,
 # huggingface_hub); weights + the precomputed text-embedding bank come from the HF hub.
 voxtell = ["voxtell"]
@@ -134,12 +140,21 @@ artifacts = ["src/haversack/data/*.json", "src/haversack/data/*.md", "src/havers
 
 [tool.uv]
 # Engines own their environments (docs: "one environment per engine") when their deps
-# genuinely conflict (synthstrip's numpy<2; voxtell's torch<2.9 against core's); those are
+# genuinely conflict (synthstrip's numpy<2; voxtell's torch<2.9 against core's, until
+# override-dependencies lifted it - voxtell keeps its own environment until it is shown to
+# install beside the others); those are
 # declared here so uv resolves them in separate forks of ONE universal lock. fastsurfer left
 # the group 2026-09-03: the fork's torch pin was upstream's CUDA-11 caution, relaxed, and the
 # engine now installs into the main environment (`uv sync --extra fastsurfer`) -
 # the same declaration then drives per-engine venvs locally and per-engine images on Modal.
 # A future engine with its own incompatible pins adds an extra + one entry here.
+# voxtell's `torch<2.9` is a leftover of torch 2.9.0's 3D-convolution slowdown under AMP
+# (pytorch#166122, fixed in 2.10; VoxTell's authors report 2.10 and 2.11 fine), so it is
+# overridden (2026-09-12). Verified on Modal: a VoxTell worker on torch 2.14.0+cu130 (L40S)
+# segmented an NLST chest CT - four prompts, plausible volumes, ~8 GB GPU memory of 46.
+# An override replaces EVERY torch requirement in the graph - synthstrip-torch's and monai's
+# too, neither yet run on 2.14 - so all engines resolve one torch (2.14 today).
+override-dependencies = ["torch>=2.10"]
 conflicts = [
     [
       { extra = "synthstrip" },
@@ -162,8 +177,12 @@ rankfield = { git = "https://github.com/mhalle/rankfield.git", tag = "v0.3.2" }
 # every outside install failed before downloading anything (2026-09-02). For upstream work
 # put the checkout in by hand: `uv pip install -e ../upstream/nnUNet`.
 # fastsurfer-lean = our slimmed FastSurfer fork (parcellation CNN only, packaging fixed).
-# Pinned to the slim branch's rev; import namespace stays FastSurferCNN.
-fastsurfer-lean = { git = "https://github.com/mhalle/fastsurfer-lean.git", rev = "68322213c0c9ff2b6b1612aa5bd9b7272cc6a817" }
+# Pinned to a tag cut from an upstream RELEASE (2026-09-12): `v<release>-lean<n>` is
+# upstream's `v<release>` with only pyproject.toml changed. It was a dev snapshot before,
+# code the maintainers had not released or validated. The release in the tag is the
+# engine's weights identity (engines/registry.py), and a test holds the two together.
+# Import namespace stays FastSurferCNN.
+fastsurfer-lean = { git = "https://github.com/mhalle/fastsurfer-lean.git", tag = "v2.5.4-lean2" }
 # voxtell = MIC-DKFZ's free-text promptable segmentation. Pinned to a git rev, not the
 # PyPI release: 0.1.0 on PyPI predates helpers this engine uses (download_voxtell_model),
 # and pinning the rev means the source we integrated against is the source that runs.

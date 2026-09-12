@@ -61,7 +61,7 @@ def main(t1, outdir, depth=6, clip=8.0, device="mps"):
         fs.emit_probabilities = _real
 
     conf = captured["conf"]
-    got, want = grid_record(conf), metas["brain"]["source_grid"]
+    got, want = grid_record(conf), metas["asegdkt"]["source_grid"]
     same = all(np.allclose(got[k], want[k], atol=1e-4) for k in got)
     print(f"\nconformed grid vs the store's source_grid: {'MATCH' if same else 'MISMATCH'}")
     print(f"  {got['shape_zyx']} @ {[round(v, 6) for v in got['spacing_zyx']]}")
@@ -70,7 +70,7 @@ def main(t1, outdir, depth=6, clip=8.0, device="mps"):
     sitk.WriteImage(conf, str(out / "conformed_1mm.nii.gz"), useCompression=True)
 
     (out / "meta.json").write_text(json.dumps(
-        {"image": str(t1), "task": "fastsurfer:brain", "engine": "fastsurfer",
+        {"image": str(t1), "task": "fastsurfer:asegdkt", "engine": "fastsurfer",
          "depth": depth, "clip": clip, "device": device,
          "parts": metas, "provenance": seg.provenance, "timings": seg.timings},
         indent=1, default=str), encoding="utf-8")

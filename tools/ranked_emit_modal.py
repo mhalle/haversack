@@ -231,9 +231,9 @@ def main(identifier: str, tasks: str, subject: str, workdir: str,
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
 
-    # `fastsurfer:brain` is a different engine on a different image; everything else is the
+    # `fastsurfer:asegdkt` is a different engine on a different image; everything else is the
     # nnU-Net path. Dispatch here rather than making the caller know.
-    if want == ["fastsurfer:brain"]:
+    if want == ["fastsurfer:asegdkt"]:
         data = emit_brain.remote(identifier, depth, clip, source)
     else:
         data = emit.remote(identifier, want, depth, clip, None, source)

@@ -1,5 +1,37 @@
 # Changelog
 
+## [Unreleased]
+
+- **One torch for every engine: VoxTell's `torch<2.9` is overridden, and everything resolves
+  torch 2.14.** VoxTell pinned below 2.9 because torch 2.9.0 slowed 3D convolutions under
+  mixed precision (pytorch#166122); that was fixed in 2.10, and VoxTell's authors report 2.10
+  and 2.11 fine. `[tool.uv] override-dependencies = ["torch>=2.10"]` lifts the pin, and a
+  VoxTell worker on torch 2.14 (CUDA 13, L40S) was run on Modal: a chest CT, four prompts,
+  plausible volumes, about 8 GB of GPU memory. An override applies to the whole graph, so
+  SynthStrip and MONAI move to 2.14 too; neither has been run on it yet. The FastSurfer fork
+  asks for torch 2.14 and its torchvision (0.29) as its floor.
+- **haversack runs on Python 3.12, for now (`requires-python = ">=3.12,<3.13"`).** FastSurfer
+  fails on 3.14 - it passes `str | None` as an argparse type, which 3.14's argparse refuses -
+  and upstream lists nothing past 3.13. The suite passes on 3.13 too, but every Modal image,
+  the development environment and every measured run is 3.12, so that is what ships until
+  FastSurfer is brought up to current Python. `.python-version` asks uv for 3.12.
+- **FastSurfer's task is `fastsurfer:asegdkt`, FastSurfer's own name for the module.**
+  `brain` was a name haversack made up, and it would not have survived FastSurfer's other
+  segmentation modules (`cereb`, `hypothal`) arriving in the same catalog. `fastsurfer:brain`
+  is refused naming the new form, as `ts:` was in 0.11.0.
+- **haversack runs FastSurfer 2.5.4, a release, and says so.** The `fastsurfer-lean` fork was
+  cut from an August dev snapshot - code the maintainers had not released or validated. It is
+  now upstream's v2.5.4 tag with only `pyproject.toml` changed (`v2.5.4-lean2`), and it asks
+  for the latest torch (2.14.0) and its torchvision rather than upstream's 2.7. Of what the
+  engine calls, only `conform`'s handling of float noise in voxel sizes near 1 mm differs from
+  before. The weights identity is the release (`fastsurfer=2.5.4`) rather than the checkpoints'
+  `vinn-v2`, which every 2.x release shares, and a test holds it to the tag; FastSurfer's
+  cached results recompute once under the new key.
+- **A pinned version an image-baked engine does not run is refused.** `fastsurfer:asegdkt@X`
+  (and SynthStrip's and VoxTell's) ran the one build there is whatever `X` said, because an
+  engine task never reached the check an nnU-Net task's pin goes through. The version the
+  build runs is accepted; any other is refused before the engine starts.
+
 ## [0.11.0] - 2026-09-12
 
 Two changes break what worked before, and a catalog arrives. A task name now names its catalog -

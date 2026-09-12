@@ -106,6 +106,12 @@ class Segmenter:
                 f"environment. It has its own: UV_PROJECT_ENVIRONMENT=.venvs/{eng.name} "
                 f"uv sync --extra {eng.extra} --extra serve, then run haversack from it "
                 f"(or deploy with {eng.enabled_env}=1 to run it on Modal).")
+        # An engine task never reaches catalog.get(), where an nnU-Net task's `@version` is
+        # honoured, so a pin was dropped here and the one build there is ran instead.
+        # prepare() is the catalog's own door for a pinned version: it refuses one this
+        # build does not run (ImageBakedEcosystem.ensure).
+        if "@" in str(task) and hasattr(self.catalog, "prepare"):
+            self.catalog.prepare(task)
         kw = {**self.policy, **overrides}
         seg = eng.compute(image, device=kw["device"], batch_size=kw["batch_size"],
                           progress=kw.get("progress"), cancel=kw.get("cancel"),

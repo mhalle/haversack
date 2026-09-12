@@ -99,7 +99,7 @@ def test_a_worker_warms_only_the_jobs_that_will_run_on_it(monkeypatch):
     job's series and then stopped (one-ahead), and its own next job ran cold."""
     m, fake = _swap_dict(monkeypatch)
     fake["cur"] = {"id": "cur", "state": "running", "created": 0, "task": "ts.v2:total"}
-    fake["fs"] = {"id": "fs", "state": "queued", "created": 1, "task": "fastsurfer:brain",
+    fake["fs"] = {"id": "fs", "state": "queued", "created": 1, "task": "fastsurfer:asegdkt",
                   "source": [{"kind": "s3", "id": "b/mprage"}]}
     fake["nn"] = {"id": "nn", "state": "queued", "created": 2, "task": "ts.v2:total_fast"}
     assert m._prefetch_candidate("cur", "nnunetv2") == ("upload", None, "nn")
@@ -251,7 +251,7 @@ def test_fresh_weights_versions_reloads_once(monkeypatch):
     assert Vol.n == 2                       # window elapsed: one more
 
 
-@pytest.mark.parametrize("engine, task", [("fastsurfer", "fastsurfer:brain"),
+@pytest.mark.parametrize("engine, task", [("fastsurfer", "fastsurfer:asegdkt"),
                                           ("synthstrip", "synthstrip:mask")])
 def test_spawn_worker_rejects_an_engine_this_deployment_does_not_run(engine, task, monkeypatch):
     """Dispatch: an engine task on a deployment without that engine enabled fails
@@ -313,7 +313,7 @@ def test_spawn_worker_routes_by_engine_not_by_task_prefix():
     from haversack.engines import registry as R
     assert R.engine_for_task("ts.v2:total_fast").name == R.NNUNETV2
     assert R.engine_for_task("custom:mine").name == R.NNUNETV2
-    assert R.engine_for_task("fastsurfer:brain").name == "fastsurfer"
+    assert R.engine_for_task("fastsurfer:asegdkt").name == "fastsurfer"
     assert modal_app.ENGINE_WORKERS.keys() <= R.ENGINES.keys()
     # every engine this deployment ENABLES has a composed worker; one that is off has
     # no adapter imported at all, which is the point - its image was never built either

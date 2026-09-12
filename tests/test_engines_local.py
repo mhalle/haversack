@@ -64,12 +64,33 @@ def test_segmenter_routes_an_engine_task_to_its_compute(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pipeline, "segment", never)
     seg = Segmenter(weights=tmp_path, device="cpu", batch_size=4)
-    assert seg.segment("t1.nii.gz", "fastsurfer:brain", progress=print) == "SEGMENTATION"
+    assert seg.segment("t1.nii.gz", "fastsurfer:asegdkt", progress=print) == "SEGMENTATION"
     assert calls["image"] == "t1.nii.gz" and calls["device"] == "cpu" and calls["batch_size"] == 4
     assert calls["progress"] is print and calls["probabilities"] is None
     # the off-thread form takes the same route
-    job = seg.submit("t1.nii.gz", "fastsurfer:brain")
+    job = seg.submit("t1.nii.gz", "fastsurfer:asegdkt")
     assert job.result() == "SEGMENTATION"
+
+
+def test_a_pinned_engine_task_runs_only_the_version_it_names(monkeypatch, tmp_path):
+    """An engine task never reaches catalog.get(), where an nnU-Net task's `@version` is
+    honoured, so `fastsurfer:asegdkt@<anything>` used to run the one build there is. The
+    version this build runs is accepted; any other is refused before compute starts."""
+    calls = []
+    monkeypatch.setitem(registry.ENGINES, "fastsurfer",
+                        dataclasses.replace(registry.ENGINES["fastsurfer"],
+                                            compute=lambda image, **kw: calls.append(image) or _Seg()))
+    monkeypatch.setenv("HAVERSACK_FASTSURFER", "1")       # the catalog lists the engine's tasks
+    _spec_says(monkeypatch, True)
+    from haversack.errors import ModelNotFound
+    from haversack.segmenter import Segmenter
+    seg = Segmenter(weights=tmp_path, device="cpu")
+    have = registry.ENGINES["fastsurfer"].weights_identity()[0]["version"]
+    with pytest.raises(ModelNotFound, match=f"this build runs fastsurfer {have}"):
+        seg.segment("t1.nii.gz", "fastsurfer:asegdkt@2.5.3")
+    assert calls == []                                    # refused before the engine ran
+    seg.segment("t1.nii.gz", f"fastsurfer:asegdkt@{have}")
+    assert calls == ["t1.nii.gz"]
 
 
 def test_segmenter_refuses_an_engine_task_without_its_runtime(monkeypatch, tmp_path):
@@ -77,7 +98,7 @@ def test_segmenter_refuses_an_engine_task_without_its_runtime(monkeypatch, tmp_p
     _spec_says(monkeypatch, False)
     from haversack.segmenter import Segmenter
     with pytest.raises(UnsupportedModel, match="uv sync --extra fastsurfer"):
-        Segmenter(weights=tmp_path).segment("t1.nii.gz", "fastsurfer:brain")
+        Segmenter(weights=tmp_path).segment("t1.nii.gz", "fastsurfer:asegdkt")
 
 
 def test_nnunet_tasks_still_take_the_pipeline(monkeypatch, tmp_path):
@@ -93,7 +114,7 @@ def test_cli_stack_check_is_per_engine(monkeypatch, tmp_path, capsys):
     from haversack import cli
     _spec_says(monkeypatch, False)
     (tmp_path / "t1.nii.gz").touch()
-    rc = cli.main(["segment", str(tmp_path / "t1.nii.gz"), "--task", "fastsurfer:brain",
+    rc = cli.main(["segment", str(tmp_path / "t1.nii.gz"), "--task", "fastsurfer:asegdkt",
                    "-o", str(tmp_path / "out.seg.nrrd")])
     err = capsys.readouterr().err
     assert rc == 2 and "fastsurfer engine" in err and "--extra fastsurfer" in err
@@ -129,7 +150,7 @@ def test_run_local_resolves_device_and_reports(monkeypatch):
     assert isinstance(fs.run_local("t1.nii.gz", device="cpu", batch_size="auto", progress=Rep(),
                                    grid="input", interp="linear"), _Seg)  # nnU-Net keys ignored
     assert seen["device"] == "cpu" and seen["batch_size"] == 8 and seen["viewagg_device"] == "cpu"
-    assert stages and stages[0][0] == "predict" and "fastsurfer:brain" in stages[0][1]
+    assert stages and stages[0][0] == "predict" and "fastsurfer:asegdkt" in stages[0][1]
 
 
 def test_synthstrip_has_a_local_runner_too(monkeypatch, tmp_path):

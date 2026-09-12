@@ -1198,17 +1198,33 @@ class ImageBakedEcosystem(EngineEcosystem):
         return True                      # weights ship with the engine's image
 
     def ensure(self, task: str, root, progress=None, version=None) -> None:
+        """Nothing to install - but a pinned version this build does not run is refused.
+        It used to return here whatever was asked, so `fastsurfer:brain@anything` ran the
+        one version there is: the silent wrong version the `@` grammar exists to prevent."""
+        if version is None:
+            return None
+        have = [e.get("version") for e in (self.weights_identity(task, root) or ())]
+        if version not in have:
+            raise ModelNotFound(
+                f"{self.name}:{task}@{version}: this build runs {self.name} "
+                f"{' / '.join(map(str, have)) or 'an unversioned build'}; install the "
+                "haversack release that pins the version you want")
         return None
 
 
 class FastSurferEcosystem(ImageBakedEcosystem):
     """FastSurfer whole-brain parcellation (2.5D view-aggregation, not nnU-Net).
-    Its checkpoints are baked into the FastSurfer worker image."""
+    Its checkpoints are baked into the FastSurfer worker image.
+
+    The task is `asegdkt`, FastSurfer's own name for this module (`--no_asegdkt`,
+    `--asegdkt_segfile`); its other segmentation modules are `cereb` and `hypothal`, so
+    they would arrive as tasks of this one catalog. It was `brain` until 0.12.0, a name
+    haversack made up - see RENAMED_TASKS."""
 
     name = "fastsurfer"
     engine = "fastsurfer"
     description = "FastSurfer whole-brain parcellation (engine)"
-    task_names = ("brain",)
+    task_names = ("asegdkt",)
     modality = "MR (T1)"
 
     @property
@@ -1579,6 +1595,11 @@ def default_ecosystems() -> list:
 #: refused with the new form to use; a store written the old way is still read (ranked_build).
 RENAMED_ECOSYSTEMS = {"ts": "ts.v2"}
 
+#: Tasks renamed, old canonical name -> new, refused the same way. Only a name haversack
+#: invented is ever renamed - task names are the model makers' - and `fastsurfer:brain` was
+#: ours; FastSurfer calls the module `asegdkt` (0.12.0).
+RENAMED_TASKS = {"fastsurfer:brain": "fastsurfer:asegdkt"}
+
 
 class EcosystemCatalog:
     """A TaskCatalog-compatible federation over an ecosystem registry.
@@ -1622,6 +1643,9 @@ class EcosystemCatalog:
             if eco is None and ename in RENAMED_ECOSYSTEMS:
                 new = RENAMED_ECOSYSTEMS[ename]
                 raise LookupError(f"catalog {ename!r} is {new!r} since 0.11.0: use {new}:{short}")
+            if name in RENAMED_TASKS:
+                raise LookupError(f"task {name!r} is {RENAMED_TASKS[name]!r} since 0.12.0: "
+                                  f"use {RENAMED_TASKS[name]}")
             if eco is None or ename not in self._short.get(short, ()):
                 raise LookupError(f"unknown task {name!r}")
             return eco, short, f"{ename}:{short}", version

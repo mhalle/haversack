@@ -189,13 +189,42 @@ def test_fastsurfer_ecosystem_lists_but_refuses_spec(tmp_path):
     from haversack.ecosystems import EcosystemCatalog, FastSurferEcosystem
     from haversack.errors import UnsupportedModel
     cat = EcosystemCatalog([FastSurferEcosystem()], root=tmp_path)
-    assert cat.resolve("fastsurfer:brain")[2] == "fastsurfer:brain"
-    with pytest.raises(LookupError, match="needs its catalog: use fastsurfer:brain"):
-        cat.resolve("brain")
-    fs_info = cat.info("fastsurfer:brain")
+    assert cat.resolve("fastsurfer:asegdkt")[2] == "fastsurfer:asegdkt"
+    with pytest.raises(LookupError, match="needs its catalog: use fastsurfer:asegdkt"):
+        cat.resolve("asegdkt")
+    fs_info = cat.info("fastsurfer:asegdkt")
     assert fs_info["engine"] == "fastsurfer" and fs_info["task_spec"] is False
     with pytest.raises(UnsupportedModel, match="engine, not an nnU-Net task"):
-        cat.get("fastsurfer:brain")
+        cat.get("fastsurfer:asegdkt")
+
+
+def test_fastsurfer_brain_is_refused_with_its_new_name(tmp_path):
+    """`fastsurfer:brain` was a name haversack made up; FastSurfer calls the module
+    `asegdkt`. The old name is refused naming the new one, as `ts:` is (0.12.0), in
+    every form a caller could have written it."""
+    from haversack.ecosystems import EcosystemCatalog, FastSurferEcosystem
+    cat = EcosystemCatalog([FastSurferEcosystem()], root=tmp_path)
+    for old in ("fastsurfer:brain", "fastsurfer:brain@2.5.4"):
+        with pytest.raises(LookupError, match="is 'fastsurfer:asegdkt' since 0.12.0: use fastsurfer:asegdkt"):
+            cat.resolve(old)
+    assert "fastsurfer:brain" not in cat.names()
+
+
+@pytest.mark.parametrize("eco_name", ["FastSurferEcosystem", "SynthStripEcosystem", "VoxTellEcosystem"])
+def test_an_image_baked_engine_refuses_a_version_it_does_not_run(eco_name, tmp_path):
+    """An image-baked engine has exactly one version - the one its registry identity
+    names - so `@` that version is accepted and any other refused. `ensure` used to
+    return whatever was asked, and the one build there is ran under someone else's pin."""
+    from haversack import ecosystems
+    from haversack.errors import ModelNotFound
+    eco = getattr(ecosystems, eco_name)()
+    task = eco.tasks()[0]
+    cat = EcosystemCatalog([eco], root=tmp_path)
+    have = eco.weights_identity(task, tmp_path)[0]["version"]
+    assert cat.prepare(f"{eco.name}:{task}@{have}")["name"] == f"{eco.name}:{task}"
+    with pytest.raises(ModelNotFound, match=f"this build runs {eco.name} {have}"):
+        cat.prepare(f"{eco.name}:{task}@not-{have}")
+    cat.prepare(f"{eco.name}:{task}")                    # no pin: nothing to refuse
 
 
 def test_synthstrip_ecosystem_lists_but_refuses_spec(tmp_path):
@@ -280,4 +309,4 @@ def test_one_model_engines_still_take_their_identity_from_the_registry(tmp_path)
     from haversack.ecosystems import FastSurferEcosystem
     from haversack.engines import registry as R
     eco = FastSurferEcosystem()
-    assert eco.weights_identity("brain", tmp_path) == R.ENGINES["fastsurfer"].weights_identity()
+    assert eco.weights_identity("asegdkt", tmp_path) == R.ENGINES["fastsurfer"].weights_identity()

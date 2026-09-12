@@ -26,8 +26,9 @@ from haversack.modal_app import (CACHE_ROOT, GPU, GPU_SNAPSHOT, INPUTS_ROOT,
 ENGINE = "voxtell"
 
 # VoxTell engine image (built only when enabled). The `voxtell` extra brings the package
-# and its own tree (torch<2.9, nnunetv2, transformers, huggingface_hub); `idc` brings
-# obstore, `preview` matplotlib for the serve-core preview.
+# and its own tree (nnunetv2, transformers, huggingface_hub); its `torch<2.9` is lifted by
+# pyproject's override-dependencies, and this image ran on torch 2.14.0+cu130 (2026-09-12).
+# `idc` brings obstore, `preview` matplotlib for the serve-core preview.
 #
 # Weights policy differs from the other engines, deliberately. The VoxTell checkpoint and
 # the precomputed text-embedding bank are baked at BUILD (small, and they cover the common

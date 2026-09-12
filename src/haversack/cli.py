@@ -56,7 +56,7 @@ def _need_inference_stack(task=None) -> None:
 
     The inference stack is core, so this fires only on a lean install (``--no-deps``: the
     client and a describe-only front end never pay for torch) - and then it must say what to
-    do rather than trace back from `import torch`. An engine task (``fastsurfer:brain``)
+    do rather than trace back from `import torch`. An engine task (``fastsurfer:asegdkt``)
     needs that engine's runtime, which lives in its own environment; ``task=None`` (the
     server) needs only torch - it checks per task at run time.
     """
@@ -333,7 +333,7 @@ def _command_line() -> click.Group:
         epilog=_verbatim("""examples:
   haversack segment ct.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
   haversack segment dicom_dir/ --task ts.v2:total --spacing 1 -o labels.nii.gz
-  haversack segment t1.nii.gz --task fastsurfer:brain -o brain.seg.nrrd      (from the fastsurfer venv)
+  haversack segment t1.nii.gz --task fastsurfer:asegdkt -o brain.seg.nrrd      (from the fastsurfer venv)
   haversack segment "zenodo:<recid>/amos22.zip!amos22/imagesVa/amos_0575.nii.gz" --task mrsegmentator:base -o amos.seg.nrrd
   haversack segment a.nii.gz b.nii.gz dicom_dir/ --task ts.v2:total_fast --format seg.nrrd -o out/   (batch: out/<name>_total_fast.seg.nrrd)"""),
         params=[
@@ -347,7 +347,7 @@ def _command_line() -> click.Group:
                                  'github:<owner>/<repo>@<tag>/<asset>')),
             click.Option(['--task'], required=True, shell_complete=_complete_task,
                          help=('what to segment: a name from `haversack tasks` (total_fast, '
-                               'total, fastsurfer:brain, ...), or a path to a stock nnU-Net '
+                               'total, fastsurfer:asegdkt, ...), or a path to a stock nnU-Net '
                                'model folder')),
             click.Option(['-o', '--output'],
                          help=('one input: the output file (its extension picks the format). '

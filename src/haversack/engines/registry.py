@@ -163,7 +163,12 @@ class Engine:
 
 
 def _fastsurfer_identity() -> list[dict]:
-    return [{"id": "fastsurfer", "version": "vinn-v2"}]
+    # The FastSurfer RELEASE, not the checkpoints' own version (2026-09-12, was "vinn-v2"):
+    # every 2.x release loads the same VINN v2.0.0 checkpoints, while conform - which decides
+    # the grid the network sees - changes between releases, so the release is what pins the
+    # bytes. It is the tag the fastsurfer-lean pin in pyproject is cut from; a test holds
+    # the two together. `fastsurfer:asegdkt@2.5.4` names it, and any other version is refused.
+    return [{"id": "fastsurfer", "version": "2.5.4"}]
 
 
 def _fastsurfer_compute(image, **kw):

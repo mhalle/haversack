@@ -3153,15 +3153,15 @@ def test_an_engine_epoch_moves_only_that_engines_keys(monkeypatch):
     # no epoch: byte-for-byte the key from before Engine.cache_epoch existed
     monkeypatch.setitem(registry.ENGINES, "fastsurfer", dataclasses.replace(fs_eng, cache_epoch=None))
     assert registry.ENGINES[registry.NNUNETV2].cache_epoch is None
-    for task in ("fastsurfer:brain", "total_fast"):
+    for task in ("fastsurfer:asegdkt", "total_fast"):
         assert key(task) == sv.result_key(("idc:abc",), task, {}, ["w=1"]), task
-    fs_plain, ts_plain = key("fastsurfer:brain"), key("total_fast")
+    fs_plain, ts_plain = key("fastsurfer:asegdkt"), key("total_fast")
 
     # an epoch moves that engine's keys, and each bump moves them again
     monkeypatch.setitem(registry.ENGINES, "fastsurfer", dataclasses.replace(fs_eng, cache_epoch="1"))
-    fs_1 = key("fastsurfer:brain")
+    fs_1 = key("fastsurfer:asegdkt")
     monkeypatch.setitem(registry.ENGINES, "fastsurfer", dataclasses.replace(fs_eng, cache_epoch="2"))
-    fs_2 = key("fastsurfer:brain")
+    fs_2 = key("fastsurfer:asegdkt")
     assert len({fs_plain, fs_1, fs_2}) == 3
     # ...and no other engine's
     assert key("total_fast") == ts_plain

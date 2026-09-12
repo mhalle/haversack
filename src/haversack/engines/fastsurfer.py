@@ -559,11 +559,11 @@ def emit_probabilities(spec, logits, source_ref, target_ref, class_labels) -> No
     # rather than an install sidecar.
     ident = weights_installed()
     ranked.emit(
-        spec, "brain", lg,
+        spec, "asegdkt", lg,
         softmax={"engine": "fastsurfer", "classes": int(lg.shape[0]),
                  "weights": ident[0].get("id", "fastsurfer") if ident else "fastsurfer",
                  "version": ident[0].get("version") if ident else None},
-        part="brain", engine="fastsurfer", haversack=__version__,
+        part="asegdkt", engine="fastsurfer", haversack=__version__,
         labels=[int(v) for v in np.asarray(class_labels).reshape(-1)],
         labels_note="channel -> aparc+aseg id; segment() additionally applies "
                     "split_cortex_labels, which is spatial and not expressible as a LUT",
@@ -726,7 +726,7 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", batch_size: int = 8
 def run_local(image, *, device="auto", batch_size="auto", progress=None, cancel=None,
               probabilities=None, **_policy):
     """The in-process entry point (:attr:`Engine.compute`): what ``haversack segment`` and a
-    local ``haversack serve`` call for ``fastsurfer:brain``. Resolves ``device`` the way the
+    local ``haversack serve`` call for ``fastsurfer:asegdkt``. Resolves ``device`` the way the
     nnU-Net path does, places the view-aggregation field by :func:`local_viewagg`, reports
     one stage, and honors the cancel token before the model is built. nnU-Net policy keys
     that mean nothing here (grid, interp, ...) are accepted and ignored."""
@@ -737,7 +737,7 @@ def run_local(image, *, device="auto", batch_size="auto", progress=None, cancel=
     bs = 8 if batch_size in (None, "auto") else int(batch_size)
     viewagg = local_viewagg(dev)
     report.check()
-    report.stage("predict", f"fastsurfer:brain on {dev} (view aggregation on {viewagg})")
+    report.stage("predict", f"fastsurfer:asegdkt on {dev} (view aggregation on {viewagg})")
     seg = segment(image, device=dev, batch_size=bs, viewagg_device=viewagg,
                   probabilities=probabilities)
     for d in seg.provenance.get("deviations", ()):
