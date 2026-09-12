@@ -56,7 +56,9 @@ time. Results computed with the default options change, so the cache epoch moves
   combined task, because the nine overlap by design (upstream's own combined map paints the
   thoracic cavity over every lung lobe). haversack does not gate `head` and `headneck` on a
   brain or post-process, and it pads the edge of a short volume the TotalSegmentator way (a
-  34-slice head CT: 0.977-0.998).
+  34-slice head CT: 0.977-0.998). `cads:vertebrae` makes `vertebrae` an ambiguous short name -
+  it meant `totalvibe:vertebrae` - so a script that says `task="vertebrae"` now has to say
+  `totalvibe:vertebrae`.
 - **`haversack rights` given a model task name says to use `cite`.** `rights totalvibe:vibe`
   ended in a raw `KeyError`, and `rights ts:total` called the task a local file. `rights`
   reports on data sources; a prefix naming a model catalog now exits 2 pointing at

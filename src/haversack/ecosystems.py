@@ -928,8 +928,10 @@ class CADSEcosystem(ZipManifestEcosystem):
 
     def spec(self, task: str, root) -> TaskSpec:
         import dataclasses
-        # The TotalSegmentator lineage - RAS, corner-aligned resampling, no crop to nonzero -
-        # is what CADS's own preprocessing does, and what its checkpoints do not say.
+        # The TotalSegmentator lineage - RAS and corner-aligned resampling - is what CADS's own
+        # preprocessing does, and what its checkpoints do not say. Like TotalSegmentator's, it
+        # skips the crop to nonzero that upstream's nnU-Net predictor then applies; on CT, whose
+        # air is -1000 HU and not 0, that crop removes nothing.
         return dataclasses.replace(super().spec(task, root), lineage="ts")
 
 

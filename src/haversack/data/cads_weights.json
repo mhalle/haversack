@@ -95,7 +95,7 @@
    "dataset_id": "557",
    "modality": "CT",
    "structures": 9,
-   "description": "head tissues from a brain atlas: white and gray matter, CSF, scalp, eyeballs, compact and spongy bone, vessels, eye muscles",
+   "description": "head tissues from a brain atlas: white and gray matter, CSF, scalp, eyeballs, compact and spongy bone, blood, head muscles (the paper's rectus eye muscles)",
    "license": "CC-BY-SA-4.0"
   },
   "headneck": {
@@ -107,7 +107,7 @@
    "dataset_id": "558",
    "modality": "CT",
    "structures": 29,
-   "description": "head-and-neck organs at risk after HaN-Seg",
+   "description": "head-and-neck organs at risk after HaN-Seg; the open weights are weaker here than upstream's reference weights, upstream notes",
    "license": "CC-BY-SA-4.0"
   },
   "bodyregions": {

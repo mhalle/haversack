@@ -171,7 +171,7 @@
   },
   "cads": {
    "title": "CADS",
-   "description": "Whole-body CT segmentation of 167 anatomical structures by nine models, trained on the CADS dataset of 22,022 CT volumes assembled from public collections. haversack offers the open-licensed weights.",
+   "description": "Whole-body CT segmentation of 167 anatomical structures by nine models. The CADS dataset is 22,022 CT volumes assembled from public collections; haversack offers the open-licensed weights, trained on its license-compatible part (up to 13,269 CT images per model; 864 for head, 127 for headneck), which upstream notes are weaker than its reference weights on some detailed head-and-neck structures.",
    "group": "Department of Quantitative Biomedicine, University of Zurich (Xu et al.)",
    "repository": "https://github.com/murong-xu/CADS",
    "license": {

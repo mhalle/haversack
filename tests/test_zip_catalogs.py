@@ -221,6 +221,16 @@ def test_cads_runs_in_the_totalsegmentator_lineage_so_its_sides_are_right(tmp_pa
     assert canonical_orientation_for(stock, _Store()) is None          # the mirror it prevents
 
 
+def test_cads_makes_vertebrae_an_ambiguous_short_name(tmp_path):
+    """`cads:vertebrae` collides with `totalvibe:vertebrae`, which the bare name used to mean.
+    The CHANGELOG says so; the error names both, and the qualified names still resolve."""
+    cat = EcosystemCatalog(root=tmp_path)
+    with pytest.raises(LookupError, match="ambiguous.*cads:vertebrae.*totalvibe:vertebrae"):
+        cat.resolve("vertebrae")
+    assert cat.resolve("cads:vertebrae")[2] == "cads:vertebrae"
+    assert cat.resolve("totalvibe:vertebrae")[2] == "totalvibe:vertebrae"
+
+
 def test_totalvibe_orientation_is_read_from_the_checkpoint_not_hardcoded(tmp_path):
     """Upstream reorients per model while the plans declare a reader that does
     not reorient - MRSegmentator's LPS problem, except stated per model in the

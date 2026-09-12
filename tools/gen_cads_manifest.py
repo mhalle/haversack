@@ -61,8 +61,10 @@ CURATED = {
                    "sigmoid, rectum, prostate, seminal vesicles, mammary glands, sternum, "
                    "psoas major and rectus abdominis"),
     "557": ("head", "head tissues from a brain atlas: white and gray matter, CSF, scalp, "
-                    "eyeballs, compact and spongy bone, vessels, eye muscles"),
-    "558": ("headneck", "head-and-neck organs at risk after HaN-Seg"),
+                    "eyeballs, compact and spongy bone, blood, head muscles (the paper's "
+                    "rectus eye muscles)"),
+    "558": ("headneck", "head-and-neck organs at risk after HaN-Seg; the open weights are "
+                        "weaker here than upstream's reference weights, upstream notes"),
     "559": ("bodyregions", "body composition: subcutaneous tissue, muscle, abdominal and "
                            "thoracic cavities, bones, glands, pericardium, mediastinum, "
                            "spinal cord, breast implants"),
@@ -90,6 +92,7 @@ def describe_zip(url: str) -> dict:
             "region_based": region_based,
             "structures": 0 if region_based else sum(1 for v in labels.values() if int(v) != 0),
             "orientation": dataset.get("orientation"),
+            "training": dataset.get("numTraining"),
             "transpose": plans.get("transpose_forward"),
             "folds": zippeek.folds(cd), "checkpoints": zippeek.checkpoints(cd)}
 
@@ -147,7 +150,7 @@ def main() -> None:
                        "modality": "CT", "structures": d["structures"], "description": what,
                        "license": LICENSE}
         print(f"  {task}: {d['folder']}/{d['config']}  folds={d['folds']} {d['checkpoints']}  "
-              f"structures={d['structures']}", file=sys.stderr)
+              f"structures={d['structures']}  numTraining={d['training']}", file=sys.stderr)
 
     total = sum(e["structures"] for e in tasks.values())
     if total != STRUCTURES:
