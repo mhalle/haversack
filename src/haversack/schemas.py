@@ -263,12 +263,22 @@ def wire_params(algorithm: type, processing: bool) -> type:
     because a client sending one dict is simpler than a client learning where
     each key belongs. Merging them by inheritance also makes a name collision
     between an engine's knob and one of ours a loud error here rather than a
-    silent shadowing (see the collision test).
+    silent shadowing (test_schemas.py,
+    test_an_engine_parameter_may_not_share_a_name_with_a_processing_option).
+
+    The error is checked for, not inherited: pydantic merges two bases that declare the
+    same field without complaint - the first base's field wins - so until 2026-09-12 this
+    promise held only on paper, and an engine declaring ``grid`` would have replaced ours.
     """
     if not processing:
         return algorithm
     if algorithm is NoParams:
         return ProcessingParams
+    clash = sorted(set(algorithm.model_fields) & set(ProcessingParams.model_fields))
+    if clash:
+        raise TypeError(f"{algorithm.__name__} declares {clash}, which the processing options "
+                        "already use; on the flat wire one would shadow the other - rename "
+                        "the engine's")
     return create_model(f"{algorithm.__name__}Wire",
                         __base__=(algorithm, ProcessingParams))
 

@@ -113,6 +113,30 @@ def test_an_engine_without_processing_knobs_publishes_an_empty_group():
     assert not groups["processing"].get("properties")
 
 
+def test_an_engine_parameter_may_not_share_a_name_with_a_processing_option():
+    """wire_params merges an engine's parameters with ours into ONE flat model by
+    inheritance, and promised that a shared name was "a loud error ... (see the collision
+    test)". There was no such test, and it was not an error: pydantic let the engine's
+    field shadow ours, so an engine declaring `grid: int` turned a request's
+    `grid: "input"` into a validation failure and the processing option vanished
+    (found 2026-09-12). Without the processing group there is nothing to clash with."""
+    class Clashing(S.Params):
+        grid: int = 7
+        prompts: list[str] = []
+
+    with pytest.raises(TypeError, match=r"\['grid'\]"):
+        S.wire_params(Clashing, True)
+    assert S.wire_params(Clashing, False) is Clashing
+
+
+def test_no_registered_engine_collides_with_the_processing_options():
+    """The same rule, over the engines that actually ship: building each one's wire
+    model is what submit does, so a clash would otherwise surface on a live request."""
+    from haversack.engines import registry
+    for eng in registry.ENGINES.values():
+        S.wire_params(eng.parameters, eng.processing_knobs)
+
+
 # -- what describe() publishes per task ------------------------------------
 
 def _bundle(root, name="toy", version="1.0", *, n_in=1, channel_def=None,

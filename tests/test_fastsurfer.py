@@ -227,6 +227,47 @@ def test_restore_gpu_tensor_input_matches_numpy_input():
     assert np.array_equal(from_numpy, from_tensor)
 
 
+def test_restore_gpu_labels_do_not_depend_on_its_channel_groups_or_target_slabs():
+    """restore_logits_gpu used to widen the whole source to fp32 and sample all K channels
+    onto the whole target before its argmax - 17 GB and 42 GB for a 384^3 source and a
+    512^3 target, past an A10G's 22 GB (2026-09-11). It now walks channel groups and target
+    Z-slabs with a running argmax, and the labels must be exactly the one-piece labels
+    whatever the sizes: ties (quantized fp16 values) exercise the lowest-index rule ACROSS
+    groups, a flipped, anisotropic, offset geometry the per-slab grid. The source is the
+    on-GPU path's form - an fp16 (K,Z,Y,X) view of the (X,Y,Z,K) field - and the numpy fp32
+    copy of the same values must agree with it, since widening is exact."""
+    torch = pytest.importorskip("torch")
+    Z, Y, X, K = 9, 10, 11, 7
+    rng = np.random.default_rng(2)
+    zz, yy, xx = np.meshgrid(np.arange(Z), np.arange(Y), np.arange(X), indexing="ij")
+    feats = [xx, yy, zz, xx + yy - zz, X - 1 - xx, yy - xx, zz + 2]
+    vals = np.stack([f + rng.normal(0, 1.5, f.shape) for f in feats], axis=0)   # (K,Z,Y,X)
+    # Interpolated values almost never tie by chance, so make them: channels 5 and 6
+    # duplicate 1 and 0 exactly - equal after sampling everywhere, so wherever either wins
+    # the restore must name the LOWER one, even from a later group.
+    vals[5], vals[6] = vals[1], vals[0]
+    field = torch.from_numpy(np.round(vals * 2) / 2).permute(3, 2, 1, 0).contiguous()   # (X,Y,Z,K)
+    field = field.to(torch.float16)
+    view = field.permute(3, 2, 1, 0)                                   # (K,Z,Y,X), strided
+    as_numpy = np.ascontiguousarray(np.transpose(field.float().numpy(), (2, 1, 0, 3)))   # (Z,Y,X,K)
+    flip = (-1., 0., 0., 0., -1., 0., 0., 0., 1.)
+    source = _img(np.zeros((Z, Y, X)), (1.5, 1.25, 1.0), origin=(10., -20., 5.))
+    source.SetDirection(flip)
+    target = _img(np.zeros((Z * 2, Y * 2, X * 2)), (0.75, 0.6, 0.5), origin=(8., -18., 6.))
+    target.SetDirection(flip)
+    plane = (Y * 2) * (X * 2)
+
+    one_piece = fs.restore_logits_gpu(view, source, target, device="cpu",
+                                      group=K, slab_voxels=1 << 30)
+    assert len(np.unique(one_piece)) > 2                               # not a trivial field
+    for group, slab in ((1, 1), (2, plane * 3), (3, plane), (4, plane * 7), (K, 1)):
+        got = fs.restore_logits_gpu(view, source, target, device="cpu",
+                                    group=group, slab_voxels=slab)
+        assert np.array_equal(got, one_piece), (group, slab)
+    assert np.array_equal(fs.restore_logits_gpu(as_numpy, source, target, device="cpu",
+                                                group=3, slab_voxels=plane * 2), one_piece)
+
+
 def test_restore_cpu_takes_the_fp16_field_as_a_view_and_matches_the_fp32_copy():
     """Until 2026-09-11 the CPU path handed the restore an fp32, (Z,Y,X,K)-contiguous copy
     of FastSurfer's fp16 field, widened and transposed as two full copies - about 105 GB at

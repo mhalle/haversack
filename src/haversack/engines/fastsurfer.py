@@ -163,7 +163,9 @@ def restore_logits(logits, source_ref, target_ref):
     return idx
 
 
-def restore_logits_gpu(logits_in, source_ref, target_ref, device="cuda"):
+def restore_logits_gpu(logits_in, source_ref, target_ref, device="cuda", *,
+                       group: int | None = None, slab_voxels: int = 1 << 24,
+                       group_bytes: int = 1 << 30):
     """GPU equivalent of :func:`restore_logits`: trilinear-resample the whole
     K-channel logit field from ``source_ref``'s grid onto ``target_ref``'s grid
     and argmax over classes, in one batched ``grid_sample`` on ``device`` instead
@@ -173,41 +175,67 @@ def restore_logits_gpu(logits_in, source_ref, target_ref, device="cuda"):
     half-pixel (voxel-center) convention as SimpleITK (``align_corners=False``,
     zero padding outside).
 
-    ``logits_in`` is either a torch tensor already ``(K, Zs, Ys, Xs)`` on a device
-    (the on-GPU path - no host<->device copy) or a numpy ``(Zs, Ys, Xs, K)`` field
-    (moved to ``device`` here). Needs the field resident on the device (~5 GB fp32
-    at 256^3 x 79); the CPU :func:`restore_logits` is the memory-frugal fallback.
-    Returns a ``(Z, Y, X)`` int32 class-index volume (target array order)."""
+    ``logits_in`` is either a torch tensor ``(K, Zs, Ys, Xs)`` of any float dtype and
+    layout (the on-GPU path hands over a view of the fp16 field - no host<->device copy)
+    or a numpy ``(Zs, Ys, Xs, K)`` field, moved to ``device`` a channel group at a time.
+    Returns a ``(Z, Y, X)`` int32 class-index volume (target array order).
+
+    Memory is bounded by the groups, never the whole field in fp32 on either grid. Until
+    2026-09-12 this widened the whole source to fp32 in one piece and sampled all K
+    channels onto the whole target before its argmax: 17 GB and 42 GB for a 384^3 source
+    and a 512^3 target, past an A10G's 22 GB. Now channels go ``group`` at a time (default:
+    as many as fit ``group_bytes`` of fp32 source), each widened once, and within a group
+    the target is walked in Z-slabs of about ``slab_voxels``; a running argmax on the
+    device keeps the LOWEST index on ties, torch.argmax's rule, so the labels do not
+    depend on either size. The per-slab grid is computed elementwise from global target
+    indices, so a voxel's sample position does not depend on which slab it fell in."""
     import torch
     import torch.nn.functional as F
 
     dev = torch.device(device)
-    if isinstance(logits_in, torch.Tensor):              # already (K,Zs,Ys,Xs) on device
-        K, Zs, Ys, Xs = (int(s) for s in logits_in.shape)
-        logits = logits_in.to(dev).float()[None]         # (1,K,Zs,Ys,Xs) fp32
-    else:                                                # numpy (Zs,Ys,Xs,K)
-        Zs, Ys, Xs, K = logits_in.shape
-        logits = (torch.from_numpy(np.ascontiguousarray(logits_in))
-                  .permute(3, 0, 1, 2).contiguous()[None].to(dev, torch.float32))
+    if isinstance(logits_in, torch.Tensor):              # (K,Zs,Ys,Xs), any layout/dtype/device
+        src_all = logits_in
+    else:                                                # numpy (Zs,Ys,Xs,K), host
+        src_all = torch.from_numpy(np.asarray(logits_in)).permute(3, 0, 1, 2)
+    K, Zs, Ys, Xs = (int(s) for s in src_all.shape)
     tgt = target_ref.GetSize()                            # (Xt, Yt, Zt)
     Xt, Yt, Zt = int(tgt[0]), int(tgt[1]), int(tgt[2])
     A, t = _resample_affine(source_ref, target_ref)
-
-    # target voxel indices (x,y,z) for every output voxel, array order (z,y,x)
-    zz, yy, xx = torch.meshgrid(torch.arange(Zt), torch.arange(Yt), torch.arange(Xt),
-                                indexing="ij")
-    idx_t = torch.stack([xx, yy, zz], dim=-1).to(dev, torch.float64)   # (Zt,Yt,Xt,3)
-    A_t = torch.as_tensor(A, device=dev, dtype=torch.float64)
-    off = torch.as_tensor(t, device=dev, dtype=torch.float64)
-    src = idx_t @ A_t.T + off                             # continuous source index (x,y,z)
-    # -> normalized [-1,1], voxel-center convention (align_corners=False)
+    A = [[float(a) for a in row] for row in np.asarray(A)]
+    t = [float(v) for v in np.asarray(t)]
     N = torch.as_tensor([Xs, Ys, Zs], device=dev, dtype=torch.float64)
-    grid = ((src + 0.5) * 2.0 / N - 1.0).to(torch.float32)[None]        # (1,Zt,Yt,Xt,3)
+    xs = torch.arange(Xt, device=dev, dtype=torch.float64)[None, None, :]
+    ys = torch.arange(Yt, device=dev, dtype=torch.float64)[None, :, None]
 
-    out = F.grid_sample(logits, grid, mode="bilinear",
-                        padding_mode="zeros", align_corners=False)      # (1,K,Zt,Yt,Xt)
-    idx = out.argmax(dim=1)[0].to(torch.int32).cpu().numpy()            # (Zt,Yt,Xt)
-    return idx
+    def grid_for(z0, z1):
+        """Normalized sample positions for target planes z0:z1, voxel-center convention
+        (align_corners=False). Elementwise in the order x, y, z, then the offset, from
+        GLOBAL indices - the same arithmetic for a voxel whichever slab holds it."""
+        zz = torch.arange(z0, z1, device=dev, dtype=torch.float64)[:, None, None]
+        src = torch.stack([xs * A[r][0] + ys * A[r][1] + zz * A[r][2] + t[r] for r in range(3)],
+                          dim=-1)                                     # (zs,Yt,Xt,3) source (x,y,z)
+        return ((src + 0.5) * 2.0 / N - 1.0).to(torch.float32)[None]  # (1,zs,Yt,Xt,3)
+
+    g = group or max(1, min(K, group_bytes // (4 * Zs * Ys * Xs)))
+    zs = max(1, min(Zt, slab_voxels // (Yt * Xt)))
+    best = torch.full((Zt, Yt, Xt), float("-inf"), device=dev, dtype=torch.float32)
+    bidx = torch.zeros((Zt, Yt, Xt), device=dev, dtype=torch.int32)
+    for k0 in range(0, K, g):
+        k1 = min(k0 + g, K)
+        chan = src_all[k0:k1].to(dev).float().contiguous()[None]     # this group only, widened once
+        for z0 in range(0, Zt, zs):
+            z1 = min(z0 + zs, Zt)
+            out = F.grid_sample(chan, grid_for(z0, z1), mode="bilinear",
+                                padding_mode="zeros", align_corners=False)[0]   # (g,zs,Yt,Xt)
+            i = out.argmax(dim=0)                                     # lowest index within the group
+            v = out.gather(0, i[None])[0]
+            b = best[z0:z1]
+            up = v > b                                                # strict: an earlier group keeps a tie
+            best[z0:z1] = torch.where(up, v, b)
+            bidx[z0:z1] = torch.where(up, (i + k0).to(torch.int32), bidx[z0:z1])
+            del out, i, v, up
+        del chan
+    return bidx.cpu().numpy()
 
 
 _RUNNERS: dict = {}          # (device, batch_size) -> RunModelOnData, cached across jobs
@@ -471,7 +499,10 @@ def _capture_logits(t1_sitk, device: str, batch_size: int = 8, on_gpu: bool = Tr
     if on_gpu and identity:
         # keep the field on the device; (X,Y,Z,K) -> (K,Z,Y,X) for the resampler.
         # The orientation change is left to the restore's affine (no reorder here).
-        logits = pred_prob.permute(3, 2, 1, 0).contiguous()            # (K,Zs,Ys,Xs) on device
+        # A view, not the contiguous copy it was until 2026-09-12: that copy was a second
+        # whole field on the card beside the first (8.6 GiB each at 384^3, an A10G has 22),
+        # and the grouped restore and the encoder each widen only what they read.
+        logits = pred_prob.permute(3, 2, 1, 0)                         # (K,Zs,Ys,Xs) view, device
     elif identity:
         # The host path keeps the field in fp16. Until 2026-09-11 it was widened to fp32 and
         # then transposed contiguous - two fp32 copies beside the fp16 original, ~105 GB at
