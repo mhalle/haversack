@@ -219,6 +219,10 @@ def test_fresh_weights_versions_reloads_once(monkeypatch):
                 return {"weights_installed": [{"id": "297", "version": "v2"}]}
             return {"weights_installed": [{"id": "297"}]}   # -> unknown
 
+        def engine_for(self, task):     # weights_versions_of reads the engine's cache_epoch
+            from haversack.engines import registry
+            return registry.engine_for_task(str(task))
+
     monkeypatch.setattr(modal_app, "weights_vol", Vol())
     ex = modal_app.ModalExecutor()
     ex.segmenter = Seg()

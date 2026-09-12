@@ -164,6 +164,9 @@ _ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack 
 #: narrower than the network's patch is grown to it with real voxels, where the sliding
 #: window padded it with normalized 0 (the model's mean tissue); and a crop that saves no
 #: tiles runs the whole volume. Each changes labels under an unchanged key.
+#:
+#: A change that only ONE engine's arithmetic sees bumps that engine's
+#: ``Engine.cache_epoch`` instead (2026-09-12), so the other engines keep their results.
 CACHE_EPOCH = "3"
 
 
@@ -292,15 +295,36 @@ def resource_links(task, identity, options, *, preview=False, statistics=False) 
 
 
 def weights_versions_of(segmenter, task) -> list:
-    """The key's model component, from the install sidecars via describe().
-    "unknown" when nothing better exists - documented, never guessed."""
+    """The key's model component, from the install sidecars via describe(), plus the
+    task's engine's own cache epoch when it declares one (``Engine.cache_epoch``).
+    "unknown" when nothing better exists - documented, never guessed.
+
+    The one door every result key's weights pass through (Modal's
+    ``_fresh_weights_versions`` wraps it), which is why the engine epoch joins here and
+    not at each ``result_key`` call site."""
     try:
         entries = segmenter.describe(task).get("weights_installed") or []
         out = [f"{e.get('id')}={e.get('version') or e.get('sha256') or 'unknown'}"
-               for e in entries]
-        return out or ["unknown"]
+               for e in entries] or ["unknown"]
     except Exception:
-        return ["unknown"]
+        out = ["unknown"]
+    return out + _engine_epoch(segmenter, task)
+
+
+def _engine_epoch(segmenter, task) -> list:
+    """``["<engine>@epoch=<n>"]`` for an engine that declares a cache epoch, else nothing,
+    so an engine that never bumps keeps exactly the keys it always had.
+
+    Only "there is no such engine" means no epoch. Anything else - above all a
+    segmenter-shaped object with no ``engine_for`` - raises: a silent ``[]`` on one side
+    of the API/worker handshake is a key the other side never computes, which is how
+    Modal's _EngineShim briefly published FastSurfer results nowhere (2026-09-12)."""
+    try:
+        eng = segmenter.engine_for(task)
+    except LookupError:
+        return []
+    ep = getattr(eng, "cache_epoch", None)
+    return [f"{eng.name}@epoch={ep}"] if ep else []
 
 
 #: Reserved in a path component on SOME platform, so reserved on ALL of them.

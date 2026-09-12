@@ -97,6 +97,12 @@ class FakeSegmenter:
             raise KeyError(task)
         return {"name": task, "structures": ["spleen", "kidney_right"]}
 
+    def engine_for(self, task):
+        # routed as the real Segmenter routes it: weights_versions_of reads the engine's
+        # cache_epoch into every key, and raises (by design) for a double without this
+        from haversack.engines import registry
+        return registry.engine_for_task(str(task))
+
     def segment(self, image, task, *, progress=None, cancel=None, **options):
         self.calls.append((str(image), task, options))
         self.inputs.append(image)                  # unstringified, for role checks
@@ -3095,6 +3101,46 @@ def test_a_release_does_not_throw_the_result_cache_away(monkeypatch):
     assert sv.result_key(("idc:abc",), "total", {"grid": 1.5}, ["ts=v2.4.0"]) != before
     assert sv.result_key(("idc:abc",), "total_fast", {"grid": 2.0}, ["ts=v2.4.0"]) != before
     assert sv.result_key(("idc:abc",), "total_fast", {"grid": 1.5}, ["ts=v2.5.0"]) != before
+
+
+def test_an_engine_epoch_moves_only_that_engines_keys(monkeypatch):
+    """The global CACHE_EPOCH is global: bumping it for a change only one engine's
+    arithmetic sees (FastSurfer's 0.7 mm floor, 2026-09-12) would recompute every other
+    engine's results too. Engine.cache_epoch reaches the key through weights_versions_of,
+    the one door every key's weights pass through. An engine WITHOUT one must key exactly
+    as before the field existed - that is what lets it be added without a global bump."""
+    import dataclasses
+
+    from haversack import serve as sv
+    from haversack.engines import registry
+
+    class Seg:                                        # only what weights_versions_of reads
+        def describe(self, task):
+            return {"weights_installed": [{"id": "w", "version": "1"}]}
+
+        def engine_for(self, task):
+            return registry.ENGINES["fastsurfer" if task.startswith("fastsurfer:")
+                                    else registry.NNUNETV2]
+
+    seg = Seg()
+    key = lambda task: sv.result_key(("idc:abc",), task, {}, sv.weights_versions_of(seg, task))
+    fs_eng = registry.ENGINES["fastsurfer"]
+
+    # no epoch: byte-for-byte the key from before Engine.cache_epoch existed
+    monkeypatch.setitem(registry.ENGINES, "fastsurfer", dataclasses.replace(fs_eng, cache_epoch=None))
+    assert registry.ENGINES[registry.NNUNETV2].cache_epoch is None
+    for task in ("fastsurfer:brain", "total_fast"):
+        assert key(task) == sv.result_key(("idc:abc",), task, {}, ["w=1"]), task
+    fs_plain, ts_plain = key("fastsurfer:brain"), key("total_fast")
+
+    # an epoch moves that engine's keys, and each bump moves them again
+    monkeypatch.setitem(registry.ENGINES, "fastsurfer", dataclasses.replace(fs_eng, cache_epoch="1"))
+    fs_1 = key("fastsurfer:brain")
+    monkeypatch.setitem(registry.ENGINES, "fastsurfer", dataclasses.replace(fs_eng, cache_epoch="2"))
+    fs_2 = key("fastsurfer:brain")
+    assert len({fs_plain, fs_1, fs_2}) == 3
+    # ...and no other engine's
+    assert key("total_fast") == ts_plain
 
 
 def test_a_zip_and_loose_parts_of_one_series_are_the_same_input(tmp_path):

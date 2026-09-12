@@ -986,6 +986,14 @@ class _EngineShim:
     def __init__(self, engine: str):
         self._engine = engine
 
+    def engine_for(self, task):
+        """This worker's engine row, whatever the task: ``weights_versions_of`` reads its
+        ``cache_epoch`` into the key. Missing until 2026-09-12, the first day an engine
+        declared one - the API keyed FastSurfer with ``fastsurfer@epoch=1`` and this shim
+        re-keyed without it, publishing every result into a slot nothing looks up (caught
+        by test_the_engine_shim_reports_the_weights_identity_the_api_reports)."""
+        return _engines.ENGINES[self._engine]
+
     def describe(self, task):
         identity = _engines.ENGINES[self._engine].weights_identity
         if identity is not None:

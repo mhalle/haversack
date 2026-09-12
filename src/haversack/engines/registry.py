@@ -130,6 +130,16 @@ class Engine:
     #: useful ones out of a shared LRU - VoxTell, whose free-text prompts hash
     #: into the key, is the case this exists for.
     serve_from_cache: bool = True
+    #: This engine's own cache epoch: the per-engine half of ``serve.CACHE_EPOCH``. Bump it
+    #: when THIS engine would compute different bytes from the same request - its inference
+    #: path, its conform, its restore - and only its results are recomputed. None (the
+    #: default) adds nothing to the key, so an engine that never bumps keeps exactly the
+    #: keys it always had. Kept out of ``weights_identity`` on purpose: that also labels the
+    #: probabilities an engine stores, and a processing change is not a new set of weights.
+    #: Exists because the global epoch is global (2026-09-12): FastSurfer's 0.7 mm floor
+    #: changes only FastSurfer's sub-0.7 mm results, and bumping CACHE_EPOCH for it would
+    #: have thrown away every nnU-Net result as well.
+    cache_epoch: str | None = None
     #: The engine's own parameters, as a pydantic model. Generates the JSON
     #: Schema ``describe()`` publishes AND validates the request at submit, from
     #: one declaration. Our processing knobs are a separate group and are not
@@ -210,6 +220,9 @@ ENGINES: dict[str, Engine] = {
         cache_store=("fastsurfer-checkpoints", "HAVERSACK_FASTSURFER_CHECKPOINTS"),
         behavior=GRADED_RESTORE,
         processing_knobs=False,
+        # 1 (2026-09-12): inputs finer than 0.7 mm are processed at 0.7 (VOX_FLOOR_MM in
+        # engines/fastsurfer.py), where they used to run on FastSurfer's unfloored "min"
+        cache_epoch="1",
         description="FastSurferVINN 2.5D view-aggregation parcellation",
     ),
     "synthstrip": Engine(

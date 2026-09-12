@@ -227,6 +227,96 @@ def test_restore_gpu_tensor_input_matches_numpy_input():
     assert np.array_equal(from_numpy, from_tensor)
 
 
+def test_restore_cpu_takes_the_fp16_field_as_a_view_and_matches_the_fp32_copy():
+    """Until 2026-09-11 the CPU path handed the restore an fp32, (Z,Y,X,K)-contiguous copy
+    of FastSurfer's fp16 field, widened and transposed as two full copies - about 105 GB at
+    peak for a 512^3 field on a Mac. It now hands over one fp16 (Z,Y,X,K) copy as a
+    (K,Z,Y,X) view, each channel widened as the restore reads it. fp16 -> fp32 is exact, so
+    the labels must be IDENTICAL, not close - including where classes tie, which fp16's
+    coarse steps make common, and which the quantized values here force. The restore
+    promises any layout, so an arbitrarily strided view must agree as well."""
+    torch = pytest.importorskip("torch")
+    X, Y, Z, K = 10, 12, 14, 5                    # distinct, so a swapped axis cannot pass
+    rng = np.random.default_rng(0)
+    xx, yy, zz = np.meshgrid(np.arange(X), np.arange(Y), np.arange(Z), indexing="ij")
+    feats = [xx, yy, zz, xx + yy - zz, X - 1 - xx]
+    vals = np.stack([f + rng.normal(0, 2, f.shape) for f in feats], axis=-1)
+    field = torch.from_numpy(np.round(vals * 4) / 4).to(torch.float16)   # (X,Y,Z,K), ties
+    handed = field.permute(2, 1, 0, 3).contiguous().permute(3, 0, 1, 2)   # _capture_logits'
+    strided = field.permute(3, 2, 1, 0)                                   # any other layout
+    old = np.ascontiguousarray(np.transpose(field.float().numpy(), (2, 1, 0, 3)))   # (Z,Y,X,K)
+
+    source = _img(np.zeros((Z, Y, X)), (1.0, 1.25, 1.5), origin=(3., -4., 5.))
+    source.SetDirection((-1., 0., 0., 0., -1., 0., 0., 0., 1.))
+    target = _img(np.zeros((Z * 2, Y * 2, X * 2)), (0.5, 0.6, 0.7), origin=(2., -3., 6.))
+    target.SetDirection((-1., 0., 0., 0., -1., 0., 0., 0., 1.))
+
+    expected = fs.restore_logits(old, source, target)
+    for view in (handed, strided):
+        assert not view.is_contiguous() and view.dtype == torch.float16
+        assert np.array_equal(fs.restore_logits(view, source, target), expected)
+
+
+def test_the_field_leaves_mps_exactly_when_one_buffer_cannot_hold_it():
+    """A 384^3 FastSurfer run died on MPS allocating its (X,Y,Z,79) fp16 field: PyTorch's
+    MPS allocator refuses a buffer past Metal's maxBufferLength, 8 GiB on the M2 it was
+    measured on (2026-09-11) - 378^3 allocates, 379^3 does not. field_device moves such a
+    field to the host (FastSurfer's own viewagg_device=cpu) and must not move smaller ones,
+    which would cost speed for nothing. Only MPS has this limit."""
+    K = 79
+    assert fs.field_device("mps", (378, 378, 378, K)) == "mps"          # 7.95 GiB: allocates
+    assert fs.field_device("mps", (379, 379, 379, K)) == "cpu"          # 8.01 GiB: refused
+    assert fs.field_device("mps", (512, 512, 512, K)) == "cpu"
+    assert fs.field_device("mps", (366, 366, 366, K)) == "mps"          # 256 mm FOV at 0.7 mm
+    assert fs.field_device("cuda:0", (512, 512, 512, K)) == "cuda:0"    # no such buffer limit
+    assert fs.field_device("cpu", (512, 512, 512, K)) == "cpu"
+
+
+@pytest.mark.parametrize("zooms, want_vox, want_floored_from", [
+    ((0.5, 0.5, 0.5), 0.7, 0.5),            # the case the floor exists for
+    ((0.69, 0.69, 0.69), 0.7, 0.69),
+    ((0.45, 0.45, 1.0), 0.7, 0.45),         # anisotropic: "min" takes the finest axis
+    ((0.7, 0.7, 0.7), "min", None),         # at the floor: FastSurfer's own mode, untouched
+    ((0.8, 0.8, 0.8), "min", None),
+    ((0.9375, 0.9375, 1.2), "min", None),
+    ((0.96, 0.96, 0.96), "min", None),      # FastSurfer snaps this to 1 mm itself
+    ((1.0, 1.3, 1.0), "min", None),         # ds000114's T1
+    ((1.2, 1.2, 1.2), "min", None),         # above the 1 mm cap
+])
+def test_the_floor_replaces_only_choices_finer_than_it(zooms, want_vox, want_floored_from):
+    """FastSurfer's "min" rule has a 1 mm cap and no floor. The floor must raise ONLY a
+    choice finer than 0.7 mm; anything else gets FastSurfer's own mode back verbatim, so
+    its conform - and so its bytes - are literally what they were before the floor. The
+    conform settings are FastSurfer's parser defaults, read rather than restated."""
+    pytest.importorskip("FastSurferCNN")
+    nib = pytest.importorskip("nibabel")
+    from FastSurferCNN import run_prediction as rp
+    a = rp.make_parser().parse_args(["--t1", "x", "--sd", "x"])
+    ck = {"vox_size": a.vox_size, "img_size": a.image_size,
+          "threshold_1mm": a.conform_to_1mm_threshold}
+    assert ck["vox_size"] == "min"                        # what haversack runs today
+    img = nib.Nifti1Image(np.zeros((16, 16, 16), np.uint8), np.diag([*zooms, 1.0]))
+    vox, floored_from = fs.processing_vox_size(img, ck)
+    assert vox == want_vox
+    assert floored_from == (pytest.approx(want_floored_from) if want_floored_from else None)
+
+
+@pytest.mark.slow
+def test_the_largest_field_kept_on_mps_really_allocates():
+    """The constant must never OVERestimate the device: a field field_device keeps on MPS
+    has to allocate there. Allocates ~8 GB, so slow and MPS-only."""
+    torch = pytest.importorskip("torch")
+    if not torch.backends.mps.is_available():
+        pytest.skip("no MPS device")
+    K, n = 79, 378
+    assert fs.field_device("mps", (n, n, n, K)) == "mps"
+    t = torch.zeros((n, n, n, K), dtype=torch.float16, device="mps")
+    t[:, :8].add_(torch.ones((n, 8, n, K), dtype=torch.float16, device="mps"), alpha=0.4)
+    torch.mps.synchronize()
+    del t
+    torch.mps.empty_cache()
+
+
 def test_sitk_nibabel_sitk_roundtrip_is_geometry_exact():
     """sitk -> nibabel -> sitk must recover size/spacing/origin/direction/data
     exactly. This is the bridge that recovers the conformed-orig geometry for the
@@ -273,8 +363,9 @@ def test_emit_probabilities_hands_over_the_field_with_both_grids():
 
 
 def test_emit_probabilities_accepts_the_cpu_paths_axis_order():
-    """_capture_logits returns (K,Z,Y,X) torch on the GPU path but (Z,Y,X,K) numpy on the
-    CPU one; the encoder only takes the former, so the hook must transpose."""
+    """_capture_logits returns (K,Z,Y,X) torch on every identity path (on the device, or an
+    fp16 view on the host since 2026-09-11) but still (Z,Y,X,K) numpy after a non-identity
+    reorder; the encoder only takes the former, so the hook must transpose."""
     from haversack import ranked
 
     pytest.importorskip("torch")
@@ -291,6 +382,33 @@ def test_emit_probabilities_accepts_the_cpu_paths_axis_order():
     assert got[0].meta["classes"] == K
     # and the winner survives the transpose
     np.testing.assert_array_equal(got[0].ranks[0] - 1, lg.argmax(axis=3).astype(np.uint8))
+
+
+def test_emit_probabilities_stores_the_same_bytes_from_the_fp16_view_as_from_the_fp32_copy():
+    """The host path used to hand the encoder an fp32 contiguous copy of the field; since
+    2026-09-11 it hands over the fp16 field itself as a strided (K,Z,Y,X) view, and the
+    encoder widens each slab. fp16 -> fp32 is exact, so every stored plane must be
+    IDENTICAL - ranks, gap bytes and tail - including at the ties fp16 makes common, and
+    the quantized values here force."""
+    from haversack import ranked
+    torch = pytest.importorskip("torch")
+    X, Y, Z, K = 6, 5, 4, 7
+    rng = np.random.default_rng(1)
+    field = torch.from_numpy(np.round(rng.normal(0, 3, (X, Y, Z, K)) * 4) / 4).to(torch.float16)
+    handed = field.permute(2, 1, 0, 3).contiguous().permute(3, 0, 1, 2)   # _capture_logits'
+    old = np.ascontiguousarray(np.transpose(field.float().numpy(), (2, 1, 0, 3)))   # (Z,Y,X,K)
+    ref = sitk.GetImageFromArray(np.zeros((Z, Y, X), np.float32))
+
+    codes = []
+    for lg in (old, handed):
+        spec = ranked.RankedSpec(sink=lambda part, code: codes.append(code), depth=4)
+        fs.emit_probabilities(spec, lg, ref, ref, list(range(K)))
+    a, b = codes
+    for name in ("ranks", "support", "tail"):
+        x, y = getattr(a, name), getattr(b, name)
+        assert (x is None) == (y is None), name
+        if x is not None:
+            assert x.dtype == y.dtype and np.array_equal(x, y), name
 
 
 def test_emit_probabilities_is_a_noop_without_a_spec():

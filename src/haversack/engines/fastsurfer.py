@@ -119,14 +119,18 @@ def nibabel_to_sitk(nb):
     return img
 
 
-def restore_logits(logit_zyx, source_ref, target_ref):
+def restore_logits(logits, source_ref, target_ref):
     """Resample a per-class logit field from ``source_ref``'s grid onto
     ``target_ref``'s grid (SimpleITK physical space, so any orientation/spacing
     difference is handled), and argmax over classes -> a class-index volume on
     the target grid.
 
-    ``logit_zyx`` is ``(Z, Y, X, K)`` (SimpleITK array order) aligned with
-    ``source_ref`` (a SimpleITK image carrying the source geometry).
+    ``logits`` is a numpy ``(Z, Y, X, K)`` field (SimpleITK array order) or a torch
+    ``(K, Z, Y, X)`` tensor of any float dtype and layout - the latter is what
+    ``_capture_logits`` hands over on the host path since 2026-09-11, fp16 and strided -
+    aligned with ``source_ref`` (a SimpleITK image carrying the source geometry). A tensor
+    channel is widened to fp32 only as it is read: SimpleITK has no fp16, and widening is
+    exact.
     ``target_ref`` is a SimpleITK image whose grid is the desired output.
 
     Streams one channel at a time with a running argmax, so peak memory is one
@@ -137,13 +141,18 @@ def restore_logits(logit_zyx, source_ref, target_ref):
     """
     import SimpleITK as sitk
 
-    K = logit_zyx.shape[3]
+    tensor = not isinstance(logits, np.ndarray)       # torch (K,Z,Y,X), or numpy (Z,Y,X,K)
+    if tensor:
+        import torch
+    K = int(logits.shape[0] if tensor else logits.shape[3])
     tgt_size = target_ref.GetSize()
     tgt_shape = (tgt_size[2], tgt_size[1], tgt_size[0])   # sitk size is (x,y,z)
     best = np.full(tgt_shape, -np.inf, dtype=np.float32)
     idx = np.zeros(tgt_shape, dtype=np.int32)
     for k in range(K):
-        ch = sitk.GetImageFromArray(np.ascontiguousarray(logit_zyx[..., k]))
+        chan = (logits[k].to("cpu", torch.float32, memory_format=torch.contiguous_format).numpy()
+                if tensor else np.ascontiguousarray(logits[..., k]))
+        ch = sitk.GetImageFromArray(chan)
         ch.CopyInformation(source_ref)
         native = sitk.GetArrayFromImage(
             sitk.Resample(ch, target_ref, sitk.Transform(),
@@ -228,6 +237,61 @@ def local_viewagg(device: str, host_gb: float | None = None) -> str:
         gb = _host_memory_gb() if host_gb is None else host_gb
         return "mps" if gb >= 32 else "cpu"
     return "cpu"
+
+
+#: The largest single MPS buffer, in bytes. PyTorch's MPS allocator refuses anything past
+#: Metal's ``maxBufferLength`` ("Invalid buffer size"), which is 8 GiB on the 16 GB M2 this
+#: was measured on (2026-09-11): a (378^3, 79) fp16 field allocates, (379^3, 79) does not -
+#: the crossover a 384^3 FastSurfer run first failed at. Larger machines report a larger
+#: limit, but torch exposes no way to read it, so a field past this goes to the host even
+#: where one buffer might have held it: slower, never wrong, and the same on every Mac.
+MPS_MAX_BUFFER_BYTES = 8 << 30
+
+
+def field_device(device, shape, itemsize: int = 2) -> str:
+    """Where a view-aggregation field of ``shape`` can live, given where it was asked to.
+
+    The host when no MPS buffer that size can exist, ``device`` otherwise. The move is
+    FastSurfer's own ``--viewagg_device cpu``: the three view networks still run on the
+    device and each batch is added into the field on the host, so the result is one
+    FastSurfer computes itself - it is the speed that changes, not the method."""
+    import math
+    dev = str(device)
+    if dev.startswith("mps") and math.prod(int(s) for s in shape) * itemsize >= MPS_MAX_BUFFER_BYTES:
+        return "cpu"
+    return dev
+
+
+#: The finest voxel size FastSurfer is asked to process at, in mm. FastSurferVINN was
+#: trained and validated on 0.7-1.0 mm, and its own --vox_size help calls anything below
+#: 0.7 "experimental" (Henschel et al. 2022, doi:10.1016/j.neuroimage.2022.118933). Its
+#: "min" rule has a 1 mm cap and no floor, so a 0.5 mm scan ran on a 512^3 grid: a 21 GB
+#: field, past one MPS buffer, and 2.7x the network work of 0.7 mm. Finer inputs are
+#: raised to this (2026-09-12, fastsurfer cache_epoch 1); the labels are still restored
+#: onto the input's own grid.
+VOX_FLOOR_MM = 0.7
+
+
+def processing_vox_size(img, conform_kwargs):
+    """FastSurfer's own voxel-size choice for ``img``, raised to :data:`VOX_FLOOR_MM`.
+
+    Returns ``(vox_size, floored_from)``: the ``vox_size`` to conform with, and FastSurfer's
+    own choice in mm when the floor replaced it (else None). An input at or above the floor
+    gets FastSurfer's own mode back, not the number it resolves to, so its conform is
+    literally the one it always had. The choice is FastSurfer's ``conformed_vox_img_size``
+    itself - the 0.95 mm snap-to-1 threshold and the rounding are its rules, not copies."""
+    from FastSurferCNN.data_loader.conform import conformed_vox_img_size
+    vox, _ = conformed_vox_img_size(img, conform_kwargs["vox_size"], conform_kwargs["img_size"],
+                                    threshold_1mm=conform_kwargs["threshold_1mm"])
+    if vox is None:                                   # 'keep' mode: no size was chosen to floor
+        return conform_kwargs["vox_size"], None
+    # At FastSurfer's own 4-decimal precision (vox_eps): a header's float32 0.7 is
+    # 0.699999988, which a float64 comparison calls finer than the floor - a genuine
+    # 0.7 mm scan would have been "floored" to 0.7 and a deviation recorded for nothing.
+    chosen = round(float(np.min(vox)), 4)
+    if chosen >= VOX_FLOOR_MM:
+        return conform_kwargs["vox_size"], None
+    return VOX_FLOOR_MM, chosen
 
 
 # The three FastSurferVINN v2.0.0 checkpoints, by filename and sha256. They are fixed,
@@ -356,10 +420,15 @@ def _capture_logits(t1_sitk, device: str, batch_size: int = 8, on_gpu: bool = Tr
     frame and ``n2l.inverse`` is the identity - the orientation change is deferred
     into the restore's physical-space resample. When ``on_gpu`` and that reorder
     is identity, the K-channel field stays on the GPU (returned as a torch tensor
-    ``(K, Zs, Ys, Xs)``) - no host<->device copy, no per-channel reorder. The
-    fallback (``on_gpu=False`` or a non-identity reorder) returns numpy
-    ``(Zs, Ys, Xs, K)`` as before. Returns
-    (logits, conf_orig_sitk, fs_labels_zyx, class_labels)."""
+    ``(K, Zs, Ys, Xs)``) - no host<->device copy, no per-channel reorder. Otherwise,
+    with the identity reorder, it comes back to the host in the same ``(K, Zs, Ys, Xs)``
+    shape, fp16, as a view of one ``(Zs, Ys, Xs, K)`` copy; only a non-identity reorder
+    still returns numpy fp32 ``(Zs, Ys, Xs, K)``. Returns
+    (logits, conf_orig_sitk, fs_labels_zyx, class_labels, capture) - the last says what
+    the capture actually did, so the caller can record it: ``field_device`` (where the
+    view-aggregation field lived, which :func:`field_device` may have moved to the host),
+    ``vox_mm`` (the processing voxel size) and ``floored_from`` (FastSurfer's own choice
+    when :data:`VOX_FLOOR_MM` replaced it, else None)."""
     import torch
     from FastSurferCNN.data_loader.conform import Reorientation, conform, is_conform
     import FastSurferCNN.data_loader.data_utils as du
@@ -370,7 +439,9 @@ def _capture_logits(t1_sitk, device: str, batch_size: int = 8, on_gpu: bool = Tr
     # conform in memory, no file writes (conform_and_save_orig minus the IO);
     # reuse FastSurfer's own conform kwargs so we match its trained-input contract
     ck = r._RunModelOnData__conform_kwargs()          # name-mangled: FastSurfer's exact knobs
-    if not is_conform(orig, **r._RunModelOnData__conform_kwargs(verbose=False)):
+    vox, floored_from = processing_vox_size(orig, ck)   # FastSurfer's choice, floored at 0.7
+    ck = r._RunModelOnData__conform_kwargs(vox_size=vox)
+    if not is_conform(orig, **r._RunModelOnData__conform_kwargs(vox_size=vox, verbose=False)):
         orig = conform(orig, **ck)
         orig_data = np.asanyarray(orig.dataobj)
 
@@ -379,7 +450,8 @@ def _capture_logits(t1_sitk, device: str, batch_size: int = 8, on_gpu: bool = Tr
         orig.affine, "soft LIA", orig_data.shape, zoom)
     orig_in_lia = n2l(orig_data, order=1)
     shape = orig_in_lia.shape + (r.get_num_classes(),)
-    pred_prob = torch.zeros(shape, device=r.viewagg_device,
+    field_dev = field_device(r.viewagg_device, shape)   # the host if MPS cannot hold it
+    pred_prob = torch.zeros(shape, device=field_dev,
                             dtype=torch.float16, requires_grad=False)
     for plane, model in r.models.items():
         r.set_model(plane)
@@ -400,17 +472,26 @@ def _capture_logits(t1_sitk, device: str, batch_size: int = 8, on_gpu: bool = Tr
         # keep the field on the device; (X,Y,Z,K) -> (K,Z,Y,X) for the resampler.
         # The orientation change is left to the restore's affine (no reorder here).
         logits = pred_prob.permute(3, 2, 1, 0).contiguous()            # (K,Zs,Ys,Xs) on device
-    else:
+    elif identity:
+        # The host path keeps the field in fp16. Until 2026-09-11 it was widened to fp32 and
+        # then transposed contiguous - two fp32 copies beside the fp16 original, ~105 GB at
+        # peak for a 512^3 field, and emit_probabilities made a third. Now one fp16 copy into
+        # (Z,Y,X,K): the same transpose as before at half the bytes, so a channel read by the
+        # CPU restore strides by K exactly as it did, and an encoder slab of Z-planes is one
+        # contiguous block. Widening is exact and each consumer widens only what it reads, so
+        # the bytes out are unchanged. A pure view of the (X,Y,Z,K) buffer would save this
+        # copy too, but would make every one of the K channel reads a scattered 3D transpose.
+        logits = pred_prob.cpu().permute(2, 1, 0, 3).contiguous().permute(3, 0, 1, 2)
+    else:                                             # generic reorder (rare: non-LIA conform)
         pp = pred_prob.float().cpu().numpy()          # (X, Y, Z, K) nibabel order
-        if identity:
-            logit_conf = pp
-        else:                                         # generic reorder (rare: non-LIA conform)
-            logit_conf = np.empty(inv(pp[..., 0], order=1).shape + (pp.shape[3],), np.float32)
-            for k in range(pp.shape[3]):
-                logit_conf[..., k] = np.asarray(inv(pp[..., k], order=1))
+        logit_conf = np.empty(inv(pp[..., 0], order=1).shape + (pp.shape[3],), np.float32)
+        for k in range(pp.shape[3]):
+            logit_conf[..., k] = np.asarray(inv(pp[..., k], order=1))
         logits = np.ascontiguousarray(np.transpose(logit_conf, (2, 1, 0, 3)))   # (Z,Y,X,K)
     del pred_prob
-    return logits, conf_orig, fs_labels_zyx, r.labels
+    capture = {"field_device": field_dev, "floored_from": floored_from,
+               "vox_mm": round(float(np.min(zoom)), 4)}   # the header's float32, at vox_eps
+    return logits, conf_orig, fs_labels_zyx, r.labels, capture
 
 
 def _fs_version() -> str:
@@ -429,10 +510,11 @@ def emit_probabilities(spec, logits, source_ref, target_ref, class_labels) -> No
     supply the geometry a reader needs to redo the restore. Without both grids the arrays
     are a picture of the conformed grid and nothing else.
 
-    ``logits`` arrives from ``_capture_logits`` two ways: a torch tensor ``(K, Z, Y, X)`` on
-    the device when the GPU restore is in play, ``(Z, Y, X, K)`` numpy otherwise. The encoder
-    wants the former, and promotes to fp32 per slab itself - so do not cast the whole field
-    here, which would materialize a second copy of the largest array in the run.
+    ``logits`` arrives from ``_capture_logits`` as a torch tensor ``(K, Z, Y, X)`` - on the
+    device when the GPU restore is in play, an fp16 view on the host otherwise - or, only
+    after a non-identity reorder, as ``(Z, Y, X, K)`` numpy. The encoder wants the tensor,
+    and promotes to fp32 per slab itself - so do not cast or copy the whole field here, which
+    would materialize a second copy of the largest array in the run.
     """
     import torch
 
@@ -507,8 +589,9 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", batch_size: int = 8
     use_gpu = restore == "gpu" or (restore == "auto" and str(device).startswith("cuda"))
     timings: dict[str, float] = {}
     _t = time.perf_counter()
-    logits, conf_orig, fs_labels_zyx, class_labels = _capture_logits(
+    logits, conf_orig, fs_labels_zyx, class_labels, capture = _capture_logits(
         t1_img, device, batch_size, on_gpu=use_gpu, viewagg_device=viewagg_device)
+    field_dev = capture["field_device"]
     timings["capture"] = time.perf_counter() - _t     # conform + VINN inference (model cached)
 
     def to_fs(idx_zyx):
@@ -584,13 +667,26 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", batch_size: int = 8
             "restore": (f"logit-grade (physical-space, {'gpu' if use_gpu else 'cpu'})"
                         if logit_grade else "label-nn"),
             "self_check": "reproduces FastSurfer labels at conformed grid" if self_check else "skipped",
-            "device": device, "view_aggregation_device": viewagg_device, "deviations": []}
-    if viewagg_device == "cpu" and not str(device).startswith("cpu"):
+            "device": device, "view_aggregation_device": field_dev,
+            "processing_vox_mm": capture["vox_mm"], "deviations": []}
+    if capture["floored_from"] is not None:
         from ..result import deviation
         prov["deviations"].append(deviation(
+            "processing voxel size", f"{capture['floored_from']:g} mm (FastSurfer's 'min')",
+            f"{capture['vox_mm']:g} mm",
+            "FastSurferVINN is validated at 0.7-1.0 mm and calls finer experimental; the "
+            "labels are still restored onto the input's own grid"))
+    if field_dev == "cpu" and not str(device).startswith("cpu"):
+        from ..result import deviation
+        if viewagg_device == "cpu":                   # placed there by policy (local_viewagg)
+            why = "the 79-class aggregation field would not fit the GPU's memory pool"
+        else:                                         # moved there by field_device, for size
+            gb = int(np.prod(logits.shape)) * 2 / 2**30
+            why = (f"the 79-class aggregation field ({gb:.1f} GiB) is larger than one MPS "
+                   f"buffer can be ({MPS_MAX_BUFFER_BYTES / 2**30:.0f} GiB)")
+        prov["deviations"].append(deviation(
             "device (view-aggregation field)", device, "cpu",
-            "the 79-class aggregation field would not fit the GPU's memory pool; the three "
-            "view networks still ran on the requested device"))
+            why + "; the three view networks still ran on the requested device"))
     seg = Segmentation(labels=out_img, schema=LabelSchema(names=names),
                        grid=grid, spec=None, timings=timings, provenance=prov)
     return seg
