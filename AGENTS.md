@@ -83,7 +83,7 @@ Two layers, enforced by `tests/test_layering.py`:
   OpenAPI), `sources` (idc/tcia/openneuro/zenodo/hf), `content` (content-addressed inputs),
   `preview`, `statistics`.
 - **Engines** — `engines/registry.py` is the static ecosystem→engine map (ts, moose,
-  mrsegmentator, dentalsegmentator, totalvibe, custom → nnunetv2; fastsurfer, synthstrip,
+  mrsegmentator, dentalsegmentator, totalvibe, cads, custom → nnunetv2; fastsurfer, synthstrip,
   voxtell, monai). Deliberately NOT a plugin system, and the reason is now in the module
   docstring: the torch-free import rule, Modal resolving `@app.cls` at import, and engines
   living in conflicting environments each rule discovered plugins out on their own.
@@ -113,17 +113,19 @@ Two layers, enforced by `tests/test_layering.py`:
   url, folder, tag and a digest, never labels. Override `_unpack_into` only if the zip has
   no `Dataset<id>` parent, and `spec` only to read a fact the checkpoint states somewhere
   `from_model_folder` does not look (TotalVibe's per-model orientation).
-- **CADS (murong-xu/CADS) was evaluated as a catalog on 2026-09-11 and not added yet.** Each
+- **CADS (murong-xu/CADS) is the `cads` catalog (`CADSEcosystem`, 2026-09-12), `open` weights only.** Each
   license release is nine ResEnc-L checkpoints (T551-T559, `fold_all`, 1.5 mm, one CT channel)
   and fits `ZipManifestEcosystem` - except that CADS reorients to RAS and resamples the
   TotalSegmentator way while its plans say `SimpleITKIO` and its `dataset.json` states no
-  orientation, so `spec()` must set lineage `ts`: the stock `from_model_folder` path scored
+  orientation, so its `spec()` sets lineage `ts`: the stock `from_model_folder` path scored
   mean Dice 0.034 against upstream with every side swapped. With lineage `ts`, on the whole
-  volume (`envelope_mm=None`), all nine open tasks matched upstream at 0.998-1.0 on a
-  chest-abdomen-pelvis and a whole-body CT on an A10, fp16 or fp32 alike. One resampling fact
+  volume (`envelope_mm=None`) and restored `nearest` as upstream restores, all nine open tasks
+  matched upstream at 0.998-1.0 on a chest-abdomen-pelvis and a whole-body CT on an A10, fp16
+  or fp32 alike. Through the catalog on the M2 (`cads:organs`, 2026-09-12): 99.9995 % of voxels
+  with `--interp nearest`, mean Dice 0.970 (adrenals 0.91) with the default linear restore. One resampling fact
   differs from TotalSegmentator: CADS's copy of `change_spacing` has no `mode="nearest"`, so it
   pads with scipy's `constant` 0 HU. A 34-slice head CT feels it (0.977-0.998 as is, 0.9997-1.0
-  in constant mode), so a CADS catalog should carry it. Upstream gates T557/T558 on a brain
+  in constant mode), which the catalog does not carry yet. Upstream gates T557/T558 on a brain
   found by T553; on abdomen-only, whole-body and head scans the gate removed nothing. One
   combined label map would need a transparent LUT value, since a label dropped from a union
   remap paints 0 over earlier parts. Licenses: `open` CC BY-SA 4.0 and `research` CC BY-NC-SA

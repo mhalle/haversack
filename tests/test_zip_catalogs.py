@@ -21,7 +21,7 @@ import pytest
 import urllib.request
 
 from haversack import fetchlib
-from haversack.ecosystems import (DentalSegmentatorEcosystem, EcosystemCatalog,
+from haversack.ecosystems import (CADSEcosystem, DentalSegmentatorEcosystem, EcosystemCatalog,
                               TotalVibeEcosystem, ZipManifestEcosystem, registry)
 from haversack.errors import InputError, ModelNotFound
 
@@ -87,7 +87,7 @@ def _expecting(eco, payload: bytes, task: str):
 # --- what the manifests may and may not carry -------------------------------
 
 def test_manifests_hold_only_what_the_checkpoint_cannot_know():
-    for eco in (DentalSegmentatorEcosystem(), TotalVibeEcosystem()):
+    for eco in (DentalSegmentatorEcosystem(), TotalVibeEcosystem(), CADSEcosystem()):
         assert eco.tasks(), eco.name
         for task, e in eco._entries.items():
             where = f"{eco.name}:{task}"
@@ -175,6 +175,50 @@ def test_bare_config_zip_gets_the_dataset_parent_the_archive_lacks(tmp_path):
     assert (tmp_path / "totalvibe" / "Dataset278" / CONFIG / "dataset.json").is_file()
     assert eco.materialized("body_regions", tmp_path)
     assert eco.spec("body_regions", tmp_path).name == "body_regions"
+
+
+def test_cads_offers_every_release_asset_and_each_is_verified(tmp_path):
+    """The open release is exactly the nine models, T551-T559; each download is checked
+    against the sha256 GitHub publishes, and between them they name the 167 structures of the
+    paper's Supplementary Table 2."""
+    raw = json.loads(CADSEcosystem.MANIFEST.read_text(encoding="utf-8"))
+    tasks = raw["tasks"]
+    assert {e["folder"] + ".zip" for e in tasks.values()} == set(raw["release_assets"])
+    assert all(re.fullmatch(r"[0-9a-f]{64}", e["sha256"]) for e in tasks.values())
+    assert sum(e["structures"] for e in tasks.values()) == 167
+    assert {e["license"] for e in tasks.values()} == {"CC-BY-SA-4.0"}   # the open weights only
+    cat = EcosystemCatalog(root=tmp_path)
+    assert cat.engine_of("cads:organs") == "nnunetv2"
+    info = cat.info("cads:organs")
+    assert info["modality"] == "CT" and info["dataset_id"] == "551" and info["materialized"] is False
+
+
+def test_cads_runs_in_the_totalsegmentator_lineage_so_its_sides_are_right(tmp_path):
+    """CADS reorients to RAS before its network, but its plans say SimpleITKIO and its
+    dataset.json names no orientation. Read as a stock nnU-Net model the same folder keeps
+    the acquisition's axis order, and every left/right structure lands on the wrong side
+    (mean Dice 0.034 against upstream, 2026-09-11). The catalog's spec must say RAS."""
+    from pathlib import Path
+
+    from haversack import io as nio
+    from haversack.pipeline import canonical_orientation_for
+    from haversack.tasks import TaskSpec
+
+    class _Store:
+        def resolve(self, weights_id, *, configuration=None):
+            return Path(weights_id)
+
+    payload = _nested_zip(dataset="Dataset551_Totalseg251",
+                          labels={"kidney_right": 2, "kidney_left": 3})
+    eco = _expecting(CADSEcosystem(), payload, "organs")
+    with _serve(payload):
+        eco.ensure("organs", tmp_path)
+    spec = eco.spec("organs", tmp_path)
+    assert spec.lineage == "ts"
+    assert set(spec.label_map.values()) == {"kidney_right", "kidney_left"}
+    assert canonical_orientation_for(spec, _Store()) == nio.CANONICAL
+    stock = TaskSpec.from_model_folder(spec.single)
+    assert canonical_orientation_for(stock, _Store()) is None          # the mirror it prevents
 
 
 def test_totalvibe_orientation_is_read_from_the_checkpoint_not_hardcoded(tmp_path):

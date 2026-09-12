@@ -42,6 +42,20 @@ time. Results computed with the default options change, so the cache epoch moves
   found - that crop is not the body envelope and stays on - but a box narrower than the patch is
   now grown from the image rather than padded, and one that saves no tiles runs the whole volume.
   Both can change a cascade's labels.
+- **CADS** (`cads:*`, weights CC BY-SA 4.0): whole-body CT, 167 structures in nine models -
+  `organs`, `vertebrae`, `cardiac`, `muscles`, `ribs`, `oar`, `head`, `headneck` and
+  `bodyregions`. The weights are upstream's `open` release; its non-commercial `research` and
+  challenge-gated `reference` weights are not offered. Upstream reorients to RAS before the
+  network while its checkpoints say nothing about orientation, so the catalog runs them in the
+  TotalSegmentator lineage: read as stock nnU-Net models every left/right structure lands on
+  the wrong side, and with the lineage all nine matched upstream at 0.998-1.0 over the whole
+  volume with `--interp nearest`, which is how upstream restores its labels (`cads:organs`
+  through the catalog on MPS: 99.9995 % of voxels). The default linear restore moves
+  boundaries off upstream's - `organs` at mean Dice 0.970, its adrenals at 0.91 - so a
+  comparison with upstream wants `--interp nearest`. Each task is one model and there is no combined task, because the nine overlap by
+  design (upstream's own combined map paints the thoracic cavity over every lung lobe).
+  haversack does not gate `head` and `headneck` on a brain or post-process, and it pads the
+  edge of a short volume the TotalSegmentator way (a 34-slice head CT: 0.977-0.998).
 
 ## [0.10.2] - 2026-09-11
 

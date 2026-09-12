@@ -1,0 +1,126 @@
+{
+ "source": "https://api.github.com/repos/murong-xu/CADS/releases/tags/cads-model-open_v1.0.0 + each zip's own dataset.json / plans.json (read by Range)",
+ "note": "labels are read from each installed checkpoint's own dataset.json, never from here; the RAS orientation the models need is stated by CADSEcosystem.spec, because the checkpoints do not state it",
+ "repository": "https://github.com/murong-xu/CADS",
+ "release_assets": [
+  "Dataset551_Totalseg251.zip",
+  "Dataset552_Totalseg252.zip",
+  "Dataset553_Totalseg253.zip",
+  "Dataset554_Totalseg254.zip",
+  "Dataset555_Totalseg255.zip",
+  "Dataset556_GC256.zip",
+  "Dataset557_Brain257.zip",
+  "Dataset558_OAR258.zip",
+  "Dataset559_Saros259.zip"
+ ],
+ "tasks": {
+  "organs": {
+   "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset551_Totalseg251.zip",
+   "sha256": "99b33943d202d794249e85c6e42bb30c7b72c7afc36d044fe57103b675e85656",
+   "tag": "cads-model-open_v1.0.0",
+   "folder": "Dataset551_Totalseg251",
+   "release": "cads-model-open_v1.0.0",
+   "dataset_id": "551",
+   "modality": "CT",
+   "structures": 17,
+   "description": "abdominal organs, the aorta, the inferior vena cava, the portal and splenic veins, and the five lung lobes",
+   "license": "CC-BY-SA-4.0"
+  },
+  "vertebrae": {
+   "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset552_Totalseg252.zip",
+   "sha256": "de132d4104627401852f2a7c426056462423df30bee7ffed7e07aebe32d32736",
+   "tag": "cads-model-open_v1.0.0",
+   "folder": "Dataset552_Totalseg252",
+   "release": "cads-model-open_v1.0.0",
+   "dataset_id": "552",
+   "modality": "CT",
+   "structures": 24,
+   "description": "vertebrae C1 to L5",
+   "license": "CC-BY-SA-4.0"
+  },
+  "cardiac": {
+   "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset553_Totalseg253.zip",
+   "sha256": "927dbe88f9873fc9598702884c11cf3adc4535749146cd3e6424ac40579b3e45",
+   "tag": "cads-model-open_v1.0.0",
+   "folder": "Dataset553_Totalseg253",
+   "release": "cads-model-open_v1.0.0",
+   "dataset_id": "553",
+   "modality": "CT",
+   "structures": 18,
+   "description": "heart chambers and myocardium, esophagus, trachea, pulmonary artery - and also the brain, common iliac vessels, small bowel, duodenum, colon, urinary bladder and face",
+   "license": "CC-BY-SA-4.0"
+  },
+  "muscles": {
+   "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset554_Totalseg254.zip",
+   "sha256": "cbee9dda40dd946c70c238f9e580f64ab4367c27d5472c9fc77853d16509e54f",
+   "tag": "cads-model-open_v1.0.0",
+   "folder": "Dataset554_Totalseg254",
+   "release": "cads-model-open_v1.0.0",
+   "dataset_id": "554",
+   "modality": "CT",
+   "structures": 21,
+   "description": "gluteal, deep back and iliopsoas muscles - and also the humeri, scapulae, clavicles, femurs, hips and sacrum",
+   "license": "CC-BY-SA-4.0"
+  },
+  "ribs": {
+   "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset555_Totalseg255.zip",
+   "sha256": "a7fdf1ca915746551f322168623def871462e6b56bf1a59e0cc253f2baf41e54",
+   "tag": "cads-model-open_v1.0.0",
+   "folder": "Dataset555_Totalseg255",
+   "release": "cads-model-open_v1.0.0",
+   "dataset_id": "555",
+   "modality": "CT",
+   "structures": 24,
+   "description": "ribs 1 to 12, left and right",
+   "license": "CC-BY-SA-4.0"
+  },
+  "oar": {
+   "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset556_GC256.zip",
+   "sha256": "a2110a2501de85c3dfc63298fcda1d19fb3b935e6d012692c0d749b97b2c8d1e",
+   "tag": "cads-model-open_v1.0.0",
+   "folder": "Dataset556_GC256",
+   "release": "cads-model-open_v1.0.0",
+   "dataset_id": "556",
+   "modality": "CT",
+   "structures": 15,
+   "description": "radiotherapy organs at risk: spinal canal, larynx, heart, bowel space, sigmoid, rectum, prostate, seminal vesicles, mammary glands, sternum, psoas major and rectus abdominis",
+   "license": "CC-BY-SA-4.0"
+  },
+  "head": {
+   "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset557_Brain257.zip",
+   "sha256": "18b563d7bd20b1a2bce0632b98064a0279280d0f3e56e91f2e6328eb1a7e740c",
+   "tag": "cads-model-open_v1.0.0",
+   "folder": "Dataset557_Brain257",
+   "release": "cads-model-open_v1.0.0",
+   "dataset_id": "557",
+   "modality": "CT",
+   "structures": 9,
+   "description": "head tissues from a brain atlas: white and gray matter, CSF, scalp, eyeballs, compact and spongy bone, vessels, eye muscles",
+   "license": "CC-BY-SA-4.0"
+  },
+  "headneck": {
+   "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset558_OAR258.zip",
+   "sha256": "8fa72c933bd33d5a30b1bc9f2f0bee18f8a3e6c445589255e58327a80447b831",
+   "tag": "cads-model-open_v1.0.0",
+   "folder": "Dataset558_OAR258",
+   "release": "cads-model-open_v1.0.0",
+   "dataset_id": "558",
+   "modality": "CT",
+   "structures": 29,
+   "description": "head-and-neck organs at risk after HaN-Seg",
+   "license": "CC-BY-SA-4.0"
+  },
+  "bodyregions": {
+   "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset559_Saros259.zip",
+   "sha256": "1b1b546f27e7c548dbaf49951cd1974c376719e6714a1f4c3def40a1c4c0dca9",
+   "tag": "cads-model-open_v1.0.0",
+   "folder": "Dataset559_Saros259",
+   "release": "cads-model-open_v1.0.0",
+   "dataset_id": "559",
+   "modality": "CT",
+   "structures": 10,
+   "description": "body composition: subcutaneous tissue, muscle, abdominal and thoracic cavities, bones, glands, pericardium, mediastinum, spinal cord, breast implants",
+   "license": "CC-BY-SA-4.0"
+  }
+ }
+}

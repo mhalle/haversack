@@ -169,6 +169,30 @@
     "nnunetv2"
    ]
   },
+  "cads": {
+   "title": "CADS",
+   "description": "Whole-body CT segmentation of 167 anatomical structures by nine models, trained on the CADS dataset of 22,022 CT volumes assembled from public collections. haversack offers the open-licensed weights.",
+   "group": "Department of Quantitative Biomedicine, University of Zurich (Xu et al.)",
+   "repository": "https://github.com/murong-xu/CADS",
+   "license": {
+    "code": "Apache-2.0",
+    "weights": "CC-BY-SA-4.0"
+   },
+   "weights_record": "https://github.com/murong-xu/CADS/releases/tag/cads-model-open_v1.0.0",
+   "cite": [
+    {
+     "title": "CADS: A Comprehensive Anatomical Dataset and Segmentation for Whole-Body Anatomy in Computed Tomography",
+     "authors": "Xu M, Amiranashvili T, Navarro F, Fritsak M, Hamamci IE, Shit S, Wittmann B, Er S, Christ SM, de la Rosa E, Deseoe J, Graf R, Möller H, Sekuboyina A, Peeken JC, Becker S, Baldini G, Haubold J, Nensa F, Hosch R, Mirajkar N, Khalid S, Zachow S, Weber MA, Langs G, Wasserthal J, Ozdemir MK, Fedorov A, Kikinis R, Tanadini-Lang S, Kirschke JS, Combs SE, Menze B",
+     "journal": "arXiv",
+     "year": 2025,
+     "doi": "10.48550/arXiv.2507.22953",
+     "arxiv": "2507.22953"
+    }
+   ],
+   "also_cite": [
+    "nnunetv2"
+   ]
+  },
   "custom": {
    "title": "your own nnU-Net models",
    "description": "Model folders you point haversack at. Their license and citation are whatever their authors state; haversack knows nothing about them.",

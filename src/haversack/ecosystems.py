@@ -61,6 +61,7 @@ MOOSE_MANIFEST = Path(__file__).parent / "data" / "moose_weights.json"
 MRSEGMENTATOR_MANIFEST = Path(__file__).parent / "data" / "mrsegmentator_weights.json"
 DENTALSEGMENTATOR_MANIFEST = Path(__file__).parent / "data" / "dentalsegmentator_weights.json"
 TOTALVIBE_MANIFEST = Path(__file__).parent / "data" / "totalvibe_weights.json"
+CADS_MANIFEST = Path(__file__).parent / "data" / "cads_weights.json"
 
 
 def manifest_entry(entries: dict, task: str, *, what: str = "", generator: str = "") -> dict:
@@ -885,6 +886,53 @@ class TotalVibeEcosystem(ZipManifestEcosystem):
         return out
 
 
+class CADSEcosystem(ZipManifestEcosystem):
+    """CADS (Xu et al., arXiv 2507.22953): nine nnU-Net v2 ResEnc-L checkpoints, one per model
+    group (T551-T559), naming 167 CT structures between them - ``organs``, ``vertebrae``,
+    ``cardiac``, ``muscles``, ``ribs``, ``oar``, ``head``, ``headneck`` and ``bodyregions``.
+    The weights are upstream's ``open`` release (CC BY-SA 4.0). Its ``research`` weights are
+    non-commercial and its ``reference`` weights add challenge datasets under their own terms,
+    and haversack has no license gate to offer either behind.
+
+    The packaging is MOOSE's: a ``Dataset<id>`` parent, and macOS zip litter the installer
+    drops. One fact is missing from the checkpoint's account of itself, and :meth:`spec`
+    states it: **CADS preprocesses the TotalSegmentator way** - reorient to RAS, resample with
+    TotalSegmentator's ``change_spacing`` - while its plans say ``SimpleITKIO`` and its
+    ``dataset.json`` declares no orientation. Read as a stock nnU-Net model, every
+    left/right structure came out on the wrong side (mean Dice 0.034 against upstream). With
+    lineage ``ts`` and ``interp="nearest"`` - upstream restores its labels nearest-neighbor -
+    all nine matched upstream's own inference at 0.998-1.0 over the whole volume of a
+    chest-abdomen-pelvis and a whole-body CT (2026-09-11), and ``organs`` through this
+    catalog on MPS agreed on 99.9995 % of voxels (2026-09-12). haversack's default linear
+    restore moves boundaries off upstream's: ``organs`` at mean Dice 0.970, its adrenals 0.91.
+
+    Three differences from upstream remain, and are documented rather than hidden:
+
+    - CADS's copy of ``change_spacing`` pads with scipy's ``constant`` 0 HU where
+      TotalSegmentator's uses ``nearest``, and haversack resamples the TotalSegmentator way.
+      Only short volumes notice: a 34-slice head CT matched at 0.977-0.998.
+    - Upstream runs ``head`` and ``headneck`` only when ``cardiac`` finds a brain, crops them
+      to a box around it, and removes small components from five groups. haversack runs each
+      task as asked and post-processes nothing.
+    - Each task is one model, and there is no combined task. The nine overlap by design -
+      ``bodyregions`` holds the cavities and tissues the other groups subdivide - so one label
+      map of all nine loses structures: upstream's own paints the thoracic cavity over every
+      lung lobe.
+    """
+
+    name = "cads"
+    description = "CADS whole-body CT models (open weights, CC BY-SA 4.0)"
+    bucket = "cads"
+    MANIFEST = CADS_MANIFEST
+    generator = "tools/gen_cads_manifest.py"
+
+    def spec(self, task: str, root) -> TaskSpec:
+        import dataclasses
+        # The TotalSegmentator lineage - RAS, corner-aligned resampling, no crop to nonzero -
+        # is what CADS's own preprocessing does, and what its checkpoints do not say.
+        return dataclasses.replace(super().spec(task, root), lineage="ts")
+
+
 class CustomEcosystem(ModelEcosystem):
     """The operator's own model folders: always materialized, nothing to install.
     The folder is read through from_model_folder, so the checkpoint's
@@ -1517,7 +1565,7 @@ def default_ecosystems() -> list:
     enabled engine. Enablement is the registry's answer (read from the
     environment per call), so the catalog and the workers cannot disagree."""
     ecos = [TSEcosystem(), MooseEcosystem(), MRSegmentatorEcosystem(),
-            DentalSegmentatorEcosystem(), TotalVibeEcosystem()]
+            DentalSegmentatorEcosystem(), TotalVibeEcosystem(), CADSEcosystem()]
     ecos += [cls() for engine, cls in _ENGINE_ECOSYSTEMS.items()
              if _registry.enabled(engine)]
     return ecos

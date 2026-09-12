@@ -1,7 +1,7 @@
 # haversack
 
 `haversack` runs nnU-Net-family segmentation models on PyTorch - TotalSegmentator, MOOSE,
-MRSegmentator, DentalSegmentator, TotalVibeSegmentator, and any stock nnU-Net v2
+MRSegmentator, DentalSegmentator, TotalVibeSegmentator, CADS, and any stock nnU-Net v2
 model folder - on an Apple Silicon GPU (MPS), a CUDA card, or the CPU. It is a library
 with a command line and a small REST server on top.
 
@@ -86,8 +86,8 @@ download the same model twice:
 | command line | `--model-root DIR` |
 
 They download on first use: TotalSegmentator models from the TotalSegmentator GitHub releases
-(with the sha256 the manifest records), MOOSE, MRSegmentator, DentalSegmentator and
-TotalVibeSegmentator from their own hosting, each checked against whatever digest its
+(with the sha256 the manifest records), MOOSE, MRSegmentator, DentalSegmentator,
+TotalVibeSegmentator and CADS from their own hosting, each checked against whatever digest its
 publisher states - Zenodo publishes md5, GitHub sha256. Three TotalVibeSegmentator assets are
 published with no digest at all and so are checked against nothing; the manifest names them. To
 provision ahead of time:
