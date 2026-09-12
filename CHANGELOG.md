@@ -88,6 +88,29 @@ time. Results computed with the default options change, so the cache epoch moves
   container, checked by a test that reads those reads from the module's source.
 - **An engine parameter that shadows a processing option is refused** when the wire model is
   built. The documented "loud error" had no test, and pydantic silently merged the two.
+- **`segment` failed outright on CUDA when a model with many classes met a large grid.** The
+  fused Triton restore addressed the whole logit field with 32-bit offsets and refused any field
+  of K x Z x Y x X of 2^31 or more, with a `ValueError` nothing caught. The open CADS
+  head-and-neck model (K=30) on a whole-body PET/CT's attenuation CT with `--envelope 0` is 30 x
+  678 x 334 x 334 = 2.27e9 logits. The 20 mm body envelope, the default until this release, had
+  kept most runs under the line; with the whole volume now the default, that model would have
+  failed on such a scan every time. Only each channel's base needed 64 bits - the Metal kernel
+  has always had it that way - so that field now restores on Triton. On an A10 its labels equal
+  the torch backend's (fp16; in fp32 two voxels differ, both ties within 5e-7), and they are
+  bit-identical to the old kernel's wherever the old one ran, at no measurable cost: over 30
+  interleaved runs on one A10, a K=118 field restored in 54.9 ms (median) against the old
+  kernel's 55.7, and a K=30 field in 23.5 against 24.1. Nothing that ran before computes
+  different labels, so the cache epoch stays where it is.
+- **What a fused kernel still cannot address, "auto" now restores with the torch backend and
+  says so, instead of failing.** That is a channel of 2^31 voxels or more (a 1290^3 model grid,
+  on either kernel), or for Triton an output of 2^31 or more (a whole body at about 0.5 mm),
+  which the old kernel did not check at all: its 32-bit output index wrapped, and on an A10 a
+  2048 x 1024 x 1025 output died of an illegal memory access. The torch backend has no such
+  limit but is far slower (1.0 s against
+  0.02 s for the field above), so the run records it: a `note: restore backend` line on the
+  command line, a `restore` progress stage on the server, and an entry in
+  `provenance.deviations`. `to_labels(backend="auto")` called directly warns instead; a
+  backend asked for by name still refuses a field it cannot take, naming `backend='torch'`.
 
 ## [0.10.2] - 2026-09-11
 

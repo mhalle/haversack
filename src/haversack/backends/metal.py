@@ -115,6 +115,23 @@ def available() -> bool:
                 and hasattr(torch.mps, "compile_shader"))
 
 
+# Offsets within one channel are 32-bit; the channel stride and the output index are 64-bit.
+OFFSET_LIMIT = 2 ** 31
+
+
+def cannot_take(logits_shape, out_shape) -> str | None:
+    """Why the kernel cannot address this field, or None if it can.
+
+    Only a channel of 2^31 voxels (a 1290^3 model grid) is out of reach. The output has no
+    limit: it is launched in z-slabs of ``slab_voxels`` and indexed with 64-bit offsets.
+    """
+    _, Zt, Yt, Xt = (int(v) for v in logits_shape)
+    if Zt * Yt * Xt >= OFFSET_LIMIT:
+        return (f"a channel of {Zt}x{Yt}x{Xt} = {Zt * Yt * Xt:,} voxels is 2^31 or more, "
+                f"past its 32-bit in-channel offsets")
+    return None
+
+
 def source(fp_contract_off: bool = True) -> str:
     pragma = "#pragma clang fp contract(off)" if fp_contract_off else ""
     parts = [_HEADER.replace("{PRAGMA}", pragma)]
@@ -167,9 +184,10 @@ def run(logits: torch.Tensor, out: torch.Tensor, tables, lut, *, mode: str, pain
     logits = logits.contiguous()
     dev = logits.device
     K, Zt, Yt, Xt = (int(s) for s in logits.shape)
-    if Zt * Yt * Xt >= 2 ** 31:
-        raise ValueError("haversack.backends.metal: per-channel volume must be < 2^31 voxels (32-bit in-channel offsets)")
     Za, Ya, Xa = (int(s) for s in out.shape)
+    why = cannot_take((K, Zt, Yt, Xt), (Za, Ya, Xa))
+    if why is not None:
+        raise ValueError(f"haversack.backends.metal: {why}; restore with backend='torch'")
     tz, ty, tx = tables
 
     def to_i(a):

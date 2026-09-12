@@ -63,6 +63,17 @@ Two layers, enforced by `tests/test_layering.py`:
 
 - **Kernel** — `grid mapping tables restore resample shuffleup reference backends/` — torch +
   numpy only; knows nothing of tasks, files, weights. scipy is call-time only in `resample`.
+- **Restore backends** (`backends/`, 2026-09-11). "auto" takes the device's fused kernel
+  (`FUSED`: Metal on MPS, Triton on CUDA) only when its `cannot_take(logits_shape, out_shape)`
+  says it can address the field - the same function its `run` refuses on, so the two cannot
+  disagree - and otherwise the torch backend, which `segment` records as a `restore backend`
+  deviation and `to_labels` warns about. Both kernels use 32-bit offsets within a channel and a
+  64-bit channel base; Triton's base was an int32 `k * chan` until that day and failed a K=30
+  model on a whole-body grid (2.27e9 logits). Triton's output index is 32-bit and was never
+  checked (an output of 2.15e9 voxels died of an illegal address); Metal's is 64-bit and
+  slabbed. `torch_gather` has no offset limit (on an A10, a channel of 2^31 voxels restored
+  exactly, and that 2.15e9-voxel output restored). CI has no CUDA, so `tools/restore_limits_modal.py` is the only check of
+  the Triton kernel: with the 32-bit base put back it dies of an illegal address.
 - **Pipeline** — `io preprocess frame network pipeline segmenter tasks ecosystems values
   envelope weights weights_fetch trainers result cache job progress cli fetchlib filelock`.
   `fetchlib` is the ONLY place a URL is opened (named agent, token stripped on a cross-origin

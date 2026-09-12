@@ -45,6 +45,29 @@ def why_unavailable() -> str:
     return ""
 
 
+# Offsets within one channel and into the output are 32-bit; only each channel's base is 64-bit.
+OFFSET_LIMIT = 2 ** 31
+
+
+def cannot_take(logits_shape, out_shape) -> str | None:
+    """Why the kernel cannot address this field, or None if it can.
+
+    ``backends.select`` asks this before "auto" takes the kernel, and ``run`` refuses on it, so
+    the two cannot disagree. K itself is unlimited: the channel base is 64-bit (2026-09-11,
+    after a K=30 field of 2.27e9 logits was refused). A channel of 2^31 voxels is a 1290^3 model
+    grid; an output of 2^31 is a whole body at about 0.5 mm.
+    """
+    _, Zs, Ys, Xs = (int(v) for v in logits_shape)
+    Za, Ya, Xa = (int(v) for v in out_shape)
+    if Zs * Ys * Xs >= OFFSET_LIMIT:
+        return (f"a channel of {Zs}x{Ys}x{Xs} = {Zs * Ys * Xs:,} voxels is 2^31 or more, "
+                f"past its 32-bit in-channel offsets")
+    if Za * Ya * Xa >= OFFSET_LIMIT:
+        return (f"an output of {Za}x{Ya}x{Xa} = {Za * Ya * Xa:,} voxels is 2^31 or more, "
+                f"past its 32-bit output offsets")
+    return None
+
+
 if triton is not None:
 
     @triton.jit
@@ -58,8 +81,9 @@ if triton is not None:
         ``PAINT`` leaves the output untouched where the decision is background, which is how
         multi-model tasks composite into one buffer.
 
-        Offsets are 32-bit, as in the Metal backend where 64-bit ones cost 2x, so the caller
-        must check ``K * Zs * Ys * Xs < 2**31``.
+        Offsets within a channel and into the output are 32-bit, as in the Metal backend where
+        64-bit ones cost 2x; each channel's base is 64-bit, one scalar per channel, so K
+        channels together may pass 2^31. ``cannot_take`` is the host-side check.
         """
         pid = tl.program_id(0)
         offs = pid * BLOCK + tl.arange(0, BLOCK)
@@ -104,16 +128,20 @@ if triton is not None:
         best_k = tl.zeros((BLOCK,), tl.int32)
         label = tl.full((BLOCK,), background, tl.int32)
         hit = tl.zeros((BLOCK,), tl.int1)
+        # Each channel's base is a pointer advanced by `chan`, so it is 64-bit. Until 2026-09-11
+        # it was an int32 `k * chan`, which wrapped once K channels passed 2^31 logits (a K=30
+        # model on a whole-body CT at 1.5 mm is 2.27e9). A `k.to(tl.int64) * chan` base fixed
+        # that too but cost 3-4 % on an A10; the carried pointer costs nothing measurable.
+        ch = logits_ptr
         for k in range(0, K):
-            off = k * chan
-            c00 = (tl.load(logits_ptr + off + b000, mask=load_mask, other=0.0).to(tl.float32) * wx0
-                   + tl.load(logits_ptr + off + b001, mask=load_mask, other=0.0).to(tl.float32) * xf)
-            c01 = (tl.load(logits_ptr + off + b010, mask=load_mask, other=0.0).to(tl.float32) * wx0
-                   + tl.load(logits_ptr + off + b011, mask=load_mask, other=0.0).to(tl.float32) * xf)
-            c10 = (tl.load(logits_ptr + off + b100, mask=load_mask, other=0.0).to(tl.float32) * wx0
-                   + tl.load(logits_ptr + off + b101, mask=load_mask, other=0.0).to(tl.float32) * xf)
-            c11 = (tl.load(logits_ptr + off + b110, mask=load_mask, other=0.0).to(tl.float32) * wx0
-                   + tl.load(logits_ptr + off + b111, mask=load_mask, other=0.0).to(tl.float32) * xf)
+            c00 = (tl.load(ch + b000, mask=load_mask, other=0.0).to(tl.float32) * wx0
+                   + tl.load(ch + b001, mask=load_mask, other=0.0).to(tl.float32) * xf)
+            c01 = (tl.load(ch + b010, mask=load_mask, other=0.0).to(tl.float32) * wx0
+                   + tl.load(ch + b011, mask=load_mask, other=0.0).to(tl.float32) * xf)
+            c10 = (tl.load(ch + b100, mask=load_mask, other=0.0).to(tl.float32) * wx0
+                   + tl.load(ch + b101, mask=load_mask, other=0.0).to(tl.float32) * xf)
+            c11 = (tl.load(ch + b110, mask=load_mask, other=0.0).to(tl.float32) * wx0
+                   + tl.load(ch + b111, mask=load_mask, other=0.0).to(tl.float32) * xf)
             v = (c00 * wy0 + c01 * yf) * wz0 + (c10 * wy0 + c11 * yf) * zf
             if MODE == 0:
                 upd = v > best
@@ -123,6 +151,7 @@ if triton is not None:
                 over = v > threshold                       # channel order is paint priority
                 label = tl.where(over, tl.load(lut_ptr + k), label)
                 hit = hit | over
+            ch += chan
         if MODE == 0:
             label = tl.load(lut_ptr + best_k, mask=mask, other=background)
             hit = best_k != 0
@@ -171,9 +200,10 @@ def run(logits: torch.Tensor, out: torch.Tensor, tables, lut, *, mode: str, pain
         raise ValueError("haversack.backends.triton_gpu: out must be contiguous")
     logits = logits.contiguous()
     K, Zs, Ys, Xs = (int(v) for v in logits.shape)
-    if K * Zs * Ys * Xs >= 2 ** 31:
-        raise ValueError("haversack.backends.triton_gpu: K * source volume must be < 2^31 (32-bit offsets)")
     Za, Ya, Xa = (int(v) for v in out.shape)
+    why = cannot_take((K, Zs, Ys, Xs), (Za, Ya, Xa))
+    if why is not None:
+        raise ValueError(f"haversack.backends.triton_gpu: {why}; restore with backend='torch'")
     n_out = Za * Ya * Xa
     dev = logits.device
 

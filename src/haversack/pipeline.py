@@ -12,6 +12,7 @@ from .envelope import (Envelope, at_least, body_mask, body_threshold, envelope_m
                        envelope_of, label_roi, margin_in_voxels, worth_cropping)
 from .frame import Frame
 from .mapping import Mapping
+from . import backends
 from .restore import to_labels
 from .network import TorchModel, available_folds
 from .tasks import (ModelNotFound, TaskCatalog, TaskSpec, _resolve_spec,
@@ -341,8 +342,17 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         mapping = frame.mapping(ogrid)
         if not env.is_whole():
             mapping = mapping >> Mapping((1.0, 1.0, 1.0), tuple(-float(v) for v in env.start))
+        choice = backends.select("auto", logits.device, tuple(logits.shape), tuple(ogrid.shape))
+        if choice.fallback:
+            # the fused kernel cannot address this field, so the slower torch backend restores
+            # it; before 2026-09-11 the Triton kernel's refusal failed the whole run instead
+            report.stage("restore", f"torch backend: {choice.fallback}")
+            from .result import deviation
+            d = deviation("restore backend", "auto", "torch", choice.fallback)
+            if d not in prov["deviations"]:                 # parts on one grid say it once
+                prov["deviations"].append(d)
         to_labels(logits, ogrid, mapping, interp=interp, outside="background", lut=lut, paint=paint,
-                  out=out, backend="auto")
+                  out=out, backend=choice.name)
         if device == "cuda":
             torch.cuda.synchronize()
         elif device == "mps":

@@ -54,6 +54,8 @@ def test_backends_match_reference(device, name, logit_dtype):
         np.testing.assert_array_equal(results[backend][~valid], 3)
     if "metal" in results:
         assert_agree_up_to_ties(results["metal"], results["torch"], values, what=f"metal-vs-torch/{name}")
+    if "triton" in results:           # torch is what "auto" falls back to when Triton cannot take a field
+        assert_agree_up_to_ties(results["triton"], results["torch"], values, what=f"triton-vs-torch/{name}")
 
 
 def test_numpy_input_and_shape_errors():

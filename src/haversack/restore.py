@@ -6,6 +6,8 @@ nothing K-channel-sized is ever materialized at the output resolution.
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import torch
 
@@ -96,11 +98,16 @@ def to_labels(logits, grid, mapping: Mapping, *, interp="linear", outside: str =
     if max_label > (255 if out.dtype == torch.uint8 else 65535):
         raise ValueError(f"label {max_label} does not fit {out.dtype}")
 
+    choice = backends.select(backend, lg.device, tuple(lg.shape), out_shape)
+    if choice.fallback:
+        # `segment` selects first and records this as a deviation, passing the name it chose;
+        # a caller of this function would otherwise never learn it got the slower backend
+        warnings.warn(f"haversack.to_labels: {choice.fallback}; restoring with the torch backend, "
+                      f"which has no such limit but is slower", RuntimeWarning, stacklevel=2)
     tables = build_tables(out_shape, src_shape, mapping, interp=interp, outside=outside, coord_dtype=coord_dtype)
-    name, mod = backends.select(backend, lg.device)
-    opts = {"slab_voxels": int(slab_voxels)} if name == "metal" else {}
-    mod.run(lg, out, tables, lut_arr.astype(np.int32), mode=mode, paint=bool(paint),
-            background=int(background), threshold=float(threshold), **opts)
+    opts = {"slab_voxels": int(slab_voxels)} if choice.name == "metal" else {}
+    choice.module.run(lg, out, tables, lut_arr.astype(np.int32), mode=mode, paint=bool(paint),
+                      background=int(background), threshold=float(threshold), **opts)
     return out
 
 
