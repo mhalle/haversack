@@ -1,29 +1,32 @@
 # Changelog
 
-## [Unreleased]
+## [0.11.0] - 2026-09-12
 
-The body envelope - inference cropped to the patient's bounding box - is off by default now,
-and `0` means "no envelope" everywhere. It was on at 20 mm and documented as costing nothing
-where it mattered; measured against whole-volume inference, it changes labels wherever it saves
-time. Results computed with the default options change, so the cache epoch moves to 3. And a
-task name now has to name its catalog - `ts.v2:total_fast`, not `total_fast` - which breaks every
-script, request and command line that used a bare name; the error says what to write instead.
+Two changes break what worked before, and a catalog arrives. A task name now names its catalog -
+`ts.v2:total_fast`, not `total_fast` - and TotalSegmentator's catalog is `ts.v2`, so a bare name
+and the old `ts:` are refused, with the form to write instead. The body envelope is off by
+default and `0` means the whole volume everywhere, which changes the labels a default run
+computes. CADS arrives: nine whole-body CT models, 167 structures, open weights. Beside them,
+the Triton restore takes fields past 2^31 logits, a first-use weights install is timed and
+reported as its own step, FastSurfer runs finer-than-0.7 mm scans at 0.7 mm and restores on the
+GPU in pieces, a Modal deploy made with `--app-name` runs as itself, and `rights` points a task
+name at `cite`. Cached results recompute once: the global cache epoch moves to 3, and
+TotalSegmentator's results are keyed by their new name.
 
-- **Task names carry their catalog: `ts.v2:total_fast`, `cads:organs`, `totalvibe:vertebrae`.** A
-  bare name resolved to whichever installed catalog offered it, so what a script meant depended
-  on what else was installed: adding CADS turned `vertebrae` from `totalvibe:vertebrae` into an
-  ambiguity error, and TotalSegmentator v3 reuses v2's names. A bare name is now refused even
-  when one catalog alone offers it, in the CLI, the Python API and on the server, and the error
-  names the qualified form (`task 'total_fast' needs its catalog: use ts.v2:total_fast`). Names
-  stay the model makers'; haversack does not rename a task to avoid a collision. Results were
-  already keyed and recorded by the qualified name, so no cached result changes. Shell
-  completion offers qualified names and still finds them from the task's own name, and a
-  cascade's reference to a task of its own catalog (`teeth` crops from
-  `craniofacial_structures`) is looked up in that catalog. TotalSegmentator's catalog is
-  `ts.v2` now - it is TotalSegmentator v2's, and v3 reuses v2's task names, so v3 can arrive
-  as `ts.v3` beside it; the family is what comes before the dot. `ts:total_fast` is refused
-  with the `ts.v2:` form to use, and a store written with a `ts:` or a bare name still reads.
-
+- **Task names carry their catalog: `ts.v2:total_fast`, `cads:organs`, `totalvibe:vertebrae`.**
+  A bare name resolved to whichever installed catalog offered it, so what a script meant
+  depended on what else was installed: adding CADS turned `vertebrae` from `totalvibe:vertebrae`
+  into an ambiguity error, and TotalSegmentator v3 reuses v2's names. A bare name is now refused
+  even when one catalog alone offers it, in the CLI, the Python API and on the server, and the
+  error names the qualified form (`task 'total_fast' needs its catalog: use ts.v2:total_fast`).
+  Names stay the model makers'; haversack does not rename a task to avoid a collision. Results
+  are keyed by the qualified name, so TotalSegmentator's cached results recompute once under
+  `ts.v2`; none is served wrong. Shell completion offers qualified names and still finds them
+  from the task's own name, and a cascade's reference to a task of its own catalog (`teeth`
+  crops from `craniofacial_structures`) is looked up in that catalog. TotalSegmentator's catalog
+  is `ts.v2` now - it is TotalSegmentator v2's, and v3 reuses v2's task names, so v3 can arrive
+  as `ts.v3` beside it; the family is what comes before the dot. `ts:total_fast` is refused with
+  the `ts.v2:` form to use, and a store written with a `ts:` or a bare name still reads.
 - **`envelope_mm=0` cropped inference flush to the skin in Python and on the server, while
   `--envelope 0` ran the whole volume.** One number, two meanings: a CADS parity study passed 0
   believing it meant "no envelope" and measured, against upstream, mean Dice 0.64 on the face,
