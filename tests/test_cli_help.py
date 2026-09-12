@@ -107,14 +107,15 @@ def _env(**extra):
 
 def test_the_shell_completes_task_names_from_the_catalog():
     """Completion is click's own, driven by `_HAVERSACK_COMPLETE` through the real entry point;
-    `--task` completes from the catalog, including the short spelling people type for a
-    TotalSegmentator task. A subprocess, because completion ends by exiting."""
+    `--task` completes from the catalog. Only qualified names are offered - a bare one is
+    refused - but typing the task's own name (`total_f`) finds `ts.v2:total_fast`. A subprocess,
+    because completion ends by exiting."""
     env = _env(_HAVERSACK_COMPLETE="bash_complete",
                COMP_WORDS="haversack segment --task total_f", COMP_CWORD="3")
     r = subprocess.run(ENTRY, env=env, capture_output=True, text=True, timeout=120)
     items = [line.split(",", 1)[1] for line in r.stdout.splitlines() if "," in line]
-    assert "total_fast" in items, (r.returncode, r.stdout[:300], r.stderr[-300:])
-    assert all(i.startswith("total_f") for i in items), items
+    assert "ts.v2:total_fast" in items, (r.returncode, r.stdout[:300], r.stderr[-300:])
+    assert all(":" in i and i.partition(":")[2].startswith("total_f") for i in items), items
 
 
 #: The entry point as a terminal starts it. A foreground job gets SIGINT at its default, so the

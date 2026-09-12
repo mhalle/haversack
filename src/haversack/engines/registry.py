@@ -1,10 +1,10 @@
 """The engine registry: which runtimes exist, and what each one is.
 
 **Ecosystem vs Engine.** An *ecosystem* is what the user selects - a catalog of
-tasks with the ``eco:task@version`` grammar (``ts``, ``moose``, ``mrsegmentator``,
+tasks with the ``eco:task@version`` grammar (``ts.v2``, ``moose``, ``mrsegmentator``,
 ``custom``, ``fastsurfer``, ``synthstrip``). An *engine* is the runtime that actually
 runs a task: its container image, its compute, its weights identity. **Many
-ecosystems map to one engine** - ``ts``, ``moose``, ``mrsegmentator`` and ``custom``
+ecosystems map to one engine** - ``ts.v2``, ``moose``, ``mrsegmentator`` and ``custom``
 are four catalogs of nnU-Net models, all run by the ``nnunetv2`` engine.
 
 This module is the single source of truth for that mapping and for every fact

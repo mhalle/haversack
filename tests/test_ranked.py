@@ -35,7 +35,7 @@ class TestEmit(unittest.TestCase):
     def test_emit_encodes_stamps_and_sinks(self):
         got = []
         spec = ranked.RankedSpec(sink=lambda part, code: got.append((part, code)), depth=4, clip=6.0)
-        code = ranked.emit(spec, "organs", _logits(K=8), engine="nnunetv2", task="ts:total")
+        code = ranked.emit(spec, "organs", _logits(K=8), engine="nnunetv2", task="ts.v2:total")
         self.assertEqual(len(got), 1)
         part, sunk = got[0]
         self.assertEqual(part, "organs")

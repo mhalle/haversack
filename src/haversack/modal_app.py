@@ -54,7 +54,7 @@ PROXY_AUTH = os.environ.get("HAVERSACK_PROXY_AUTH", "1") not in ("0", "false", "
 SCALEDOWN = int(os.environ.get("HAVERSACK_SCALEDOWN", "120"))
 GPU_SNAPSHOT = os.environ.get("HAVERSACK_GPU_SNAPSHOT", "0") not in ("0", "false", "no", "")
 SNAPSHOT = (os.environ.get("HAVERSACK_SNAPSHOT", "1") not in ("0", "false", "no")) or GPU_SNAPSHOT
-WARM_TASK = os.environ.get("HAVERSACK_WARM_TASK", "total_fast")
+WARM_TASK = os.environ.get("HAVERSACK_WARM_TASK", "ts.v2:total_fast")   # qualified: bare names are refused
 MAX_CONTAINERS = int(os.environ.get("HAVERSACK_MAX_CONTAINERS", "1"))
 SHM_CACHE_GB = float(os.environ.get("HAVERSACK_SHM_CACHE_GB", "8"))
 JOBS_TTL_H = float(os.environ.get("HAVERSACK_JOBS_TTL_H", "72"))
@@ -931,7 +931,7 @@ class _WorkerBase:
          enable_memory_snapshot=SNAPSHOT, **_cls_extra)
 class Worker(_WorkerBase):
     """The nnU-Net worker: runs every ecosystem whose engine is ``nnunetv2``
-    (ts, moose, custom) through the Segmenter."""
+    (ts.v2, moose, custom) through the Segmenter."""
 
     engine = _engines.NNUNETV2
 
@@ -979,7 +979,7 @@ class Worker(_WorkerBase):
         if task not in self._ensured:
             # Volume.commit scans the whole multi-GB weights tree, so ensure+
             # commit once per container, not per job. seg.prepare is catalog-
-            # aware: ts, moose, custom all install through it.
+            # aware: ts.v2, moose, custom all install through it.
             self.seg.prepare(task)
             weights_vol.commit()
             self._ensured.add(task)

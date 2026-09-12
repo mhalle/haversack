@@ -2967,8 +2967,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         return out or None
 
     def canon_task(t: str):
-        """Canonical task name for any accepted form (short, eco:name,
-        eco:name@version) - None when unknown/ambiguous. All forms converge to
+        """Canonical task name for any accepted form (eco:name,
+        eco:name@version) - None when unknown or bare. All forms converge to
         one canonical name and therefore one result-cache key.
 
         Path-bearing names are refused BEFORE resolution: the in-process
@@ -2983,6 +2983,19 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             except LookupError:
                 return None
         return t if t in seg.tasks() else None
+
+    def unknown_task(t: str) -> str:
+        """What a 404 for task ``t`` says: the resolver's own words when it has them - a bare
+        name comes back naming the qualified form to use - else plain "unknown task". Only a
+        catalog-shaped name reaches the resolver, as in canon_task."""
+        if hasattr(seg, "resolve_task") and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:@-]*", t or ""):
+            try:
+                seg.resolve_task(t)
+            except LookupError as e:
+                return str(e)
+            except Exception:              # noqa: BLE001 - a 404 never echoes a resolver fault
+                pass
+        return f"unknown task {t!r}"
 
     # The OpenAPI document carries the guide's rules, so /docs and `haversack docs --server`
     # cannot say different things; the routes are grouped by the tags the guide names.
@@ -3325,7 +3338,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         require_auth(request)
         canonical = canon_task(task)
         if canonical is None:
-            raise HTTPException(404, f"unknown task {task!r}")
+            raise HTTPException(404, unknown_task(task))
         # canon_task drops @version by design (all wire forms converge to ONE
         # cache key). For prepare the version IS the request, so pass the
         # requested form through - dropping it silently installed the default
@@ -3401,7 +3414,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
     def describe(task: str):
         canonical = canon_task(task)       # catalog names only, like every other route
         if canonical is None:
-            raise HTTPException(404, f"unknown task {task!r}")
+            raise HTTPException(404, unknown_task(task))
         try:
             return seg.describe(canonical)
         except Exception as e:             # noqa: BLE001 - never echo the resolver's path
@@ -3452,10 +3465,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         kind = src[0].get("kind", "upload") if src else "upload"
         canonical = canon_task(task)
         if canonical is None:              # catalog names only at the wire boundary
-            names = seg.tasks()
-            raise HTTPException(404, f"unknown task {task!r}; this server offers "
-                                     f"{len(names)} catalog tasks, e.g. "
-                                     + ", ".join(names[:4]))
+            why = unknown_task(task)
+            if "needs its catalog" not in why:
+                names = seg.tasks()
+                why = (f"unknown task {task!r}; this server offers {len(names)} catalog "
+                       "tasks, e.g. " + ", ".join(names[:4]))
+            raise HTTPException(404, why)
         task = canonical
         # ...and the engine may decline to be served from cache at all (see
         # engine_serves_from_cache): a per-engine default, overridable per request
@@ -3889,7 +3904,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     raise HTTPException(422, f"{ident!r} is not a valid {prefix} identifier")
                 canonical = canon_task(task)
                 if canonical is None:
-                    raise HTTPException(404, f"unknown task {task!r}")
+                    raise HTTPException(404, unknown_task(task))
                 task = canonical
                 key = derive_key(srcobj.identity(ident), task, gopts)
                 fname = f"{_task_stem(task)}_{ident[:8]}{tok}.seg.nrrd"

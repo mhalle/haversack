@@ -189,6 +189,30 @@ def test_health_and_tasks(tmp_path):
     assert client.get("/v1/tasks/nope").status_code == 404
 
 
+def test_a_bare_task_name_gets_a_404_naming_the_qualified_one(tmp_path):
+    """Bare task names are refused (2026-09-12): the 404 says what to write instead, where it
+    used to say only "unknown task" - on describe and on submit alike."""
+    from haversack.ecosystems import EcosystemCatalog
+    cat = EcosystemCatalog(root=tmp_path / "weights")
+
+    class Qualified(FakeSegmenter):
+        def tasks(self):
+            return ["ts.v2:total_fast", "ts.v2:total"]
+
+        def resolve_task(self, t):
+            return cat.resolve(t)[2]
+
+    ex = LocalExecutor(Qualified(), workdir=tmp_path, max_pending=4, keep_finished=50)
+    client = TestClient(create_app(ex))
+    want = "task 'total_fast' needs its catalog: use ts.v2:total_fast"
+    r = client.get("/v1/tasks/total_fast")
+    assert (r.status_code, r.json()["detail"]) == (404, want)
+    r = client.post("/v1/jobs", files={"file": ("scan.nii.gz", volume_bytes(7))},
+                    data={"task": "total_fast"})
+    assert (r.status_code, r.json()["detail"]) == (404, want)
+    assert client.get("/v1/tasks/nope").json()["detail"].startswith("unknown task 'nope'")
+
+
 def test_version_self_report(tmp_path):
     _, _, client = make(tmp_path)
     r = client.get("/v1/version")
@@ -429,7 +453,7 @@ def test_health_advertises_source_kinds(tmp_path):
 
 def test_real_segmenter_describe_enrichment(tmp_path):
     from haversack import Segmenter
-    d = Segmenter(weights=tmp_path).describe("total_fast")   # empty root: nothing installed
+    d = Segmenter(weights=tmp_path).describe("ts.v2:total_fast")   # empty root: nothing installed
     assert d["folds_default"] == [0]
     assert d["configuration"] is None
     assert d["weights_installed"] and all(e["installed"] is False for e in d["weights_installed"])
@@ -441,7 +465,7 @@ def test_describe_publishes_what_a_client_needs_to_build_a_request(tmp_path):
     takes, which options it accepts, and what it does that cannot be changed."""
     from haversack import Segmenter
     ex = LocalExecutor(Segmenter(weights=tmp_path), workdir=tmp_path)
-    d = TestClient(create_app(ex)).get("/v1/tasks/total_fast").json()
+    d = TestClient(create_app(ex)).get("/v1/tasks/ts.v2:total_fast").json()
     # One input. It is named generically here because nothing is installed - the
     # model's own channel name comes from its dataset.json, and inventing "CT"
     # before reading it would be exactly the guess this design refuses to make.
@@ -1564,9 +1588,9 @@ def test_all_task_name_forms_converge_to_one_cache_key(tmp_path, monkeypatch):
         return d
 
     seg = FakeSegmenter()
-    seg.resolve_task = lambda t: {"total_fast": "ts:total_fast",
-                                  "ts:total_fast": "ts:total_fast",
-                                  "ts:total_fast@v1": "ts:total_fast"}.get(t) or (
+    seg.resolve_task = lambda t: {"total_fast": "ts.v2:total_fast",
+                                  "ts.v2:total_fast": "ts.v2:total_fast",
+                                  "ts.v2:total_fast@v1": "ts.v2:total_fast"}.get(t) or (
         (_ for _ in ()).throw(LookupError(t)))
     ex = LocalExecutor(seg, workdir=tmp_path, cache_dir=tmp_path / "rc",
                        fetch_idc_fn=fake_fetch)
@@ -1577,7 +1601,7 @@ def test_all_task_name_forms_converge_to_one_cache_key(tmp_path, monkeypatch):
                    headers={"Prefer": "wait=30"})
     assert r.status_code == 200                      # computed under the short form
     assert len(seg.calls) == 1
-    for form in ("ts:total_fast", "ts:total_fast@v1", "total_fast"):
+    for form in ("ts.v2:total_fast", "ts.v2:total_fast@v1", "total_fast"):
         r2 = client.get(f"/v1/idc/{u}/{form}/labels.seg.nrrd")
         assert r2.status_code == 200, form           # cache hit, no recompute
     assert len(seg.calls) == 1
@@ -2786,9 +2810,9 @@ def test_prepare_preserves_the_version_pin(tmp_path):
 
     class PinSeg(FakeSegmenter):
         def resolve_task(self, t):
-            if t.split("@")[0] not in ("total_fast", "ts:total_fast"):
+            if t.split("@")[0] not in ("total_fast", "ts.v2:total_fast"):
                 raise LookupError(t)
-            return "ts:total_fast"
+            return "ts.v2:total_fast"
 
         def prepare(self, task, progress=None):
             seen.append(task)
@@ -2797,19 +2821,19 @@ def test_prepare_preserves_the_version_pin(tmp_path):
     ex = LocalExecutor(PinSeg(), workdir=tmp_path)
     client = TestClient(create_app(ex))
     try:
-        r = client.post("/v1/tasks/ts:total_fast@v9.9.9/prepare")
+        r = client.post("/v1/tasks/ts.v2:total_fast@v9.9.9/prepare")
         assert r.status_code == 202 and r.json()["version"] == "v9.9.9"
         t0 = time.time()
         while not seen and time.time() - t0 < 5:
             time.sleep(0.02)
-        assert seen == ["ts:total_fast@v9.9.9"], seen
+        assert seen == ["ts.v2:total_fast@v9.9.9"], seen
         seen.clear()
         r = client.post("/v1/tasks/total_fast/prepare")   # unpinned unchanged
         assert "version" not in r.json()
         t0 = time.time()
         while not seen and time.time() - t0 < 5:
             time.sleep(0.02)
-        assert seen == ["ts:total_fast"]
+        assert seen == ["ts.v2:total_fast"]
     finally:
         ex.close()
 
@@ -2904,7 +2928,7 @@ def test_an_engine_can_decline_to_be_served_from_cache(monkeypatch):
     unbounded and a lookup almost never hits - it opts out per engine, while the
     nnU-Net catalogs keep memoizing."""
     from haversack.serve import engine_serves_from_cache
-    assert engine_serves_from_cache("ts:total_fast") is True
+    assert engine_serves_from_cache("ts.v2:total_fast") is True
     assert engine_serves_from_cache("monai:spleen_ct_segmentation") is True
     assert engine_serves_from_cache("voxtell:text") is False
     assert engine_serves_from_cache("nonsense:task") is True   # unknown: unchanged

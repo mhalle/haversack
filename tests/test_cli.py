@@ -29,11 +29,11 @@ def test_segment_cli_kwargs_are_accepted_by_pipeline(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pipeline, "segment", fake_segment)
     (tmp_path / "in.nii.gz").touch()
-    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
                    "-o", str(tmp_path / "out.nii.gz"),
                    "--model-root", str(tmp_path / "weights"), "--quiet"])
     assert rc == 0
-    assert captured["task"] == "total_fast"
+    assert captured["task"] == "ts.v2:total_fast"
     assert captured["weights"] == str(tmp_path / "weights")
     assert "model_root" not in captured
 
@@ -54,7 +54,7 @@ def test_errors_are_one_line_not_a_traceback(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(pipeline, "segment", fake_segment)
     (tmp_path / "in.nii.gz").touch()
-    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
                    "-o", str(tmp_path / "out.nii.gz"), "--quiet"])
     err = capsys.readouterr().err
     assert rc == 2
@@ -74,7 +74,7 @@ def test_tasks_lists_the_catalog_without_torch(tmp_path):
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
     names = [line.split()[0] for line in r.stdout.splitlines() if line.strip()]
-    assert "ts:total_fast" in names and "mrsegmentator:base" in names and "moose:clin_ct_body" in names
+    assert "ts.v2:total_fast" in names and "mrsegmentator:base" in names and "moose:clin_ct_body" in names
     # an empty weights root: no nnU-Net task is installed, whatever "materialized" says about
     # its spec (TS specs ship in the catalog, so materialized is always True there)
     assert not [line for line in r.stdout.splitlines()
@@ -97,7 +97,7 @@ def test_lean_install_says_what_it_lacks(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(importlib.util, "find_spec", no_torch)
     (tmp_path / "in.nii.gz").touch()
-    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
                    "-o", str(tmp_path / "out.nii.gz")])
     err = capsys.readouterr().err
     assert rc == 2
@@ -108,7 +108,7 @@ def test_missing_input_is_one_line(tmp_path, capsys):
     """A missing input file ended in a SimpleITK traceback from inside the reader
     (2026-09-03); the CLI now says so before touching any stack."""
     from haversack import cli
-    rc = cli.main(["segment", str(tmp_path / "nope.nii.gz"), "--task", "total_fast",
+    rc = cli.main(["segment", str(tmp_path / "nope.nii.gz"), "--task", "ts.v2:total_fast",
                    "-o", str(tmp_path / "out.nii.gz")])
     err = capsys.readouterr().err
     assert rc == 2 and err.strip() == f"haversack: input not found: {tmp_path / 'nope.nii.gz'}"
@@ -117,7 +117,7 @@ def test_missing_input_is_one_line(tmp_path, capsys):
 def test_tasks_with_a_name_prints_its_structures(tmp_path):
     """A blind user could not find the structure list (2026-09-03): `tasks` printed only
     name/engine/modality and nothing said --json carried `structures`. Now `tasks <name>`."""
-    code = f"import haversack.cli as c; raise SystemExit(c.main(['tasks', 'total_fast', '--model-root', {str(tmp_path)!r}]))"
+    code = f"import haversack.cli as c; raise SystemExit(c.main(['tasks', 'ts.v2:total_fast', '--model-root', {str(tmp_path)!r}]))"
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
     # one `<label>\t<name>` per line, in LABEL order - the only way to read a
@@ -125,7 +125,7 @@ def test_tasks_with_a_name_prints_its_structures(tmp_path):
     rows = [ln.split("\t") for ln in r.stdout.splitlines() if ln.strip()]
     labels = [int(k) for k, _ in rows]
     names = [n for _, n in rows]
-    assert len(rows) == 117 and "liver" in names and names[0] != "ts:total_fast"
+    assert len(rows) == 117 and "liver" in names and names[0] != "ts.v2:total_fast"
     assert labels == sorted(labels) and labels[0] == 1
 
 
@@ -178,14 +178,14 @@ def test_the_client_finds_a_local_servers_generated_token(tmp_path, monkeypatch)
 
 def test_the_cli_refuses_output_names_it_does_not_write_and_store_batches(tmp_path, capsys):
     (tmp_path / "in.nii.gz").write_bytes(b"x")
-    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
                    "-o", str(tmp_path / "out.zarr")])
     assert rc == 2 and ".duckn" in capsys.readouterr().err
-    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
                    "--format", "seg.nrrd", "-o", str(tmp_path / "out.duckn")])
     assert rc == 2 and "exactly one input" in capsys.readouterr().err
     rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), str(tmp_path / "in.nii.gz"),
-                   "--task", "total_fast", "-o", str(tmp_path / "out.duckn.zip")])
+                   "--task", "ts.v2:total_fast", "-o", str(tmp_path / "out.duckn.zip")])
     assert rc == 2 and "exactly one input" in capsys.readouterr().err
 
 
@@ -216,12 +216,12 @@ def test_bad_output_names_are_refused_before_anything_runs(tmp_path, capsys, mon
     monkeypatch.setattr(cli_mod, "_need_inference_stack",
                         lambda task=None: (_ for _ in ()).throw(AssertionError("stack demanded first")))
     for out in ("outdir/", "out", "out.txt", "out.zarr"):
-        rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "total_fast",
+        rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
                        "-o", str(tmp_path / out)])
         err = capsys.readouterr().err
         assert rc == 2 and "not an output haversack writes" in err, (out, err)
     rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), str(tmp_path / "in.nii.gz"),
-                   "--task", "total_fast", "--format", "seg.nrrd", "-o", str(tmp_path / "o.zarr")])
+                   "--task", "ts.v2:total_fast", "--format", "seg.nrrd", "-o", str(tmp_path / "o.zarr")])
     assert rc == 2 and "directory of labels" in capsys.readouterr().err
 
 

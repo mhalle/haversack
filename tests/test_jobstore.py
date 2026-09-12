@@ -16,7 +16,7 @@ def store(tmp_path):
     return JobStore(tmp_path / "jobs.db")
 
 
-def _rec(jid, state="queued", *, key=None, created=None, task="ts:total_fast", **kw):
+def _rec(jid, state="queued", *, key=None, created=None, task="ts.v2:total_fast", **kw):
     return {"id": jid, "task": task, "state": state, "cache_key": key,
             "created": created if created is not None else time.time(), **kw}
 

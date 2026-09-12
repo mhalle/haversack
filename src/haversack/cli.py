@@ -1,4 +1,4 @@
-"""haversack segment IN --task total_fast -o OUT [--spacing 1.0] [--interp nearest|linear]"""
+"""haversack segment IN --task ts.v2:total_fast -o OUT [--spacing 1.0] [--interp nearest|linear]"""
 from __future__ import annotations
 
 import sys
@@ -263,16 +263,16 @@ def _version_option() -> click.Option:
 
 def _complete_task(ctx, param, incomplete):
     """Shell completion for a task name, from the catalog with nothing downloaded - as `tasks`
-    lists them - plus the short spelling of each TotalSegmentator task, which is what people
-    actually type."""
+    lists them. Only qualified names are offered, since a bare one is refused, but what was
+    typed is matched against the task's own part too: people start with `total_f`."""
     try:
         from .ecosystems import EcosystemCatalog
         from .weights import WeightsStore
         names = EcosystemCatalog(root=WeightsStore(None, fetch=False).root).names()
     except Exception:                      # completion must never put a traceback in a shell
         return []
-    short = [n[len("ts:"):] for n in names if n.startswith("ts:")]
-    return [n for n in (*names, *short) if n.startswith(incomplete)]
+    return [n for n in names
+            if n.startswith(incomplete) or n.partition(":")[2].startswith(incomplete)]
 
 
 def _dispatch(handler, cmd: str, subkey: str | None = None):
@@ -317,8 +317,8 @@ def _command_line() -> click.Group:
               'REST server and a client for one.'),
         epilog=_verbatim("""examples:
   haversack tasks                                          what can be segmented
-  haversack segment scan.nii.gz --task total_fast -o labels.seg.nrrd
-  haversack segment idc:<crdc_series_uuid> --task total -o labels.seg.nrrd
+  haversack segment scan.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
+  haversack segment idc:<crdc_series_uuid> --task ts.v2:total -o labels.seg.nrrd
   haversack serve --port 8790                              a local server (it generates a token); then: haversack remote submit ...
   haversack docs                                           the user guide; `haversack docs weights` for one section"""))
 
@@ -331,11 +331,11 @@ def _command_line() -> click.Group:
               ".nrrd, .seg.nrrd, .mha); labels come back on the input grid, in the input's "
               'orientation.'),
         epilog=_verbatim("""examples:
-  haversack segment ct.nii.gz --task total_fast -o labels.seg.nrrd
-  haversack segment dicom_dir/ --task total --spacing 1 -o labels.nii.gz
+  haversack segment ct.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
+  haversack segment dicom_dir/ --task ts.v2:total --spacing 1 -o labels.nii.gz
   haversack segment t1.nii.gz --task fastsurfer:brain -o brain.seg.nrrd      (from the fastsurfer venv)
   haversack segment "zenodo:<recid>/amos22.zip!amos22/imagesVa/amos_0575.nii.gz" --task mrsegmentator:base -o amos.seg.nrrd
-  haversack segment a.nii.gz b.nii.gz dicom_dir/ --task total_fast --format seg.nrrd -o out/   (batch: out/<name>_total_fast.seg.nrrd)"""),
+  haversack segment a.nii.gz b.nii.gz dicom_dir/ --task ts.v2:total_fast --format seg.nrrd -o out/   (batch: out/<name>_total_fast.seg.nrrd)"""),
         params=[
             click.Argument(['input'], nargs=-1, required=True,
                            help=('one or more inputs; several = batch mode. Each is a NIfTI / '
@@ -431,7 +431,7 @@ def _command_line() -> click.Group:
         epilog=_verbatim("""examples:
   haversack tasks                        every task
   haversack tasks --installed            what runs without a download
-  haversack tasks total_fast             the 117 structure names total_fast produces
+  haversack tasks ts.v2:total_fast          the 117 structure names total_fast produces
   haversack tasks --json                 full records: name, ecosystem, engine, modality, structures, installed;
                                          `materialized` = the task's definition is known here without a download,
                                          `task_spec` = it is an nnU-Net model (false for FastSurfer, SynthStrip, ...)"""),
@@ -456,7 +456,7 @@ def _command_line() -> click.Group:
               'alongside every model trained with it). Every reference carries its DOI and '
               'PubMed ID where one exists. Nothing is downloaded.'),
         epilog=_verbatim("""examples:
-  haversack cite total_fast              TotalSegmentator's CT paper, nnU-Net, the license
+  haversack cite ts.v2:total_fast           TotalSegmentator's CT paper, nnU-Net, the license
   haversack cite totalvibe:body_regions  the TUM group, European Radiology 2026, Apache-2.0
   haversack cite monai:brats_mri_segmentation --json   the bundle's own references, as data"""),
         params=[
@@ -557,7 +557,7 @@ def _command_line() -> click.Group:
               'any kind.'),
         epilog=_verbatim("""examples:
   haversack serve                                                   (a token is generated for you)
-  HAVERSACK_SERVER=http://127.0.0.1:8790 haversack remote submit scan.nii.gz --task total_fast
+  HAVERSACK_SERVER=http://127.0.0.1:8790 haversack remote submit scan.nii.gz --task ts.v2:total_fast
   haversack serve --host 0.0.0.0 --token secret                      (other machines pass --token secret)"""),
         params=[
             click.Option(['--host'], default='127.0.0.1',
@@ -844,7 +844,7 @@ def _cmd_rights(args) -> int:
     reg = registry(default_sources() + [HttpSource()])
     parsed = parse_input(args.input, known=reg)
     # A task name is shaped like a remote input, and `totalvibe:vibe` reached
-    # `reg[kind]` as a raw KeyError (2026-09-12); `ts:total` is too short a prefix
+    # `reg[kind]` as a raw KeyError (2026-09-12); `ts.v2:total` is too short a prefix
     # to parse as one and was called a local file. Both are models, whose rights
     # `cite` reports - say so before either refusal.
     kind = parsed[0] if parsed else str(args.input).partition(":")[0]
@@ -1309,7 +1309,7 @@ def _cmd_weights(args) -> int:
         info = cat.prepare(args.task, progress=lambda m: say(f"  {m}"))
         # No count. `weights_installed` is only populated by engine ecosystems,
         # and the spec's own weights_ids omits the crop_from_task chains a
-        # cascade installs - ts:teeth pulls three models and either number
+        # cascade installs - ts.v2:teeth pulls three models and either number
         # says one. `weights list` reports what is actually on disk.
         if info.get("task_spec", True):
             print(f"{info['name']}: weights ready under {store.root}")

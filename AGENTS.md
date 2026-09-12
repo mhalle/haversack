@@ -93,7 +93,7 @@ Two layers, enforced by `tests/test_layering.py`:
   (RemoteClient), `schemas` (pydantic: one declaration → JSON Schema, submit validation,
   OpenAPI), `sources` (idc/tcia/openneuro/zenodo/hf), `content` (content-addressed inputs),
   `preview`, `statistics`.
-- **Engines** — `engines/registry.py` is the static ecosystem→engine map (ts, moose,
+- **Engines** — `engines/registry.py` is the static ecosystem→engine map (ts.v2, moose,
   mrsegmentator, dentalsegmentator, totalvibe, cads, custom → nnunetv2; fastsurfer, synthstrip,
   voxtell, monai). Deliberately NOT a plugin system, and the reason is now in the module
   docstring: the torch-free import rule, Modal resolving `@app.cls` at import, and engines
@@ -443,7 +443,7 @@ multi-hour job fares against the 3600 s function timeout.
   is provenance only - the content digest never reaches `result_key` - and a `no-cache`
   refetch rewrites it.
 - `docs/totalvibe-region-names.md` records deferred work: naming TotalVibe's 11 regions,
-  which needs deriving from a `ts:total` overlap table, NOT reading them off upstream's JPEG.
+  which needs deriving from a `ts.v2:total` overlap table, NOT reading them off upstream's JPEG.
 - **Two provenance digests pin less than they say (found 2026-09-11, not fixed).** A
   detached header (`.nhdr`, probably `.mhd`) is digested alone - changing its data file
   leaves the digest the same - and a directory holding exactly ONE top-level file is

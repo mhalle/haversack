@@ -70,7 +70,7 @@ in one line and names what to add.
 
 lists every task the catalog knows, with the engine, modality, and whether its weights are
 already on disk. `haversack tasks --installed` shows what will run without a download, and
-`haversack tasks total_fast` prints the structures a task produces, one per line. This
+`haversack tasks ts.v2:total_fast` prints the structures a task produces, one per line. This
 guide itself ships with the package: `haversack docs` prints it, `haversack docs weights`
 one section, and every command answers `--help` with its options, defaults and examples.
 
@@ -93,7 +93,7 @@ published with no digest at all and so are checked against nothing; the manifest
 provision ahead of time:
 
 ```bash
-haversack weights fetch total          # every part the task needs
+haversack weights fetch ts.v2:total          # every part the task needs
 haversack weights coverage             # what the manifest can provision, and what it cannot
 ```
 
@@ -114,7 +114,7 @@ them.
 ## Segment from the command line
 
 ```bash
-haversack segment scan.nii.gz --task total_fast -o labels.nii.gz
+haversack segment scan.nii.gz --task ts.v2:total_fast -o labels.nii.gz
 ```
 
 The input is a NIfTI, NRRD, or MetaImage file, or a directory holding one DICOM series (a
@@ -122,15 +122,15 @@ folder of several is refused, never read as one of them) - local, or a remote so
 on demand (see [Remote inputs](#remote-inputs)):
 
 ```bash
-haversack segment idc:<crdc_series_uuid> --task total_fast -o labels.seg.nrrd
+haversack segment idc:<crdc_series_uuid> --task ts.v2:total_fast -o labels.seg.nrrd
 haversack segment "zenodo:<recid>/amos22.zip!amos22/imagesVa/amos_0575.nii.gz" --task mrsegmentator:base -o amos.seg.nrrd
-haversack segment https://example.org/scan.nii.gz --task total -o labels.nii.gz
+haversack segment https://example.org/scan.nii.gz --task ts.v2:total -o labels.nii.gz
 ```
 
 **Batch** - pass several inputs to segment them all into one output directory:
 
 ```bash
-haversack segment a.nii.gz b.nii.gz dicom_dir/ --task total_fast --format seg.nrrd -o out/
+haversack segment a.nii.gz b.nii.gz dicom_dir/ --task ts.v2:total_fast --format seg.nrrd -o out/
 ```
 
 With more than one input, `-o` is a directory (default: the current directory) and `--format`
@@ -143,8 +143,9 @@ the file, its extension picking the format).
 
 Output format follows the extension
 (`.nii.gz`, `.nrrd`, `.seg.nrrd`, `.mha`); labels come back on the input grid, in the input's
-orientation. Task names are `ecosystem:task`, and a bare name is looked up across ecosystems
-(`total_fast` is `ts:total_fast`).
+orientation. Task names are `ecosystem:task` (`ts.v2:total_fast`, `cads:organs`). A bare name is
+refused with the qualified form to use: what it meant would depend on which catalogs happen to
+be installed, and two catalogs can offer the same name.
 
 `total_fast` is the 3 mm whole-body model; `total_fastest` is the 6 mm one (coarser, faster
 still), and `total` runs the five 1.5 mm models. Useful options:
@@ -186,7 +187,7 @@ read and the network.
 ```python
 from haversack import segment, Segmenter
 
-r = segment("scan.nii.gz", "total_fast")        # a Segmentation
+r = segment("scan.nii.gz", "ts.v2:total_fast")        # a Segmentation
 r.save("labels.nii.gz")
 liver = r.mask("liver")                          # boolean array (Z, Y, X) on the output grid
 r.present()                                      # {label: name} for what was found, e.g. {5: "liver", ...}
@@ -195,7 +196,7 @@ r.timings, r.provenance                          # per-stage seconds; what ran, 
 
 seg = Segmenter(cache_models=5)                  # models stay warm across calls
 for path in paths:
-    seg.segment(path, "total").save(path.with_suffix(".labels.nii.gz"))
+    seg.segment(path, "ts.v2:total").save(path.with_suffix(".labels.nii.gz"))
 job = seg.submit("scan.nii.gz", "total", on_progress=print)   # off-thread, cancellable
 ```
 
@@ -380,7 +381,7 @@ machines, bind it to a network interface with a token of your choosing, `--host 
 ```bash
 export HAVERSACK_SERVER=http://127.0.0.1:8790
 haversack remote tasks
-haversack remote submit scan.nii.gz --task total_fast -o labels.seg.nrrd
+haversack remote submit scan.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
 ```
 
 `submit` uploads, shows progress, and downloads the labels; `--no-wait` returns a job id for

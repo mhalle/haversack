@@ -14,7 +14,7 @@ ecosystems map to one engine. The four nnU-Net catalogs below all run on
 
 The nnU-Net catalogs:
 
-- ``ts`` - the TotalSegmentator catalog. Its tasks are *compositions* (unions,
+- ``ts.v2`` - the TotalSegmentator v2 catalog. Its tasks are *compositions* (unions,
   cascades, remaps) that exist only as application logic, so it carries a full
   task registry (guarded by the remap drift test).
 - ``moose`` - MOOSE/moosez models. Bare, self-describing nnU-Net checkpoints
@@ -37,7 +37,7 @@ listed but unmaterialized: ``info()`` says so without downloading, ``get()``
 installs on demand (the same behavior TS weights ids always had).
 
 Naming has three layers (user decision 2026-08-25): the **canonical name is
-ecosystem-qualified** (``ts:total_fast``, ``moose:clin_ct_fast_organs``) and
+ecosystem-qualified** (``ts.v2:total_fast``, ``moose:clin_ct_fast_organs``) and
 is what listings, result-cache keys, and provenance carry; the **short name**
 is a resolution convenience, accepted when exactly one ecosystem offers it
 and refused with the qualified candidates when ambiguous - so two ecosystems
@@ -120,7 +120,7 @@ class ModelEcosystem:
 
     An ecosystem is what the *user* selects. What actually runs its tasks is an
     :mod:`~haversack.engines.registry` engine, named by :attr:`engine` - many
-    ecosystems map to one engine (``ts``, ``moose`` and ``custom`` are three
+    ecosystems map to one engine (``ts.v2``, ``moose`` and ``custom`` are three
     catalogs of nnU-Net models, all run by ``nnunetv2``).
 
     An ecosystem whose engine has no :class:`~haversack.tasks.TaskSpec` - FastSurfer
@@ -260,7 +260,7 @@ class TSEcosystem(ModelEcosystem):
     actionable message). Always materialized - the composition data carries
     the label maps, and the remap drift test keeps them honest."""
 
-    name = "ts"
+    name = "ts.v2"
     description = "TotalSegmentator task catalog"
 
     def __init__(self):
@@ -1573,10 +1573,17 @@ def default_ecosystems() -> list:
     return ecos
 
 
+#: Catalogs renamed, old name -> new. TotalSegmentator's is `ts.v2` since 0.11.0: it is
+#: TotalSegmentator v2's, and v3 reuses v2's task names, so v3 arrives as `ts.v3` beside it
+#: (`family.version`: the family is what comes before the dot). A task named the old way is
+#: refused with the new form to use; a store written the old way is still read (ranked_build).
+RENAMED_ECOSYSTEMS = {"ts": "ts.v2"}
+
+
 class EcosystemCatalog:
     """A TaskCatalog-compatible federation over an ecosystem registry.
 
-    Canonical names are ``eco:task``; short names resolve when unique. ``get()``
+    Task names are ``eco:task``; a bare name is refused (see ``resolve``). ``get()``
     materializes on demand (installing weights if needed - the same
     on-first-use behavior TS weights ids always had); ``info()`` never
     downloads. A TaskSpec or a model-folder path passes through ``get``
@@ -1597,13 +1604,12 @@ class EcosystemCatalog:
     def resolve(self, name: str) -> tuple:
         """``(ecosystem, short_task, canonical, version)`` for any name form.
 
-        The grammar is ``[eco:]name[@version]`` - three layers plus the hash
-        beneath: the short name resolves when exactly one ecosystem offers it,
-        the canonical form is ecosystem-qualified, and ``@version`` pins a
-        weights release at install time (the canonical name stays unversioned;
-        actual versions live in the result key's weights component). Unknown
-        names and ambiguous short names raise LookupError - the ambiguity
-        error lists the qualified candidates to use instead."""
+        The grammar is ``eco:name[@version]``: the name is ecosystem-qualified,
+        and ``@version`` pins a weights release at install time (the canonical
+        name stays unversioned; actual versions live in the result key's
+        weights component). Unknown names raise LookupError, and so does a bare
+        ``name`` - even one only one catalog offers - naming the qualified forms
+        to use instead."""
         name = str(name)
         version = None
         if "@" in name:
@@ -1613,6 +1619,9 @@ class EcosystemCatalog:
         if ":" in name:
             ename, _, short = name.partition(":")
             eco = self.registry.get(ename)
+            if eco is None and ename in RENAMED_ECOSYSTEMS:
+                new = RENAMED_ECOSYSTEMS[ename]
+                raise LookupError(f"catalog {ename!r} is {new!r} since 0.11.0: use {new}:{short}")
             if eco is None or ename not in self._short.get(short, ()):
                 raise LookupError(f"unknown task {name!r}")
             return eco, short, f"{ename}:{short}", version
@@ -1620,10 +1629,12 @@ class EcosystemCatalog:
         if not enames:
             raise LookupError(f"unknown task {name!r}; {len(self._short)} known, "
                               f"e.g. {self.names()[:6]}")
-        if len(enames) > 1:
-            raise LookupError(f"short name {name!r} is ambiguous; use one of "
-                              + ", ".join(f"{e}:{name}" for e in sorted(enames)))
-        return self.registry[enames[0]], name, f"{enames[0]}:{name}", version
+        # Refused even when one catalog alone offers it: which catalog a bare name meant
+        # depended on which catalogs were installed, so adding one changed or broke what a
+        # script meant (CADS's `vertebrae` took `totalvibe:vertebrae`'s name, 2026-09-12;
+        # TotalSegmentator v3 reuses v2's). Task names are the model makers' - never renamed.
+        raise LookupError(f"task {name!r} needs its catalog: use "
+                          + " or ".join(f"{e}:{name}" for e in sorted(enames)))
 
     def __contains__(self, name) -> bool:
         try:

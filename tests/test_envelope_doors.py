@@ -75,7 +75,7 @@ def _check(stubbed, zero, three):
 
 def test_the_python_api(stubbed):
     for mm in (0, 3.0):
-        pipeline.segment(str(stubbed["ct"]), "total_fast", envelope_mm=mm)
+        pipeline.segment(str(stubbed["ct"]), "ts.v2:total_fast", envelope_mm=mm)
     _check(stubbed, *stubbed["seen"])
 
 
@@ -88,14 +88,14 @@ def test_every_door_defaults_to_the_whole_volume(stubbed, tmp_path):
     from haversack import Segmenter, cli
     from haversack.serve import LocalExecutor, create_app
     ct = stubbed["ct"]
-    pipeline.segment(str(ct), "total_fast")
-    Segmenter(weights=tmp_path).segment(str(ct), "total_fast")
-    assert cli.main(["segment", str(ct), "--task", "total_fast",
+    pipeline.segment(str(ct), "ts.v2:total_fast")
+    Segmenter(weights=tmp_path).segment(str(ct), "ts.v2:total_fast")
+    assert cli.main(["segment", str(ct), "--task", "ts.v2:total_fast",
                      "-o", str(tmp_path / "labels.nii.gz"), "--quiet"]) == 0
     client = TestClient(create_app(LocalExecutor(Segmenter(weights=tmp_path / "w"),
                                                  workdir=tmp_path / "work")))
     r = client.post("/v1/jobs", files={"file": ("ct.nii.gz", ct.read_bytes())},
-                    data={"task": "total_fast", "options": "{}"})
+                    data={"task": "ts.v2:total_fast", "options": "{}"})
     assert r.status_code == 202, r.text
     jid, t0 = r.json()["id"], time.time()
     while (s := client.get(f"/v1/jobs/{jid}").json())["state"] not in ("done", "failed"):
@@ -111,10 +111,10 @@ def test_every_door_defaults_to_the_whole_volume(stubbed, tmp_path):
 def test_the_segmenter_policy_and_its_per_call_override(stubbed, tmp_path):
     from haversack import Segmenter
     ct = str(stubbed["ct"])
-    Segmenter(weights=tmp_path, envelope_mm=0).segment(ct, "total_fast")
-    Segmenter(weights=tmp_path, envelope_mm=3.0).segment(ct, "total_fast")
-    Segmenter(weights=tmp_path).segment(ct, "total_fast", envelope_mm=0)
-    Segmenter(weights=tmp_path).segment(ct, "total_fast", envelope_mm=3.0)
+    Segmenter(weights=tmp_path, envelope_mm=0).segment(ct, "ts.v2:total_fast")
+    Segmenter(weights=tmp_path, envelope_mm=3.0).segment(ct, "ts.v2:total_fast")
+    Segmenter(weights=tmp_path).segment(ct, "ts.v2:total_fast", envelope_mm=0)
+    Segmenter(weights=tmp_path).segment(ct, "ts.v2:total_fast", envelope_mm=3.0)
     policy_zero, policy_three, call_zero, call_three = stubbed["seen"]
     _check(stubbed, policy_zero, policy_three)
     _check(stubbed, call_zero, call_three)
@@ -131,7 +131,7 @@ def test_the_server(stubbed, tmp_path):
     body = stubbed["ct"].read_bytes()
     for mm in (0, 3.0):
         r = client.post("/v1/jobs", files={"file": ("ct.nii.gz", body)},
-                        data={"task": "total_fast", "options": f'{{"envelope_mm": {mm}}}'})
+                        data={"task": "ts.v2:total_fast", "options": f'{{"envelope_mm": {mm}}}'})
         assert r.status_code == 202, r.text
         jid, t0 = r.json()["id"], time.time()
         while (s := client.get(f"/v1/jobs/{jid}").json())["state"] not in ("done", "failed"):
@@ -144,7 +144,7 @@ def test_the_server(stubbed, tmp_path):
 def test_the_command_line(stubbed, tmp_path):
     from haversack import cli
     for mm in ("0", "3"):
-        rc = cli.main(["segment", str(stubbed["ct"]), "--task", "total_fast", "--envelope", mm,
+        rc = cli.main(["segment", str(stubbed["ct"]), "--task", "ts.v2:total_fast", "--envelope", mm,
                        "-o", str(tmp_path / f"labels{mm}.nii.gz"), "--quiet"])
         assert rc == 0
     _check(stubbed, *stubbed["seen"])

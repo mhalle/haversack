@@ -85,8 +85,8 @@ def test_nnunet_tasks_still_take_the_pipeline(monkeypatch, tmp_path):
     from haversack.segmenter import Segmenter
     seen = {}
     monkeypatch.setattr(pipeline, "segment", lambda image, task, **kw: seen.update(task=task) or "OK")
-    assert Segmenter(weights=tmp_path).segment("ct.nii.gz", "ts:total_fast") == "OK"
-    assert seen["task"] == "ts:total_fast"
+    assert Segmenter(weights=tmp_path).segment("ct.nii.gz", "ts.v2:total_fast") == "OK"
+    assert seen["task"] == "ts.v2:total_fast"
 
 
 def test_cli_stack_check_is_per_engine(monkeypatch, tmp_path, capsys):

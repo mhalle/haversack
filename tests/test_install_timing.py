@@ -118,6 +118,37 @@ def test_a_first_use_install_never_moves_the_run_backwards(tmp_path, monkeypatch
     assert run and all(p.n_parts == 2 for p in run), [str(p) for p in run]
 
 
+def test_a_cascades_bare_coarse_task_is_looked_up_in_its_own_catalog(tmp_path, monkeypatch):
+    """A registry names its own tasks bare (TotalSegmentator's `teeth` crops from
+    `craniofacial_structures`); since bare names are refused, the pipeline qualifies the
+    reference with the cascade's own catalog - `fine:coarse` for `fine:task`."""
+    from haversack.tasks import CascadeStep, TaskSpec, UnionPart
+    _, store, cache = _two_part_task(tmp_path, [_StubModel(ORGANS._props) for _ in range(2)])
+    monkeypatch.setattr(pipeline, "as_store", lambda *a, **k: store)
+    coarse = TaskSpec(name="fine:coarse", shape="union", label_map={1: "a"},
+                      union=(UnionPart(weights_id=1, label_remap={1: 1}, name="c"),))
+    fine = TaskSpec(name="fine:task", shape="cascade", label_map={1: "a"},
+                    cascade=(CascadeStep(crop_from_task="coarse", crop_to_classes=(1,)),
+                             CascadeStep(weights_id=2)))
+
+    class _Qualified:
+        asked = []
+
+        def installed(self, name):
+            return True
+
+        def get(self, name, progress=None):
+            self.asked.append(name)
+            if ":" not in name:
+                raise LookupError(f"task {name!r} needs its catalog")
+            return coarse
+
+    cat = _Qualified()
+    pipeline.segment(str(_write_ct(tmp_path, (12, 14, 16))), fine, catalog=cat, models=cache,
+                     device="cpu", convention="corner", folds=(0,))
+    assert cat.asked == ["fine:coarse"], cat.asked
+
+
 def test_an_install_inside_a_cascade_keeps_the_cascades_parts(tmp_path, monkeypatch):
     from haversack import weights_fetch
     from haversack.tasks import CascadeStep, TaskSpec, UnionPart

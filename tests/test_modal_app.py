@@ -98,10 +98,10 @@ def test_a_worker_warms_only_the_jobs_that_will_run_on_it(monkeypatch):
     pre-read the nnU-Net worker's upload, the nnU-Net worker staged a FastSurfer
     job's series and then stopped (one-ahead), and its own next job ran cold."""
     m, fake = _swap_dict(monkeypatch)
-    fake["cur"] = {"id": "cur", "state": "running", "created": 0, "task": "ts:total"}
+    fake["cur"] = {"id": "cur", "state": "running", "created": 0, "task": "ts.v2:total"}
     fake["fs"] = {"id": "fs", "state": "queued", "created": 1, "task": "fastsurfer:brain",
                   "source": [{"kind": "s3", "id": "b/mprage"}]}
-    fake["nn"] = {"id": "nn", "state": "queued", "created": 2, "task": "ts:total_fast"}
+    fake["nn"] = {"id": "nn", "state": "queued", "created": 2, "task": "ts.v2:total_fast"}
     assert m._prefetch_candidate("cur", "nnunetv2") == ("upload", None, "nn")
     assert m._prefetch_candidate("cur", "fastsurfer") == ("s3", "s3:b/mprage", "fs")
     assert m._prefetch_candidate("cur", "monai") is None
@@ -311,7 +311,7 @@ def test_spawn_worker_routes_by_engine_not_by_task_prefix():
     routes to the default engine without naming any of them."""
     from haversack import modal_app
     from haversack.engines import registry as R
-    assert R.engine_for_task("ts:total_fast").name == R.NNUNETV2
+    assert R.engine_for_task("ts.v2:total_fast").name == R.NNUNETV2
     assert R.engine_for_task("custom:mine").name == R.NNUNETV2
     assert R.engine_for_task("fastsurfer:brain").name == "fastsurfer"
     assert modal_app.ENGINE_WORKERS.keys() <= R.ENGINES.keys()

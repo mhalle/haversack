@@ -226,6 +226,10 @@ def _synthetic_emit(tmp_path):
     """A one-part emit directory of the shape ranked_emit.py writes, from random logits."""
     build = _tool("ranked_build_store")
     names = build.names_for("nnunetv2", "total_fast")
+    # a store records its task as it was named when written: a bare `total_fast` or `ts:` before
+    # 0.11.0, `ts.v2:` since - the catalog refuses the first two, and the build still reads them
+    assert build.names_for("nnunetv2", "ts:total_fast") == names
+    assert build.names_for("nnunetv2", "ts.v2:total_fast") == names
     labels = [0] + sorted(names)[:2]                          # background + two real ids
     torch.manual_seed(0)
     logits = torch.randn(len(labels), 20, 24, 28)

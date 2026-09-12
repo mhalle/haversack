@@ -5,7 +5,24 @@
 The body envelope - inference cropped to the patient's bounding box - is off by default now,
 and `0` means "no envelope" everywhere. It was on at 20 mm and documented as costing nothing
 where it mattered; measured against whole-volume inference, it changes labels wherever it saves
-time. Results computed with the default options change, so the cache epoch moves to 3.
+time. Results computed with the default options change, so the cache epoch moves to 3. And a
+task name now has to name its catalog - `ts.v2:total_fast`, not `total_fast` - which breaks every
+script, request and command line that used a bare name; the error says what to write instead.
+
+- **Task names carry their catalog: `ts.v2:total_fast`, `cads:organs`, `totalvibe:vertebrae`.** A
+  bare name resolved to whichever installed catalog offered it, so what a script meant depended
+  on what else was installed: adding CADS turned `vertebrae` from `totalvibe:vertebrae` into an
+  ambiguity error, and TotalSegmentator v3 reuses v2's names. A bare name is now refused even
+  when one catalog alone offers it, in the CLI, the Python API and on the server, and the error
+  names the qualified form (`task 'total_fast' needs its catalog: use ts.v2:total_fast`). Names
+  stay the model makers'; haversack does not rename a task to avoid a collision. Results were
+  already keyed and recorded by the qualified name, so no cached result changes. Shell
+  completion offers qualified names and still finds them from the task's own name, and a
+  cascade's reference to a task of its own catalog (`teeth` crops from
+  `craniofacial_structures`) is looked up in that catalog. TotalSegmentator's catalog is
+  `ts.v2` now - it is TotalSegmentator v2's, and v3 reuses v2's task names, so v3 can arrive
+  as `ts.v3` beside it; the family is what comes before the dot. `ts:total_fast` is refused
+  with the `ts.v2:` form to use, and a store written with a `ts:` or a bare name still reads.
 
 - **`envelope_mm=0` cropped inference flush to the skin in Python and on the server, while
   `--envelope 0` ran the whole volume.** One number, two meanings: a CADS parity study passed 0
@@ -56,11 +73,9 @@ time. Results computed with the default options change, so the cache epoch moves
   combined task, because the nine overlap by design (upstream's own combined map paints the
   thoracic cavity over every lung lobe). haversack does not gate `head` and `headneck` on a
   brain or post-process, and it pads the edge of a short volume the TotalSegmentator way (a
-  34-slice head CT: 0.977-0.998). `cads:vertebrae` makes `vertebrae` an ambiguous short name -
-  it meant `totalvibe:vertebrae` - so a script that says `task="vertebrae"` now has to say
-  `totalvibe:vertebrae`.
+  34-slice head CT: 0.977-0.998).
 - **`haversack rights` given a model task name says to use `cite`.** `rights totalvibe:vibe`
-  ended in a raw `KeyError`, and `rights ts:total` called the task a local file. `rights`
+  ended in a raw `KeyError`, and `rights ts.v2:total` called the task a local file. `rights`
   reports on data sources; a prefix naming a model catalog now exits 2 pointing at
   `haversack cite <task>`, and any other unknown prefix exits 2 listing the source kinds
   `rights` takes. What it reports for a real source is unchanged.

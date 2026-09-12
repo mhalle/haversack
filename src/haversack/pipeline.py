@@ -388,7 +388,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         fr = None
         # Timing keys: `load:<task>` for a one-model task, `load:<task>:<part>` for a union.
         # A single task's only part is named after the task, and the old unconditional suffix
-        # printed `load:ts:total_fast:ts:total_fast`.
+        # printed `load:ts.v2:total_fast:ts.v2:total_fast`.
         sfx = "" if len(parts) == 1 else None
         for i, (wid, remap, pname) in enumerate(parts):
             key = f"{tag}{sfx if sfx is not None else ':' + pname}"
@@ -432,7 +432,10 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             last = i == len(stages) - 1
             if step.crop_from_task is not None:
                 report.stage("cascade", f"{tag} stage {i + 1}/{len(stages)}: crop from {step.crop_from_task!r}")
-                sub_labels, sub_fr, sub_og = run_task_canonical(resolve(step.crop_from_task), f"{tag}:{step.crop_from_task}")
+                crop = step.crop_from_task
+                if ":" not in crop and ":" in spc.name:       # a registry names its own tasks bare
+                    crop = f"{spc.name.partition(':')[0]}:{crop}"
+                sub_labels, sub_fr, sub_og = run_task_canonical(resolve(crop), f"{tag}:{step.crop_from_task}")
                 e = label_roi(sub_labels.cpu().numpy(), step.crop_to_classes,
                               margin_voxels=margin_in_voxels(step.dilation_mm, sub_og.spacing))
                 roi_mm = None if e.is_whole() else ((tuple(float(v) for v in sub_og.index_to_mm(e.start)),

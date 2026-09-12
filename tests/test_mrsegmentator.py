@@ -63,7 +63,7 @@ def test_manifest_holds_only_what_the_checkpoint_cannot_know():
 
 def test_default_catalog_lists_it_beside_ts_and_moose():
     reg = registry(None)
-    assert {"ts", "moose", "mrsegmentator"} <= set(reg)
+    assert {"ts.v2", "moose", "mrsegmentator"} <= set(reg)
     assert isinstance(reg["mrsegmentator"], MRSegmentatorEcosystem)
     cat = EcosystemCatalog([TSEcosystem(), MooseEcosystem(), MRSegmentatorEcosystem()])
     assert "mrsegmentator:base" in cat.names() and "mrsegmentator:body_comp" in cat.names()
@@ -148,8 +148,10 @@ def test_pin_checks_the_installed_bytes_not_the_manifest(tmp_path):
 
 def test_catalog_resolves_short_and_pinned_forms(tmp_path):
     cat = EcosystemCatalog([TSEcosystem(), MRSegmentatorEcosystem()], root=tmp_path)
-    eco, short, canonical, version = cat.resolve("body_comp@1.0")
+    eco, short, canonical, version = cat.resolve("mrsegmentator:body_comp@1.0")
     assert (eco.name, short, canonical, version) == ("mrsegmentator", "body_comp", "mrsegmentator:body_comp", "1.0")
+    with pytest.raises(LookupError, match="needs its catalog: use mrsegmentator:body_comp"):
+        cat.resolve("body_comp@1.0")                       # a bare name is refused (0.11.0)
     with pytest.raises(ModelNotFound, match="not installed"):
         MRSegmentatorEcosystem().spec("base", tmp_path)
 

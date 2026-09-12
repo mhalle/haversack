@@ -4,7 +4,7 @@
   "checked": "2026-09-06"
  },
  "ecosystems": {
-  "ts": {
+  "ts.v2": {
    "title": "TotalSegmentator",
    "description": "Segmentation of most major anatomical structures in any CT or MR image, trained on a wide range of scanners, institutions and protocols.",
    "group": "Clinic of Radiology and Nuclear Medicine, University Hospital Basel (Department of Research and Analysis)",

@@ -100,7 +100,7 @@ def test_policy_is_held_and_passed_through(monkeypatch):
 
     monkeypatch.setattr("haversack.pipeline.segment", fake_segment)
     seg = Segmenter(device="cuda", dtype="fp32", envelope_mm=None, cache_models=2)
-    assert seg.segment("img.nii.gz", "total_fast") == "result"
+    assert seg.segment("img.nii.gz", "ts.v2:total_fast") == "result"
     assert seen["device"] == "cuda" and seen["dtype"] == "fp32" and seen["envelope_mm"] is None
     assert seen["models"] is seg.models and seen["catalog"] is seg.catalog
 
@@ -109,7 +109,7 @@ def test_per_call_arguments_override_the_policy(monkeypatch):
     seen = {}
     monkeypatch.setattr("haversack.pipeline.segment", lambda image, task, **kw: seen.update(kw))
     seg = Segmenter(device="cpu", interp="linear")
-    seg.segment("img.nii.gz", "total_fast", interp="nearest", grid=1.5)
+    seg.segment("img.nii.gz", "ts.v2:total_fast", interp="nearest", grid=1.5)
     assert seen["interp"] == "nearest" and seen["grid"] == 1.5
     assert seen["device"] == "cpu"                     # unchanged policy still applies
 
@@ -117,12 +117,12 @@ def test_per_call_arguments_override_the_policy(monkeypatch):
 def test_an_unknown_argument_is_rejected_rather_than_silently_ignored():
     seg = Segmenter()
     with pytest.raises(TypeError, match="unknown argument"):
-        seg.segment("img.nii.gz", "total_fast", devcie="cuda")   # typo
+        seg.segment("img.nii.gz", "ts.v2:total_fast", devcie="cuda")   # typo
 
 
 def test_callable_shorthand_is_the_same_operation(monkeypatch):
     monkeypatch.setattr("haversack.pipeline.segment", lambda image, task, **kw: ("ran", task))
-    assert Segmenter()("img.nii.gz", "total_fast") == ("ran", "total_fast")
+    assert Segmenter()("img.nii.gz", "ts.v2:total_fast") == ("ran", "ts.v2:total_fast")
 
 
 def test_every_policy_key_is_accepted_as_an_override(monkeypatch):
@@ -137,7 +137,7 @@ def test_every_policy_key_is_accepted_as_an_override(monkeypatch):
 # -- introspection ----------------------------------------------------------------------
 def test_describe_reports_a_task_without_running_it():
     seg = Segmenter()
-    d = seg.describe("total_fast")
+    d = seg.describe("ts.v2:total_fast")
     assert d["lineage"] == "ts" and d["modality"] == "CT"
     assert d["n_structures"] == len(d["structures"]) > 100
     assert "liver" in d["structures"] and d["weights"] == ["297"]
@@ -145,21 +145,22 @@ def test_describe_reports_a_task_without_running_it():
 
 def test_structures_are_in_label_order():
     seg = Segmenter()
-    names = seg.structures("total_fast")
-    spec = seg.catalog.get("total_fast")
+    names = seg.structures("ts.v2:total_fast")
+    spec = seg.catalog.get("ts.v2:total_fast")
     assert names == [spec.label_map[k] for k in sorted(spec.label_map)]
 
 
 def test_tasks_lists_the_catalog():
     seg = Segmenter()
-    assert "ts:total" in seg.tasks() and len(seg.tasks()) == len(seg.catalog)
-    assert seg.resolve_task("total") == "ts:total"          # short form resolves
-    assert seg.resolve_task("ts:total@v2.0.0") == "ts:total"
+    assert "ts.v2:total" in seg.tasks() and len(seg.tasks()) == len(seg.catalog)
+    with pytest.raises(LookupError, match="use ts.v2:total$"):
+        seg.resolve_task("total")                          # a bare name is refused (0.11.0)
+    assert seg.resolve_task("ts.v2:total@v2.0.0") == "ts.v2:total"
 
 
 def test_describe_works_for_a_union_task_and_lists_every_model():
     seg = Segmenter()
-    d = seg.describe("total")
+    d = seg.describe("ts.v2:total")
     assert d["shape"] == "label_union" and len(d["weights"]) == 5
 
 
@@ -250,5 +251,5 @@ def test_segmenter_holds_a_store_and_passes_it_through(monkeypatch, tmp_path):
     monkeypatch.setattr("haversack.pipeline.segment", lambda image, task, **kw: seen.update(kw))
     seg = Segmenter(weights=tmp_path)
     assert isinstance(seg.weights, WeightsStore)
-    seg.segment("i", "total_fast")
+    seg.segment("i", "ts.v2:total_fast")
     assert seen["weights"] is seg.weights

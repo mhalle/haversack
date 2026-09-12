@@ -27,7 +27,7 @@ class Segmenter:
     """Segment with a fixed execution policy and warm models.
 
     >>> seg = Segmenter(device="cuda", weights="/weights", cache_models=2)
-    >>> r = seg.segment("scan.nii.gz", "total_fast")
+    >>> r = seg.segment("scan.nii.gz", "ts.v2:total_fast")
     >>> r.mask("liver").sum()
 
     ``weights`` says where model files come from - a :class:`~haversack.weights.WeightsStore`, a
@@ -56,7 +56,8 @@ class Segmenter:
 
     def resolve_task(self, task) -> str:
         """The canonical (ecosystem-qualified, unversioned) name for any
-        accepted form - short, eco:name, or eco:name@version."""
+        accepted form - eco:name or eco:name@version. A bare name raises
+        LookupError naming the qualified forms to use."""
         if hasattr(self.catalog, "resolve"):
             return self.catalog.resolve(task)[2]
         return str(task)

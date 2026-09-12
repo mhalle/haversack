@@ -27,8 +27,8 @@ haversack serve --port 8790
 
 export HAVERSACK_SERVER=http://127.0.0.1:8790
 haversack remote tasks
-haversack remote submit scan.nii.gz --task total_fast -o labels.seg.nrrd
-haversack remote submit idc:<crdc_series_uuid> --task total_fast -o labels.seg.nrrd
+haversack remote submit scan.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
+haversack remote submit idc:<crdc_series_uuid> --task ts.v2:total_fast -o labels.seg.nrrd
 ```
 
 `submit` uploads (or names a hosted series), streams progress, and downloads the labels;
@@ -43,7 +43,7 @@ sides:
 
 ```bash
 haversack serve --host 0.0.0.0 --token choose-a-secret
-HAVERSACK_SERVER=http://gpu-box:8790 haversack remote --token choose-a-secret submit scan.nii.gz --task total_fast -o labels.seg.nrrd
+HAVERSACK_SERVER=http://gpu-box:8790 haversack remote --token choose-a-secret submit scan.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
 ```
 
 `remote` takes the token from `--token`, then `HAVERSACK_TOKEN`, then the local file.
@@ -173,8 +173,8 @@ without the bytes passing through the client. No route ever hands input bytes ba
 `GET /v1/tasks` lists catalog names; `GET /v1/tasks/{task}` describes one: its `engine`,
 `lineage`, `modality`, the `structures`, the `weights` and whether they are installed, the
 `inputs` it takes (each with a role name, a kind, and whether it is required), its
-`parameters` as two JSON Schemas, and its `behavior`. Task names cross the wire as catalog
-names only; the in-process API's ability to run a model folder by path stops at this
+`parameters` as two JSON Schemas, and its `behavior`. Task names cross the wire as qualified catalog
+names only (a bare `total_fast` is a 404 that names `ts.v2:total_fast`); the in-process API's ability to run a model folder by path stops at this
 boundary. The grammar `eco:name@version` names an ecosystem, a task, and a weights version;
 all spellings of one task converge on one cache key, except in `POST /v1/tasks/{task}/prepare`,
 which installs a task's weights ahead of first use and honors the exact version asked for.
@@ -246,7 +246,7 @@ is for smoke tests: anyone with the URL can spend the GPU.
 Deploy-time knobs, all environment variables because Modal resolves decorators at import:
 `HAVERSACK_GPU` (default L40S; A10 is the economical fast-mode choice), `HAVERSACK_APP_NAME`,
 `HAVERSACK_SCALEDOWN`, `HAVERSACK_MAX_CONTAINERS`, `HAVERSACK_SNAPSHOT` (memory snapshots,
-default on), `HAVERSACK_WARM_TASK` (the task loaded at startup, default `total_fast`),
+default on), `HAVERSACK_WARM_TASK` (the task loaded at startup, default `ts.v2:total_fast`),
 `HAVERSACK_JOBS_TTL_H` (default 72), `HAVERSACK_RESULTS_KEEP` (default 500),
 `HAVERSACK_INPUTS_GB` (default 50), `HAVERSACK_ARTIFACTS` (default `preview,statistics`),
 `HAVERSACK_IDC_CLOUD` (`aws`, or `gcp` to read IDC's Google Cloud mirror first - for a

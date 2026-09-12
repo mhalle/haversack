@@ -135,11 +135,23 @@ def _ts_names(task):
     that goes stale silently when the catalog moves, and a wrong name on a segment is the kind
     of error nothing downstream catches.
     """
-    from haversack.ecosystems import EcosystemCatalog
+    from haversack.ecosystems import RENAMED_ECOSYSTEMS, EcosystemCatalog
     from haversack.tasks import _resolve_spec
     from haversack.weights import as_store
     store = as_store(None, layout="ts")
-    return dict(_resolve_spec(task, EcosystemCatalog(root=store.root)).label_map)
+    cat = EcosystemCatalog(root=store.root)
+    # A store's metadata records the task as it was named when the store was written. Before
+    # 0.11.0 that was `ts:total_fast`, or a bare `total_fast` meaning the one catalog that
+    # offered it; the catalog refuses both forms now, so read them the way they were written.
+    name = str(task)
+    eco, sep, short = name.partition(":")
+    if sep and eco in RENAMED_ECOSYSTEMS:
+        name = f"{RENAMED_ECOSYSTEMS[eco]}:{short}"
+    elif not sep:
+        found = [n for n in cat.names() if n.partition(":")[2] == name]
+        if len(found) == 1:
+            name = found[0]
+    return dict(_resolve_spec(name, cat).label_map)
 
 
 CASCADE_PART = re.compile(r":s\d+$")      # a cascade stage is named `<task>:s<i>`

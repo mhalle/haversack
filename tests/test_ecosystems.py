@@ -19,8 +19,8 @@ def _fake_model_folder(root, name="Dataset900_Toy", labels=None):
 
 
 def test_short_name_collisions_resolve_by_prefix(tmp_path):
-    """Two ecosystems may ship the same short name: only the short form goes
-    ambiguous, and the error names the qualified candidates."""
+    """Two ecosystems may ship the same short name: the bare form is refused,
+    naming the qualified candidates, and each qualified form resolves."""
     class Eco:
         def __init__(self, name):
             self.name = name
@@ -32,7 +32,7 @@ def test_short_name_collisions_resolve_by_prefix(tmp_path):
             return {"name": t, "ecosystem": self.name, "materialized": False}
     cat = EcosystemCatalog([Eco("a"), Eco("b")], root=tmp_path)
     assert cat.names() == ["a:x", "b:x"]
-    with pytest.raises(LookupError, match="ambiguous.*a:x.*b:x"):
+    with pytest.raises(LookupError, match="needs its catalog: use a:x or b:x"):
         cat.resolve("x")
     eco, short, canonical, version = cat.resolve("a:x")
     assert (eco.name, short, canonical, version) == ("a", "x", "a:x", None)
@@ -42,8 +42,8 @@ def test_short_name_collisions_resolve_by_prefix(tmp_path):
 
 def test_ts_and_moose_coexist_without_collisions():
     reg = registry(None)
-    assert set(reg) == {"ts", "moose", "mrsegmentator", "dentalsegmentator", "totalvibe", "cads"}
-    assert "total_fast" in reg["ts"].tasks()
+    assert set(reg) == {"ts.v2", "moose", "mrsegmentator", "dentalsegmentator", "totalvibe", "cads"}
+    assert "total_fast" in reg["ts.v2"].tasks()
     assert "clin_ct_fast_organs" in reg["moose"].tasks()
     assert "base" in reg["dentalsegmentator"].tasks() and "vibe" in reg["totalvibe"].tasks()
 
@@ -79,13 +79,14 @@ def test_catalog_federates_and_reports(tmp_path):
     folder = _fake_model_folder(tmp_path)
     cat = EcosystemCatalog([TSEcosystem(), CustomEcosystem({"mine": folder})],
                            root=tmp_path)
-    assert "ts:total_fast" in cat.names() and "custom:mine" in cat.names()
-    assert cat.info("mine")["ecosystem"] == "custom"
-    assert cat.info("mine")["name"] == "custom:mine"       # canonical everywhere
-    assert cat.info("ts:total_fast")["materialized"] is True
+    assert "ts.v2:total_fast" in cat.names() and "custom:mine" in cat.names()
+    assert cat.info("custom:mine")["ecosystem"] == "custom"
+    assert cat.info("custom:mine")["name"] == "custom:mine"   # canonical everywhere
+    assert cat.info("ts.v2:total_fast")["materialized"] is True
     spec = cat.get("custom:mine")
     assert spec.name == "custom:mine" and spec.label_map[1] == "organ_a"
-    assert cat.get("mine").name == "custom:mine"           # short form converges
+    with pytest.raises(LookupError, match="needs its catalog: use custom:mine"):
+        cat.get("mine")                                    # a bare name is refused (2026-09-12)
     with pytest.raises(LookupError):
         cat.info("nope")
 
@@ -189,7 +190,8 @@ def test_fastsurfer_ecosystem_lists_but_refuses_spec(tmp_path):
     from haversack.errors import UnsupportedModel
     cat = EcosystemCatalog([FastSurferEcosystem()], root=tmp_path)
     assert cat.resolve("fastsurfer:brain")[2] == "fastsurfer:brain"
-    assert cat.resolve("brain")[2] == "fastsurfer:brain"
+    with pytest.raises(LookupError, match="needs its catalog: use fastsurfer:brain"):
+        cat.resolve("brain")
     fs_info = cat.info("fastsurfer:brain")
     assert fs_info["engine"] == "fastsurfer" and fs_info["task_spec"] is False
     with pytest.raises(UnsupportedModel, match="engine, not an nnU-Net task"):
@@ -203,7 +205,8 @@ def test_synthstrip_ecosystem_lists_but_refuses_spec(tmp_path):
     from haversack.errors import UnsupportedModel
     cat = EcosystemCatalog([SynthStripEcosystem()], root=tmp_path)
     assert cat.resolve("synthstrip:mask")[2] == "synthstrip:mask"
-    assert cat.resolve("mask")[2] == "synthstrip:mask"
+    with pytest.raises(LookupError, match="needs its catalog: use synthstrip:mask"):
+        cat.resolve("mask")
     info = cat.info("synthstrip:mask")
     assert info["engine"] == "synthstrip" and info["task_spec"] is False
     assert info["weights_installed"] == [{"id": "synthstrip", "version": "v1"}]

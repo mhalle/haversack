@@ -316,7 +316,7 @@ class RetentionAgreesAcrossSubstrates(unittest.TestCase):
             expected = {}
             for i, (label, fields, want) in enumerate(self.CASES):
                 jid = f"j{i}"
-                rec = {"id": jid, "task": "ts:total", "kind": "segment",
+                rec = {"id": jid, "task": "ts.v2:total", "kind": "segment",
                        "cache_key": None, "state": fields["state"],
                        "created": now + fields.get("created", -10),
                        "started": None,

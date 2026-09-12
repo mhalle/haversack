@@ -72,7 +72,7 @@ class TheRecordIsComplete(unittest.TestCase):
         renamed or dropped task must fail here, not silently un-gate."""
         from haversack.ecosystems import TSEcosystem
         offered = set(TSEcosystem().tasks())
-        gated = attribution.for_ecosystem("ts")["licensed_tasks"]
+        gated = attribution.for_ecosystem("ts.v2")["licensed_tasks"]
         self.assertTrue(gated)
         self.assertEqual(sorted(set(gated) - offered), [])
         self.assertIn("brain_aneurysm", offered)
@@ -81,9 +81,9 @@ class TheRecordIsComplete(unittest.TestCase):
 class TheThreeLayersMerge(unittest.TestCase):
 
     def test_a_task_carries_its_ecosystem_and_its_engine(self):
-        rec = attribution.for_task("ts:total_fast", {"ecosystem": "ts", "engine": "nnunetv2",
+        rec = attribution.for_task("ts.v2:total_fast", {"ecosystem": "ts.v2", "engine": "nnunetv2",
                                                      "modality": "CT"})
-        self.assertEqual(rec["ecosystem"], "ts")
+        self.assertEqual(rec["ecosystem"], "ts.v2")
         self.assertEqual(rec["engine"], "nnunetv2")
         self.assertEqual(rec["ecosystem_info"]["title"], "TotalSegmentator")
         dois = [r.get("doi") for r in rec["cite"]]
@@ -91,19 +91,19 @@ class TheThreeLayersMerge(unittest.TestCase):
         self.assertEqual([r["for"] for r in rec["cite"]], ["ecosystem", "engine"])
 
     def test_the_mri_paper_is_asked_for_by_the_mr_tasks_only(self):
-        ct = attribution.for_task("ts:total_fast", {"ecosystem": "ts", "modality": "CT"})
-        mr = attribution.for_task("ts:total_mr", {"ecosystem": "ts", "modality": "MR"})
+        ct = attribution.for_task("ts.v2:total_fast", {"ecosystem": "ts.v2", "modality": "CT"})
+        mr = attribution.for_task("ts.v2:total_mr", {"ecosystem": "ts.v2", "modality": "MR"})
         self.assertNotIn("10.1148/radiol.241613", [r.get("doi") for r in ct["cite"]])
         self.assertIn("10.1148/radiol.241613", [r.get("doi") for r in mr["cite"]])
         self.assertIn("39964271", [r.get("pmid") for r in mr["cite"]])
 
     def test_a_licensed_totalsegmentator_model_says_so(self):
-        rec = attribution.for_task("ts:appendicular_bones", {"ecosystem": "ts"})
+        rec = attribution.for_task("ts.v2:appendicular_bones", {"ecosystem": "ts.v2"})
         self.assertIn("non-commercial", rec["task"]["license"]["weights"])
         self.assertTrue(rec["task"]["license"]["url"].startswith("https://backend.totalsegmentator.com"))
-        aneurysm = attribution.for_task("ts:brain_aneurysm", {"ecosystem": "ts"})
+        aneurysm = attribution.for_task("ts.v2:brain_aneurysm", {"ecosystem": "ts.v2"})
         self.assertEqual(aneurysm["task"]["license"]["weights"], "CC-BY-NC-4.0")
-        plain = attribution.for_task("ts:total_fast", {"ecosystem": "ts"})
+        plain = attribution.for_task("ts.v2:total_fast", {"ecosystem": "ts.v2"})
         self.assertNotIn("license", plain["task"])
 
     def test_a_manifests_facts_become_the_tasks_own(self):
@@ -142,7 +142,7 @@ class TheThreeLayersMerge(unittest.TestCase):
         for eco, expected in (("voxtell", "CC-BY-NC-SA-4.0"),):
             rec = attribution.for_ecosystem(eco)
             self.assertEqual(rec["license"]["weights"], expected)
-        self.assertEqual(attribution.for_task("ts:brain_aneurysm", {"ecosystem": "ts"})
+        self.assertEqual(attribution.for_task("ts.v2:brain_aneurysm", {"ecosystem": "ts.v2"})
                          ["task"]["license"]["weights"], "CC-BY-NC-4.0")
 
     def test_an_engine_that_is_its_own_ecosystem_is_cited_once(self):
@@ -163,7 +163,7 @@ class ItReachesEveryPlaceAUserLooks(unittest.TestCase):
         from haversack import Segmenter
         with tempfile.TemporaryDirectory() as td:
             seg = Segmenter(device="cpu", weights=td)
-            installed = seg.describe("ts:total_fast")          # TS is always materialized
+            installed = seg.describe("ts.v2:total_fast")          # TS is always materialized
             self.assertEqual(installed["attribution"]["ecosystem_info"]["title"], "TotalSegmentator")
             self.assertIn("37795137", json.dumps(installed["attribution"]))
             not_installed = seg.describe("dentalsegmentator:base")
@@ -182,7 +182,7 @@ class ItReachesEveryPlaceAUserLooks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             ex = LocalExecutor(Segmenter(device="cpu", weights=td), workdir=td)
             try:
-                d = TestClient(create_app(ex)).get("/v1/tasks/total_fast").json()
+                d = TestClient(create_app(ex)).get("/v1/tasks/ts.v2:total_fast").json()
             finally:
                 ex.close()
             self.assertIn("attribution", d)
@@ -210,7 +210,7 @@ class ItReachesEveryPlaceAUserLooks(unittest.TestCase):
         from haversack import cli
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = cli.main(["cite", "total_fast"])
+            rc = cli.main(["cite", "ts.v2:total_fast"])
         out = buf.getvalue()
         self.assertEqual(rc, 0)
         self.assertIn("University Hospital Basel", out)

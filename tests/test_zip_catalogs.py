@@ -221,14 +221,22 @@ def test_cads_runs_in_the_totalsegmentator_lineage_so_its_sides_are_right(tmp_pa
     assert canonical_orientation_for(stock, _Store()) is None          # the mirror it prevents
 
 
-def test_cads_makes_vertebrae_an_ambiguous_short_name(tmp_path):
-    """`cads:vertebrae` collides with `totalvibe:vertebrae`, which the bare name used to mean.
-    The CHANGELOG says so; the error names both, and the qualified names still resolve."""
+def test_a_bare_task_name_is_refused_even_when_one_catalog_offers_it(tmp_path):
+    """Which catalog a bare name meant depended on which catalogs were installed: adding CADS
+    turned `vertebrae` from `totalvibe:vertebrae` into an error. A bare name is refused now,
+    whether one catalog offers it or two, naming the qualified forms; those resolve."""
     cat = EcosystemCatalog(root=tmp_path)
-    with pytest.raises(LookupError, match="ambiguous.*cads:vertebrae.*totalvibe:vertebrae"):
+    with pytest.raises(LookupError, match="needs its catalog: use cads:vertebrae or totalvibe:vertebrae"):
         cat.resolve("vertebrae")
+    with pytest.raises(LookupError, match="needs its catalog: use ts.v2:total_fast$"):
+        cat.resolve("total_fast")
+    with pytest.raises(LookupError, match="needs its catalog: use ts.v2:total_fast$"):
+        cat.resolve("total_fast@v2.0.0")
     assert cat.resolve("cads:vertebrae")[2] == "cads:vertebrae"
     assert cat.resolve("totalvibe:vertebrae")[2] == "totalvibe:vertebrae"
+    assert cat.resolve("ts.v2:total_fast")[2] == "ts.v2:total_fast"
+    with pytest.raises(LookupError, match=r"catalog 'ts' is 'ts\.v2' since 0\.11\.0: use ts\.v2:total_fast"):
+        cat.resolve("ts:total_fast")                       # TotalSegmentator's catalog is ts.v2
 
 
 def test_totalvibe_orientation_is_read_from_the_checkpoint_not_hardcoded(tmp_path):

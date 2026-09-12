@@ -40,7 +40,7 @@ def device_lock(device) -> threading.RLock:
 class Job:
     """A segmentation running on a worker thread.
 
-    >>> job = seg.submit("scan.nii.gz", "total")
+    >>> job = seg.submit("scan.nii.gz", "ts.v2:total")
     >>> while not job.done:              # or a Qt timer, or `await asyncio.to_thread(job.wait)`
     ...     show(job.progress)
     >>> result = job.result()            # re-raises whatever the run raised
