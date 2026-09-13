@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.12.0] - 2026-09-13
 
 - **The segments index: what every task produces, before anything is installed.** Most
   catalogs could list a task's segments only once its weights were on disk, so "which tasks
