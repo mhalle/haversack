@@ -343,10 +343,11 @@ are deleted later in the function; the consumer (`junction_sparse` → `_triple_
 closures never outlive the call. Real hazard class, not a real bug — it becomes one the day
 that routine is made lazy. Binding them as lambda defaults would remove both.
 
-## Still unverified, as of 0.11.0
+## Still unverified, as of 0.12.0
 
-0.11.0 is tagged and pushed with CI green BEFORE the tag (run 34696966934 on `f314516`: 1275
-passed, 29 skipped, on its first attempt), as 0.10.2 (run 34647237300 on `a2695f5`: 1205 passed,
+0.12.0 is tagged and pushed with CI green BEFORE the tag (run 34769584574 on `12bc0c7`: 1424
+passed, 29 skipped, on its first attempt), as 0.11.0 (run 34696966934 on `f314516`: 1275
+passed, 29 skipped, on its first attempt), 0.10.2 (run 34647237300 on `a2695f5`: 1205 passed,
 20 skipped, on its first attempt - with the Ctrl-C test 0.10.2 fixed), 0.10.1 (run 34627834734
 on `4dc79e8`: 1204 passed, 20 skipped - on its second attempt: the first failed only
 `test_ctrl_c_still_ends_the_process_by_sigint`, which timed out on the runner, passed on the
@@ -354,7 +355,7 @@ re-run and locally 5 of 5, and exercises a path 0.10.1 did not touch - the test'
 against a CPython signal window, diagnosed since: see "Known open"), 0.10.0 (run 34614181942 on
 `8b3a1ee`: 1143 passed), 0.9.1 (run 34594374478 on `5677f36`: 1137 passed), 0.9.0 (run
 34585608278 on `50caae6`: 1135 passed) and 0.8.0 (985 passed) were - the whole lesson of 0.7.0
-and 0.7.1, both tagged onto a red CI and then deleted from origin. Each of 0.11.0, 0.10.2,
+and 0.7.1, both tagged onto a red CI and then deleted from origin. Each of 0.12.0, 0.11.0, 0.10.2,
 0.10.1, 0.10.0 and 0.9.1 was also smoke-run through `uvx` from its release commit before the
 tag, the check that found 0.9.0's bug. 0.10.1's `ts:total_fast` labels are byte-identical to
 0.10.0's on a 512x512x209 chest-abdomen-pelvis CT (108 structures), as 0.10.0's were to 0.9.1's,
@@ -364,6 +365,12 @@ computation `segment` makes runs through, so that comparison was not repeated; 0
 default labels on purpose - the body envelope is off by default - so it was compared with
 upstream instead: through the new catalog, `cads:organs` matched upstream CADS on 99.9995 % of
 voxels on the M2 and `cads:headneck` on 99.99995 % on an L40S, both with `--interp nearest`.
+0.12.0 was not compared byte for byte: it adds the segments index and its search, drops
+nnU-Net's `ignore` role from label names, and moves FastSurfer to 2.5.4 (whose results
+recompute once under their new key). It was deployed to Modal before the release instead
+(`haversack-seg-smoke-0913`, torn down): `/v1/segments` answered from exactly the 94 served
+tasks on both the API and the anonymous twin, paged and counted, refused regex with a 422,
+and one `ts.v2:total_fastest` job on an IDC CT came back with 112 named segments and no `ignore`.
 What follows is what the work never proved, kept because it is still true.
 
 - **The result cache's locks have run only on APFS.** Writer claims and the entry lock rely
