@@ -978,13 +978,19 @@ class TheCommandLine(unittest.TestCase):
         self.assertTrue(all(line.startswith("#") for line in out.splitlines()), out)
         self.assertIn("counts only", out.splitlines()[0])
 
-    def test_the_task_listing_counts_structures_instead_of_listing_them(self):
+    def test_the_task_listing_counts_structures_and_leaves_credit_to_cite(self):
+        """A listing answers which tasks exist; each task's structures and credit are one call
+        away (`tasks TASK`, `cite TASK`). Listed in full they were 347 KB, most of it the same
+        citations repeated across a catalog's tasks."""
         rc, out, _ = self.run_cli("tasks", "--json")
         rows = {r["name"]: r for r in json.loads(out)}
         self.assertEqual(rc, 0)
         self.assertEqual(rows["ts.v2:total"]["n_structures"], 117)
-        self.assertFalse([n for n, r in rows.items() if "structures" in r or "label_map" in r])
-        self.assertIn("attribution", rows["ts.v2:total"])
+        self.assertFalse([n for n, r in rows.items()
+                          if {"structures", "label_map", "attribution"} & set(r)])
+        rc, out, _ = self.run_cli("cite", "ts.v2:total", "--json")
+        self.assertEqual(rc, 0)
+        self.assertTrue(json.loads(out)["cite"])
 
     def test_a_search_modifier_without_find_is_refused(self):
         rc, _, err = self.run_cli("tasks", "--glob")

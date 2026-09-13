@@ -49,10 +49,13 @@
   with the counts alone. The counts come first and a receipt comes last - the CLI's `#` header
   and `# end:` line on stdout with the results, the JSON's trailing `end` - so an answer that
   lost its tail is missing its end, however complete it looks. The server's answer carries an
-  `index` version, which changes if the index is rebuilt between pages. `haversack tasks
-  --json` lists each task with `n_structures` instead of its whole structure list and label
-  map, as `/v1/tasks` does - `tasks TASK --json` has one task's. That takes the listing from
-  347 KB to 269 KB; most of the rest is each task's attribution block, unchanged.
+  `index` version, which changes if the index is rebuilt between pages. The task listings
+  answer which tasks exist and leave the rest to one call per task: `haversack tasks --json`
+  counts each task's structures (`n_structures`) instead of listing them with its label map,
+  and neither it nor `GET /v1/tasks` carries each task's attribution any more - 204 KB of the
+  CLI listing's 347 KB, largely the same citations repeated across a catalog's tasks.
+  `haversack tasks TASK --json`, `haversack cite TASK` and `GET /v1/tasks/{task}` give one
+  task's. The CLI listing is now 24 KB.
 - **A MOOSE task's modality no longer changes when it installs.** MOOSE's catalog took the
   modality from the task name before install and from the checkpoint after, and two
   checkpoints misstate theirs: `preclin_mr_all`'s `dataset.json` names its channel "CT", so

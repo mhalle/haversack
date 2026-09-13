@@ -114,6 +114,25 @@ class TheSegmentsRoute(unittest.TestCase):
         self.assertEqual(counted["key_count"], first["key_count"])
         self.assertEqual(self.get(q="vertebrae", offset=-1).status_code, 422)
 
+    def test_the_task_listing_leaves_structures_and_credit_to_describe(self):
+        """GET /v1/tasks is one line per task; a task's structures, label map and attribution
+        are GET /v1/tasks/{task}'s. The attribution alone was most of the listing's weight."""
+        from haversack.ecosystems import EcosystemCatalog, TSEcosystem
+
+        catalog = EcosystemCatalog([TSEcosystem()], root=self.tmp)
+
+        class Cataloged(FakeSegmenter):
+            def tasks(self):
+                return catalog.names()
+        seg = Cataloged()
+        seg.catalog = catalog
+        client = TestClient(create_app(LocalExecutor(seg, workdir=self.tmp / "cat")))
+        detail = client.get("/v1/tasks").json()["detail"]
+        self.assertIn("ts.v2:total", detail)
+        self.assertFalse([t for t, d in detail.items()
+                          if {"structures", "label_map", "attribution"} & set(d)])
+        self.assertIn("attribution", catalog.info("ts.v2:total"))     # still there per task
+
     def test_the_remote_client_speaks_it(self):
         rc = RemoteClient("http://testserver")
         rc._http = self.client                   # starlette's TestClient is an httpx.Client

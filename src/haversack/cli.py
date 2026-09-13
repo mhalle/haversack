@@ -1151,16 +1151,17 @@ def _cmd_tasks(args) -> int:
             continue
         rows.append(info)
     if args.json:
-        # One lean record per task, as /v1/tasks has them: each task's structure list and label
+        # One lean record per task, as /v1/tasks has them. A task's structure list and label
         # map (117 names for ts.v2:total) are counted, not listed - `tasks TASK --json` has one
-        # task's. Measured 2026-09-13, that takes the listing from 347 KB to 269 KB; most of
-        # what remains is each task's attribution block (204 KB, largely the same citations
-        # repeated across a catalog's tasks), which the README documents here and is left.
+        # task's - and its attribution is left to `haversack cite TASK`: measured 2026-09-13,
+        # the listing was 347 KB, 204 KB of it attribution, largely the same citations repeated
+        # across a catalog's tasks. A listing answers which tasks exist; credit is per task.
         lean = []
         for i in rows:
             i = dict(i)
             names = i.pop("structures", None)
             i.pop("label_map", None)
+            i.pop("attribution", None)
             if names:
                 i.setdefault("n_structures", len(names))
             lean.append(i)

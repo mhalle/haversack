@@ -3413,6 +3413,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     i.pop("label_map", None)     # and the mapping, which is the same
                                                  # information again - this endpoint is
                                                  # one line per task and stays that way
+                    i.pop("attribution", None)   # and the credit, per task at
+                                                 # /v1/tasks/{task}: it was most of this
+                                                 # listing's weight (2026-09-13)
                     detail[t] = i
                 except Exception:
                     pass
