@@ -102,10 +102,25 @@ class TheSegmentsRoute(unittest.TestCase):
         self.assertIn("own spelling", params["field"]["description"])
         self.assertIn("503", op["responses"])
 
+    def test_pages_and_counts_go_over_the_wire(self):
+        first = self.get(q="vertebrae", limit=3).json()
+        self.assertTrue(first["truncated"])
+        second = self.get(q="vertebrae", limit=3, offset=first["next_offset"]).json()
+        self.assertEqual(second["offset"], 3)
+        self.assertFalse({g["key"] for g in first["results"]} & {g["key"] for g in second["results"]})
+        self.assertEqual(list(second)[-1], "end")
+        counted = self.get(q="vertebrae", count_only="true").json()
+        self.assertNotIn("results", counted)
+        self.assertEqual(counted["key_count"], first["key_count"])
+        self.assertEqual(self.get(q="vertebrae", offset=-1).status_code, 422)
+
     def test_the_remote_client_speaks_it(self):
         rc = RemoteClient("http://testserver")
         rc._http = self.client                   # starlette's TestClient is an httpx.Client
         res = rc.segments("pancreas", limit=5)
         self.assertIn("ts.v2:total", {s["task"] for g in res["results"] for s in g["segments"]})
+        page = rc.segments("vertebrae", limit=2, offset=2)
+        self.assertEqual(page["offset"], 2)
+        self.assertNotIn("results", rc.segments("vertebrae", count_only=True))
         with self.assertRaisesRegex(RemoteError, "422"):
             rc.segments("^x$", mode="regex")

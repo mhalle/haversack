@@ -80,7 +80,8 @@ output overlaps (none means layer 0), and the id its model gives each - as the m
 them, with the version that pins each list. A task's `structures` are those ids in label order,
 and `haversack tasks TASK` prints them from the index for a model not installed here.
 `haversack catalog mine` refreshes the index and `haversack catalog check` finds stale
-records. This
+records. A `--find` answer opens with a `#` line of counts and closes with a `# end:` line that
+gives the next page's `--offset`; `--count` sizes a search before reading it. This
 guide itself ships with the package: `haversack docs` prints it, `haversack docs weights`
 one section, and every command answers `--help` with its options, defaults and examples.
 

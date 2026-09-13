@@ -45,6 +45,14 @@ from .errors import InputError
 SCHEMA_VERSION = 1
 PACKAGED = Path(__file__).parent / "data" / "segments.json"
 KINDS = ("segments", "open")
+#: The rules that turn what a model states into a record - which labels are roles and not
+#: segments, where an archive's configuration is read, how regions become layers. Part of
+#: every record's version, so a change to them makes `check` call every record stale and keeps
+#: `mine` from reusing a record derived under the old rules. BUMP IT whenever a listing would
+#: come out differently from the same source; 2026-09-13's `ignore` change would have been
+#: "2", and it is what this field exists for. A record mined before the field existed reads as
+#: "1": every record in the index then was mined under these rules (checked 2026-09-13).
+LISTING_EPOCH = "1"
 _META = {
     "schema_version": SCHEMA_VERSION,
     "generator": "haversack catalog mine",
@@ -213,8 +221,13 @@ def plan(targets, *, all_: bool = False, ecosystems=None) -> list:
 
 
 def mine(plan, path, *, root=None, reader=None, write: bool = True, prune: bool = False,
-         workers: int = 8, today: str | None = None) -> dict:
+         workers: int = 8, today: str | None = None, reuse: bool = True) -> dict:
     """Mine every task in ``plan`` and merge the records into the index at ``path``.
+
+    ``reuse`` (the default) lets a catalog rebuild a record without reading an archive its
+    manifest still pins by the same digest, under the same listing rules - a version change
+    from outside the archive then costs no network. ``reuse=False`` (``--reread``) reads
+    everything.
 
     Records the run did not ask for are left exactly as they are. A task whose segments are
     unchanged keeps its record, stamp included, so re-mining everything rewrites nothing that
@@ -230,7 +243,10 @@ def mine(plan, path, *, root=None, reader=None, write: bool = True, prune: bool 
     records = dict(load(path)["tasks"])
     jobs = [(eco, t) for eco, tasks, _ in plan for t in tasks]
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(jobs) or 1))) as pool:
-        outcomes = list(pool.map(lambda job: _mine_one(job[0], job[1], root, reader), jobs))
+        outcomes = list(pool.map(
+            lambda job: _mine_one(job[0], job[1], root, reader,
+                                  records.get(f"{job[0].name}:{job[1]}") if reuse else None),
+            jobs))
     stamp = {"at": today or date.today().isoformat(), "by": f"haversack {__version__}"}
     results = []
     for (eco, t), (record, problem, note) in zip(jobs, outcomes):
@@ -295,7 +311,7 @@ def check(path=None, *, ecosystems=None, targets=None) -> list:
             live.add(name)
             rec = held.get(name)
             try:
-                version = json.loads(json.dumps(eco.label_version(t)))
+                version = json.loads(json.dumps(current_version(eco, t)))
             except Exception as e:                  # noqa: BLE001 - one row of the report
                 out.append((name, "error", f"{type(e).__name__}: {e}"))
                 continue
@@ -311,29 +327,44 @@ def check(path=None, *, ecosystems=None, targets=None) -> list:
     return out
 
 
-def _mine_one(eco, task: str, root, reader) -> tuple:
+def current_version(eco, task: str) -> dict:
+    """The version a record of ``task`` must carry to be current: what its catalog pins
+    (:meth:`~haversack.ecosystems.ModelEcosystem.label_version`) and the listing rules."""
+    return {**eco.label_version(task), "listing": LISTING_EPOCH}
+
+
+def _rules_of(record) -> str:
+    """The listing rules a record was derived under; one from before the field reads as "1"."""
+    return str(((record or {}).get("version") or {}).get("listing", "1"))
+
+
+def _mine_one(eco, task: str, root, reader, previous=None) -> tuple:
     """``(record, problem, note)`` - never raises: one task's failure is one line of the
-    report, not the end of the run."""
+    report, not the end of the run. ``previous`` is offered to the catalog for reuse only
+    when it was derived under the current listing rules."""
     try:
-        version = eco.label_version(task)
-        listing = dict(eco.label_listing(task, root, reader))
+        version = current_version(eco, task)
+        hint = previous if previous and _rules_of(previous) == LISTING_EPOCH else None
+        listing = dict(eco.label_listing(task, root, reader, previous=hint))
         installed = listing.pop("installed", None)
+        reused = listing.pop("reused", False)
         record = _record(eco, task, version, listing)
     except Exception as e:                          # noqa: BLE001 - reported, and the run fails
         return None, f"{type(e).__name__}: {e}", None
-    note = None
+    notes = ["archive unchanged by its digest, not read again"] if reused else []
     if installed:
         if installed.get("compared") and not installed.get("agrees"):
             return None, (f"the installed copy (version {installed.get('version')}) names its "
                           "segments differently from its published archive at the same version - "
                           "one of them changed under that version; not recorded"), None
         if installed.get("compared"):
-            note = "installed copy agrees"
+            notes.append("installed copy agrees")
         elif installed.get("note"):
-            note = installed["note"]
+            notes.append(installed["note"])
         else:
-            note = f"installed copy is version {installed.get('version') or 'unknown'}, not compared"
-    return record, None, note
+            notes.append(f"installed copy is version {installed.get('version') or 'unknown'}, "
+                         "not compared")
+    return record, None, "; ".join(notes) or None
 
 
 def _record(eco, task: str, version: dict, listing: dict) -> dict:
@@ -500,16 +531,30 @@ class Index:
                                  f"{e}) - re-mine it with `haversack catalog mine {task}`") from None
         self._postings = postings
         self._vocabulary = sorted(postings)
+        #: A short digest of what was indexed, returned with every answer: a caller walking
+        #: pages with `offset` sees it change if the index is rebuilt mid-walk (a redeploy,
+        #: a re-mine) and knows the offsets it holds no longer line up.
+        import hashlib
+        self.version = hashlib.sha256(json.dumps(records, sort_keys=True, default=str)
+                                      .encode("utf-8")).hexdigest()[:12]
         self.catalogs = sorted({e["ecosystem"] for e in self.entries} |
                                {o["ecosystem"] for o in self.open})
 
     def search(self, query, *, mode: str = "words", field: str = "key", catalog=None,
-               modality=None, tasks=None, limit: int | None = None,
-               allowed_modes=MODES) -> dict:
+               modality=None, tasks=None, limit: int | None = None, offset: int = 0,
+               count_only: bool = False, allowed_modes=MODES) -> dict:
         """Segments matching ``query``, grouped by folded id, each group with every task and
         label value that has it. ``tasks`` limits the answer to those tasks (a server passes
         the ones it serves); ``allowed_modes`` is what the caller may use (the server: no
-        regex). ``field="id"`` matches a glob or regex against the model's own spelling."""
+        regex). ``field="id"`` matches a glob or regex against the model's own spelling.
+
+        Paged, for a reader that cannot be trusted to see a long answer whole - an agent whose
+        harness cuts tool output without saying so (2026-09-13). ``limit`` ids from ``offset``
+        on, in an order that does not change for a given index; ``truncated`` is precise (more
+        ids exist after this page, never merely a full page) and ``next_offset`` says where
+        they start, null on the last page. ``count_only`` answers with the counts alone. The
+        counts come first and ``end`` comes last, after ``results``: an answer that arrives
+        without its ``end`` lost its tail on the way, however complete it looks."""
         import bisect
         import fnmatch
         import re
@@ -530,6 +575,8 @@ class Index:
             raise InputError(f"the query is {len(query)} characters; the limit is {MAX_QUERY}")
         if limit is not None and limit < 1:
             raise InputError("limit must be at least 1")
+        if offset < 0:
+            raise InputError("offset must be 0 or more")
         # Named against what the caller may see: listing every catalog in the index told a
         # server's callers about catalogs it does not serve (a review found it, 2026-09-13).
         visible = sorted({e["ecosystem"] for e in self.entries + self.open
@@ -588,18 +635,28 @@ class Index:
             g["segments"].append(seg)
         exact = fold(query)
         ordered = sorted(groups.values(), key=lambda g: (g["key"] != exact, g["key"]))
-        truncated = limit is not None and len(ordered) > limit
-        shown = ordered[:limit] if truncated else ordered
+        start = min(offset, len(ordered))
+        stop = len(ordered) if limit is None else min(len(ordered), start + limit)
+        page = [] if count_only else ordered[start:stop]
+        more = not count_only and stop < len(ordered)
+        # where the next results start: after this page, or - for a count - at the beginning
+        next_offset = stop if more else (0 if count_only and ordered else None)
         opened = [o["task"] for o in self.open if keep(o)]
-        out = {"query": query, "mode": mode, "field": field, "key_count": len(groups),
-               "segment_count": len(matched), "truncated": truncated, "results": shown,
-               "open_vocabulary": opened}
-        named = {s["task"] for g in shown for s in g["segments"]}
+        out = {"query": query, "mode": mode, "field": field, "index": self.version,
+               "key_count": len(groups), "segment_count": len(matched), "offset": start,
+               "truncated": more, "next_offset": next_offset}
+        if not count_only:
+            out["results"] = page
+        named = {s["task"] for g in page for s in g["segments"]}
         notes = {t: self.notes[t] for t in sorted(named) if t in self.notes}
         if notes:
             out["notes"] = notes
+        out["open_vocabulary"] = opened
         if opened:
             out["open_vocabulary_note"] = _OPEN_NOTE
+        # the receipt, always the last key
+        out["end"] = {"shown": f"{start + 1}-{start + len(page)}" if page else "none",
+                      "of": len(ordered), "next_offset": next_offset}
         return out
 
 

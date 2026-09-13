@@ -334,7 +334,8 @@ class MergingTouchesOnlyWhatWasAsked(unittest.TestCase):
         self.assertEqual(set(recs), {"dentalsegmentator:base", "mrsegmentator:base",
                                      "mrsegmentator:body_comp"})
         rec = recs["dentalsegmentator:base"]
-        self.assertEqual(rec["version"], self.ecos[0].label_version("base"))
+        self.assertEqual(rec["version"], segments.current_version(self.ecos[0], "base"))
+        self.assertEqual(rec["version"]["listing"], segments.LISTING_EPOCH)
         self.assertEqual(rec["segments"], [{"id": "a", "value": 1}, {"id": "b", "value": 2}])
         self.assertEqual(rec["mined"]["at"], "2000-01-01")
         self.assertEqual(segments.check(self.path, ecosystems=self.ecos),
@@ -344,6 +345,7 @@ class MergingTouchesOnlyWhatWasAsked(unittest.TestCase):
 
     def test_mining_one_task_leaves_every_other_record_as_it_was(self):
         before = self.records()
+        self.repin(self.ecos[1])
         url = self.ecos[1]._entries["base"]["url"]
         r = segments.mine(self.plan("mrsegmentator:base"), self.path, today="2001-01-01",
                           reader=FakeReader(zips={url: _zip({"dataset.json": _dataset({"liver": 1})})}))
@@ -363,6 +365,7 @@ class MergingTouchesOnlyWhatWasAsked(unittest.TestCase):
 
     def test_a_dry_run_writes_nothing(self):
         text = self.path.read_text()
+        self.repin(self.ecos[0])
         url = self.ecos[0]._entries["base"]["url"]
         r = segments.mine(self.plan("dentalsegmentator"), self.path, write=False,
                           reader=FakeReader(zips={url: _zip({f"{CFG}/dataset.json": _dataset({"x": 1})})}))
@@ -372,6 +375,7 @@ class MergingTouchesOnlyWhatWasAsked(unittest.TestCase):
 
     def test_a_failed_fetch_keeps_the_previous_record_and_fails_the_run(self):
         before = self.records()
+        self.repin(self.ecos[0])
         url = self.ecos[0]._entries["base"]["url"]
         r = segments.mine(self.plan("dentalsegmentator"), self.path, reader=FakeReader(fail={url}))
         self.assertTrue(r["failed"])
@@ -383,6 +387,8 @@ class MergingTouchesOnlyWhatWasAsked(unittest.TestCase):
         changes, and the failed task's record must come through the write unchanged. Mining a
         single failing task writes nothing, so it could not tell."""
         before = self.records()
+        self.repin(self.ecos[0])
+        self.repin(self.ecos[1])
         dental = self.ecos[0]._entries["base"]["url"]
         mrseg = self.ecos[1]._entries["base"]["url"]
         r = segments.mine(self.plan(), self.path, today="2003-03-03", reader=FakeReader(
@@ -392,6 +398,16 @@ class MergingTouchesOnlyWhatWasAsked(unittest.TestCase):
         after = self.records()
         self.assertEqual(after["dentalsegmentator:base"], before["dentalsegmentator:base"])
         self.assertEqual(after["mrsegmentator:base"]["segments"], [{"id": "liver", "value": 1}])
+
+    @staticmethod
+    def repin(eco, task="base"):
+        """A new archive at the same URL: the manifest's digest moves, as a regenerated
+        manifest's would. Without it, an unchanged digest lets the miner reuse the record -
+        which is the point of the digest, and not what these tests are about."""
+        entry = dict(eco._entries[task])
+        key = "sha256" if entry.get("sha256") else "md5"
+        entry[key] = str(entry.get(key) or "") + "-new"
+        eco._entries = {**eco._entries, task: entry}
 
     def _plant(self, **records):
         data = json.loads(self.path.read_text())
@@ -455,6 +471,73 @@ class MergingTouchesOnlyWhatWasAsked(unittest.TestCase):
                           reader=FakeReader())
         self.assertFalse(r["failed"])
         self.assertIn("v0-older, not compared", r["results"][0][2])
+
+
+class AnArchiveItsDigestPinsIsNotReadAgain(unittest.TestCase):
+    """mrsegmentator:body_comp waited on a Zenodo outage to be re-read for a modality its
+    archive does not even hold. A manifest digest pins the archive's bytes, so under the same
+    listing rules the record's segments are reused and only facts from outside it recomputed."""
+
+    def setUp(self):
+        self.tmp = _tmpdir(self)
+        self.path = self.tmp / "segments.json"
+        self.ecos = [E.DentalSegmentatorEcosystem(), E.MRSegmentatorEcosystem()]
+        r = self.mine(reader=FakeReader(), today="2000-01-01")
+        self.assertFalse(r["failed"], r["results"])
+
+    def mine(self, *targets, **kw):
+        plan = (segments.plan(targets, ecosystems=self.ecos) if targets
+                else segments.plan((), all_=True, ecosystems=self.ecos))
+        return segments.mine(plan, self.path, **kw)
+
+    def unreachable(self):
+        return FakeReader(fail={e["url"] for eco in self.ecos for e in eco._entries.values()})
+
+    def test_a_version_change_from_outside_the_archive_is_mined_without_it(self):
+        eco = self.ecos[1]
+        with mock.patch.object(eco, "modality", "MR (edited)"):
+            r = self.mine("mrsegmentator", reader=self.unreachable())
+        self.assertFalse(r["failed"], r["results"])
+        self.assertEqual({s for _, s, _ in r["results"]}, {"changed"})
+        self.assertTrue(all("not read again" in d for _, _, d in r["results"]), r["results"])
+        rec = json.loads(self.path.read_text())["tasks"]["mrsegmentator:base"]
+        self.assertEqual((rec["modality"], rec["version"]["modality"]), ("MR (edited)",) * 2)
+        self.assertEqual(rec["segments"], [{"id": "a", "value": 1}, {"id": "b", "value": 2}])
+
+    def test_a_moved_digest_is_read_again(self):
+        MergingTouchesOnlyWhatWasAsked.repin(self.ecos[0])
+        r = self.mine("dentalsegmentator", reader=self.unreachable())
+        self.assertTrue(r["failed"])
+
+    def test_an_archive_no_digest_pins_is_always_read(self):
+        moose = E.MooseEcosystem()
+        task = sorted(moose.tasks())[0]
+        self.assertFalse(moose._entries[task].get("sha256") or moose._entries[task].get("md5"))
+        plan = segments.plan([f"moose:{task}"], ecosystems=[moose])
+        segments.mine(plan, self.path, reader=FakeReader())
+        r = segments.mine(plan, self.path, reader=FakeReader(fail={moose._entries[task]["url"]}))
+        self.assertTrue(r["failed"])
+
+    def test_new_listing_rules_make_every_record_stale_and_read_again(self):
+        with mock.patch.object(segments, "LISTING_EPOCH", "2"):
+            rows = {s for _, s, _ in segments.check(self.path, ecosystems=self.ecos)}
+            r = self.mine(reader=self.unreachable())
+        self.assertEqual(rows, {"stale"})
+        self.assertTrue(r["failed"])
+
+    def test_a_record_from_before_the_rules_field_counts_as_the_first_rules(self):
+        data = json.loads(self.path.read_text())
+        for rec in data["tasks"].values():
+            rec["version"].pop("listing")
+        self.path.write_text(json.dumps(data))
+        r = self.mine(reader=self.unreachable())
+        self.assertFalse(r["failed"], r["results"])        # reused, and stamped current
+        self.assertEqual({s for _, s, _ in segments.check(self.path, ecosystems=self.ecos)},
+                         {"ok"})
+
+    def test_reread_reads_even_an_unchanged_archive(self):
+        r = self.mine(reader=self.unreachable(), reuse=False)
+        self.assertTrue(r["failed"])
 
 
 class StalenessFollowsTheCatalog(unittest.TestCase):
@@ -711,6 +794,43 @@ class SearchingTheIndex(unittest.TestCase):
         res = self.idx.search("vertebrae", limit=1)
         self.assertEqual((len(res["results"]), res["truncated"], res["key_count"]), (1, True, 3))
 
+    def test_pages_walk_the_answer_in_a_fixed_order(self):
+        """limit ids from offset; truncated means more follow and next_offset says where,
+        null on the last page - a full page is not by itself 'more'."""
+        seen, offset, pages = [], 0, 0
+        while offset is not None:
+            res = self.idx.search("vertebrae", limit=2, offset=offset)
+            seen += [g["key"] for g in res["results"]]
+            self.assertEqual(res["truncated"], res["next_offset"] is not None)
+            offset, pages = res["next_offset"], pages + 1
+        self.assertEqual(seen, self.keys("vertebrae"))
+        self.assertEqual(pages, 2)
+        exact = self.idx.search("vertebrae", limit=3)
+        self.assertEqual((exact["truncated"], exact["next_offset"]), (False, None))
+
+    def test_end_is_the_last_key_and_repeats_the_page(self):
+        res = self.idx.search("vertebrae", limit=2, offset=1)
+        self.assertEqual(list(res)[-1], "end")
+        self.assertEqual(res["end"], {"shown": "2-3", "of": 3, "next_offset": None})
+        past = self.idx.search("vertebrae", limit=2, offset=9)
+        self.assertEqual((past["results"], past["end"]["shown"], past["next_offset"]),
+                         ([], "none", None))
+        with self.assertRaisesRegex(InputError, "offset"):
+            self.idx.search("vertebrae", offset=-1)
+
+    def test_count_only_answers_with_the_counts_alone(self):
+        res = self.idx.search("vertebrae", count_only=True)
+        self.assertNotIn("results", res)
+        self.assertEqual((res["key_count"], res["segment_count"], res["next_offset"]), (3, 3, 0))
+        self.assertEqual(list(res)[-1], "end")
+
+    def test_the_index_version_changes_with_what_was_indexed(self):
+        again = segments.Index(json.loads(json.dumps(SAMPLE)))
+        other = segments.Index({**SAMPLE, "moose:x": {**SAMPLE["moose:x"],
+                                                      "segments": [{"id": "spleen", "value": 1}]}})
+        self.assertEqual(self.idx.search("kid")["index"], again.search("kid")["index"])
+        self.assertNotEqual(self.idx.search("kid")["index"], other.search("kid")["index"])
+
     def test_bad_queries_are_refused_with_the_fix(self):
         for kw, words in (({"query": ""}, "empty"), ({"query": "x" * 201}, "limit"),
                           ({"query": "x", "mode": "fuzzy"}, "use words"),
@@ -834,7 +954,37 @@ class TheCommandLine(unittest.TestCase):
 
     def test_nothing_found_exits_1(self):
         rc, out, _ = self.run_cli("tasks", "--find", "zzqqxx")
-        self.assertEqual((rc, out), (1, ""))
+        self.assertEqual(rc, 1)
+        self.assertTrue(all(line.startswith("#") for line in out.splitlines()), out)
+        self.assertEqual(out.splitlines()[-1], "# end: nothing matched")
+
+    def test_an_answer_says_what_to_expect_first_and_that_it_ended_last(self):
+        """The header gives the counts and the page, the end line proves the answer arrived
+        whole and says where the next page starts - both on stdout, with the results, where a
+        harness that cuts output cannot keep one and lose the other unnoticed."""
+        rc, out, _ = self.run_cli("tasks", "--find", "vertebra*", "--glob", "--limit", "2")
+        lines = out.splitlines()
+        self.assertEqual(rc, 0)
+        self.assertRegex(lines[0], r"^# \d+ id\(s\), \d+ segment\(s\); showing ids 1-2$")
+        self.assertRegex(lines[-1], r"^# end: ids 1-2 of \d+; next: --offset 2$")
+        rc, out, _ = self.run_cli("tasks", "--find", "vertebra*", "--glob", "--limit", "2",
+                                  "--offset", "2")
+        self.assertIn("showing ids 3-4", out.splitlines()[0])
+        self.assertNotEqual(lines[1], out.splitlines()[1])        # a different page
+
+    def test_count_sizes_a_search_without_its_results(self):
+        rc, out, _ = self.run_cli("tasks", "--find", "vertebra*", "--glob", "--count")
+        self.assertEqual(rc, 0)
+        self.assertTrue(all(line.startswith("#") for line in out.splitlines()), out)
+        self.assertIn("counts only", out.splitlines()[0])
+
+    def test_the_task_listing_counts_structures_instead_of_listing_them(self):
+        rc, out, _ = self.run_cli("tasks", "--json")
+        rows = {r["name"]: r for r in json.loads(out)}
+        self.assertEqual(rc, 0)
+        self.assertEqual(rows["ts.v2:total"]["n_structures"], 117)
+        self.assertFalse([n for n, r in rows.items() if "structures" in r or "label_map" in r])
+        self.assertIn("attribution", rows["ts.v2:total"])
 
     def test_a_search_modifier_without_find_is_refused(self):
         rc, _, err = self.run_cli("tasks", "--glob")

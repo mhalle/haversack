@@ -438,14 +438,16 @@ def _command_line() -> click.Group:
   haversack tasks                        every task
   haversack tasks --installed            what runs without a download
   haversack tasks ts.v2:total_fast          the 117 structure names total_fast produces
-  haversack tasks --json                 full records: name, ecosystem, engine, modality, structures, installed;
+  haversack tasks --json                 full records: name, ecosystem, engine, modality, n_structures, installed;
                                          `materialized` = the task's definition is known here without a download,
                                          `task_spec` = it is an nnU-Net model (false for FastSurfer, SynthStrip, ...)
   haversack tasks --find pancreas        every task that produces a pancreas, with its label value
   haversack tasks --find "kid left" --installed        ...among what runs without a download
   haversack tasks --find 'vertebra*_[ct]*' --glob      cervical and thoracic vertebrae, either spelling
   haversack tasks --find '^rib_(left|right)_1[0-2]$' --regex
-  haversack tasks ts.v2:total --find liver             search one task's segments"""),
+  haversack tasks ts.v2:total --find liver             search one task's segments
+  haversack tasks --find vertebra --count              how many, before reading them
+  haversack tasks --find vertebra --offset 50          the next page, from the end line"""),
         params=[
             click.Argument(['task'], required=False, shell_complete=_complete_task,
                            help=('a task name: print its structures instead of the list. An '
@@ -455,7 +457,8 @@ def _command_line() -> click.Group:
             click.Option(['--installed'], is_flag=True,
                          help='only tasks whose weights are already on disk'),
             click.Option(['--json'], is_flag=True,
-                         help='the full per-task info records; with --find, the search answer'),
+                         help=('the per-task records, structures counted (`tasks TASK --json` '
+                               "lists one task's); with --find, the search answer")),
             click.Option(['--find'], metavar='TEXT',
                          help=('which of the tasks listed here produce a segment: each id, then '
                                'a line per task - the task, its label value ("1 L2" = value 1 in '
@@ -475,6 +478,11 @@ def _command_line() -> click.Group:
                          help='with --find: only tasks whose modality contains this (CT, MR, ...)'),
             click.Option(['--limit'], type=int,
                          help='with --find: at most this many ids (default 50)'),
+            click.Option(['--offset'], type=int,
+                         help=('with --find: the first id to show - the next offset the previous '
+                               "answer's end line gives")),
+            click.Option(['--count'], is_flag=True,
+                         help='with --find: the counts alone, to size a search before reading it'),
         ])
     root.add_command(tasks)
 
@@ -554,6 +562,9 @@ def _command_line() -> click.Group:
                          help='mine every catalog this build knows, engines enabled here or not'),
             click.Option(['--to'], help='write this index file instead of the default'),
             click.Option(['--dry-run'], is_flag=True, help='report what would change, write nothing'),
+            click.Option(['--reread'], is_flag=True,
+                         help=("read every archive again, even one whose manifest digest says it "
+                               'is unchanged since its record was mined')),
             click.Option(['--model-root'],
                          help=('weights root whose installed models are held against their '
                                'archives (default: the usual weights root)')),
@@ -1014,9 +1025,9 @@ def _cmd_tasks(args) -> int:
     from .errors import InputError
     if args.find is None:
         if (args.glob or args.regex or args.exact or args.catalog or args.modality
-                or args.limit is not None):
-            raise InputError("--glob, --regex, --exact, --catalog, --modality and --limit "
-                             "narrow a search: give --find TEXT as well")
+                or args.limit is not None or args.offset is not None or args.count):
+            raise InputError("--glob, --regex, --exact, --catalog, --modality, --limit, "
+                             "--offset and --count shape a search: give --find TEXT as well")
     else:
         # Which tasks produce a segment, from the segments index - nothing installed, nothing
         # downloaded. Here rather than as a `segments` command: the answer is tasks, and a
@@ -1044,25 +1055,46 @@ def _cmd_tasks(args) -> int:
         res = segments.index().search(
             args.find, mode="glob" if args.glob else "regex" if args.regex else "words",
             field="id" if args.exact else "key", catalog=args.catalog, modality=args.modality,
-            tasks=only, limit=50 if args.limit is None else args.limit)
+            tasks=only, limit=50 if args.limit is None else args.limit,
+            offset=args.offset or 0, count_only=args.count)
         if args.json:
             print(json.dumps(res, indent=2, ensure_ascii=False))
         else:
-            for g in res["results"]:
+            # A header saying what to expect and an end line proving it all arrived, both on
+            # stdout with the results and marked `#` (`grep -v '^#'` drops them): an agent whose
+            # harness cuts long output silently finds the end line missing, instead of a short
+            # answer that looks complete. The summary used to go to stderr, after the results -
+            # the part such a harness cuts first (2026-09-13).
+            n, end = res["key_count"], res["end"]
+            page = ("counts only" if args.count else
+                    f"showing ids {end['shown']}" if end["shown"] != "none" else "no ids here")
+            print(f"# {n} id(s), {res['segment_count']} segment(s); {page}")
+            for g in res.get("results") or ():
                 print(g["key"])
                 for s in g["segments"]:
                     # the label value, and the layer where the output overlaps
                     where = str(s["value"]) + (f" L{s['layer']}" if s.get("layer") else "")
                     spelled = "" if s["id"] == g["key"] else f"  ({s['id']})"
                     print(f"  {s['task']:44s} {where:>6s}  {s['modality'] or ''}{spelled}")
-            print(f"{res['key_count']} id(s), {res['segment_count']} segment(s)"
-                  + ("; more with --limit" if res["truncated"] else ""), file=sys.stderr)
             for task, note in (res.get("notes") or {}).items():
-                print(f"note: {task}: {note}", file=sys.stderr)
+                print(f"# note: {task}: {note}")
             if res["open_vocabulary"]:
-                print(f"also: {', '.join(res['open_vocabulary'])} - "
-                      f"{res['open_vocabulary_note']}", file=sys.stderr)
-        return 0 if res["results"] else 1
+                print(f"# also: {', '.join(res['open_vocabulary'])} - "
+                      f"{res['open_vocabulary_note']}")
+            if not n:
+                last = "nothing matched"
+            elif args.count:
+                last = "counts only; the results start at --offset 0"
+            elif end["next_offset"] is not None:
+                last = f"ids {end['shown']} of {n}; next: --offset {end['next_offset']}"
+            elif end["shown"] == "none":
+                last = f"no ids at --offset {res['offset']}; there are {n}"
+            elif res["offset"] == 0:
+                last = f"all {n} id(s) shown"
+            else:
+                last = f"ids {end['shown']} of {n}, the last page"
+            print(f"# end: {last}")
+        return 0 if res["key_count"] else 1
 
     if args.task:
         info = cat.info(args.task)
@@ -1119,7 +1151,20 @@ def _cmd_tasks(args) -> int:
             continue
         rows.append(info)
     if args.json:
-        print(json.dumps(rows, indent=2, default=str))
+        # One lean record per task, as /v1/tasks has them: each task's structure list and label
+        # map (117 names for ts.v2:total) are counted, not listed - `tasks TASK --json` has one
+        # task's. Measured 2026-09-13, that takes the listing from 347 KB to 269 KB; most of
+        # what remains is each task's attribution block (204 KB, largely the same citations
+        # repeated across a catalog's tasks), which the README documents here and is left.
+        lean = []
+        for i in rows:
+            i = dict(i)
+            names = i.pop("structures", None)
+            i.pop("label_map", None)
+            if names:
+                i.setdefault("n_structures", len(names))
+            lean.append(i)
+        print(json.dumps(lean, indent=2, default=str))
     else:
         for i in rows:
             print(f"{i['name']:44s} {i.get('engine', ''):12s} {i.get('modality') or '':4s} "
@@ -1472,7 +1517,7 @@ def _cmd_catalog(args) -> int:
         say(f"index: {path}" + (" (dry run)" if args.dry_run else ""))
         say(f"mining {sum(len(t) for _, t, _ in plan)} task(s) from {len(plan)} catalog(s)")
         report = segments.mine(plan, path, root=WeightsStore(args.model_root, fetch=False).root,
-                               write=not args.dry_run, prune=args.all)
+                               write=not args.dry_run, prune=args.all, reuse=not args.reread)
         show(report["results"])
         counts = Counter(s for _, s, _ in report["results"])
         say(", ".join(f"{n} {s}" for s, n in sorted(counts.items()))

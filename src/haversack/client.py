@@ -84,13 +84,19 @@ class RemoteClient:
 
     def segments(self, query: str, *, mode: str = "words", field: str = "key",
                  catalog: str | None = None, modality: str | None = None,
-                 limit: int | None = None) -> dict:
+                 limit: int | None = None, offset: int | None = None,
+                 count_only: bool = False) -> dict:
         """Which of the server's tasks produce a segment, and with what label value
-        (``GET /v1/segments``): word prefixes by default, or ``mode="glob"``."""
+        (``GET /v1/segments``): word prefixes by default, or ``mode="glob"``. Paged: pass
+        the answer's ``next_offset`` as ``offset`` for the next page; ``count_only`` sizes a
+        search first."""
         params = {"q": query, "mode": mode, "field": field}
-        for k, v in (("catalog", catalog), ("modality", modality), ("limit", limit)):
+        for k, v in (("catalog", catalog), ("modality", modality), ("limit", limit),
+                     ("offset", offset)):
             if v is not None:
                 params[k] = v
+        if count_only:
+            params["count_only"] = "true"
         return self._json("GET", "/v1/segments", params=params)
 
     def submit(self, image, task: str, **options) -> str:

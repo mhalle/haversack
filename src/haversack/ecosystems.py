@@ -211,6 +211,32 @@ def _dataset_listing(ds: dict, *, modality: str | None = None, where: str = "") 
     return out
 
 
+def _reusable(previous, entry: dict) -> bool:
+    """Whether a previous record's archive facts still hold without reading the archive: it was
+    read from this same URL, and the manifest pins that URL's bytes with the same digest now as
+    then. A manifest with no digest (MOOSE's) proves nothing, so its archives are always read.
+    Added 2026-09-13, when a record waited on a Zenodo outage to be re-read for a modality its
+    archive does not even hold."""
+    if not previous or not previous.get("segments"):
+        return False
+    pins = [k for k in ("sha256", "md5") if entry.get(k)]
+    was = previous.get("version") or {}
+    return (bool(pins) and (previous.get("source") or {}).get("zip") == entry.get("url")
+            and was.get("url") == entry.get("url")
+            and all(str(was.get(k)) == str(entry[k]) for k in pins))
+
+
+def _reused_listing(previous: dict, *, modality) -> dict:
+    """A listing rebuilt from a previous record's archive facts - its segments, where it read
+    them, and any note they carried - with the facts from outside the archive (``modality``)
+    taken fresh from the catalog."""
+    out = {"kind": previous["kind"], "segments": [dict(s) for s in previous["segments"]],
+           "modality": modality, "source": dict(previous["source"]), "reused": True}
+    if previous.get("note"):
+        out["note"] = previous["note"]
+    return out
+
+
 def _installed_checkpoint_check(eco, task: str, root, listing: dict) -> dict | None:
     """Whether a copy of this checkpoint installed under ``root`` at the SAME tag names its
     labels as the archive does. None when nothing is installed. A copy at another tag - or
@@ -308,9 +334,11 @@ class ModelEcosystem:
             "label_version and label_listing, or build the catalog on a shape that has them "
             "(ZipManifestEcosystem, ImageBakedEcosystem)")
 
-    def label_listing(self, task: str, root, reader) -> dict:
+    def label_listing(self, task: str, root, reader, previous=None) -> dict:
         """This task's segments as its source states them, for the segments index
-        (``haversack catalog mine``).
+        (``haversack catalog mine``). ``previous`` is the task's last record, mined under the
+        current listing rules, or None: a catalog whose archives a manifest pins by digest may
+        rebuild from it without reading an unchanged archive, marking the listing ``reused``.
 
         ``{"kind", "modality", "source"}`` plus, for kind ``segments``, ``segments``: a list
         of ``{"id", "value", "layer"?}`` - the model's own token for each output, the label
@@ -458,7 +486,7 @@ class TSEcosystem(ModelEcosystem):
         return {"ts_version": str(meta.get("ts_version")),
                 "registry_sha256": _digest(entries[task])}
 
-    def label_listing(self, task: str, root, reader) -> dict:
+    def label_listing(self, task: str, root, reader, previous=None) -> dict:
         spec = self._catalog.get(task)
         return {"kind": "segments", "modality": spec.modality,
                 "segments": [{"id": n, "value": v} for v, n in spec.label_map.items()],
@@ -762,16 +790,22 @@ class ZipManifestEcosystem(ModelEcosystem):
             out["modality"] = str(entry["modality"])
         return out
 
-    def label_listing(self, task: str, root, reader) -> dict:
+    def label_listing(self, task: str, root, reader, previous=None) -> dict:
         entry = manifest_entry(self._entries, task, what=f"{self.name} task {task!r}",
                                generator=self.generator)
         where = f"{self.name}:{task}"
-        member, ds = checkpoint_dataset_json(reader.zip(entry["url"]), folder=entry["folder"],
-                                             where=where)
-        # the manifest's modality where it states one, as spec() and info() use it (a channel
-        # named "any" or "ct" is a contrast claim, not a modality); else the checkpoint's
-        out = _dataset_listing(ds, modality=entry.get("modality"), where=where)
-        out["source"] = {"zip": entry["url"], "member": member}
+        if _reusable(previous, entry):
+            # the digest pins the archive, so its dataset.json is what it was; only the
+            # manifest's own facts can have moved
+            out = _reused_listing(previous, modality=entry.get("modality") or previous.get("modality"))
+        else:
+            member, ds = checkpoint_dataset_json(reader.zip(entry["url"]), folder=entry["folder"],
+                                                 where=where)
+            # the manifest's modality where it states one, as spec() and info() use it (a
+            # channel named "any" or "ct" is a contrast claim, not a modality); else the
+            # checkpoint's
+            out = _dataset_listing(ds, modality=entry.get("modality"), where=where)
+            out["source"] = {"zip": entry["url"], "member": member}
         out["installed"] = _installed_checkpoint_check(self, task, root, out)
         return out
 
@@ -948,21 +982,26 @@ class MRSegmentatorEcosystem(ModelEcosystem):
         out["modality"] = str(self.modality)
         return out
 
-    def label_listing(self, task: str, root, reader) -> dict:
+    def label_listing(self, task: str, root, reader, previous=None) -> dict:
         entry = manifest_entry(self._entries, task, what=f"mrsegmentator task {task!r}",
                                generator="tools/gen_mrsegmentator_manifest.py")
         where = f"mrsegmentator:{task}"
-        zf = reader.zip(entry["url"])
-        member, ds = checkpoint_dataset_json(zf, flat=True, where=where)
-        # the same second check the installer makes: the version the zip itself carries
-        if "version.json" in zf.namelist():
-            have = json.loads(zf.read("version.json")).get("weights_version")
-            if have is not None and str(have) != str(entry.get("tag")):
-                raise ModelNotFound(
-                    f"{where}: the archive carries weights_version {have!r} but the manifest "
-                    f"says {entry.get('tag')!r} - regenerate the manifest")
-        out = _dataset_listing(ds, modality=self.modality, where=where)
-        out["source"] = {"zip": entry["url"], "member": member}
+        if _reusable(previous, entry):
+            # the digest pins the archive - its dataset.json and version.json are what they
+            # were when read - and the modality is this class's, not the archive's
+            out = _reused_listing(previous, modality=self.modality)
+        else:
+            zf = reader.zip(entry["url"])
+            member, ds = checkpoint_dataset_json(zf, flat=True, where=where)
+            # the same second check the installer makes: the version the zip itself carries
+            if "version.json" in zf.namelist():
+                have = json.loads(zf.read("version.json")).get("weights_version")
+                if have is not None and str(have) != str(entry.get("tag")):
+                    raise ModelNotFound(
+                        f"{where}: the archive carries weights_version {have!r} but the "
+                        f"manifest says {entry.get('tag')!r} - regenerate the manifest")
+            out = _dataset_listing(ds, modality=self.modality, where=where)
+            out["source"] = {"zip": entry["url"], "member": member}
         out["installed"] = _installed_checkpoint_check(self, task, root, out)
         return out
 
@@ -1461,7 +1500,7 @@ class ImageBakedEcosystem(EngineEcosystem):
             out["modality"] = str(self.modality)
         return out
 
-    def label_listing(self, task: str, root, reader) -> dict:
+    def label_listing(self, task: str, root, reader, previous=None) -> dict:
         table = self._required_table(task)
         if table is None:
             return {"kind": "open", "modality": self.modality, "source": {"engine": self.engine},
@@ -1843,7 +1882,7 @@ class MonaiEcosystem(EngineEcosystem):
             out["sha1"] = str(entry["checksum"])
         return out
 
-    def label_listing(self, task: str, root, reader) -> dict:
+    def label_listing(self, task: str, root, reader, previous=None) -> dict:
         entry = self._entry(task)
         version = str(entry["version"])
         url = self.METADATA_URL.format(bundle=task, version=version)

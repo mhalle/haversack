@@ -3468,7 +3468,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             modality: str | None = Query(None, description="only tasks whose modality "
                                                           "contains this (CT, MR, ...)"),
             limit: int = Query(100, description="at most this many ids (result groups), "
-                                                "1-1000")):
+                                                "1-1000"),
+            offset: int = Query(0, description="the first id to return, for the next page: "
+                                               "the previous answer's next_offset"),
+            count_only: bool = Query(False, description="answer with the counts alone, to "
+                                                        "size a search before fetching it")):
         """Which tasks produce a segment, and with what label value: a search over every
         task's segments as its model states them (``data/segments.json``), grouped by folded
         id. A read, open to anonymous callers like ``/v1/tasks``. Word prefixes in any order
@@ -3476,14 +3480,19 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         because a pattern from anyone can take unbounded time to evaluate. Only tasks this
         deployment serves come back. Not ``/v1/segmentations``, which lists cached results.
 
-        The answer: ``results``, one per folded id - ``key``, the ``ids`` as the models spell
-        them, and ``segments``, each ``{task, value, id, modality, layer?}`` (no ``layer``
-        means layer 0) - with ``key_count``, ``segment_count``, ``truncated``, ``notes``
-        (``{task: caveat}`` for tasks whose values need one) and ``open_vocabulary`` (served
-        tasks that segment whatever a prompt names)."""
+        The answer, in this order: ``index`` (a short version - it changes if the index is
+        rebuilt between pages), ``key_count``, ``segment_count``, ``offset``, ``truncated``
+        (more ids after this page) and ``next_offset`` (null on the last page); ``results``,
+        one per folded id - ``key``, the ``ids`` as the models spell them, and ``segments``,
+        each ``{task, value, id, modality, layer?}`` (no ``layer`` means layer 0) - absent
+        under ``count_only``; ``notes`` (``{task: caveat}``), ``open_vocabulary`` (served tasks
+        that segment whatever a prompt names); and last, ``end``, a receipt repeating the
+        page and the next offset: an answer without it lost its tail in transit."""
         from . import segments as segments_index
         if not 1 <= limit <= 1000:
             raise HTTPException(422, "limit must be between 1 and 1000")
+        if offset < 0:
+            raise HTTPException(422, "offset must be 0 or more")
         try:
             idx = segments_index.index()
         except Exception as e:             # noqa: BLE001 - never echo a server path
@@ -3494,7 +3503,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(503, "this server cannot list its tasks right now") from e
         try:
             return idx.search(q, mode=mode, field=field, catalog=catalog, modality=modality,
-                              tasks=served, limit=limit,
+                              tasks=served, limit=limit, offset=offset, count_only=count_only,
                               allowed_modes=segments_index.WIRE_MODES)
         except InputError as e:
             raise HTTPException(422, str(e)) from e

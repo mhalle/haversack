@@ -16,7 +16,8 @@
         "tag": "cads-model-open_v1.0.0",
         "sha256": "1b1b546f27e7c548dbaf49951cd1974c376719e6714a1f4c3def40a1c4c0dca9",
         "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset559_Saros259.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset559_Saros259.zip",
@@ -80,7 +81,8 @@
         "tag": "cads-model-open_v1.0.0",
         "sha256": "927dbe88f9873fc9598702884c11cf3adc4535749146cd3e6424ac40579b3e45",
         "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset553_Totalseg253.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset553_Totalseg253.zip",
@@ -176,7 +178,8 @@
         "tag": "cads-model-open_v1.0.0",
         "sha256": "18b563d7bd20b1a2bce0632b98064a0279280d0f3e56e91f2e6328eb1a7e740c",
         "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset557_Brain257.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset557_Brain257.zip",
@@ -236,7 +239,8 @@
         "tag": "cads-model-open_v1.0.0",
         "sha256": "8fa72c933bd33d5a30b1bc9f2f0bee18f8a3e6c445589255e58327a80447b831",
         "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset558_OAR258.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset558_OAR258.zip",
@@ -376,7 +380,8 @@
         "tag": "cads-model-open_v1.0.0",
         "sha256": "cbee9dda40dd946c70c238f9e580f64ab4367c27d5472c9fc77853d16509e54f",
         "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset554_Totalseg254.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset554_Totalseg254.zip",
@@ -484,7 +489,8 @@
         "tag": "cads-model-open_v1.0.0",
         "sha256": "a2110a2501de85c3dfc63298fcda1d19fb3b935e6d012692c0d749b97b2c8d1e",
         "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset556_GC256.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset556_GC256.zip",
@@ -568,7 +574,8 @@
         "tag": "cads-model-open_v1.0.0",
         "sha256": "99b33943d202d794249e85c6e42bb30c7b72c7afc36d044fe57103b675e85656",
         "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset551_Totalseg251.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset551_Totalseg251.zip",
@@ -660,7 +667,8 @@
         "tag": "cads-model-open_v1.0.0",
         "sha256": "a7fdf1ca915746551f322168623def871462e6b56bf1a59e0cc253f2baf41e54",
         "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset555_Totalseg255.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset555_Totalseg255.zip",
@@ -780,7 +788,8 @@
         "tag": "cads-model-open_v1.0.0",
         "sha256": "de132d4104627401852f2a7c426056462423df30bee7ffed7e07aebe32d32736",
         "url": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset552_Totalseg252.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/murong-xu/CADS/releases/download/cads-model-open_v1.0.0/Dataset552_Totalseg252.zip",
@@ -900,7 +909,8 @@
         "tag": "v100",
         "md5": "b71cd5230168d28a4f71b078265b76be",
         "url": "https://zenodo.org/records/10829675/files/Dataset112_DentalSegmentator_v100.zip?download=1",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://zenodo.org/records/10829675/files/Dataset112_DentalSegmentator_v100.zip?download=1",
@@ -947,7 +957,8 @@
           }
         ],
         "table_sha256": "068ec41d30d52c1c20fe84e04911119d9aa52bb82adbeca55e155edcab90daed",
-        "modality": "MR (T1)"
+        "modality": "MR (T1)",
+        "listing": "1"
       },
       "source": {
         "engine": "fastsurfer",
@@ -1279,7 +1290,8 @@
       "kind": "segments",
       "modality": "MR",
       "version": {
-        "bundle_version": "0.5.4"
+        "bundle_version": "0.5.4",
+        "listing": "1"
       },
       "source": {
         "url": "https://huggingface.co/MONAI/brats_mri_segmentation/resolve/0.5.4/configs/metadata.json",
@@ -1314,7 +1326,8 @@
       "kind": "segments",
       "modality": "CT",
       "version": {
-        "bundle_version": "0.5.2"
+        "bundle_version": "0.5.2",
+        "listing": "1"
       },
       "source": {
         "url": "https://huggingface.co/MONAI/pancreas_ct_dints_segmentation/resolve/0.5.2/configs/metadata.json",
@@ -1331,7 +1344,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -1342,7 +1355,8 @@
       "kind": "segments",
       "modality": "CT",
       "version": {
-        "bundle_version": "0.6.1"
+        "bundle_version": "0.6.1",
+        "listing": "1"
       },
       "source": {
         "url": "https://huggingface.co/MONAI/spleen_ct_segmentation/resolve/0.6.1/configs/metadata.json",
@@ -1355,7 +1369,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -1366,7 +1380,8 @@
       "kind": "segments",
       "modality": "CT",
       "version": {
-        "bundle_version": "0.5.8"
+        "bundle_version": "0.5.8",
+        "listing": "1"
       },
       "source": {
         "url": "https://huggingface.co/MONAI/swin_unetr_btcv_segmentation/resolve/0.5.8/configs/metadata.json",
@@ -1427,7 +1442,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -1438,7 +1453,8 @@
       "kind": "segments",
       "modality": "CT",
       "version": {
-        "bundle_version": "0.2.7"
+        "bundle_version": "0.2.7",
+        "listing": "1"
       },
       "source": {
         "url": "https://huggingface.co/MONAI/wholeBody_ct_segmentation/resolve/0.2.7/configs/metadata.json",
@@ -1863,7 +1879,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -1874,7 +1890,8 @@
       "kind": "segments",
       "modality": "MRI",
       "version": {
-        "bundle_version": "0.2.7"
+        "bundle_version": "0.2.7",
+        "listing": "1"
       },
       "source": {
         "url": "https://huggingface.co/MONAI/wholeBrainSeg_Large_UNEST_segmentation/resolve/0.2.7/configs/metadata.json",
@@ -2411,7 +2428,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -2424,7 +2441,8 @@
       "version": {
         "tag": "v.3.1.3",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_ALPACA.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_ALPACA.zip",
@@ -2470,7 +2488,8 @@
       "version": {
         "tag": "23052024",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_PUMA_1k_23052024.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_PUMA_1k_23052024.zip",
@@ -2584,7 +2603,8 @@
       "version": {
         "tag": "06032024",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_PUMA4_06032024.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_PUMA4_06032024.zip",
@@ -2694,7 +2714,8 @@
       "version": {
         "tag": "25102023",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_all_bones_25102023.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_all_bones_25102023.zip",
@@ -2796,7 +2817,8 @@
       "version": {
         "tag": "27112023",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_body_27112023.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_body_27112023.zip",
@@ -2834,7 +2856,8 @@
       "version": {
         "tag": "05092024",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_body_composition_05092024.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_body_composition_05092024.zip",
@@ -2868,7 +2891,8 @@
       "version": {
         "tag": "21052025",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_cardiac_ras_21052025.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_cardiac_ras_21052025.zip",
@@ -2942,7 +2966,8 @@
       "version": {
         "tag": "v100",
         "url": "https://model.s.mdforge.com/Dataset112_DentalSegmentator_v100_moose.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://model.s.mdforge.com/Dataset112_DentalSegmentator_v100_moose.zip",
@@ -2984,7 +3009,8 @@
       "version": {
         "tag": "06102024",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_digestive_06102024.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_digestive_06102024.zip",
@@ -3022,7 +3048,8 @@
       "version": {
         "tag": "12052026",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.7/clin_ct_face_ear_12052026.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.7/clin_ct_face_ear_12052026.zip",
@@ -3052,7 +3079,8 @@
       "version": {
         "tag": "10092024",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_cardiac3_10092024.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_cardiac3_10092024.zip",
@@ -3126,7 +3154,8 @@
       "version": {
         "tag": "02092024",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_organs_6_02092024.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_organs_6_02092024.zip",
@@ -3224,7 +3253,8 @@
       "version": {
         "tag": "10092024",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_vertebrae3_10092024.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_vertebrae3_10092024.zip",
@@ -3358,7 +3388,8 @@
       "version": {
         "tag": "31082023",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_fat_31082023.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_fat_31082023.zip",
@@ -3412,7 +3443,8 @@
       "version": {
         "tag": "24062023",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_lungs_24062023.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_lungs_24062023.zip",
@@ -3454,7 +3486,8 @@
       "version": {
         "tag": "21052025",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_muscles_ras_21052025.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_muscles_ras_21052025.zip",
@@ -3516,7 +3549,8 @@
       "version": {
         "tag": "07052025",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_organs_ras_07052025.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_organs_ras_07052025.zip",
@@ -3614,7 +3648,8 @@
       "version": {
         "tag": "07052025",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_peripheral_bones_ras_07052025.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_peripheral_bones_ras_07052025.zip",
@@ -3760,7 +3795,8 @@
       "version": {
         "tag": "08052025",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_ribs_ras_08052025.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_ribs_ras_08052025.zip",
@@ -3890,7 +3926,8 @@
       "version": {
         "tag": "21052025",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_vertebrae_ras_21052025.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_ct_vertebrae_ras_21052025.zip",
@@ -4024,7 +4061,8 @@
       "version": {
         "tag": "17112023",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_fdg_pt_brain_v1_17112023.zip",
-        "modality": "PT"
+        "modality": "PT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/clin_fdg_pt_brain_v1_17112023.zip",
@@ -4378,7 +4416,8 @@
       "version": {
         "tag": "12012026",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.5/clin_pt_face_12012026.zip",
-        "modality": "PT"
+        "modality": "PT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.5/clin_pt_face_12012026.zip",
@@ -4404,7 +4443,8 @@
       "version": {
         "tag": "05122023",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/preclin_ct_legs_05122023.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/preclin_ct_legs_05122023.zip",
@@ -4434,7 +4474,8 @@
       "version": {
         "tag": "05122023",
         "url": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/preclin_mr_all_05122023.zip",
-        "modality": "MR"
+        "modality": "MR",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/ENHANCE-PET/MOOSE/releases/download/moosez-v.3.1.3/preclin_mr_all_05122023.zip",
@@ -4542,7 +4583,8 @@
         "tag": "1.2",
         "sha256": "dd26c1b511908a1f2a752b7fe8f5ca9c5603fc3e69fa52f57bf3ccdd52ceb286",
         "url": "https://github.com/hhaentze/MRSegmentator/releases/download/v1.2.0/weights.zip",
-        "modality": "MR"
+        "modality": "MR",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/hhaentze/MRSegmentator/releases/download/v1.2.0/weights.zip",
@@ -4725,7 +4767,9 @@
         "release": "zenodo:21211879",
         "tag": "1.0",
         "sha256": "3ec490f641dd1aebdd4d2f497e69f8c9f2e4060a45c7d0d69c3ea0e74daf1550",
-        "url": "https://zenodo.org/records/21211879/files/body_comp_weights.zip?download=1"
+        "url": "https://zenodo.org/records/21211879/files/body_comp_weights.zip?download=1",
+        "modality": "MR",
+        "listing": "1"
       },
       "source": {
         "zip": "https://zenodo.org/records/21211879/files/body_comp_weights.zip?download=1",
@@ -4774,7 +4818,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -4792,7 +4836,8 @@
           }
         ],
         "table_sha256": "dc7047eab3f35f0c0108b7c50b71faccdccf991c246c9d732a426de9eab8db2d",
-        "modality": "MR (any contrast)"
+        "modality": "MR (any contrast)",
+        "listing": "1"
       },
       "source": {
         "engine": "synthstrip",
@@ -4819,7 +4864,8 @@
         "release": "v1.0.0",
         "tag": "v1.0.0",
         "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/278.zip",
-        "modality": "MR"
+        "modality": "MR",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/278.zip",
@@ -4887,7 +4933,8 @@
         "tag": "v1.0.0",
         "sha256": "c53fd265fe713023c1d24955f05770f996f7aaac5c850e96958f3c760e0630a3",
         "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/012.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/012.zip",
@@ -5279,7 +5326,8 @@
         "tag": "v1.0.0",
         "sha256": "0dceeeb30c8f4ec441019c043a193156141bfb1bcb7c11191b754fc871eae8ac",
         "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/538.zip",
-        "modality": "CT"
+        "modality": "CT",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/538.zip",
@@ -5447,7 +5495,8 @@
         "tag": "v1.0.0",
         "sha256": "ca78f6a7b586eb18acd094e32677ff41b62f6487f63fabc0fad16cbdfa787c6a",
         "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/540.zip",
-        "modality": "MR"
+        "modality": "MR",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/540.zip",
@@ -5474,7 +5523,8 @@
         "release": "v1.0.0",
         "tag": "v1.0.0",
         "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/511.zip",
-        "modality": "MR"
+        "modality": "MR",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/511.zip",
@@ -5610,7 +5660,8 @@
         "tag": "v1.0.0",
         "sha256": "97483c90952bd988c58e8a040a59e685183a259d903c42e25f1b78224082f4fe",
         "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/100.zip",
-        "modality": "MR"
+        "modality": "MR",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/100.zip",
@@ -5921,7 +5972,8 @@
         "release": "v1.0.0",
         "tag": "v1.0.0",
         "url": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/099.zip",
-        "modality": "MR"
+        "modality": "MR",
+        "listing": "1"
       },
       "source": {
         "zip": "https://github.com/robert-graf/VIBESegmentator/releases/download/v1.0.0/099.zip",
@@ -6230,7 +6282,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "a0847608c92d6647014d9baca43850c713463468926ad455b8aa38f2be5827da"
+        "registry_sha256": "a0847608c92d6647014d9baca43850c713463468926ad455b8aa38f2be5827da",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6326,7 +6379,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6338,7 +6391,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "f62372977a09e2a1af669593368be6b5a3729c2b7ed20f5c9da8acc08d0b4477"
+        "registry_sha256": "f62372977a09e2a1af669593368be6b5a3729c2b7ed20f5c9da8acc08d0b4477",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6362,7 +6416,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6374,7 +6428,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6d278ac0ce8a1a2ce2d70d672d64c9fb3fec2ce2a152eefe5d0a81c5e349325f"
+        "registry_sha256": "6d278ac0ce8a1a2ce2d70d672d64c9fb3fec2ce2a152eefe5d0a81c5e349325f",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6426,7 +6481,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6438,7 +6493,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6953587d7b906a1598c980d5281189095a7d1973458da5f5d66915acf5b79ba7"
+        "registry_sha256": "6953587d7b906a1598c980d5281189095a7d1973458da5f5d66915acf5b79ba7",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6478,7 +6534,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6490,7 +6546,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "06a514d9a3a50ec1784a1474afabb438c35786cd6186ef23811cc541f634da68"
+        "registry_sha256": "06a514d9a3a50ec1784a1474afabb438c35786cd6186ef23811cc541f634da68",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6506,7 +6563,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6518,7 +6575,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "b4aca695fa16d5f95de7c6081aa9437b3b1a13a000eff244b773bbb2e31f4b83"
+        "registry_sha256": "b4aca695fa16d5f95de7c6081aa9437b3b1a13a000eff244b773bbb2e31f4b83",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6534,7 +6592,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6546,7 +6604,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "b060cf24e492930009e1e6c5172bf6cf8371f6c9e2018a20f3bb24821ff678c4"
+        "registry_sha256": "b060cf24e492930009e1e6c5172bf6cf8371f6c9e2018a20f3bb24821ff678c4",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6562,7 +6621,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6574,7 +6633,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "f11db0920e45a3763e7bf6409ed96486a01fcf35d487ff207fe8a2fa5d908aa4"
+        "registry_sha256": "f11db0920e45a3763e7bf6409ed96486a01fcf35d487ff207fe8a2fa5d908aa4",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6590,7 +6650,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6602,7 +6662,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "ec0203084deeb87115674a43ced8702c9e072e783317466ae679b0b816b0b664"
+        "registry_sha256": "ec0203084deeb87115674a43ced8702c9e072e783317466ae679b0b816b0b664",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6614,7 +6675,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6626,7 +6687,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "3c1ca922e50bef790b5491d51feb31cc21a76b79725ebb2a7c82c93624dbf7ed"
+        "registry_sha256": "3c1ca922e50bef790b5491d51feb31cc21a76b79725ebb2a7c82c93624dbf7ed",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6698,7 +6760,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6710,7 +6772,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "87581fa1c9471232037502953a3adcf9e2ee058bb4f7e0354f0a5efa64060d5b"
+        "registry_sha256": "87581fa1c9471232037502953a3adcf9e2ee058bb4f7e0354f0a5efa64060d5b",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6722,7 +6785,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6734,7 +6797,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "17207fc925c68a61143f596bcffad90ba57f4be2bef99a4632c7f6d5436dcf9f"
+        "registry_sha256": "17207fc925c68a61143f596bcffad90ba57f4be2bef99a4632c7f6d5436dcf9f",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6746,7 +6810,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6758,7 +6822,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "4efe12e6ed142001f569c614e4112286e538fbdda9d46079cc4ec5f407334d99"
+        "registry_sha256": "4efe12e6ed142001f569c614e4112286e538fbdda9d46079cc4ec5f407334d99",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6770,7 +6835,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6782,7 +6847,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "9a1411ef1f76c257a12f9074d7b4ba472b9ae4157f801db32b4ccd893cd871ed"
+        "registry_sha256": "9a1411ef1f76c257a12f9074d7b4ba472b9ae4157f801db32b4ccd893cd871ed",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6794,7 +6860,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6806,7 +6872,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "226d5fdd58feb27799d5120168edeca1d47ed9efc00112fa07214a2b088b0f44"
+        "registry_sha256": "226d5fdd58feb27799d5120168edeca1d47ed9efc00112fa07214a2b088b0f44",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6842,7 +6909,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6854,7 +6921,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "fb52137a98acb983a6f80026c5c7de8042c6467ed7f6d764f635ef75b256f854"
+        "registry_sha256": "fb52137a98acb983a6f80026c5c7de8042c6467ed7f6d764f635ef75b256f854",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6866,7 +6934,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6878,7 +6946,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "8c9a4d0793f13d41608f2d2f81b235c7f7242d9c67314112d96ed5adbf881366"
+        "registry_sha256": "8c9a4d0793f13d41608f2d2f81b235c7f7242d9c67314112d96ed5adbf881366",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6890,7 +6959,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6902,7 +6971,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "821bc400277002d5d24e4b1c3b757c9f45bb958f0ea987db0b78898d18a1bed4"
+        "registry_sha256": "821bc400277002d5d24e4b1c3b757c9f45bb958f0ea987db0b78898d18a1bed4",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -6986,7 +7056,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -6998,7 +7068,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "bd7a491d0951756a7a64853bbde30aa9764d0193f3b7160cbec75bfb4ca2fe4d"
+        "registry_sha256": "bd7a491d0951756a7a64853bbde30aa9764d0193f3b7160cbec75bfb4ca2fe4d",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7050,7 +7121,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7062,7 +7133,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "a691e47f27aac95a12a113b64789e49864256a04267b9e6cfbbb288e1162ba7a"
+        "registry_sha256": "a691e47f27aac95a12a113b64789e49864256a04267b9e6cfbbb288e1162ba7a",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7118,7 +7190,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7130,7 +7202,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "0eabef79bfdb42cbf84c0dd46eab2f145152b1fe3b3fa0db6db51bb430f7fbe4"
+        "registry_sha256": "0eabef79bfdb42cbf84c0dd46eab2f145152b1fe3b3fa0db6db51bb430f7fbe4",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7166,7 +7239,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7178,7 +7251,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "9f384fed0bc910cdc5151fab06b631b53747f1ec3dff30f27beda7f6c01e7c51"
+        "registry_sha256": "9f384fed0bc910cdc5151fab06b631b53747f1ec3dff30f27beda7f6c01e7c51",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7190,7 +7264,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7202,7 +7276,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6653583634744ae74fe3a2530bec373a25089771dc65e3b3da4ae42d40861f6d"
+        "registry_sha256": "6653583634744ae74fe3a2530bec373a25089771dc65e3b3da4ae42d40861f6d",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7218,7 +7293,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7230,7 +7305,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "5b74cc4863349468514f2c70dcebc2b609bf870e78698f1fc8350d687f499e16"
+        "registry_sha256": "5b74cc4863349468514f2c70dcebc2b609bf870e78698f1fc8350d687f499e16",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7242,7 +7318,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7254,7 +7330,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "56e9c2e4cc19ebc26be8ae99125ddc8199b4e4169208c9d25a66251ef3de22ed"
+        "registry_sha256": "56e9c2e4cc19ebc26be8ae99125ddc8199b4e4169208c9d25a66251ef3de22ed",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7266,7 +7343,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7278,7 +7355,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "af0278fa0153a9582916639b1e1384b544584679bdc13ef850162e45cd7e172c"
+        "registry_sha256": "af0278fa0153a9582916639b1e1384b544584679bdc13ef850162e45cd7e172c",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7318,7 +7396,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7330,7 +7408,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "780884260260649bd9fc65e006506e8405d2ed418c036bd0e7e9d8b96e5b5768"
+        "registry_sha256": "780884260260649bd9fc65e006506e8405d2ed418c036bd0e7e9d8b96e5b5768",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7370,7 +7449,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7382,7 +7461,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "06e5490cc6cf37d273c4936e27c1ad493e2e4a6692aa406b8a353efd2434d1db"
+        "registry_sha256": "06e5490cc6cf37d273c4936e27c1ad493e2e4a6692aa406b8a353efd2434d1db",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7398,7 +7478,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7410,7 +7490,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "a60725ead92431725d70b24aff090db95c38b2e544438352bd19972f39098075"
+        "registry_sha256": "a60725ead92431725d70b24aff090db95c38b2e544438352bd19972f39098075",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7426,7 +7507,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7438,7 +7519,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "db3b7493892bdc707f27c9ef19c00a023ea8e54bef9c761f6e07d5cde5f10512"
+        "registry_sha256": "db3b7493892bdc707f27c9ef19c00a023ea8e54bef9c761f6e07d5cde5f10512",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7462,7 +7544,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7474,7 +7556,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6b1f26396602d032accf6d924bcd113e9dfe4b2416c58f5b03d2d53e96fd5f3b"
+        "registry_sha256": "6b1f26396602d032accf6d924bcd113e9dfe4b2416c58f5b03d2d53e96fd5f3b",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7490,7 +7573,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7502,7 +7585,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "f39b6f8502844dfdadfb70c53debca6d1075c2dc5c6b307749272f2eb4cb041d"
+        "registry_sha256": "f39b6f8502844dfdadfb70c53debca6d1075c2dc5c6b307749272f2eb4cb041d",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7586,7 +7670,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7598,7 +7682,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6bc5288616d389473ebe0639ed75ed2ce224fdd134a1a3f68a15d9bfe57602c1"
+        "registry_sha256": "6bc5288616d389473ebe0639ed75ed2ce224fdd134a1a3f68a15d9bfe57602c1",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7618,7 +7703,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7630,7 +7715,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "d4b1f538961fa9b7facf662372718d69d93d8da595b188e4f3acf0f85489f34a"
+        "registry_sha256": "d4b1f538961fa9b7facf662372718d69d93d8da595b188e4f3acf0f85489f34a",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7946,7 +8032,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7958,7 +8044,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "02b1135e4e5f7d752d6eefba361ccd8433bb5af78f13e41fa8f7ca8dc1062111"
+        "registry_sha256": "02b1135e4e5f7d752d6eefba361ccd8433bb5af78f13e41fa8f7ca8dc1062111",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -7970,7 +8057,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -7982,7 +8069,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "17cdcd94705f714e08512b115a26aa9ff6f58b03569275b282c72277d2bbf2d1"
+        "registry_sha256": "17cdcd94705f714e08512b115a26aa9ff6f58b03569275b282c72277d2bbf2d1",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -8062,7 +8150,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -8074,7 +8162,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "ceff4b42ec36f0f87ccc9d9caafe39ca7e9ddc21fd8c86969a2d2e189dd2c304"
+        "registry_sha256": "ceff4b42ec36f0f87ccc9d9caafe39ca7e9ddc21fd8c86969a2d2e189dd2c304",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -8154,7 +8243,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -8166,7 +8255,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "c6ed6777da220059279c03a89aa4f1c1acb15a335cf184d6430805bbbca9fe6f"
+        "registry_sha256": "c6ed6777da220059279c03a89aa4f1c1acb15a335cf184d6430805bbbca9fe6f",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -8190,7 +8280,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -8202,7 +8292,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "d0f60c0b3ff1d81950ff4aaf040e04e70a275236e4578f11b41d09d03a54ebc2"
+        "registry_sha256": "d0f60c0b3ff1d81950ff4aaf040e04e70a275236e4578f11b41d09d03a54ebc2",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -8222,7 +8313,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -8234,7 +8325,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "fd72b116871c91109e998c1b79b369c2d472792ea9a996008702dc44e21ad8fe"
+        "registry_sha256": "fd72b116871c91109e998c1b79b369c2d472792ea9a996008702dc44e21ad8fe",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -8254,7 +8346,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -8266,7 +8358,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "66886885fc6a1c864cc64c03364806ba2938d85cacbbb58c034edf0d8694d083"
+        "registry_sha256": "66886885fc6a1c864cc64c03364806ba2938d85cacbbb58c034edf0d8694d083",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -8742,7 +8835,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -8754,7 +8847,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "f63ae88b3a3d5dcf1c4c524514b4653b2cec1a9c50b813272b1b18c41e4d690a"
+        "registry_sha256": "f63ae88b3a3d5dcf1c4c524514b4653b2cec1a9c50b813272b1b18c41e4d690a",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -9230,7 +9324,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -9242,7 +9336,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "1cf93c266e4b63f0ec7fef7e12bda15fa00335cc523467136473b4684371542b"
+        "registry_sha256": "1cf93c266e4b63f0ec7fef7e12bda15fa00335cc523467136473b4684371542b",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -9718,7 +9813,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -9730,7 +9825,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "9f7bccc5ac88a9c88af1e8116062bee35d6a435ec227e1e7c18a119c0a6c5e5e"
+        "registry_sha256": "9f7bccc5ac88a9c88af1e8116062bee35d6a435ec227e1e7c18a119c0a6c5e5e",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -9834,7 +9930,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -9846,7 +9942,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "2b8a0d03bc4f5f2acf9a29c77fe301d056d51518e02ee9481bdd9fcadfc2d04c"
+        "registry_sha256": "2b8a0d03bc4f5f2acf9a29c77fe301d056d51518e02ee9481bdd9fcadfc2d04c",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -10054,7 +10151,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -10066,7 +10163,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "5b709e8bed4f492b68ddb01cc8ad5b264e194eb2e2acfc17576d5ba0e9d08c9c"
+        "registry_sha256": "5b709e8bed4f492b68ddb01cc8ad5b264e194eb2e2acfc17576d5ba0e9d08c9c",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -10274,7 +10372,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -10286,7 +10384,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "34d9f4930fdcb897719ec13564285935d8cde46d255e14f4669e2e86e621095e"
+        "registry_sha256": "34d9f4930fdcb897719ec13564285935d8cde46d255e14f4669e2e86e621095e",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -10494,7 +10593,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -10506,7 +10605,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "64748a716181fc1807af1f9365f36252b5d32527d556a3641a26e64305890085"
+        "registry_sha256": "64748a716181fc1807af1f9365f36252b5d32527d556a3641a26e64305890085",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -10530,7 +10630,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -10542,7 +10642,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "c0bd946093b4c2b7ae016296f849253feb894508858f1a7445d960a6838cb33b"
+        "registry_sha256": "c0bd946093b4c2b7ae016296f849253feb894508858f1a7445d960a6838cb33b",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -10598,7 +10699,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -10610,7 +10711,8 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "4c8258322319978aed88fb623cc8af8f4a9c6dc5ef96cd613b6e5569d2d85e66"
+        "registry_sha256": "4c8258322319978aed88fb623cc8af8f4a9c6dc5ef96cd613b6e5569d2d85e66",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -10626,7 +10728,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -10638,7 +10740,8 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "7cfbea9e1f51d841979f30f9391c579d783213a25266a2f6d73c4f838d61b2df"
+        "registry_sha256": "7cfbea9e1f51d841979f30f9391c579d783213a25266a2f6d73c4f838d61b2df",
+        "listing": "1"
       },
       "source": {
         "file": "haversack/data/ts_tasks.json"
@@ -10746,7 +10849,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -10763,7 +10866,8 @@
             "version": "v1.1"
           }
         ],
-        "modality": "CT / MR / PET"
+        "modality": "CT / MR / PET",
+        "listing": "1"
       },
       "source": {
         "engine": "voxtell"

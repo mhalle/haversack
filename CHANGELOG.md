@@ -11,7 +11,10 @@
   registry - and records the version that pins it; `haversack catalog check` says, offline,
   which records a catalog change has made stale, for everything or for the catalogs and tasks
   named. `mine --all` mines all 103 tasks in seconds; naming a catalog or a task updates only
-  that. A failed fetch keeps the previous record and fails the
+  that. An archive its manifest pins by digest is not read again while that digest - and the
+  listing rules, a number in every record's version that `check` holds the index to - is
+  unchanged, so a version change from outside the archive costs no network; `--reread` reads
+  everything. A failed fetch keeps the previous record and fails the
   run, and where a model is installed at the same version its own labels must agree with its
   archive's, or the list is not recorded (all 23 installed on the development machine agreed).
   The index ships as `data/segments.json` (2142 segments) and is derived, never used to run
@@ -39,6 +42,17 @@
   else `~/.config/haversack/segments.json`) lays over the packaged one for search and
   `catalog check`, and is where `catalog mine` writes from an installed package - or from a
   checkout, when the variable is set.
+- **Long answers are paged, and say where they end.** An agent whose harness cuts long tool
+  output sees the start of an answer and cannot tell it was cut. `tasks --find` and
+  `GET /v1/segments` now return `limit` ids from `offset` in a fixed order, with a precise
+  `truncated` and a `next_offset` (null on the last page); `--count` / `count_only` answer
+  with the counts alone. The counts come first and a receipt comes last - the CLI's `#` header
+  and `# end:` line on stdout with the results, the JSON's trailing `end` - so an answer that
+  lost its tail is missing its end, however complete it looks. The server's answer carries an
+  `index` version, which changes if the index is rebuilt between pages. `haversack tasks
+  --json` lists each task with `n_structures` instead of its whole structure list and label
+  map, as `/v1/tasks` does - `tasks TASK --json` has one task's. That takes the listing from
+  347 KB to 269 KB; most of the rest is each task's attribution block, unchanged.
 - **A MOOSE task's modality no longer changes when it installs.** MOOSE's catalog took the
   modality from the task name before install and from the checkpoint after, and two
   checkpoints misstate theirs: `preclin_mr_all`'s `dataset.json` names its channel "CT", so

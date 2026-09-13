@@ -200,11 +200,17 @@ model's own spelling. `catalog`, `modality` and `limit` (ids returned, 1-1000, d
 narrow it.
 
 The answer groups segments by folded id: `results` is a list of `{key, ids, segments}` - `ids`
-the spellings the models use, `segments` each `{task, value, id, modality, layer?}` - beside
-`key_count`, `segment_count` and `truncated`. `notes` maps a task to a caveat its values need
-(a MONAI head whose declared outputs are not the labelmap it writes), and `open_vocabulary`
-lists served tasks with no fixed segment list (VoxTell), which may segment anything a prompt
-names. A `422` is a query the search refuses - empty or longer than 200 characters,
+the spellings the models use, `segments` each `{task, value, id, modality, layer?}` - after
+`index`, `key_count`, `segment_count`, `offset`, `truncated` and `next_offset`. `notes` maps a
+task to a caveat its values need (a MONAI head whose declared outputs are not the labelmap it
+writes), and `open_vocabulary` lists served tasks with no fixed segment list (VoxTell), which
+may segment anything a prompt names. Answers are paged, for a reader that cannot be trusted to
+see a long one whole: `limit` ids from `offset`, in an order fixed for a given `index` (a short
+version, which changes if the index is rebuilt between pages); `truncated` means more ids
+follow and `next_offset` is where they start, null on the last page; `count_only=true` returns
+the counts alone. The last key is always `end`, a receipt repeating the page and the next
+offset - an answer without it lost its tail on the way, however complete it looks. A `422` is
+a query the search refuses - a negative `offset`, empty or longer than 200 characters,
 `mode=regex` (a pattern from anyone can take unbounded time to evaluate, so regex stays with
 `haversack tasks --find PATTERN --regex`, locally), `field=id` with word search, a catalog with
 no tasks here, a `limit` out of range - and a `503` means the index or this server's own task
