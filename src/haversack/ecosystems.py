@@ -190,7 +190,8 @@ def _dataset_listing(ds: dict, *, modality: str | None = None, where: str = "") 
         # haversack cannot run still says it. Its regions overlap by design - one sigmoid
         # output each - so each is a segment in a layer of its own, which is how duckn and
         # DICOM carry segments that are not disjoint (2026-09-13).
-        regions = [str(k) for k, v in raw.items() if v != 0]
+        # background and nnU-Net's `ignore` are roles, not segments (tasks.dataset_labels)
+        regions = [str(k) for k, v in raw.items() if v != 0 and k != "ignore"]
         out.update(kind="segments",
                    segments=[{"id": k, "layer": i, "value": 1} for i, k in enumerate(regions)],
                    note="region-based labels: overlapping regions, one layer each in the "

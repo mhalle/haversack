@@ -14,7 +14,7 @@
   that. A failed fetch keeps the previous record and fails the
   run, and where a model is installed at the same version its own labels must agree with its
   archive's, or the list is not recorded (all 23 installed on the development machine agreed).
-  The index ships as `data/segments.json` (2144 segments) and is derived, never used to run
+  The index ships as `data/segments.json` (2142 segments) and is derived, never used to run
   anything: an installed model's own labels still decide every result. A segment is DICOM's
   and duckn's: an `id` - the model's own token, a code in its class list rather than a display
   name or an identity across models - a label `value`, and a `layer` where the output
@@ -42,6 +42,15 @@
   applies its manifest's modality in `spec()` - one rule where TotalVibe alone had it - so
   `info()`, `describe()`, result provenance and the segments index give one answer. Only
   that metadata changes; no label is computed differently, so no cache epoch moves.
+- **nnU-Net's `ignore` label is no longer listed as a segment.** nnU-Net never predicts it -
+  its label manager skips the key by name and requires it to be the highest value, one past
+  the rest - but haversack read it into an installed model's label map like any other, so
+  TotalVibe's `vibe` and `vibe_sagittal` reported 73 structures for their 72, in `describe()`,
+  in a result's `names` and in the segments index. It is a role a value plays, as background
+  is, and is now dropped where background is, in the one parse installs and the miner share.
+  No label value changes, and a `.seg.nrrd` lists only the segments present, so no result's
+  labels differ and no cache epoch moves; a cached result of those two tasks keeps the unused
+  name in its `names` until it is recomputed.
 - **SynthStrip names its label on its engine row.** The ranked builder asks the engine row
   for label names and fell back to TotalSegmentator's for anything without them, which for
   `synthstrip:mask` meant none; the row now carries `{1: "Brain"}`, and the engine reads its

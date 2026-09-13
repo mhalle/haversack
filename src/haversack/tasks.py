@@ -58,20 +58,28 @@ class CascadeStep:
 
 
 def dataset_labels(ds: dict, where: str = "dataset.json") -> dict[int, str]:
-    """``{label value: name}`` from an nnU-Net ``dataset.json``, background dropped.
+    """``{label value: name}`` from an nnU-Net ``dataset.json``, background and ``ignore``
+    dropped.
 
     The one reading of a checkpoint's labels. :meth:`TaskSpec.from_model_folder` builds an
     installed model's label map with it, and ``haversack catalog mine`` reads a remote
     archive's with it (2026-09-12), so the index and an installed model cannot disagree about
     what the same file says. Region-based labels - a name mapping to several values - raise,
     as they always have here.
+
+    Background and ``ignore`` are roles a value plays, not segments. nnU-Net never predicts
+    the ignore label - its label manager skips the key by name and requires it to be the
+    highest value, one past the rest - so listing it named a segment no result can contain:
+    TotalVibe's ``vibe`` and ``vibe_sagittal`` reported 73 structures for their 72 (found
+    2026-09-13). duckn's segmentation extension keeps such roles with the value, not as
+    segments. The key is matched exactly, as nnU-Net matches it.
     """
     labels = ds.get("labels") or {}
     if any(isinstance(v, (list, tuple)) for v in labels.values()):
         raise UnsupportedModel(
             f"{where}: region-based labels (a label mapping to several values) are not "
             "supported yet - haversack takes the argmax of a softmax head")
-    return {int(v): str(k) for k, v in labels.items() if int(v) != 0}
+    return {int(v): str(k) for k, v in labels.items() if int(v) != 0 and k != "ignore"}
 
 
 def dataset_modality(ds: dict) -> str:

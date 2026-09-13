@@ -5901,10 +5901,6 @@
         {
           "id": "bone_other",
           "value": 72
-        },
-        {
-          "id": "ignore",
-          "value": 73
         }
       ],
       "mined": {
@@ -6216,10 +6212,6 @@
         {
           "id": "bone_other",
           "value": 72
-        },
-        {
-          "id": "ignore",
-          "value": 73
         }
       ],
       "mined": {

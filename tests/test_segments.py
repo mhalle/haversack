@@ -171,6 +171,7 @@ class ArchivesAreReadTheWayAnInstallReadsThem(unittest.TestCase):
         spec = moose.spec(task, self.tmp)
         got = self.listing({f"{folder}/{CFG}/dataset.json": ds}, eco=moose, task=task)
         self.assertEqual(_table(got), dict(spec.label_map))
+        self.assertEqual(_table(got), {1: "liver", 2: "spleen", 99: "far"})    # no `ignore`
         self.assertEqual(got["modality"], spec.modality)
         self.assertEqual(spec.modality, moose._entries[task]["modality"])
         self.assertNotEqual(spec.modality, TaskSpec.from_model_folder(d).modality)
@@ -196,6 +197,26 @@ class ArchivesAreReadTheWayAnInstallReadsThem(unittest.TestCase):
     def test_an_archive_without_a_configuration_folder_is_refused(self):
         with self.assertRaisesRegex(ModelNotFound, "no <trainer>__<plans>__<config>"):
             self.listing({f"{self.folder}/dataset.json": _dataset(GENERIC)})
+
+    def test_the_ignore_label_is_a_role_not_a_segment(self):
+        """nnU-Net never predicts `ignore`: its label manager skips the key by name. Listed as a
+        segment it named something no result can contain - TotalVibe's vibe said 73 for 72.
+        The key is matched exactly, as nnU-Net matches it."""
+        ds = _dataset({"liver": 1, "Ignore": 2, "ignore": 3})
+        got = self.listing({f"{self.folder}/{CFG}/dataset.json": ds})
+        self.assertEqual(got["segments"], [{"id": "liver", "value": 1}, {"id": "Ignore", "value": 2}])
+        d = self.tmp / "Dataset9_x" / CFG
+        (d / "fold_0").mkdir(parents=True)
+        (d / "dataset.json").write_text(json.dumps(ds))
+        (d / "plans.json").write_text(json.dumps({"configurations": {"3d_fullres": {}}}))
+        self.assertEqual(dict(TaskSpec.from_model_folder(self.tmp / "Dataset9_x").label_map),
+                         {1: "liver", 2: "Ignore"})
+
+    def test_the_ignore_label_is_no_region_either(self):
+        got = self.listing({f"{self.folder}/{CFG}/dataset.json": {
+            "channel_names": {"0": "MR"},
+            "labels": {"background": 0, "whole": [1, 2], "ignore": 3}}})
+        self.assertEqual(got["segments"], [{"id": "whole", "layer": 0, "value": 1}])
 
     def test_overlapping_regions_are_segments_in_layers_of_their_own(self):
         """Segments need not be disjoint: a region-based model's regions overlap by design, so
