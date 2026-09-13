@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+- **The segments index: what every task produces, before anything is installed.** Most
+  catalogs could list a task's segments only once its weights were on disk, so "which tasks
+  produce a pancreas, and with what label value" meant downloading gigabytes. `haversack
+  catalog mine` reads each list from where the model states it - a checkpoint's `dataset.json`
+  read out of its remote zip by Range (a few KB per model), a MONAI bundle's metadata at its
+  curated version with the commit that version names, an engine's own table, TotalSegmentator's
+  registry - and records the version that pins it; `haversack catalog check` says, offline,
+  which records a catalog change has made stale, for everything or for the catalogs and tasks
+  named. `mine --all` mines all 103 tasks in seconds; naming a catalog or a task updates only
+  that. A failed fetch keeps the previous record and fails the
+  run, and where a model is installed at the same version its own labels must agree with its
+  archive's, or the list is not recorded (all 23 installed on the development machine agreed).
+  The index ships as `data/segments.json` (2144 segments) and is derived, never used to run
+  anything: an installed model's own labels still decide every result. A segment is DICOM's
+  and duckn's: an `id` - the model's own token, a code in its class list rather than a display
+  name or an identity across models - a label `value`, and a `layer` where the output
+  overlaps, since segments need not be disjoint. The record has room for duckn's group
+  `members`, display names and designations without another schema. Mining is a method on the
+  ecosystem, so the zip-manifest and image-baked shapes carry it and a new catalog on either
+  needs no edit here; the suite fails for a catalog that cannot answer, and for a shipped
+  record whose version no longer matches its manifest.
+- **Search the segments: `haversack tasks --find` and `GET /v1/segments`.** Which tasks
+  produce a pancreas, and with what label value, is one query: word prefixes in any order by
+  default (`--find "kid left"` finds kidney_left and left_kidney), a glob over the whole id, or
+  - locally only - a regular expression. It lives under `tasks` because the answer is tasks,
+  and because a top-level `segments` would sit one letter from `segment`, the verb that runs a
+  model. Ids are compared folded for case, spaces and hyphens, with each
+  model's spelling kept beside them; grouping ids that fold alike is a match on spelling, not a
+  claim that two models mean one thing, and it is not an ontology - an abbreviation or a
+  synonym is not found. The server answers from the tasks it serves, to anonymous callers as
+  `/v1/tasks` does, and refuses regex, since a pattern from anyone can take unbounded time to
+  evaluate. `RemoteClient.segments` speaks it.
+- **A MOOSE task's modality no longer changes when it installs.** MOOSE's catalog took the
+  modality from the task name before install and from the checkpoint after, and two
+  checkpoints misstate theirs: `preclin_mr_all`'s `dataset.json` names its channel "CT", so
+  an MR model reported CT once installed, and `clin_pt_fdg_face` went from PT to "PET". The
+  generator now records the modality the name states in the manifest, and every zip catalog
+  applies its manifest's modality in `spec()` - one rule where TotalVibe alone had it - so
+  `info()`, `describe()`, result provenance and the segments index give one answer. Only
+  that metadata changes; no label is computed differently, so no cache epoch moves.
+- **SynthStrip names its label on its engine row.** The ranked builder asks the engine row
+  for label names and fell back to TotalSegmentator's for anything without them, which for
+  `synthstrip:mask` meant none; the row now carries `{1: "Brain"}`, and the engine reads its
+  mask's label from there too.
+
 - **The server honours `task@version`.** It dropped the pin before a job existed, so
   `POST /v1/jobs` with `ts.v2:total@X`, and a pinned GET, ran or served whatever version was
   installed - the silent wrong version the grammar exists to prevent; only `prepare` held it.

@@ -185,6 +185,23 @@ worker's catalog to install that version or refuse it (such a job is never answe
 cache); on a read, which cannot install anything, it is a `409` pointing at `POST /v1/jobs`.
 A job submitted with a pin reports it as `version` beside the canonical `task`.
 
+`GET /v1/segments?q=...` answers which tasks produce a segment, and with what label value,
+before anything is installed. A segment is one item of a task's segment table, as in a
+`.seg.nrrd` or a DICOM segmentation: the label `value` it is written with, the `layer` it lives
+in where the output overlaps, and its `id` - the model's own token for it, a code in that
+model's class list rather than a display name or an identity across models. The search runs
+over every task's segments as its model states them, grouped by folded id and limited to the
+tasks this deployment serves (not to be confused with `/v1/segmentations`, which lists cached
+results). `q` is word prefixes in any order by default (`kid left` finds `kidney_left` and
+`left_kidney`); `mode=glob` matches a shell pattern against the whole id. Ids are compared
+folded (case, spaces, hyphens), and `field=id` holds a glob to the model's own spelling
+instead. `catalog`, `modality` and `limit` (1-1000, default 100) narrow it. A regular
+expression is a `422` here: a pattern from anyone can take unbounded time to evaluate, so regex
+stays with `haversack tasks --find PATTERN --regex`, locally. Tasks with no fixed segment list
+(VoxTell) come back apart, as `open_vocabulary`. The answer is `data/segments.json`, which
+records the version each list was read at; `haversack catalog check` says which records a
+catalog change has made stale.
+
 `parameters.algorithm` is the engine's own knobs, empty for nnU-Net tasks, a `prompt` for
 VoxTell. `parameters.processing` is haversack's, offered only where haversack owns the chain:
 
@@ -288,6 +305,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/version` | read | what is deployed |
 | GET | `/v1/tasks` | read | task names |
 | GET | `/v1/tasks/<task>` | read | describe a task |
+| GET | `/v1/segments` | read | which tasks produce a segment, and with what label value |
 | POST | `/v1/tasks/<task>/prepare` | token | install a task's weights now |
 | GET | `/v1/sources` | read | the hosted sources and their identifier grammar |
 | GET | `/v1/segmentations` | token | every cached result, with links |

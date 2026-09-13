@@ -192,6 +192,40 @@ def test_a_failure_below_http_is_reported_by_reason(gen, registry, tmp_path):
     assert not dest.exists()
 
 
+def test_the_modality_is_read_from_the_name(gen):
+    for name, want in (("clin_ct_organs", "CT"), ("clin_ct_ALPACA", "CT"),
+                       ("preclin_mr_all", "MR"), ("clin_mr_FVM", "MR"),
+                       ("clin_pt_fdg_brain_v1", "PT"), ("clin_fdg_pt_x", "PT"),
+                       ("preclin_ct_legs", "CT")):
+        assert gen.modality_of(name) == want, name
+
+
+def test_every_offered_model_records_its_modality(gen, registry, tmp_path):
+    dest = tmp_path / "moose_weights.json"
+    _generate(gen, registry, dest)
+    raw = json.loads(dest.read_text(encoding="utf-8"))
+    assert {t: e["modality"] for t, e in raw["tasks"].items()} == {t: "CT" for t in OFFERED}
+
+
+def test_a_name_stating_no_modality_stops_the_manifest(gen, tmp_path):
+    """A model whose modality cannot be read would report whatever its checkpoint says -
+    the flip this field exists to stop - so it is an error, not a gap."""
+    p = tmp_path / "models.py"
+    p.write_text(REGISTRY.replace('"clin_ct_body"', '"body_only"'))
+    dest = tmp_path / "moose_weights.json"
+    with pytest.raises(SystemExit, match="body_only.*states no modality"):
+        _generate(gen, p, dest)
+    assert not dest.exists()
+
+
+def test_the_shipped_manifest_states_the_modality_its_names_do(gen):
+    raw = json.loads((TOOLS.parent / "src/haversack/data/moose_weights.json").read_text(
+        encoding="utf-8"))
+    assert raw["tasks"]
+    for name, entry in raw["tasks"].items():
+        assert entry.get("modality") == gen.modality_of(name), name
+
+
 def test_every_url_answering_writes_the_manifest(gen, registry, tmp_path):
     dest = tmp_path / "moose_weights.json"
     asked = []

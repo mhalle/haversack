@@ -427,14 +427,24 @@ def _command_line() -> click.Group:
         short_help="list every task the catalog can segment, or one task's structures",
         help=('One line per task: name, engine, modality, and whether its weights are on disk '
               "(or, for an engine task, whether the engine's runtime is installed here). With a "
-              "task name, prints that task's structures, one per line, in label order."),
+              "task name, prints that task's structures, one per line, in label order. With "
+              '--find, which tasks produce a segment - from the segments index, so nothing is '
+              'installed: word prefixes in any order by default ("kid left" finds kidney_left '
+              'and left_kidney), --glob or --regex for patterns. Ids are compared folded (case, '
+              'spaces and hyphens); it is not an ontology, and an abbreviation or a synonym is '
+              'not found. --find exits 1 when nothing matches.'),
         epilog=_verbatim("""examples:
   haversack tasks                        every task
   haversack tasks --installed            what runs without a download
   haversack tasks ts.v2:total_fast          the 117 structure names total_fast produces
   haversack tasks --json                 full records: name, ecosystem, engine, modality, structures, installed;
                                          `materialized` = the task's definition is known here without a download,
-                                         `task_spec` = it is an nnU-Net model (false for FastSurfer, SynthStrip, ...)"""),
+                                         `task_spec` = it is an nnU-Net model (false for FastSurfer, SynthStrip, ...)
+  haversack tasks --find pancreas        every task that produces a pancreas, with its label value
+  haversack tasks --find "kid left" --installed        ...among what runs without a download
+  haversack tasks --find 'vertebrae_[ct]*' --glob      cervical and thoracic vertebrae
+  haversack tasks --find '^rib_(left|right)_1[0-2]$' --regex
+  haversack tasks ts.v2:total --find liver             search one task's segments"""),
         params=[
             click.Argument(['task'], required=False, shell_complete=_complete_task,
                            help=('a task name: print its structures instead of the list. An '
@@ -444,6 +454,22 @@ def _command_line() -> click.Group:
             click.Option(['--installed'], is_flag=True,
                          help='only tasks whose weights are already on disk'),
             click.Option(['--json'], is_flag=True, help='the full per-task info records'),
+            click.Option(['--find'], metavar='TEXT',
+                         help=('which tasks produce a segment: prints each task, label value and '
+                               'layer, grouped by id. With a task name, searches that task')),
+            click.Option(['--glob', 'mode'], flag_value='glob',
+                         help='with --find: a shell pattern (*, ?, [...]) against the whole id'),
+            click.Option(['--regex', 'mode'], flag_value='regex',
+                         help='with --find: a regular expression anywhere in the id'),
+            click.Option(['--exact', 'field'], flag_value='id',
+                         help=("with --find --glob or --regex: the model's own spelling of the "
+                               'id rather than its folded form')),
+            click.Option(['--catalog'],
+                         help='with --find: only this catalog (ts.v2, moose, monai, ...)'),
+            click.Option(['--modality'],
+                         help='with --find: only tasks whose modality contains this (CT, MR, ...)'),
+            click.Option(['--limit'], type=int, default=50, show_default=True,
+                         help='with --find: at most this many ids'),
         ])
     root.add_command(tasks)
 
@@ -486,6 +512,64 @@ def _command_line() -> click.Group:
             click.Option(['--json'], is_flag=True, help='the record as JSON'),
         ])
     root.add_command(rights)
+
+    catalog = _Group(
+        'catalog',
+        short_help="maintain the segments index: what every catalog's tasks produce",
+        help=("Maintainer commands for the segments index (data/segments.json): every task's "
+              'segments - the label value each is written with, its layer where the output '
+              'overlaps, and the id its model gives it. `mine` reads them from where each model '
+              "states them (a checkpoint's dataset.json read out of its remote zip by Range, a "
+              "MONAI bundle's metadata at its curated version, an engine's own table) and records "
+              'the version that pins each list; `check` says, offline, which records a catalog '
+              'change has made stale. Searching the index is `haversack tasks --find`.'))
+    root.add_command(catalog)
+    catalog_mine = _Command(
+        'mine', callback=_dispatch(_cmd_catalog, 'catalog', 'ccmd'),
+        short_help='read segment lists from the models and update the index',
+        help=("Mine every catalog (--all), or the catalogs and tasks named, and merge the result "
+              'into the index: records not named are left as they are, an unchanged list keeps '
+              'its record, and a task that fails keeps its previous record and fails the run. '
+              'Naming a catalog also drops its records of tasks it no longer offers. Where a '
+              "model is installed at the same version, its own labels must agree with its "
+              "archive's, or the list is not recorded. In a source checkout this writes the "
+              'packaged index (src/haversack/data/segments.json); from an installed package, '
+              '~/.config/haversack/segments.json (or HAVERSACK_SEGMENTS).'),
+        epilog=_verbatim("""examples:
+  haversack catalog mine --all                     every catalog (a few KB read per model)
+  haversack catalog mine moose                     one catalog
+  haversack catalog mine cads:organs ts.v2:total   single tasks
+  haversack catalog mine --all --dry-run           report what would change, write nothing"""),
+        params=[
+            click.Argument(['target'], nargs=-1, shell_complete=_complete_task,
+                           help=('catalogs (ts.v2, moose, monai, ...) or tasks '
+                                 '(moose:clin_ct_organs) to mine; or give --all')),
+            click.Option(['--all'], is_flag=True,
+                         help='mine every catalog this build knows, engines enabled here or not'),
+            click.Option(['--to'], help='write this index file instead of the default'),
+            click.Option(['--dry-run'], is_flag=True, help='report what would change, write nothing'),
+            click.Option(['--model-root'],
+                         help=('weights root whose installed models are held against their '
+                               'archives (default: the usual weights root)')),
+        ])
+    catalog.add_command(catalog_mine)
+    catalog_check = _Command(
+        'check', callback=_dispatch(_cmd_catalog, 'catalog', 'ccmd'),
+        short_help="which records the catalogs' current versions have made stale",
+        help=("Compare the index with this build's catalogs, offline: every task should have a "
+              'record whose version is the one its catalog offers now. Checks everything by '
+              'default; name catalogs or tasks to narrow it. Exits 1 when any record is stale, '
+              'missing, or no longer a task.'),
+        epilog=_verbatim("""examples:
+  haversack catalog check                every task of every catalog
+  haversack catalog check moose          one catalog, its vanished tasks included
+  haversack catalog check cads:organs    one task"""),
+        params=[
+            click.Argument(['target'], nargs=-1, shell_complete=_complete_task,
+                           help='catalogs or tasks to check (default: all of them)'),
+            click.Option(['--file'], help='the index to check (default: the one `mine` writes)'),
+        ])
+    catalog.add_command(catalog_check)
 
     weights = _Group(
         'weights', short_help='download model weights ahead of time, or see what can be fetched',
@@ -905,6 +989,62 @@ def _cmd_tasks(args) -> int:
     from .weights import WeightsStore
     store = WeightsStore(args.model_root, fetch=False)
     cat = EcosystemCatalog(root=store.root)
+
+    def installed(info) -> bool:
+        # "materialized" is "the spec is answerable without installing" - for TS that is
+        # always true (the catalog ships the specs), so ask the store about the weights
+        # themselves. Never call cat.get() on an unmaterialized task: it would install.
+        if not info.get("materialized"):
+            return False
+        if not info.get("task_spec", True):
+            from .engines import registry     # an engine: installed = its runtime is here
+            return registry.available(info.get("engine", ""))
+        try:
+            return all(store.have(w) for w in cat.get(info["name"]).weights_ids)
+        except Exception:
+            return False
+
+    if args.find is None:
+        if args.mode or args.field or args.catalog or args.modality:
+            from .errors import InputError
+            raise InputError("--glob, --regex, --exact, --catalog and --modality narrow a "
+                             "search: give --find TEXT as well")
+    else:
+        # Which tasks produce a segment, from the segments index - nothing installed, nothing
+        # downloaded. Here rather than as a `segments` command: the answer is tasks, and a
+        # top-level `segments` sat one letter from `segment`, which runs a model.
+        from . import segments
+        only = {cat.resolve(args.task)[2]} if args.task else None
+        if args.installed:
+            here = set()
+            for name in cat.names():
+                try:
+                    if installed(cat.info(name)):
+                        here.add(name)
+                except Exception:                   # one broken entry must not hide the rest
+                    pass
+            only = here if only is None else only & here
+        res = segments.index().search(args.find, mode=args.mode or "words",
+                                      field=args.field or "key", catalog=args.catalog,
+                                      modality=args.modality, tasks=only, limit=args.limit)
+        if args.json:
+            print(json.dumps(res, indent=2, ensure_ascii=False))
+        else:
+            for g in res["results"]:
+                print(g["key"])
+                for s in g["segments"]:
+                    # the label value, and the layer where the output overlaps
+                    where = str(s["value"]) + (f" L{s['layer']}" if s.get("layer") else "")
+                    spelled = "" if s["id"] == g["key"] else f"  ({s['id']})"
+                    print(f"  {s['task']:44s} {where:>6s}  {s['modality'] or ''}{spelled}")
+            print(f"{res['keys']} id(s), {res['segments']} segment(s)"
+                  + (f"; showing the first {args.limit} (--limit)" if res["truncated"] else ""),
+                  file=sys.stderr)
+            if res["open_vocabulary"]:
+                print(f"also: {', '.join(res['open_vocabulary'])} - "
+                      f"{res['open_vocabulary_note']}", file=sys.stderr)
+        return 0 if res["results"] else 1
+
     if args.task:
         info = cat.info(args.task)
         names = info.get("structures") or []
@@ -933,20 +1073,6 @@ def _cmd_tasks(args) -> int:
                 for n in names:
                     print(n)
         return 0
-
-    def installed(info) -> bool:
-        # "materialized" is "the spec is answerable without installing" - for TS that is
-        # always true (the catalog ships the specs), so ask the store about the weights
-        # themselves. Never call cat.get() on an unmaterialized task: it would install.
-        if not info.get("materialized"):
-            return False
-        if not info.get("task_spec", True):
-            from .engines import registry     # an engine: installed = its runtime is here
-            return registry.available(info.get("engine", ""))
-        try:
-            return all(store.have(w) for w in cat.get(info["name"]).weights_ids)
-        except Exception:
-            return False
 
     rows = []
     for name in cat.names():
@@ -1290,6 +1416,41 @@ def _cmd_segment(args) -> int:
             print(f"{failures} of {len(inputs)} inputs failed", file=sys.stderr)
             return 1
     return 0
+
+
+def _cmd_catalog(args) -> int:
+    """`haversack catalog`."""
+    from collections import Counter
+    from pathlib import Path
+    from . import segments
+    say = lambda m: print(m, file=sys.stderr, flush=True)
+    marks = {"added": "+", "changed": "~", "unchanged": "=", "removed": "-", "failed": "!",
+             "ok": "=", "stale": "~", "missing": "?", "orphan": "-", "error": "!"}
+
+    def show(rows):
+        for name, status, detail in rows:
+            print(f"  {marks[status]} {name:48s} {status:9s} {detail}")
+
+    if args.ccmd == "mine":
+        from .weights import WeightsStore
+        plan = segments.plan(args.target, all_=args.all)
+        path = Path(args.to).expanduser() if args.to else segments.target()
+        say(f"index: {path}" + (" (dry run)" if args.dry_run else ""))
+        say(f"mining {sum(len(t) for _, t, _ in plan)} task(s) from {len(plan)} catalog(s)")
+        report = segments.mine(plan, path, root=WeightsStore(args.model_root, fetch=False).root,
+                               write=not args.dry_run, prune=args.all)
+        show(report["results"])
+        counts = Counter(s for _, s, _ in report["results"])
+        say(", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
+            + ("; written" if report["written"] else "; nothing written"))
+        return 1 if report["failed"] else 0
+    path = Path(args.file).expanduser() if args.file else segments.target()
+    say(f"index: {path}")
+    rows = segments.check(path, targets=args.target)
+    show([r for r in rows if r[1] != "ok"])
+    counts = Counter(s for _, s, _ in rows)
+    say(", ".join(f"{n} {s}" for s, n in sorted(counts.items())))
+    return 0 if set(counts) <= {"ok"} else 1
 
 
 def _cmd_weights(args) -> int:

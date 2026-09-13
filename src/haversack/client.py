@@ -82,6 +82,17 @@ class RemoteClient:
     def describe(self, task: str) -> dict:
         return self._json("GET", f"/v1/tasks/{task}")
 
+    def segments(self, query: str, *, mode: str = "words", field: str = "key",
+                 catalog: str | None = None, modality: str | None = None,
+                 limit: int | None = None) -> dict:
+        """Which of the server's tasks produce a segment, and with what label value
+        (``GET /v1/segments``): word prefixes by default, or ``mode="glob"``."""
+        params = {"q": query, "mode": mode, "field": field}
+        for k, v in (("catalog", catalog), ("modality", modality), ("limit", limit)):
+            if v is not None:
+                params[k] = v
+        return self._json("GET", "/v1/segments", params=params)
+
     def submit(self, image, task: str, **options) -> str:
         """``image`` is a local file to upload, or ``"<source>:<identifier>"``
         (e.g. ``"idc:<crdc_series_uuid>"``) to have the server fetch the input

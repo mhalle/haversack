@@ -29,7 +29,10 @@ ENGINE = "synthstrip"
 # One literal, in the registry - see the note in engines/fastsurfer.py.
 WEIGHTS_ID = ENGINE
 WEIGHTS_VERSION = _registry.ENGINES[ENGINE].weights_identity()[0]["version"]
-BRAIN_LABEL = 1
+#: The one label, from the registry row like the weights identity above - so the mask this
+#: writes and the table the segments index records cannot disagree.
+LABEL_NAMES = _registry.ENGINES[ENGINE].label_names(ENGINE)
+BRAIN_LABEL = next(iter(LABEL_NAMES))
 
 
 def weights_installed() -> list[dict]:
@@ -240,7 +243,7 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", restore: str = "aut
             "restore": f"sdt-graded ({'gpu' if use_gpu else 'cpu'})",
             "border_mm": border, "device": device,
             "precision": run["precision"], "deviations": run["deviations"]}
-    return Segmentation(labels=out_img, schema=LabelSchema(names={BRAIN_LABEL: "Brain"}),
+    return Segmentation(labels=out_img, schema=LabelSchema(names=dict(LABEL_NAMES)),
                         grid=grid, spec=None, timings=timings, provenance=prov)
 
 

@@ -54,10 +54,24 @@ def _output_channel_def(bundle_dir) -> dict:
     return ((fmt.get("outputs") or {}).get("pred") or {}).get("channel_def") or {}
 
 
+def declares_labelmap(channel_def: dict) -> bool:
+    """Whether an OUTPUT ``channel_def`` names voxel values (a labelmap) rather than output
+    channels of overlapping regions. A labelmap names its background, because value 0 needs a
+    name; a region head does not, because no channel is background. The structural signal
+    :func:`resolve_label_names` uses, as a function so the segments index reads a bundle's
+    metadata the way a result is named."""
+    return any(str(v).lower() == "background" for v in (channel_def or {}).values())
+
+
+def label_table(channel_def: dict) -> dict[int, str]:
+    """``{label value: name}`` from an output ``channel_def``, background dropped."""
+    return {int(k): str(v) for k, v in (channel_def or {}).items()
+            if str(v).lower() != "background"}
+
+
 def label_names(bundle_dir) -> dict[int, str]:
     """``{label value: name}`` from the bundle's own metadata, background dropped."""
-    return {int(k): str(v) for k, v in _output_channel_def(bundle_dir).items()
-            if str(v).lower() != "background"}
+    return label_table(_output_channel_def(bundle_dir))
 
 
 def resolve_label_names(bundle_dir, present) -> tuple[dict, dict]:
@@ -91,7 +105,7 @@ def resolve_label_names(bundle_dir, present) -> tuple[dict, dict]:
     """
     declared = label_names(bundle_dir)
     raw = _output_channel_def(bundle_dir)
-    has_background = any(str(v).lower() == "background" for v in raw.values())
+    has_background = declares_labelmap(raw)
     unexpected = sorted(set(present or ()) - set(declared))
     if has_background and not unexpected:
         return declared, {}

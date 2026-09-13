@@ -57,6 +57,30 @@ class CascadeStep:
     crop_from_task: str | None = None
 
 
+def dataset_labels(ds: dict, where: str = "dataset.json") -> dict[int, str]:
+    """``{label value: name}`` from an nnU-Net ``dataset.json``, background dropped.
+
+    The one reading of a checkpoint's labels. :meth:`TaskSpec.from_model_folder` builds an
+    installed model's label map with it, and ``haversack catalog mine`` reads a remote
+    archive's with it (2026-09-12), so the index and an installed model cannot disagree about
+    what the same file says. Region-based labels - a name mapping to several values - raise,
+    as they always have here.
+    """
+    labels = ds.get("labels") or {}
+    if any(isinstance(v, (list, tuple)) for v in labels.values()):
+        raise UnsupportedModel(
+            f"{where}: region-based labels (a label mapping to several values) are not "
+            "supported yet - haversack takes the argmax of a softmax head")
+    return {int(v): str(k) for k, v in labels.items() if int(v) != 0}
+
+
+def dataset_modality(ds: dict) -> str:
+    """The first input channel's name in an nnU-Net ``dataset.json`` - what a model folder's
+    spec reports as its modality."""
+    chan = ds.get("channel_names") or ds.get("modality") or {"0": "unknown"}
+    return str(next(iter(chan.values())))
+
+
 @dataclass(frozen=True)
 class TaskSpec:
     name: str
@@ -92,16 +116,9 @@ class TaskSpec:
             raise ModelNotFound(f"{f} has no dataset.json - not a trained nnU-Net model folder "
                                 "(expected .../Dataset<id>_<name>/<trainer>__<plans>__<config>/)")
         ds = json.loads((f / "dataset.json").read_text(encoding="utf-8"))
-        labels = ds.get("labels") or {}
-        if any(isinstance(v, (list, tuple)) for v in labels.values()):
-            raise UnsupportedModel(
-                f"{f.name}: region-based labels (a label mapping to several values) are not "
-                "supported yet - haversack takes the argmax of a softmax head")
-        chan = ds.get("channel_names") or ds.get("modality") or {"0": "unknown"}
         return cls(name=name or f.parent.name, lineage="nnunetv2",
-                   modality=str(next(iter(chan.values()))),
-                   shape="single", single=str(f),
-                   label_map={int(v): str(k) for k, v in labels.items() if int(v) != 0})
+                   modality=dataset_modality(ds), shape="single", single=str(f),
+                   label_map=dataset_labels(ds, where=f.name))
 
     @property
     def parts(self) -> list[tuple[WeightsId, Mapping[int, int] | None, str]]:

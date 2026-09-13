@@ -55,6 +55,19 @@ def test_moose_info_before_install(tmp_path):
     assert info["modality"] == "CT" and "structures" not in info
 
 
+def test_a_zip_catalog_reports_one_modality_before_and_after_install(tmp_path):
+    """The manifest's modality, before install and after. preclin_mr_all's checkpoint names
+    its channel "CT", and read alone that turned an MR task into a CT one the moment its
+    weights installed - in info(), in describe(), and in the segments index (2026-09-13)."""
+    eco = MooseEcosystem()
+    before = eco.info("preclin_mr_all", tmp_path)["modality"]
+    _fake_model_folder(tmp_path / "moose", name=eco._entries["preclin_mr_all"]["folder"])
+    assert eco.materialized("preclin_mr_all", tmp_path)      # its dataset.json says "CT"
+    assert before == "MR"
+    assert eco.spec("preclin_mr_all", tmp_path).modality == "MR"
+    assert eco.info("preclin_mr_all", tmp_path)["modality"] == "MR"
+
+
 def test_moose_materialized_spec_reads_checkpoint(tmp_path):
     eco = MooseEcosystem()
     folder = eco._entries["clin_ct_fast_organs"]["folder"]

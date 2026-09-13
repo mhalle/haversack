@@ -70,7 +70,13 @@ in one line and names what to add.
 
 lists every task the catalog knows, with the engine, modality, and whether its weights are
 already on disk. `haversack tasks --installed` shows what will run without a download, and
-`haversack tasks ts.v2:total_fast` prints the structures a task produces, one per line. This
+`haversack tasks ts.v2:total_fast` prints the structures a task produces, one per line.
+`haversack tasks --find pancreas` answers which tasks produce a segment, and with what label
+value, without installing anything (`--find "kid left"` finds kidney_left and left_kidney;
+`--glob` and `--regex` take patterns). It reads `src/haversack/data/segments.json`: every
+task's segments - label value, layer where the output overlaps, and the id its model gives
+each - as the model states them, with the version that pins each list; `haversack catalog
+mine` refreshes it and `haversack catalog check` finds stale records. This
 guide itself ships with the package: `haversack docs` prints it, `haversack docs weights`
 one section, and every command answers `--help` with its options, defaults and examples.
 

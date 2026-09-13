@@ -2,8 +2,9 @@
 
 The checkpoint is the spec (labels come from each model's own dataset.json at
 install time); this manifest holds only what the checkpoint cannot know -
-the task name, where to download it, and the release tag parsed from the
-asset filename. Run after updating upstream/MOOSE.
+the task name, where to download it, the release tag parsed from the asset
+filename, and the modality the name states, which two checkpoints misstate (see
+``MODALITY``). Run after updating upstream/MOOSE.
 
 **Every entry in the registry is accounted for.** The registry is parsed with a
 pattern, and a pattern matches what it was written against: the name group was
@@ -71,6 +72,27 @@ ENTRY = re.compile(
 #: also appears in the import and in attribute lookups; the colon is what makes
 #: it a dict key.
 URL_KEY = re.compile(r'KEY_URL\s*:\s*(?P<value>"[^"]*"|[^,\s}]*)')
+
+
+#: The modality a model takes, read from its registry name (``clin_ct_organs``,
+#: ``clin_pt_fdg_brain_v1``, ``preclin_mr_all``) and recorded in the manifest, because the
+#: checkpoints do not say it reliably: ``preclin_mr_all``'s dataset.json names its channel
+#: "CT", and ``clin_pt_fdg_face``'s says "PET" where its sibling says "PT". Read from the
+#: checkpoint alone, both tasks changed modality when they installed (found 2026-09-13, when
+#: the segments index put the two answers side by side). ``PT`` is DICOM's code for PET.
+MODALITY = re.compile(r"(?:clin|preclin)_(ct|mr|pt|fdg_pt|pt_fdg)_")
+MODALITY_CODES = {"ct": "CT", "mr": "MR"}
+
+
+def modality_of(name: str) -> str:
+    """The modality ``name`` states, or a clear stop: a model whose modality cannot be
+    read here would report whatever its checkpoint says, the flip this field exists for."""
+    m = MODALITY.match(name)
+    if m is None:
+        raise SystemExit(f"{name}: the name states no modality this generator can read "
+                         f"({MODALITY.pattern}) - add the rule rather than ship a model whose "
+                         "modality changes when it installs")
+    return MODALITY_CODES.get(m.group(1), "PT")
 
 
 def release_tag(url: str) -> str:
@@ -146,7 +168,8 @@ def generate(models_py: Path, dest: Path = DEST, status=zippeek.head_status,
         raise SystemExit(f"{len(dead)} of {len(entries)} URLs do not answer a HEAD with 200; "
                          "refusing to write a manifest that names them:\n" + "\n".join(lines))
     excluded = excluded_with_reasons(entries, not_offered, top_level)
-    tasks = {name: e for name, e in entries.items() if name not in excluded}
+    tasks = {name: {**e, "modality": modality_of(name)}
+             for name, e in entries.items() if name not in excluded}
     dest.write_text(json.dumps({"source": "moosez/models.py",
                                 "excluded": excluded,
                                 "tasks": tasks}, indent=1) + "\n", encoding="utf-8")

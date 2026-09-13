@@ -3449,6 +3449,34 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 **({"version": requested.rpartition("@")[2]}
                    if requested != task else {})}
 
+    @app.get("/v1/segments", tags=["tasks"])
+    def segments_search(q: str, mode: str = "words", field: str = "key",
+                        catalog: str | None = None, modality: str | None = None,
+                        limit: int = 100):
+        """Which tasks produce a segment, and with what label value: a search over every
+        task's segments as its model states them (``data/segments.json``), grouped by folded
+        id. A read, open to anonymous callers like ``/v1/tasks``. Word prefixes in any order
+        (the default) or a glob over the whole id; a regular expression is refused here,
+        because a pattern from anyone can take unbounded time to evaluate. Only tasks this
+        deployment serves come back. Not ``/v1/segmentations``, which lists cached results."""
+        from . import segments as segments_index
+        if not 1 <= limit <= 1000:
+            raise HTTPException(422, "limit must be between 1 and 1000")
+        try:
+            idx = segments_index.index()
+        except Exception as e:             # noqa: BLE001 - never echo a server path
+            raise HTTPException(503, "the segments index is unavailable on this server") from e
+        try:
+            served = set(seg.tasks())
+        except Exception:                  # noqa: BLE001 - nothing served, nothing listed
+            served = set()
+        try:
+            return idx.search(q, mode=mode, field=field, catalog=catalog, modality=modality,
+                              tasks=served, limit=limit,
+                              allowed_modes=segments_index.WIRE_MODES)
+        except InputError as e:
+            raise HTTPException(422, str(e)) from e
+
     @app.get("/v1/sources", tags=["service"])
     def list_sources():
         return {"sources": [dict(v.describe(), enabled=_source_enabled(v))

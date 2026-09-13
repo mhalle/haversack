@@ -190,6 +190,15 @@ def _synthstrip_identity() -> list[dict]:
     return [{"id": "synthstrip", "version": "v1"}]
 
 
+def _synthstrip_label_names(task: str) -> dict:
+    """SynthStrip's one label. The literal lives here, like the weights identity above, and
+    engines/synthstrip.py reads it, so the mask it writes and the table the segments index
+    records are one table. Before this field was set (2026-09-12) the ranked builder fell back
+    to TotalSegmentator's names for `mask` and had nothing to name it with. Ignores ``task``:
+    one engine, one label."""
+    return {1: "Brain"}
+
+
 def _synthstrip_compute(image, **kw):
     from .synthstrip import run_local
     return run_local(image, **kw)
@@ -239,6 +248,7 @@ ENGINES: dict[str, Engine] = {
         dist=("synthstrip-torch", "surfa"),
         weights_identity=_synthstrip_identity,
         compute=_synthstrip_compute,
+        label_names=_synthstrip_label_names,
         behavior=GRADED_RESTORE,
         processing_knobs=False,
         description="SynthStrip brain extraction (signed distance transform)",

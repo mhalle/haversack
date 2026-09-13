@@ -46,6 +46,7 @@ the content-addressed result key. Nothing rejects collisions anymore; only
 the ambiguous short form becomes unusable.
 """
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -115,6 +116,113 @@ def catalog_folder(root, bucket: str, folder, *, what: str = "", generator: str 
     return out
 
 
+def _pinned(entry: dict) -> dict:
+    """The manifest fields that name one exact published checkpoint - the release and tag it
+    was cut as, the digest its host states, where it lives. What pins a zip catalog's labels,
+    since they are read out of exactly that archive."""
+    return {k: str(entry[k]) for k in ("release", "tag", "sha256", "md5", "url") if entry.get(k)}
+
+
+def _digest(obj) -> str:
+    """A stable sha256 of a JSON-able value: the version of a table this build ships whole."""
+    text = json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _zip_junk(name: str) -> bool:
+    """macOS Finder's zip litter, which is not part of any model (tools/zippeek.is_junk)."""
+    base = name.rsplit("/", 1)[-1]
+    return name.startswith("__MACOSX/") or base == ".DS_Store" or base.startswith("._")
+
+
+def checkpoint_dataset_json(zf, *, folder: str | None = None, flat: bool = False,
+                            where: str = "") -> tuple[str, dict]:
+    """``(member, parsed dataset.json)`` for the configuration an install of this archive
+    would load, read out of the archive itself.
+
+    The choice is the installer's: a ``<trainer>__<plans>__<config>`` folder, macOS litter and
+    dot-prefixed directories skipped, the configuration picked by ``CONFIG_PREFERENCE``. Where
+    the preference cannot choose, this refuses, because the installed model's spec refuses the
+    same - a list read from a configuration the model would never run is a confident wrong
+    answer. ``flat`` is MRSegmentator's packaging, ``dataset.json`` at the archive root.
+    ``folder`` narrows to the manifest's Dataset folder where the archive carries it
+    (TotalVibe's archives do not, and are read whole)."""
+    from .tasks import CONFIG_PREFERENCE
+    names = [n for n in zf.namelist() if not _zip_junk(n)]
+    if flat:
+        if "dataset.json" not in names:
+            raise ModelNotFound(f"{where}: the archive has no dataset.json at its top level")
+        return "dataset.json", json.loads(zf.read("dataset.json"))
+    found: dict[str, list] = {}
+    for n in names:
+        parts = n.split("/")
+        if (len(parts) >= 2 and parts[-1] == "dataset.json" and parts[-2].count("__") == 2
+                and not any(p.startswith(".") for p in parts[:-1])):
+            found.setdefault(parts[-2].rsplit("__", 1)[1], []).append(n)
+    if folder:
+        prefix = str(folder).rstrip("/") + "/"
+        inside = {c: [n for n in ms if n.startswith(prefix)] for c, ms in found.items()}
+        found = {c: ms for c, ms in inside.items() if ms} or found
+    if not found:
+        raise ModelNotFound(f"{where}: the archive holds no <trainer>__<plans>__<config> "
+                            "folder with a dataset.json")
+    config = next((c for c in CONFIG_PREFERENCE if c in found), None)
+    if config is None:
+        if len(found) != 1:
+            raise ModelNotFound(f"{where}: the archive ships configurations {sorted(found)} "
+                                f"and none is preferred ({', '.join(CONFIG_PREFERENCE)})")
+        config = next(iter(found))
+    if len(found[config]) != 1:
+        raise ModelNotFound(f"{where}: the archive ships {config} more than once: "
+                            f"{sorted(found[config])}")
+    member = found[config][0]
+    return member, json.loads(zf.read(member))
+
+
+def _dataset_listing(ds: dict, *, modality: str | None = None, where: str = "") -> dict:
+    """A label listing from a checkpoint's ``dataset.json``, read by the function an installed
+    model's spec is built with (:func:`haversack.tasks.dataset_labels`)."""
+    from .tasks import dataset_labels, dataset_modality
+    raw = ds.get("labels") or {}
+    out = {"modality": modality or dataset_modality(ds)}
+    if any(isinstance(v, (list, tuple)) for v in raw.values()):
+        # recorded, not refused: this is a listing of what the model says, and a model
+        # haversack cannot run still says it. Its regions overlap by design - one sigmoid
+        # output each - so each is a segment in a layer of its own, which is how duckn and
+        # DICOM carry segments that are not disjoint (2026-09-13).
+        regions = [str(k) for k, v in raw.items() if v != 0]
+        out.update(kind="segments",
+                   segments=[{"id": k, "layer": i, "value": 1} for i, k in enumerate(regions)],
+                   note="region-based labels: overlapping regions, one layer each in the "
+                        "model's declared order; haversack does not run these (it takes the "
+                        "argmax of a softmax head)")
+    else:
+        out.update(kind="segments", segments=[{"id": n, "value": v} for v, n in
+                                              dataset_labels(ds, where=where).items()])
+    return out
+
+
+def _installed_checkpoint_check(eco, task: str, root, listing: dict) -> dict | None:
+    """Whether a copy of this checkpoint installed under ``root`` at the SAME tag names its
+    labels as the archive does. None when nothing is installed. A copy at another tag - or
+    one haversack did not install, so its tag is unknown - is reported and not compared: a
+    difference there is a version, not a contradiction."""
+    if root is None:
+        return None
+    try:
+        if not eco.materialized(task, root):
+            return None
+        from .weights_fetch import installed_version
+        tag = (installed_version(eco._folder(task, root)) or {}).get("tag")
+        if tag is None or tag != eco.label_version(task).get("tag"):
+            return {"version": tag, "compared": False}
+        labels = dict(eco.spec(task, root).label_map)
+    except Exception as e:                          # noqa: BLE001 - a report, not a gate
+        return {"compared": False, "note": f"installed copy unreadable ({type(e).__name__}: {e})"}
+    listed = {s["value"]: s["id"] for s in listing.get("segments") or () if not s.get("layer")}
+    return {"version": tag, "compared": True, "agrees": labels == listed}
+
+
 class ModelEcosystem:
     """One model catalog: task names, weight installation, spec loading.
 
@@ -179,6 +287,34 @@ class ModelEcosystem:
         their class attributes, and a catalog reads its model's own metadata
         (the "the checkpoint is the spec" rule)."""
         return {}
+
+    def label_version(self, task: str) -> dict:
+        """What pins this task's label list, answered offline from what this build ships: the
+        release and digest of the checkpoint its names are read from, a bundle's version, an
+        engine's own. ``haversack catalog mine`` stores it with every mined list and calls the
+        list stale the moment this answer changes (2026-09-12) - so it must be cheap, and must
+        touch neither the network nor the weights root."""
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot say what pins its tasks' labels: implement "
+            "label_version and label_listing, or build the catalog on a shape that has them "
+            "(ZipManifestEcosystem, ImageBakedEcosystem)")
+
+    def label_listing(self, task: str, root, reader) -> dict:
+        """This task's segments as its source states them, for the segments index
+        (``haversack catalog mine``).
+
+        ``{"kind", "modality", "source"}`` plus, for kind ``segments``, ``segments``: a list
+        of ``{"id", "value", "layer"?}`` - the model's own token for each output, the label
+        value it is written with, and the layer where the output overlaps - or nothing, for
+        kind ``open`` (the segments are an input). ``reader`` is the only way to the
+        network - ``zip(url)`` a random-access archive, ``json(url)`` a document and its
+        headers - which is what lets a test walk every catalog offline. ``root`` is the weights
+        root or None; where a copy is installed at the same version, ``installed`` says whether
+        it names its labels the same way, and the miner refuses a list its install contradicts.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot list its tasks' labels: implement label_listing "
+            "(see ModelEcosystem.label_listing)")
 
     def materialized(self, task: str, root) -> bool:
         """Whether spec() can answer without installing anything."""
@@ -290,6 +426,34 @@ class TSEcosystem(ModelEcosystem):
 
     def spec(self, task: str, root) -> TaskSpec:
         return self._catalog.get(task)
+
+    def _registry_entries(self) -> tuple[dict, dict]:
+        """``(_meta, {task: raw entry})`` of the shipped registry, read once."""
+        cached = getattr(self, "_raw_registry", None)
+        if cached is None:
+            data = json.loads(TaskCatalog._builtin("ts").read_text(encoding="utf-8"))
+            items = data["tasks"] if isinstance(data, dict) and "tasks" in data else data
+            items = list(items.values()) if isinstance(items, dict) else items
+            meta = data.get("_meta", {}) if isinstance(data, dict) else {}
+            cached = self._raw_registry = (meta, {d["name"]: d for d in items})
+        return cached
+
+    def label_version(self, task: str) -> dict:
+        # The labels ARE the registry entry, generated from TotalSegmentator's own source at
+        # ts_version, so its digest is what pins them - an edit to one task moves that task
+        # alone. Not the weights tags: these names are TotalSegmentator's naming of its
+        # outputs, not something read out of a checkpoint.
+        meta, entries = self._registry_entries()
+        if task not in entries:
+            raise LookupError(f"unknown ts.v2 task {task!r}")
+        return {"ts_version": str(meta.get("ts_version")),
+                "registry_sha256": _digest(entries[task])}
+
+    def label_listing(self, task: str, root, reader) -> dict:
+        spec = self._catalog.get(task)
+        return {"kind": "segments", "modality": spec.modality,
+                "segments": [{"id": n, "value": v} for v, n in spec.label_map.items()],
+                "source": {"file": "haversack/data/ts_tasks.json"}}
 
 
 class ZipManifestEcosystem(ModelEcosystem):
@@ -551,11 +715,20 @@ class ZipManifestEcosystem(ModelEcosystem):
                        entry.get("sha256"))
 
     def spec(self, task: str, root) -> TaskSpec:
+        import dataclasses
         if not self.materialized(task, root):
             raise ModelNotFound(
                 f"{self.name} task {task!r} is not installed under {root}; prepare it "
                 "first (weights install on demand when the task runs)")
-        return TaskSpec.from_model_folder(self._folder(task, root), name=task)
+        spec = TaskSpec.from_model_folder(self._folder(task, root), name=task)
+        # The manifest's modality where it states one: the answer info() gives before install
+        # and the segments index records. A checkpoint's channel name is not always a
+        # modality - TotalVibe's say "any", MOOSE's preclin_mr_all says "CT" - and applied
+        # here, once for every zip catalog, describe() (built from the spec) cannot disagree
+        # with info() or change its answer when the weights install (2026-09-13; TotalVibe
+        # alone had this, so MOOSE's two misstated checkpoints flipped).
+        modality = (self._entries.get(task) or {}).get("modality")
+        return dataclasses.replace(spec, modality=str(modality)) if modality else spec
 
     def info(self, task: str, root) -> dict:
         out = super().info(task, root)
@@ -570,6 +743,29 @@ class ZipManifestEcosystem(ModelEcosystem):
                 out[key] = entry[key]
         return out
 
+    def label_version(self, task: str) -> dict:
+        entry = manifest_entry(self._entries, task, what=f"{self.name} task {task!r}",
+                               generator=self.generator)
+        out = _pinned(entry)
+        # the record's modality is the manifest's where it states one, so a manifest change
+        # to it must make the record stale, as a new tag does
+        if entry.get("modality"):
+            out["modality"] = str(entry["modality"])
+        return out
+
+    def label_listing(self, task: str, root, reader) -> dict:
+        entry = manifest_entry(self._entries, task, what=f"{self.name} task {task!r}",
+                               generator=self.generator)
+        where = f"{self.name}:{task}"
+        member, ds = checkpoint_dataset_json(reader.zip(entry["url"]), folder=entry["folder"],
+                                             where=where)
+        # the manifest's modality where it states one, as spec() and info() use it (a channel
+        # named "any" or "ct" is a contrast claim, not a modality); else the checkpoint's
+        out = _dataset_listing(ds, modality=entry.get("modality"), where=where)
+        out["source"] = {"zip": entry["url"], "member": member}
+        out["installed"] = _installed_checkpoint_check(self, task, root, out)
+        return out
+
 
 class MooseEcosystem(ZipManifestEcosystem):
     """MOOSE (moosez): bare nnU-Net checkpoints from public GitHub release
@@ -577,20 +773,16 @@ class MooseEcosystem(ZipManifestEcosystem):
     ``TaskSpec.from_model_folder`` - labels come from each checkpoint's own
     dataset.json, so there is no class map here to drift. The manifest
     (``data/moose_weights.json``, regenerated by tools/gen_moose_manifest.py
-    from the moosez registry) holds only name -> url + folder + release tag."""
+    from the moosez registry) holds name -> url + folder + release tag, and the
+    modality the name states: two checkpoints misstate theirs, so the name's is the
+    one info(), spec() and the segments index all report (2026-09-13; this class
+    used to derive it here, before install only)."""
 
     name = "moose"
     description = "MOOSE (moosez) model zoo"
     bucket = "moose"
     MANIFEST = MOOSE_MANIFEST
     generator = "tools/gen_moose_manifest.py"
-
-    def info(self, task: str, root) -> dict:
-        out = super().info(task, root)
-        m = re.match(r"(clin|preclin)_(ct|mr|pt|fdg_pt|pt_fdg)_", task)
-        if "modality" not in out and m:
-            out["modality"] = m.group(2).upper().replace("FDG_PT", "PT").replace("PT_FDG", "PT")
-        return out
 
 
 class MRSegmentatorEcosystem(ModelEcosystem):
@@ -739,6 +931,28 @@ class MRSegmentatorEcosystem(ModelEcosystem):
         out["orientation"] = "LPS"
         return out
 
+    def label_version(self, task: str) -> dict:
+        return _pinned(manifest_entry(self._entries, task, what=f"mrsegmentator task {task!r}",
+                                      generator="tools/gen_mrsegmentator_manifest.py"))
+
+    def label_listing(self, task: str, root, reader) -> dict:
+        entry = manifest_entry(self._entries, task, what=f"mrsegmentator task {task!r}",
+                               generator="tools/gen_mrsegmentator_manifest.py")
+        where = f"mrsegmentator:{task}"
+        zf = reader.zip(entry["url"])
+        member, ds = checkpoint_dataset_json(zf, flat=True, where=where)
+        # the same second check the installer makes: the version the zip itself carries
+        if "version.json" in zf.namelist():
+            have = json.loads(zf.read("version.json")).get("weights_version")
+            if have is not None and str(have) != str(entry.get("tag")):
+                raise ModelNotFound(
+                    f"{where}: the archive carries weights_version {have!r} but the manifest "
+                    f"says {entry.get('tag')!r} - regenerate the manifest")
+        out = _dataset_listing(ds, modality=self.modality, where=where)
+        out["source"] = {"zip": entry["url"], "member": member}
+        out["installed"] = _installed_checkpoint_check(self, task, root, out)
+        return out
+
 
 class DentalSegmentatorEcosystem(ZipManifestEcosystem):
     """DentalSegmentator (Dot et al., Journal of Dentistry 2024; weights CC BY 4.0):
@@ -861,18 +1075,11 @@ class TotalVibeEcosystem(ZipManifestEcosystem):
 
     def spec(self, task: str, root) -> TaskSpec:
         import dataclasses
-        spec = super().spec(task, root)
-        # Both facts are applied HERE rather than in info(), so `describe()` -
-        # which builds its answer from the spec - cannot disagree with `info()`,
-        # and cannot report a modality that flips once the weights are installed.
-        fields = {}
+        spec = super().spec(task, root)      # the manifest's modality is applied there
+        # The orientation is applied HERE rather than in info(), so `describe()` -
+        # which builds its answer from the spec - cannot disagree with `info()`.
         orientation = self._declared_orientation(task, root)
-        if orientation is not None:
-            fields["orientation"] = orientation
-        modality = (self._entries.get(task) or {}).get("modality")
-        if modality:
-            fields["modality"] = modality
-        return dataclasses.replace(spec, **fields) if fields else spec
+        return dataclasses.replace(spec, orientation=orientation) if orientation else spec
 
     def info(self, task: str, root) -> dict:
         out = super().info(task, root)
@@ -1211,6 +1418,42 @@ class ImageBakedEcosystem(EngineEcosystem):
                 "haversack release that pins the version you want")
         return None
 
+    #: True for an engine whose task has no fixed label set - its labels are an input
+    #: (VoxTell's prompts). Declared, never inferred from a missing table: an engine that
+    #: simply forgot its table must fail tests/test_structures.py, not list as open.
+    open_vocabulary: bool = False
+
+    def _label_table(self, task: str) -> dict | None:
+        """``{value: name}`` from the engine's own row (``Engine.label_names``) - the field the
+        ranked builder already reads, so an engine names its labels in one place."""
+        thunk = _registry.ENGINES[self.engine].label_names
+        return {int(k): str(v) for k, v in thunk(task).items()} if thunk is not None else None
+
+    def _required_table(self, task: str) -> dict | None:
+        table = self._label_table(task)
+        if table is None and not self.open_vocabulary:
+            raise NotImplementedError(
+                f"{self.name}: its engine row declares no label table - set label_names on "
+                f"the {self.engine!r} Engine in engines/registry.py, or open_vocabulary on "
+                f"{type(self).__name__} if its labels are an input")
+        return table
+
+    def label_version(self, task: str) -> dict:
+        out = {"engine": [dict(e) for e in (self.weights_identity(task, None) or ())]}
+        table = self._required_table(task)
+        if table is not None:
+            out["table_sha256"] = _digest({str(k): v for k, v in table.items()})
+        return out
+
+    def label_listing(self, task: str, root, reader) -> dict:
+        table = self._required_table(task)
+        if table is None:
+            return {"kind": "open", "modality": self.modality, "source": {"engine": self.engine},
+                    "note": "no fixed label set: it segments whatever the caller asks for"}
+        return {"kind": "segments", "modality": self.modality,
+                "segments": [{"id": n, "value": v} for v, n in table.items()],
+                "source": {"engine": self.engine, "table": "Engine.label_names"}}
+
 
 class FastSurferEcosystem(ImageBakedEcosystem):
     """FastSurfer whole-brain parcellation (2.5D view-aggregation, not nnU-Net).
@@ -1285,6 +1528,7 @@ class VoxTellEcosystem(ImageBakedEcosystem):
                    'prompts are an input: options={"prompts": ["liver", ...]}')
     task_names = ("text",)
     modality = "CT / MR / PET"
+    open_vocabulary = True
 
 
 MONAI_MANIFEST = Path(__file__).parent / "data" / "monai_bundles.json"
@@ -1568,6 +1812,68 @@ class MonaiEcosystem(EngineEcosystem):
                 "inputs_hint": f"this bundle takes {n_in} input channels; their "
                                "names are read from the bundle once installed"}
 
+    #: Where a bundle's own metadata.json is read before install, pinned to the curated
+    #: version. The zoo publishes each bundle as a Hugging Face repository tagged by version,
+    #: and the revision API names the commit a tag points at; the zoo's GitHub `dev` branch,
+    #: which the manifest generator reads, is pinned to nothing. (NGC's per-version archive,
+    #: which monaihosting installs, answered 404 at its documented path on 2026-09-12.)
+    METADATA_URL = "https://huggingface.co/MONAI/{bundle}/resolve/{version}/configs/metadata.json"
+    REVISION_URL = "https://huggingface.co/api/models/MONAI/{bundle}/revision/{version}"
+
+    def label_version(self, task: str) -> dict:
+        entry = self._entry(task)
+        out = {"bundle_version": str(entry["version"])}
+        if entry.get("checksum"):
+            out["sha1"] = str(entry["checksum"])
+        return out
+
+    def label_listing(self, task: str, root, reader) -> dict:
+        entry = self._entry(task)
+        version = str(entry["version"])
+        url = self.METADATA_URL.format(bundle=task, version=version)
+        meta, _ = reader.json(url)
+        stated = str(meta.get("version", ""))
+        if stated != version:
+            raise ModelNotFound(f"monai:{task}: the metadata at {url} says version {stated!r}; "
+                                f"this build curates {version!r}")
+        out = _monai_listing(meta)
+        out["source"] = {"url": url}
+        rev, _ = reader.json(self.REVISION_URL.format(bundle=task, version=version))
+        if rev.get("sha"):
+            out["source"]["commit"] = str(rev["sha"])    # the bytes the tag named when read
+        if root is not None and self.materialized(task, root):
+            try:
+                have = _monai_listing(self.bundle_metadata(task, root))
+                agrees = all(have.get(k) == out.get(k) for k in ("kind", "segments"))
+                out["installed"] = {"version": version, "compared": True, "agrees": agrees}
+            except Exception as e:                  # noqa: BLE001 - a report, not a gate
+                out["installed"] = {"version": version, "compared": False,
+                                    "note": f"installed copy unreadable ({type(e).__name__}: {e})"}
+        return out
+
+
+def _monai_listing(meta: dict) -> dict:
+    """A segment listing from a bundle's ``metadata.json``, by the rule its results are named
+    with (engines/monai_bundle.resolve_label_names): a labelmap names its background, a head of
+    overlapping outputs does not. The head's outputs are segments that are not disjoint - one
+    binary layer per output channel - never label values of one labelmap."""
+    from .engines.monai_bundle import declares_labelmap, label_table
+    fmt = meta.get("network_data_format") or {}
+    cd = ((fmt.get("outputs") or {}).get("pred") or {}).get("channel_def") or {}
+    inp = (fmt.get("inputs") or {}).get("image") or {}
+    out = {"modality": str(inp["modality"]) if inp.get("modality") else None}
+    if declares_labelmap(cd):
+        out.update(kind="segments",
+                   segments=[{"id": n, "value": v} for v, n in label_table(cd).items()])
+    else:
+        out.update(kind="segments",
+                   segments=[{"id": str(v), "layer": int(k), "value": 1}
+                             for k, v in sorted(cd.items(), key=lambda kv: int(kv[0]))],
+                   note="the bundle's declared output channels, which overlap - one layer each; "
+                        "the labelmap the bundle writes has its own encoding, which haversack "
+                        "reports as the values themselves")
+    return out
+
 
 #: The ecosystems each engine contributes when its engine is enabled. The
 #: nnU-Net catalogs are always present; engine catalogs appear only where their
@@ -1578,15 +1884,30 @@ _ENGINE_ECOSYSTEMS = {"fastsurfer": FastSurferEcosystem,
                       "monai": MonaiEcosystem}
 
 
+#: The nnU-Net catalogs, always served. One tuple for the served set and the structures
+#: index alike, so a catalog added here is mined and checked with no second edit.
+_NNUNET_CATALOGS = (TSEcosystem, MooseEcosystem, MRSegmentatorEcosystem,
+                    DentalSegmentatorEcosystem, TotalVibeEcosystem, CADSEcosystem)
+
+
 def default_ecosystems() -> list:
     """The catalogs this deployment serves: the nnU-Net ones, plus one per
     enabled engine. Enablement is the registry's answer (read from the
     environment per call), so the catalog and the workers cannot disagree."""
-    ecos = [TSEcosystem(), MooseEcosystem(), MRSegmentatorEcosystem(),
-            DentalSegmentatorEcosystem(), TotalVibeEcosystem(), CADSEcosystem()]
+    ecos = [cls() for cls in _NNUNET_CATALOGS]
     ecos += [cls() for engine, cls in _ENGINE_ECOSYSTEMS.items()
              if _registry.enabled(engine)]
     return ecos
+
+
+def known_ecosystems() -> list:
+    """Every catalog this build knows, whether or not its engine is enabled here.
+
+    What ``haversack catalog`` mines and checks. An index of the segments each task produces is a
+    fact about the catalog, not about what this machine can run, and one that changed with
+    whichever engines were switched on would make the shipped index depend on the machine
+    that wrote it. :func:`default_ecosystems` stays the SERVED set."""
+    return [cls() for cls in _NNUNET_CATALOGS] + [cls() for cls in _ENGINE_ECOSYSTEMS.values()]
 
 
 #: Catalogs renamed, old name -> new. TotalSegmentator's is `ts.v2` since 0.11.0: it is
