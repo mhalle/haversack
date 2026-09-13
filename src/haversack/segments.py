@@ -4,7 +4,7 @@ index, ``data/segments.json``.
 
 A **segment** is one item of a task's segment table, as in a ``.seg.nrrd``, a DICOM
 segmentation or a duckn ``seg`` leaf: the label ``value`` it is written with, the ``layer`` it
-lives in when the output overlaps (absent for the single labelmap most tasks write), and its
+lives in when the output overlaps (absent means layer 0, the single labelmap most tasks write), and its
 ``id`` - the model's own token for it: ``kidney_left``, ``Left-Cerebral-White-Matter``, and for
 two TotalVibe models nothing but numbers. The id is a code in that model's class list at its
 pinned version, not a display name and not an identity across models: ``kidney_left`` in two
@@ -68,11 +68,37 @@ def user_path() -> Path:
 
 
 def target() -> Path:
-    """The packaged index in a source checkout (to be committed), the user's otherwise - the
-    rule ``weights refresh`` follows, for its reason: site-packages is not the user's to edit
-    and does not survive an upgrade."""
+    """Where ``mine`` writes when not given ``--to``: ``HAVERSACK_SEGMENTS`` when it is set -
+    honored in a checkout too, so setting it keeps a run off the shipped file, which a review
+    found it did not (2026-09-13) - else the packaged index in a source checkout (to be
+    committed), else the user's: site-packages is not the user's to edit and does not survive
+    an upgrade, the rule ``weights refresh`` follows."""
+    if os.environ.get("HAVERSACK_SEGMENTS"):
+        return user_path()
     from .weights_fetch import _is_checkout
     return PACKAGED if _is_checkout() else user_path()
+
+
+def _chosen_paths(paths=None) -> list:
+    """The index files read, in overlay order, each once: the packaged index, then the user's."""
+    chosen, seen = [], set()
+    for p in ([PACKAGED, user_path()] if paths is None else paths):
+        p = Path(p)
+        if p.resolve() not in seen:
+            seen.add(p.resolve())
+            chosen.append(p)
+    return chosen
+
+
+def records(paths=None) -> dict:
+    """``{task: record}`` of the effective index: the packaged file with the user's laid over
+    it, a user record replacing the packaged one for its task - what search reads and what
+    ``check`` checks by default."""
+    out: dict = {}
+    for p in _chosen_paths(paths):
+        if p.is_file():
+            out.update(load(p)["tasks"])
+    return out
 
 
 class HttpReader:
@@ -111,14 +137,22 @@ class HttpReader:
 
 
 def load(path) -> dict:
-    """The index at ``path``, or an empty one. A file of another schema is refused rather than
-    merged into, since a merge would mix two shapes in one file."""
+    """The index at ``path``, or an empty one when there is no file (``mine`` creates it). A file
+    that does not parse, or is of another schema, is refused naming the fix rather than merged
+    into or searched: a broken user index reached the caller as a traceback, whose exit status
+    read as "nothing matched" (a review found it, 2026-09-13)."""
     p = Path(path)
-    if not p.is_file():
+    if not p.exists():
         return {"_meta": dict(_META), "tasks": {}}
-    raw = json.loads(p.read_text(encoding="utf-8"))
+    if not p.is_file():
+        raise InputError(f"{p}: not a file - a segments index is one JSON file")
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError) as e:
+        raise InputError(f"{p}: not a readable segments index ({type(e).__name__}: {e}) - "
+                         "regenerate it with `haversack catalog mine --all`, or remove it") from None
     have = (raw.get("_meta") or {}).get("schema_version") if isinstance(raw, dict) else None
-    if have != SCHEMA_VERSION or not isinstance(raw.get("tasks"), dict):
+    if not isinstance(raw, dict) or have != SCHEMA_VERSION or not isinstance(raw.get("tasks"), dict):
         raise InputError(f"{p}: a segments index of schema {have!r}; this haversack reads "
                          f"{SCHEMA_VERSION} - regenerate it with `haversack catalog mine --all`")
     return raw
@@ -230,16 +264,26 @@ def mine(plan, path, *, root=None, reader=None, write: bool = True, prune: bool 
             "failed": any(s == "failed" for _, s, _ in results)}
 
 
-def check(path, *, ecosystems=None, targets=None) -> list:
-    """``[(task, status, detail)]`` comparing the index at ``path`` with this build's catalogs,
-    offline: ``ok``, ``stale`` (the version that pins it moved), ``missing`` (never mined),
-    ``orphan`` (no such task any more) or ``error`` (its catalog cannot say).
+def check(path=None, *, ecosystems=None, targets=None) -> list:
+    """``[(task, status, detail)]`` comparing an index with this build's catalogs, offline:
+    ``ok``, ``stale`` (the version that pins it moved), ``missing`` (never mined), ``orphan``
+    (no such task any more) or ``error`` (its catalog cannot say).
 
-    Everything by default - it is offline and instant, which is what CI wants. ``targets``
-    narrows it, in the grammar ``mine`` takes: a named catalog's orphans are still reported,
-    since the catalog was asked about whole; a named task has none."""
+    ``path=None`` checks the effective index - the packaged one with the user's laid over it,
+    which is what search reads; checking only the file ``mine`` would write reported an
+    installed package's whole index as missing (a review found it, 2026-09-13). A ``path`` must
+    be a file: a mistyped one read as an empty index, "never mined". Everything by default -
+    offline and instant, which is what CI wants; ``targets`` narrows it in the grammar ``mine``
+    takes, a named catalog's orphans still reported since it was asked about whole."""
     from .ecosystems import known_ecosystems
-    records = load(path)["tasks"]
+    if path is None:
+        held = records()
+    else:
+        p = Path(path)
+        if not p.is_file():
+            raise InputError(f"{p}: no such index file - without a file, the packaged index "
+                             "with your user index laid over it is checked")
+        held = load(p)["tasks"]
     ecos = known_ecosystems() if ecosystems is None else list(ecosystems)
     chosen = (plan(targets, ecosystems=ecos) if targets
               else [(e, list(e.tasks()), True) for e in ecos])
@@ -249,7 +293,7 @@ def check(path, *, ecosystems=None, targets=None) -> list:
         for t in tasks:
             name = f"{eco.name}:{t}"
             live.add(name)
-            rec = records.get(name)
+            rec = held.get(name)
             try:
                 version = json.loads(json.dumps(eco.label_version(t)))
             except Exception as e:                  # noqa: BLE001 - one row of the report
@@ -262,7 +306,7 @@ def check(path, *, ecosystems=None, targets=None) -> list:
             else:
                 out.append((name, "ok", _summary(rec)))
     out += [(n, "orphan", "no such task in this build's catalogs")
-            for n in sorted(set(records) - live)
+            for n in sorted(set(held) - live)
             if not targets or n.partition(":")[0] in whole]
     return out
 
@@ -430,20 +474,30 @@ class Index:
     def __init__(self, records: dict):
         self.entries: list[dict] = []
         self.open: list[dict] = []
+        #: a record's note - a caveat about what its values mean, such as a MONAI head whose
+        #: declared outputs are not the labelmap it writes - carried into every answer naming it
+        self.notes: dict[str, str] = {}
         postings: dict[str, set] = {}
         for task, rec in sorted(records.items()):
-            base = {"task": task, "ecosystem": rec.get("ecosystem") or task.partition(":")[0],
-                    "modality": rec.get("modality"), "kind": rec.get("kind")}
-            if rec.get("kind") == "open":
-                self.open.append(base)
-                continue
-            for s in rec.get("segments") or ():
-                entry = {**base, "value": s["value"], "id": str(s["id"]), "key": fold(s["id"])}
-                if s.get("layer"):
-                    entry["layer"] = s["layer"]
-                for w in words(entry["key"]):
-                    postings.setdefault(w, set()).add(len(self.entries))
-                self.entries.append(entry)
+            try:
+                base = {"task": task, "ecosystem": rec.get("ecosystem") or task.partition(":")[0],
+                        "modality": rec.get("modality"), "kind": rec.get("kind")}
+                if rec.get("note"):
+                    self.notes[task] = str(rec["note"])
+                if rec.get("kind") == "open":
+                    self.open.append(base)
+                    continue
+                for s in rec.get("segments") or ():
+                    entry = {**base, "value": int(s["value"]), "id": str(s["id"]),
+                             "key": fold(s["id"])}
+                    if s.get("layer"):
+                        entry["layer"] = int(s["layer"])
+                    for w in words(entry["key"]):
+                        postings.setdefault(w, set()).add(len(self.entries))
+                    self.entries.append(entry)
+            except (AttributeError, KeyError, TypeError, ValueError) as e:
+                raise InputError(f"segments index record {task!r} is malformed ({type(e).__name__}: "
+                                 f"{e}) - re-mine it with `haversack catalog mine {task}`") from None
         self._postings = postings
         self._vocabulary = sorted(postings)
         self.catalogs = sorted({e["ecosystem"] for e in self.entries} |
@@ -476,9 +530,16 @@ class Index:
             raise InputError(f"the query is {len(query)} characters; the limit is {MAX_QUERY}")
         if limit is not None and limit < 1:
             raise InputError("limit must be at least 1")
-        if catalog is not None and catalog not in self.catalogs:
-            raise InputError(f"unknown catalog {catalog!r}; the index has "
-                             f"{', '.join(self.catalogs)}")
+        # Named against what the caller may see: listing every catalog in the index told a
+        # server's callers about catalogs it does not serve (a review found it, 2026-09-13).
+        visible = sorted({e["ecosystem"] for e in self.entries + self.open
+                          if tasks is None or e["task"] in tasks})
+        if catalog is not None and catalog not in visible:
+            if tasks is not None and catalog in self.catalogs:
+                raise InputError(f"catalog {catalog!r} has no tasks here; this answers from "
+                                 f"{', '.join(visible) or 'no catalogs'}")
+            raise InputError(f"unknown catalog {catalog!r}; known here: "
+                             f"{', '.join(visible) or 'none'}")
 
         def keep(e) -> bool:
             return ((catalog is None or e["ecosystem"] == catalog)
@@ -500,12 +561,17 @@ class Index:
                 hit = found if hit is None else hit & found
             matched = [i for i in sorted(hit or ()) if keep(self.entries[i])]
         elif mode == "glob":
+            # Compiled here rather than through fnmatch.fnmatchcase, whose pattern cache
+            # (32768 entries) kept every distinct pattern an anonymous caller sent - 75-200 MiB
+            # of them, measured by a review (2026-09-13). `re` keeps only its last 512.
             pattern = _fold_glob(query) if field == "key" else query
-            matched = [i for i, e in enumerate(self.entries)
-                       if keep(e) and fnmatch.fnmatchcase(e[field], pattern)]
+            rx = re.compile(fnmatch.translate(pattern))
+            matched = [i for i, e in enumerate(self.entries) if keep(e) and rx.match(e[field])]
         else:
+            # case matters under field=id - "the model's own spelling" - and not for the
+            # folded key, which is lower case whatever the pattern says
             try:
-                rx = re.compile(query, re.IGNORECASE)
+                rx = re.compile(query, re.IGNORECASE if field == "key" else 0)
             except re.error as e:
                 raise InputError(f"regex {query!r}: {e}") from None
             matched = [i for i, e in enumerate(self.entries) if keep(e) and rx.search(e[field])]
@@ -523,11 +589,15 @@ class Index:
         exact = fold(query)
         ordered = sorted(groups.values(), key=lambda g: (g["key"] != exact, g["key"]))
         truncated = limit is not None and len(ordered) > limit
+        shown = ordered[:limit] if truncated else ordered
         opened = [o["task"] for o in self.open if keep(o)]
-        out = {"query": query, "mode": mode, "field": field, "keys": len(groups),
-               "segments": len(matched), "truncated": truncated,
-               "results": ordered[:limit] if truncated else ordered,
+        out = {"query": query, "mode": mode, "field": field, "key_count": len(groups),
+               "segment_count": len(matched), "truncated": truncated, "results": shown,
                "open_vocabulary": opened}
+        named = {s["task"] for g in shown for s in g["segments"]}
+        notes = {t: self.notes[t] for t in sorted(named) if t in self.notes}
+        if notes:
+            out["notes"] = notes
         if opened:
             out["open_vocabulary_note"] = _OPEN_NOTE
         return out
@@ -542,12 +612,7 @@ def index(paths=None) -> Index:
     packaged one. Rebuilt only when one of the files changes, so a server pays for it once."""
     import threading
     lock = _INDEX_CACHE.setdefault("_lock", threading.Lock())
-    chosen, seen = [], set()
-    for p in ([PACKAGED, user_path()] if paths is None else paths):
-        p = Path(p)
-        if p.resolve() not in seen:
-            seen.add(p.resolve())
-            chosen.append(p)
+    chosen = _chosen_paths(paths)
 
     def state(p: Path):
         try:
@@ -560,11 +625,7 @@ def index(paths=None) -> Index:
     with lock:
         built = _INDEX_CACHE.get(stamp)
         if built is None:
-            records: dict = {}
-            for p in chosen:
-                if p.is_file():
-                    records.update(load(p)["tasks"])
-            built = Index(records)
+            built = Index(records(chosen))
             for k in [k for k in _INDEX_CACHE if k != "_lock"]:
                 del _INDEX_CACHE[k]
             _INDEX_CACHE[stamp] = built

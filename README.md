@@ -73,10 +73,14 @@ already on disk. `haversack tasks --installed` shows what will run without a dow
 `haversack tasks ts.v2:total_fast` prints the structures a task produces, one per line.
 `haversack tasks --find pancreas` answers which tasks produce a segment, and with what label
 value, without installing anything (`--find "kid left"` finds kidney_left and left_kidney;
-`--glob` and `--regex` take patterns). It reads `src/haversack/data/segments.json`: every
-task's segments - label value, layer where the output overlaps, and the id its model gives
-each - as the model states them, with the version that pins each list; `haversack catalog
-mine` refreshes it and `haversack catalog check` finds stale records. This
+`--glob` and `--regex` take patterns). It reads the segments index that ships with haversack,
+with your own laid over it where one exists (`HAVERSACK_SEGMENTS`, else
+`~/.config/haversack/segments.json`): every task's segments - label value, layer where the
+output overlaps (none means layer 0), and the id its model gives each - as the model states
+them, with the version that pins each list. A task's `structures` are those ids in label order,
+and `haversack tasks TASK` prints them from the index for a model not installed here.
+`haversack catalog mine` refreshes the index and `haversack catalog check` finds stale
+records. This
 guide itself ships with the package: `haversack docs` prints it, `haversack docs weights`
 one section, and every command answers `--help` with its options, defaults and examples.
 

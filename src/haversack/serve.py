@@ -3449,16 +3449,38 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 **({"version": requested.rpartition("@")[2]}
                    if requested != task else {})}
 
-    @app.get("/v1/segments", tags=["tasks"])
-    def segments_search(q: str, mode: str = "words", field: str = "key",
-                        catalog: str | None = None, modality: str | None = None,
-                        limit: int = 100):
+    from fastapi import Query
+
+    @app.get("/v1/segments", tags=["tasks"], responses={
+        422: {"description": "a query the search refuses: empty or over the length cap, "
+                             "mode=regex, field=id with word search, a catalog with no tasks "
+                             "here, limit outside 1-1000"},
+        503: {"description": "the segments index, or this server's own task list, is "
+                             "unavailable"}})
+    def segments_search(
+            q: str = Query(..., description="word prefixes in any order (mode=words), or a "
+                                            "shell pattern over the whole id (mode=glob)"),
+            mode: str = Query("words", description="words or glob; regex is refused here"),
+            field: str = Query("key", description="key: ids folded for case, spaces and "
+                                                  "hyphens; id: the model's own spelling "
+                                                  "(glob only)"),
+            catalog: str | None = Query(None, description="only this catalog (ts.v2, moose, ...)"),
+            modality: str | None = Query(None, description="only tasks whose modality "
+                                                          "contains this (CT, MR, ...)"),
+            limit: int = Query(100, description="at most this many ids (result groups), "
+                                                "1-1000")):
         """Which tasks produce a segment, and with what label value: a search over every
         task's segments as its model states them (``data/segments.json``), grouped by folded
         id. A read, open to anonymous callers like ``/v1/tasks``. Word prefixes in any order
         (the default) or a glob over the whole id; a regular expression is refused here,
         because a pattern from anyone can take unbounded time to evaluate. Only tasks this
-        deployment serves come back. Not ``/v1/segmentations``, which lists cached results."""
+        deployment serves come back. Not ``/v1/segmentations``, which lists cached results.
+
+        The answer: ``results``, one per folded id - ``key``, the ``ids`` as the models spell
+        them, and ``segments``, each ``{task, value, id, modality, layer?}`` (no ``layer``
+        means layer 0) - with ``key_count``, ``segment_count``, ``truncated``, ``notes``
+        (``{task: caveat}`` for tasks whose values need one) and ``open_vocabulary`` (served
+        tasks that segment whatever a prompt names)."""
         from . import segments as segments_index
         if not 1 <= limit <= 1000:
             raise HTTPException(422, "limit must be between 1 and 1000")
@@ -3468,8 +3490,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(503, "the segments index is unavailable on this server") from e
         try:
             served = set(seg.tasks())
-        except Exception:                  # noqa: BLE001 - nothing served, nothing listed
-            served = set()
+        except Exception as e:             # noqa: BLE001 - a fault, not "nothing produces it"
+            raise HTTPException(503, "this server cannot list its tasks right now") from e
         try:
             return idx.search(q, mode=mode, field=field, catalog=catalog, modality=modality,
                               tasks=served, limit=limit,

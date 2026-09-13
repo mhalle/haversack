@@ -82,6 +82,26 @@ class TheSegmentsRoute(unittest.TestCase):
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(self.tasks(r), {"ts.v2:total"})
 
+    def test_a_server_that_cannot_list_its_tasks_says_so(self):
+        """An empty 200 read as "nothing produces this"; it is a fault, and says so."""
+        with mock.patch.object(ServedSegmenter, "tasks", side_effect=RuntimeError("boom")):
+            r = self.get(q="liver")
+        self.assertEqual(r.status_code, 503)
+        self.assertNotIn("boom", r.text)
+
+    def test_an_unserved_catalog_is_not_named_back(self):
+        r = self.get(q="left", catalog="moose")
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("has no tasks here", r.json()["detail"])
+        self.assertNotIn("cads", r.json()["detail"])
+
+    def test_the_openapi_says_what_the_parameters_and_errors_are(self):
+        op = self.client.app.openapi()["paths"]["/v1/segments"]["get"]
+        params = {p["name"]: p for p in op["parameters"]}
+        self.assertIn("glob", params["mode"]["description"])
+        self.assertIn("own spelling", params["field"]["description"])
+        self.assertIn("503", op["responses"])
+
     def test_the_remote_client_speaks_it(self):
         rc = RemoteClient("http://testserver")
         rc._http = self.client                   # starlette's TestClient is an httpx.Client

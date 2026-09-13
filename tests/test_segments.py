@@ -61,8 +61,10 @@ class FakeReader:
     def zip(self, url):
         if url in self.fail:
             raise urllib.error.URLError("unreachable")
+        # flat (MRSegmentator) and a configuration folder at the top level - where an install
+        # reads an archive that does not carry its manifest's Dataset folder
         data = self.zips.get(url) or _zip({"dataset.json": _dataset(GENERIC),
-                                           f"Dataset001_x/{CFG}/dataset.json": _dataset(GENERIC)})
+                                           f"{CFG}/dataset.json": _dataset(GENERIC)})
         return zipfile.ZipFile(io.BytesIO(data))
 
     def json(self, url):
@@ -188,6 +190,37 @@ class ArchivesAreReadTheWayAnInstallReadsThem(unittest.TestCase):
             f"{self.folder}/{CFG}/dataset.json": _dataset({"volume": 1}),
         })
         self.assertEqual(got["segments"], [{"id": "volume", "value": 1}])
+
+    def test_a_nested_copy_of_a_configuration_is_not_read(self):
+        """Configuration folders are the Dataset folder's direct children, as an install sees
+        them; a copy deeper in the archive is not one (a review mined `stale` from one)."""
+        got = self.listing({f"{self.folder}/{CFG}/dataset.json": _dataset({"tooth": 1}),
+                            f"{self.folder}/old/{CFG}/dataset.json": _dataset({"stale": 1})})
+        self.assertEqual(got["segments"], [{"id": "tooth", "value": 1}])
+
+    def test_a_preferred_configuration_without_dataset_json_is_refused(self):
+        """An install takes the preferred configuration whether or not it holds a dataset.json,
+        and then cannot load; reading the next one instead answered for a model no install
+        runs."""
+        with self.assertRaisesRegex(ModelNotFound, "has no dataset.json"):
+            self.listing({f"{self.folder}/{CFG}/plans.json": {},
+                          f"{self.folder}/nnUNetTrainer__nnUNetPlans__2d/dataset.json":
+                              _dataset({"flat": 1})})
+
+    def test_another_dataset_folder_in_the_archive_is_not_read(self):
+        got = self.listing({f"{self.folder}/{CFG}/dataset.json": _dataset({"tooth": 1}),
+                            f"Dataset999_other/{CFG}/dataset.json": _dataset({"other": 1})})
+        self.assertEqual(got["segments"], [{"id": "tooth", "value": 1}])
+
+    def test_a_dot_prefixed_folder_is_not_a_configuration(self):
+        """Dot-prefixed directories are an installer's scratch (`.staging`, `.unzip-*`), never
+        a model; TotalVibe's archives are read from their top level, where one could sit."""
+        eco = E.TotalVibeEcosystem()
+        task = sorted(eco.tasks())[0]
+        got = self.listing({f".{CFG}/dataset.json": _dataset({"staging": 1}),
+                            "nnUNetTrainer__nnUNetPlans__2d/dataset.json": _dataset({"real": 1})},
+                           eco=eco, task=task)
+        self.assertEqual(got["segments"], [{"id": "real", "value": 1}])
 
     def test_configurations_the_preference_cannot_choose_between_are_refused(self):
         with self.assertRaisesRegex(ModelNotFound, "none is preferred"):
@@ -332,7 +365,7 @@ class MergingTouchesOnlyWhatWasAsked(unittest.TestCase):
         text = self.path.read_text()
         url = self.ecos[0]._entries["base"]["url"]
         r = segments.mine(self.plan("dentalsegmentator"), self.path, write=False,
-                          reader=FakeReader(zips={url: _zip({f"D/{CFG}/dataset.json": _dataset({"x": 1})})}))
+                          reader=FakeReader(zips={url: _zip({f"{CFG}/dataset.json": _dataset({"x": 1})})}))
         self.assertEqual([s for _, s, _ in r["results"]], ["changed"])
         self.assertFalse(r["written"])
         self.assertEqual(self.path.read_text(), text)
@@ -344,6 +377,21 @@ class MergingTouchesOnlyWhatWasAsked(unittest.TestCase):
         self.assertTrue(r["failed"])
         self.assertEqual(self.records(), before)
         self.assertIn("kept the record mined 2000-01-01", r["results"][0][2])
+
+    def test_a_failed_task_keeps_its_record_while_another_changes(self):
+        """The failure path in a run that still writes: one task's fetch fails, another's list
+        changes, and the failed task's record must come through the write unchanged. Mining a
+        single failing task writes nothing, so it could not tell."""
+        before = self.records()
+        dental = self.ecos[0]._entries["base"]["url"]
+        mrseg = self.ecos[1]._entries["base"]["url"]
+        r = segments.mine(self.plan(), self.path, today="2003-03-03", reader=FakeReader(
+            fail={dental}, zips={mrseg: _zip({"dataset.json": _dataset({"liver": 1})})}))
+        self.assertTrue(r["failed"])
+        self.assertTrue(r["written"])
+        after = self.records()
+        self.assertEqual(after["dentalsegmentator:base"], before["dentalsegmentator:base"])
+        self.assertEqual(after["mrsegmentator:base"]["segments"], [{"id": "liver", "value": 1}])
 
     def _plant(self, **records):
         data = json.loads(self.path.read_text())
@@ -387,7 +435,7 @@ class MergingTouchesOnlyWhatWasAsked(unittest.TestCase):
         before = self.records()
         r = segments.mine(self.plan("dentalsegmentator:base"), self.path, root=root,
                           reader=FakeReader(zips={self.ecos[0]._entries["base"]["url"]:
-                                                  _zip({f"D/{CFG}/dataset.json": _dataset({"x": 1})})}))
+                                                  _zip({f"{CFG}/dataset.json": _dataset({"x": 1})})}))
         self.assertTrue(r["failed"])
         self.assertIn("installed copy", r["results"][0][2])
         self.assertEqual(self.records(), before)
@@ -442,6 +490,36 @@ class StalenessFollowsTheCatalog(unittest.TestCase):
         self.assertEqual(rows["mrsegmentator:base"], "missing")
         self.assertEqual(rows["dentalsegmentator:gone"], "orphan")
         self.assertEqual(rows["dentalsegmentator:base"], "ok")
+
+    def test_a_modality_the_catalog_class_states_moves_its_records(self):
+        """MRSegmentator and the engines state modality on the class, not in a manifest. Their
+        records carry it, so an edit there must make the records stale - a review changed it
+        and watched check() stay green (2026-09-13)."""
+        for eco in (E.MRSegmentatorEcosystem(), E.FastSurferEcosystem(), E.SynthStripEcosystem()):
+            task = eco.tasks()[0]
+            before = eco.label_version(task)
+            with mock.patch.object(eco, "modality", "CT (edited)"):
+                self.assertNotEqual(eco.label_version(task), before, eco.name)
+
+    def test_check_refuses_a_file_that_is_not_there(self):
+        """A mistyped --file read as an empty index: every task 'never mined'."""
+        with self.assertRaisesRegex(InputError, "no such index file"):
+            segments.check(self.tmp / "typo.json", ecosystems=[self.eco])
+        with self.assertRaisesRegex(InputError, "no such index file"):
+            segments.check(self.tmp, ecosystems=[self.eco])
+
+    def test_check_without_a_file_reads_the_packaged_index_with_the_users_over_it(self):
+        """What search reads is what is checked: from an installed package, checking only the
+        file `mine` would write reported the whole index missing."""
+        shipped = segments.load(segments.PACKAGED)["tasks"]["dentalsegmentator:base"]
+        user = self.tmp / "user.json"
+        segments.dump({"dentalsegmentator:base": {**shipped, "version": {"tag": "old"}}}, user)
+        with mock.patch.dict(os.environ, {"HAVERSACK_SEGMENTS": str(user)}):
+            rows = {n: s for n, s, _ in segments.check(targets=["dentalsegmentator"])}
+        self.assertEqual(rows, {"dentalsegmentator:base": "stale"})
+        with mock.patch.dict(os.environ, {"HAVERSACK_SEGMENTS": str(self.tmp / "none.json")}):
+            rows = {n: s for n, s, _ in segments.check(targets=["dentalsegmentator"])}
+        self.assertEqual(rows, {"dentalsegmentator:base": "ok"})
 
     def test_check_narrows_to_a_catalog_or_a_task(self):
         """A named catalog is checked whole, its vanished tasks included; a named task alone."""
@@ -631,7 +709,7 @@ class SearchingTheIndex(unittest.TestCase):
 
     def test_limit_truncates_and_says_so(self):
         res = self.idx.search("vertebrae", limit=1)
-        self.assertEqual((len(res["results"]), res["truncated"], res["keys"]), (1, True, 3))
+        self.assertEqual((len(res["results"]), res["truncated"], res["key_count"]), (1, True, 3))
 
     def test_bad_queries_are_refused_with_the_fix(self):
         for kw, words in (({"query": ""}, "empty"), ({"query": "x" * 201}, "limit"),
@@ -647,6 +725,41 @@ class SearchingTheIndex(unittest.TestCase):
     def test_a_caller_without_regex_is_told_where_regex_is(self):
         with self.assertRaisesRegex(InputError, "--regex"):
             self.idx.search("^x$", mode="regex", allowed_modes=segments.WIRE_MODES)
+
+    def test_exact_regex_minds_case_and_the_folded_key_does_not(self):
+        self.assertEqual(self.keys("^Left", mode="regex", field="id"),
+                         ["left_cerebral_white_matter", "left_kidney"])
+        self.assertEqual(self.keys("^left", mode="regex", field="id"), [])
+        self.assertEqual(self.keys("^LEFT", mode="regex"),
+                         ["left_cerebral_white_matter", "left_kidney"])
+
+    def test_a_catalog_the_caller_cannot_see_is_not_named(self):
+        """A server answers from what it serves; naming the rest of the index in an error told
+        its callers about catalogs it does not serve."""
+        with self.assertRaisesRegex(InputError, "has no tasks here") as cm:
+            self.idx.search("left", catalog="moose", tasks={"ts.v2:total"})
+        self.assertNotIn("fastsurfer", str(cm.exception))
+        with self.assertRaises(InputError) as cm:
+            self.idx.search("left", catalog="nosuch", tasks={"ts.v2:total"})
+        self.assertNotIn("moose", str(cm.exception))
+
+    def test_a_records_note_rides_along_with_its_answers(self):
+        idx = segments.Index({**SAMPLE, "monai:brats": {**SAMPLE["monai:brats"],
+                                                        "note": "its own encoding"}})
+        self.assertEqual(idx.search("tumor core")["notes"], {"monai:brats": "its own encoding"})
+        self.assertNotIn("notes", idx.search("pancreas"))
+
+    def test_globs_do_not_fill_fnmatchs_pattern_cache(self):
+        """fnmatch caches every distinct pattern, 32768 of them; an anonymous caller could fill
+        it with 75-200 MiB of compiled globs. The search compiles its own."""
+        import fnmatch
+        cache = getattr(fnmatch, "_compile_pattern", None)
+        if cache is None or not hasattr(cache, "cache_info"):
+            self.skipTest("this Python's fnmatch keeps no pattern cache")
+        before = cache.cache_info().currsize
+        for i in range(50):
+            self.idx.search(f"*{i}q*", mode="glob")
+        self.assertEqual(cache.cache_info().currsize, before)
 
 
 class TheIndexIsBuiltFromTheFiles(unittest.TestCase):
@@ -665,6 +778,25 @@ class TheIndexIsBuiltFromTheFiles(unittest.TestCase):
         idx = segments.index(paths=[a, b])
         self.assertEqual([g["key"] for g in idx.search("spleen")["results"]], ["spleen"])
         self.assertEqual([g["key"] for g in idx.search("kid", catalog="moose")["results"]], [])
+
+    def test_a_file_that_does_not_parse_is_refused_naming_the_fix(self):
+        """A broken user index reached the caller as a traceback, whose exit status read as
+        'nothing matched'."""
+        p = self.tmp / "broken.json"
+        p.write_text("{not json")
+        with self.assertRaisesRegex(InputError, "catalog mine"):
+            segments.load(p)
+        with self.assertRaisesRegex(InputError, "not a file"):
+            segments.load(self.tmp)
+
+    def test_a_malformed_record_names_the_task_to_re_mine(self):
+        with self.assertRaisesRegex(InputError, "moose:x.*catalog mine moose:x"):
+            segments.Index({"moose:x": {**SAMPLE["moose:x"], "segments": [{"id": "a"}]}})
+
+    def test_haversack_segments_is_where_mine_writes_even_in_a_checkout(self):
+        """Setting it is how a run stays off the shipped file; in a checkout it was ignored."""
+        with mock.patch.dict(os.environ, {"HAVERSACK_SEGMENTS": str(self.tmp / "mine.json")}):
+            self.assertEqual(segments.target(), self.tmp / "mine.json")
 
     def test_it_is_built_once_and_again_when_a_file_changes(self):
         a = self.write("a.json", {"moose:x": SAMPLE["moose:x"]})
@@ -713,6 +845,33 @@ class TheCommandLine(unittest.TestCase):
         rc, _, err = self.run_cli("catalog", "check", "cads")
         self.assertEqual(rc, 0, err)
         self.assertIn("9 ok", err)
+
+    def test_catalog_check_refuses_a_file_that_is_not_there(self):
+        rc, _, err = self.run_cli("catalog", "check", "--file", "/nonexistent/typo.json")
+        self.assertEqual(rc, 2)
+        self.assertIn("no such index file", err)
+
+    def test_the_search_modifiers_are_refused_where_they_mean_nothing(self):
+        for argv, words in ((("tasks", "--limit", "3"), "--find"),
+                            (("tasks", "--find", "x", "--glob", "--regex"), "give one"),
+                            (("tasks", "--find", "kidney", "--exact"), "--exact")):
+            with self.subTest(argv=argv):
+                rc, _, err = self.run_cli(*argv)
+                self.assertEqual(rc, 2, err)
+                self.assertIn(words, err)
+
+    def test_find_answers_from_the_tasks_this_catalog_lists(self):
+        """Engines are off in the suite, so their catalogs are not listed - and --find must not
+        name what `tasks TASK` would then call unknown."""
+        rc, out, _ = self.run_cli("tasks", "--find", "*tumor*", "--glob")
+        self.assertNotIn("monai:", out)
+
+    def test_a_task_not_installed_prints_its_segments_from_the_index(self):
+        empty = _tmpdir(self)
+        rc, out, err = self.run_cli("tasks", "cads:organs", "--model-root", str(empty))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("from the segments index", err)
+        self.assertTrue(out.splitlines()[0].startswith("1\t"), out)
 
 
 class TheShippedIndexAnswersRealQuestions(unittest.TestCase):

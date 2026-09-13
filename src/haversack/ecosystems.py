@@ -153,19 +153,24 @@ def checkpoint_dataset_json(zf, *, folder: str | None = None, flat: bool = False
         if "dataset.json" not in names:
             raise ModelNotFound(f"{where}: the archive has no dataset.json at its top level")
         return "dataset.json", json.loads(zf.read("dataset.json"))
-    found: dict[str, list] = {}
+    # The level an install reads: the manifest's Dataset folder where the archive carries it
+    # (MOOSE, CADS), else the archive's top level (TotalVibe's unpacks into a folder of this
+    # catalog's making). Configuration folders are that level's direct children only, chosen
+    # by preference whether or not they hold a dataset.json, as resolve_model_folder chooses:
+    # a review built archives where a nested copy, or a preferred folder with no dataset.json,
+    # made this read what no install would load (2026-09-13).
+    prefix = str(folder).rstrip("/") + "/" if folder else ""
+    root = prefix if prefix and any(n.startswith(prefix) for n in names) else ""
+    found: dict[str, set] = {}
     for n in names:
-        parts = n.split("/")
-        if (len(parts) >= 2 and parts[-1] == "dataset.json" and parts[-2].count("__") == 2
-                and not any(p.startswith(".") for p in parts[:-1])):
-            found.setdefault(parts[-2].rsplit("__", 1)[1], []).append(n)
-    if folder:
-        prefix = str(folder).rstrip("/") + "/"
-        inside = {c: [n for n in ms if n.startswith(prefix)] for c, ms in found.items()}
-        found = {c: ms for c, ms in inside.items() if ms} or found
+        if not n.startswith(root):
+            continue
+        rest = n[len(root):].split("/")
+        if len(rest) >= 2 and rest[0].count("__") == 2 and not rest[0].startswith("."):
+            found.setdefault(rest[0].rsplit("__", 1)[1], set()).add(rest[0])
     if not found:
         raise ModelNotFound(f"{where}: the archive holds no <trainer>__<plans>__<config> "
-                            "folder with a dataset.json")
+                            f"folder where an install reads it ({root or 'its top level'})")
     config = next((c for c in CONFIG_PREFERENCE if c in found), None)
     if config is None:
         if len(found) != 1:
@@ -175,7 +180,10 @@ def checkpoint_dataset_json(zf, *, folder: str | None = None, flat: bool = False
     if len(found[config]) != 1:
         raise ModelNotFound(f"{where}: the archive ships {config} more than once: "
                             f"{sorted(found[config])}")
-    member = found[config][0]
+    member = f"{root}{next(iter(found[config]))}/dataset.json"
+    if member not in names:
+        raise ModelNotFound(f"{where}: the preferred configuration {config} has no "
+                            "dataset.json, so an install of this archive would not load either")
     return member, json.loads(zf.read(member))
 
 
@@ -933,8 +941,12 @@ class MRSegmentatorEcosystem(ModelEcosystem):
         return out
 
     def label_version(self, task: str) -> dict:
-        return _pinned(manifest_entry(self._entries, task, what=f"mrsegmentator task {task!r}",
-                                      generator="tools/gen_mrsegmentator_manifest.py"))
+        out = _pinned(manifest_entry(self._entries, task, what=f"mrsegmentator task {task!r}",
+                                     generator="tools/gen_mrsegmentator_manifest.py"))
+        # the record states the class's modality, so an edit to it must make the record
+        # stale - it did not until a review changed it and watched check() stay green
+        out["modality"] = str(self.modality)
+        return out
 
     def label_listing(self, task: str, root, reader) -> dict:
         entry = manifest_entry(self._entries, task, what=f"mrsegmentator task {task!r}",
@@ -1444,6 +1456,9 @@ class ImageBakedEcosystem(EngineEcosystem):
         table = self._required_table(task)
         if table is not None:
             out["table_sha256"] = _digest({str(k): v for k, v in table.items()})
+        if self.modality:
+            # the record states it, so an edit to it must make the record stale (2026-09-13)
+            out["modality"] = str(self.modality)
         return out
 
     def label_listing(self, task: str, root, reader) -> dict:

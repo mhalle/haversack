@@ -188,19 +188,28 @@ A job submitted with a pin reports it as `version` beside the canonical `task`.
 `GET /v1/segments?q=...` answers which tasks produce a segment, and with what label value,
 before anything is installed. A segment is one item of a task's segment table, as in a
 `.seg.nrrd` or a DICOM segmentation: the label `value` it is written with, the `layer` it lives
-in where the output overlaps, and its `id` - the model's own token for it, a code in that
-model's class list rather than a display name or an identity across models. The search runs
-over every task's segments as its model states them, grouped by folded id and limited to the
-tasks this deployment serves (not to be confused with `/v1/segmentations`, which lists cached
-results). `q` is word prefixes in any order by default (`kid left` finds `kidney_left` and
-`left_kidney`); `mode=glob` matches a shell pattern against the whole id. Ids are compared
-folded (case, spaces, hyphens), and `field=id` holds a glob to the model's own spelling
-instead. `catalog`, `modality` and `limit` (1-1000, default 100) narrow it. A regular
-expression is a `422` here: a pattern from anyone can take unbounded time to evaluate, so regex
-stays with `haversack tasks --find PATTERN --regex`, locally. Tasks with no fixed segment list
-(VoxTell) come back apart, as `open_vocabulary`. The answer is `data/segments.json`, which
-records the version each list was read at; `haversack catalog check` says which records a
-catalog change has made stale.
+in where the output overlaps (no `layer` means layer 0), and its `id` - the model's own token
+for it, a code in that model's class list rather than a display name or an identity across
+models. A task's `structures` in `GET /v1/tasks/{task}` are those ids, in label order. The
+search runs over every task's segments as its model states them, limited to the tasks this
+deployment serves (not to be confused with `/v1/segmentations`, which lists cached results).
+`q` is word prefixes in any order by default (`kid left` finds `kidney_left` and
+`left_kidney`); `mode=glob` matches a shell pattern against the whole id. `field=key` (the
+default) compares ids folded for case, spaces and hyphens; `field=id` holds a glob to the
+model's own spelling. `catalog`, `modality` and `limit` (ids returned, 1-1000, default 100)
+narrow it.
+
+The answer groups segments by folded id: `results` is a list of `{key, ids, segments}` - `ids`
+the spellings the models use, `segments` each `{task, value, id, modality, layer?}` - beside
+`key_count`, `segment_count` and `truncated`. `notes` maps a task to a caveat its values need
+(a MONAI head whose declared outputs are not the labelmap it writes), and `open_vocabulary`
+lists served tasks with no fixed segment list (VoxTell), which may segment anything a prompt
+names. A `422` is a query the search refuses - empty or longer than 200 characters,
+`mode=regex` (a pattern from anyone can take unbounded time to evaluate, so regex stays with
+`haversack tasks --find PATTERN --regex`, locally), `field=id` with word search, a catalog with
+no tasks here, a `limit` out of range - and a `503` means the index or this server's own task
+list is unavailable. The index is `data/segments.json`, with the version each list was read
+at; `haversack catalog check` says which records a catalog change has made stale.
 
 `parameters.algorithm` is the engine's own knobs, empty for nnU-Net tasks, a `prompt` for
 VoxTell. `parameters.processing` is haversack's, offered only where haversack owns the chain:

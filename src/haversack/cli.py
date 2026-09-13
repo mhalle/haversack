@@ -427,12 +427,13 @@ def _command_line() -> click.Group:
         short_help="list every task the catalog can segment, or one task's structures",
         help=('One line per task: name, engine, modality, and whether its weights are on disk '
               "(or, for an engine task, whether the engine's runtime is installed here). With a "
-              "task name, prints that task's structures, one per line, in label order. With "
-              '--find, which tasks produce a segment - from the segments index, so nothing is '
-              'installed: word prefixes in any order by default ("kid left" finds kidney_left '
-              'and left_kidney), --glob or --regex for patterns. Ids are compared folded (case, '
-              'spaces and hyphens); it is not an ontology, and an abbreviation or a synonym is '
-              'not found. --find exits 1 when nothing matches.'),
+              "task name, prints that task's structures - its segments' ids - one per line in "
+              'label order; for a model not installed here, from the segments index. With '
+              '--find, which of the tasks listed here produce a segment - from the index, so '
+              'nothing is installed: word prefixes in any order by default ("kid left" finds '
+              'kidney_left and left_kidney), --glob or --regex for patterns. Ids are compared '
+              'folded (case, spaces and hyphens); it is not an ontology, and an abbreviation or '
+              'a synonym is not found. --find exits 1 when nothing matches, 2 on a usage error.'),
         epilog=_verbatim("""examples:
   haversack tasks                        every task
   haversack tasks --installed            what runs without a download
@@ -442,7 +443,7 @@ def _command_line() -> click.Group:
                                          `task_spec` = it is an nnU-Net model (false for FastSurfer, SynthStrip, ...)
   haversack tasks --find pancreas        every task that produces a pancreas, with its label value
   haversack tasks --find "kid left" --installed        ...among what runs without a download
-  haversack tasks --find 'vertebrae_[ct]*' --glob      cervical and thoracic vertebrae
+  haversack tasks --find 'vertebra*_[ct]*' --glob      cervical and thoracic vertebrae, either spelling
   haversack tasks --find '^rib_(left|right)_1[0-2]$' --regex
   haversack tasks ts.v2:total --find liver             search one task's segments"""),
         params=[
@@ -453,23 +454,27 @@ def _command_line() -> click.Group:
             click.Option(['--model-root'], help='weights root to check for installed models'),
             click.Option(['--installed'], is_flag=True,
                          help='only tasks whose weights are already on disk'),
-            click.Option(['--json'], is_flag=True, help='the full per-task info records'),
+            click.Option(['--json'], is_flag=True,
+                         help='the full per-task info records; with --find, the search answer'),
             click.Option(['--find'], metavar='TEXT',
-                         help=('which tasks produce a segment: prints each task, label value and '
-                               'layer, grouped by id. With a task name, searches that task')),
-            click.Option(['--glob', 'mode'], flag_value='glob',
+                         help=('which of the tasks listed here produce a segment: each id, then '
+                               'a line per task - the task, its label value ("1 L2" = value 1 in '
+                               'layer 2, where the output overlaps), its modality, and the '
+                               "model's own spelling in parentheses where it differs. With a "
+                               'task name, searches that task')),
+            click.Option(['--glob'], is_flag=True,
                          help='with --find: a shell pattern (*, ?, [...]) against the whole id'),
-            click.Option(['--regex', 'mode'], flag_value='regex',
+            click.Option(['--regex'], is_flag=True,
                          help='with --find: a regular expression anywhere in the id'),
-            click.Option(['--exact', 'field'], flag_value='id',
-                         help=("with --find --glob or --regex: the model's own spelling of the "
-                               'id rather than its folded form')),
+            click.Option(['--exact'], is_flag=True,
+                         help=("with --find and --glob or --regex: the model's own spelling of "
+                               'the id, case included, rather than its folded form')),
             click.Option(['--catalog'],
                          help='with --find: only this catalog (ts.v2, moose, monai, ...)'),
             click.Option(['--modality'],
                          help='with --find: only tasks whose modality contains this (CT, MR, ...)'),
-            click.Option(['--limit'], type=int, default=50, show_default=True,
-                         help='with --find: at most this many ids'),
+            click.Option(['--limit'], type=int,
+                         help='with --find: at most this many ids (default 50)'),
         ])
     root.add_command(tasks)
 
@@ -532,9 +537,10 @@ def _command_line() -> click.Group:
               'its record, and a task that fails keeps its previous record and fails the run. '
               'Naming a catalog also drops its records of tasks it no longer offers. Where a '
               "model is installed at the same version, its own labels must agree with its "
-              "archive's, or the list is not recorded. In a source checkout this writes the "
-              'packaged index (src/haversack/data/segments.json); from an installed package, '
-              '~/.config/haversack/segments.json (or HAVERSACK_SEGMENTS).'),
+              "archive's, or the list is not recorded. It writes --to, else HAVERSACK_SEGMENTS, "
+              'else in a source checkout the packaged index (src/haversack/data/segments.json), '
+              'else ~/.config/haversack/segments.json - which search then lays over the '
+              'packaged index.'),
         epilog=_verbatim("""examples:
   haversack catalog mine --all                     every catalog (a few KB read per model)
   haversack catalog mine moose                     one catalog
@@ -557,9 +563,10 @@ def _command_line() -> click.Group:
         'check', callback=_dispatch(_cmd_catalog, 'catalog', 'ccmd'),
         short_help="which records the catalogs' current versions have made stale",
         help=("Compare the index with this build's catalogs, offline: every task should have a "
-              'record whose version is the one its catalog offers now. Checks everything by '
-              'default; name catalogs or tasks to narrow it. Exits 1 when any record is stale, '
-              'missing, or no longer a task.'),
+              'record whose version is the one its catalog offers now. Checks the index search '
+              'reads - the packaged one with your user index laid over it - or --file; every '
+              'task by default, or the catalogs and tasks named. Exits 1 when any record is '
+              'stale, missing, or no longer a task, 2 on a usage error.'),
         epilog=_verbatim("""examples:
   haversack catalog check                every task of every catalog
   haversack catalog check moose          one catalog, its vanished tasks included
@@ -1004,29 +1011,40 @@ def _cmd_tasks(args) -> int:
         except Exception:
             return False
 
+    from .errors import InputError
     if args.find is None:
-        if args.mode or args.field or args.catalog or args.modality:
-            from .errors import InputError
-            raise InputError("--glob, --regex, --exact, --catalog and --modality narrow a "
-                             "search: give --find TEXT as well")
+        if (args.glob or args.regex or args.exact or args.catalog or args.modality
+                or args.limit is not None):
+            raise InputError("--glob, --regex, --exact, --catalog, --modality and --limit "
+                             "narrow a search: give --find TEXT as well")
     else:
         # Which tasks produce a segment, from the segments index - nothing installed, nothing
         # downloaded. Here rather than as a `segments` command: the answer is tasks, and a
         # top-level `segments` sat one letter from `segment`, which runs a model.
         from . import segments
-        only = {cat.resolve(args.task)[2]} if args.task else None
+        if args.glob and args.regex:
+            raise InputError("--glob and --regex are two ways to read --find: give one")
+        if args.exact and not (args.glob or args.regex):
+            raise InputError("--exact matches the model's own spelling with --glob or --regex; "
+                             "a word search always compares folded ids")
+        # Among the tasks this catalog lists, as `tasks` itself lists them: searching the
+        # whole index named engine tasks that `tasks TASK` then called unknown (2026-09-13).
+        only = set(cat.names())
+        if args.task:
+            only &= {cat.resolve(args.task)[2]}
         if args.installed:
             here = set()
-            for name in cat.names():
+            for name in only:
                 try:
                     if installed(cat.info(name)):
                         here.add(name)
                 except Exception:                   # one broken entry must not hide the rest
                     pass
-            only = here if only is None else only & here
-        res = segments.index().search(args.find, mode=args.mode or "words",
-                                      field=args.field or "key", catalog=args.catalog,
-                                      modality=args.modality, tasks=only, limit=args.limit)
+            only = here
+        res = segments.index().search(
+            args.find, mode="glob" if args.glob else "regex" if args.regex else "words",
+            field="id" if args.exact else "key", catalog=args.catalog, modality=args.modality,
+            tasks=only, limit=50 if args.limit is None else args.limit)
         if args.json:
             print(json.dumps(res, indent=2, ensure_ascii=False))
         else:
@@ -1037,9 +1055,10 @@ def _cmd_tasks(args) -> int:
                     where = str(s["value"]) + (f" L{s['layer']}" if s.get("layer") else "")
                     spelled = "" if s["id"] == g["key"] else f"  ({s['id']})"
                     print(f"  {s['task']:44s} {where:>6s}  {s['modality'] or ''}{spelled}")
-            print(f"{res['keys']} id(s), {res['segments']} segment(s)"
-                  + (f"; showing the first {args.limit} (--limit)" if res["truncated"] else ""),
-                  file=sys.stderr)
+            print(f"{res['key_count']} id(s), {res['segment_count']} segment(s)"
+                  + ("; more with --limit" if res["truncated"] else ""), file=sys.stderr)
+            for task, note in (res.get("notes") or {}).items():
+                print(f"note: {task}: {note}", file=sys.stderr)
             if res["open_vocabulary"]:
                 print(f"also: {', '.join(res['open_vocabulary'])} - "
                       f"{res['open_vocabulary_note']}", file=sys.stderr)
@@ -1049,13 +1068,28 @@ def _cmd_tasks(args) -> int:
         info = cat.info(args.task)
         names = info.get("structures") or []
         if not names:
-            from .errors import InputError
             if info.get("unresolved"):
                 # installed, but not runnable as it stands - `weights fetch`
                 # would do nothing, so say what actually helps
                 raise InputError(f"{info['name']}: {info['unresolved']}")
-            raise InputError(f"{info['name']}: no structure list until its model is installed "
-                             f"(haversack weights fetch {args.task})")
+            # Not installed: the segments index has what the model states, read from its
+            # archive at the pinned version. "Install it first" was the answer until the index
+            # existed, and a review watched --find list what this said it could not (2026-09-13).
+            from . import segments
+            segs = (segments.records().get(info["name"]) or {}).get("segments")
+            if not segs:
+                raise InputError(f"{info['name']}: no structure list until its model is "
+                                 f"installed (haversack weights fetch {args.task})")
+            print(f"{info['name']}: not installed here; from the segments index - the "
+                  "installed model's own labels decide a result", file=sys.stderr)
+            if args.json:
+                print(json.dumps({"name": info["name"], "structures": [s["id"] for s in segs],
+                                  "segments": segs, "from": "segments index"}, indent=2))
+            else:
+                for s in segs:
+                    print(f"{s['value']}\t{s['id']}"
+                          + (f"\tlayer {s['layer']}" if s.get("layer") else ""))
+            return 0
         if args.json:
             out = {"name": info["name"], "structures": list(names)}
             if info.get("label_map"):
@@ -1444,8 +1478,9 @@ def _cmd_catalog(args) -> int:
         say(", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
             + ("; written" if report["written"] else "; nothing written"))
         return 1 if report["failed"] else 0
-    path = Path(args.file).expanduser() if args.file else segments.target()
-    say(f"index: {path}")
+    path = Path(args.file).expanduser() if args.file else None
+    say(f"index: {path}" if path else
+        f"index: {segments.PACKAGED}, with {segments.user_path()} laid over it where it exists")
     rows = segments.check(path, targets=args.target)
     show([r for r in rows if r[1] != "ok"])
     counts = Counter(s for _, s, _ in rows)

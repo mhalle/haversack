@@ -33,7 +33,12 @@
   claim that two models mean one thing, and it is not an ontology - an abbreviation or a
   synonym is not found. The server answers from the tasks it serves, to anonymous callers as
   `/v1/tasks` does, and refuses regex, since a pattern from anyone can take unbounded time to
-  evaluate. `RemoteClient.segments` speaks it.
+  evaluate; SERVER.md gives the answer's shape and its errors. `RemoteClient.segments` speaks
+  it. `haversack tasks TASK` now prints a model's segments from the index when it is not
+  installed, where it used to say to install it first. A user index (`HAVERSACK_SEGMENTS`,
+  else `~/.config/haversack/segments.json`) lays over the packaged one for search and
+  `catalog check`, and is where `catalog mine` writes from an installed package - or from a
+  checkout, when the variable is set.
 - **A MOOSE task's modality no longer changes when it installs.** MOOSE's catalog took the
   modality from the task name before install and from the checkpoint after, and two
   checkpoints misstate theirs: `preclin_mr_all`'s `dataset.json` names its channel "CT", so

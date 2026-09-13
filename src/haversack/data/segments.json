@@ -946,7 +946,8 @@
             "version": "2.5.4"
           }
         ],
-        "table_sha256": "068ec41d30d52c1c20fe84e04911119d9aa52bb82adbeca55e155edcab90daed"
+        "table_sha256": "068ec41d30d52c1c20fe84e04911119d9aa52bb82adbeca55e155edcab90daed",
+        "modality": "MR (T1)"
       },
       "source": {
         "engine": "fastsurfer",
@@ -1267,7 +1268,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -4540,7 +4541,8 @@
         "release": "v1.2.0",
         "tag": "1.2",
         "sha256": "dd26c1b511908a1f2a752b7fe8f5ca9c5603fc3e69fa52f57bf3ccdd52ceb286",
-        "url": "https://github.com/hhaentze/MRSegmentator/releases/download/v1.2.0/weights.zip"
+        "url": "https://github.com/hhaentze/MRSegmentator/releases/download/v1.2.0/weights.zip",
+        "modality": "MR"
       },
       "source": {
         "zip": "https://github.com/hhaentze/MRSegmentator/releases/download/v1.2.0/weights.zip",
@@ -4709,7 +4711,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -4789,7 +4791,8 @@
             "version": "v1"
           }
         ],
-        "table_sha256": "dc7047eab3f35f0c0108b7c50b71faccdccf991c246c9d732a426de9eab8db2d"
+        "table_sha256": "dc7047eab3f35f0c0108b7c50b71faccdccf991c246c9d732a426de9eab8db2d",
+        "modality": "MR (any contrast)"
       },
       "source": {
         "engine": "synthstrip",
@@ -4802,7 +4805,7 @@
         }
       ],
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     },
@@ -10759,14 +10762,15 @@
             "id": "voxtell",
             "version": "v1.1"
           }
-        ]
+        ],
+        "modality": "CT / MR / PET"
       },
       "source": {
         "engine": "voxtell"
       },
       "note": "no fixed label set: it segments whatever the caller asks for",
       "mined": {
-        "at": "2026-09-12",
+        "at": "2026-09-13",
         "by": "haversack 0.11.0"
       }
     }
