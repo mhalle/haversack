@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+- **A Modal worker no longer spends ~2 minutes between jobs on housekeeping.** After every job
+  the worker swept the whole jobs Dict inline, holding its volume lock: one `get` per record,
+  another per `inflight:` marker's target, and a call probe per record queued longer than two
+  minutes. With the Dict a batch builds up (1342 keys, 558 of them queued, on 2026-09-19)
+  that cost ~130 s per job. It set throughput, because `run_job` did not return until the
+  sweep finished: 6 L40S workers ran ts.v2:total_fast at ~2.6 jobs/min when inference takes
+  seconds. It also showed up in the log as `preview 127s`, because the preview's timer
+  included the wait on that lock (the render itself takes ~1 s). The sweep now reads the Dict
+  once (`items()`), runs in a background thread at most every 5 minutes per container, and
+  holds the volume lock only for directory removal. A marker is re-read before it is deleted,
+  so a flight that started since the snapshot keeps its marker. The job's own input is still
+  deleted inline. The overlap log's seconds now cover the render only.
+
 ## [0.12.1] - 2026-09-19
 
 - **A series with a directory marker in its bucket fetches again.** Some IDC series carry a

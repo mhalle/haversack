@@ -444,6 +444,17 @@ that, what remains is judgment, not coverage: every smoke has been
 small and short, so nothing says how the queue behaves under sustained load or how a
 multi-hour job fares against the 3600 s function timeout.
 
+### Per-job work on Modal must not be O(jobs Dict) (2026-09-19)
+
+A `modal.Dict` `get` is ~60-80 ms and a `FunctionCall` probe ~60 ms, so anything that does one
+per record after every job grows with the queue. The old inline `_bound_jobs_store` did ~2700
+of them at 1342 keys: ~130 s per job, under `_vol_lock`, before `run_job` returned. It hid in
+the log as `[artifacts] overlap preview 127s` because the timer included `place()`'s wait on
+that lock. If an overlap time looks absurd, check who holds `_vol_lock` before profiling the
+render. Now: one `items()` snapshot, a background sweep every `SWEEP_INTERVAL_S`, and
+compare-and-delete for markers. `test_the_sweep_reads_the_dict_once_not_once_per_key` counts
+the `get`s. Not re-measured on a Modal deploy yet.
+
 ## Known open, deliberately
 
 - The two `_emit` functions are NOT consolidated: same name, different jobs (one merges

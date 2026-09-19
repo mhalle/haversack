@@ -484,7 +484,7 @@ class TheResultSaysWhatItWasComputedFrom(unittest.TestCase):
             vol = type("V", (), {"reload": lambda s: None, "commit": lambda s: None})()
             with mock.patch.multiple(m, jobs_dict=fake, SCRATCH_ROOT=str(td), scratch_vol=vol,
                                      cache_vol=vol, _prefetch_next=lambda *a, **k: None,
-                                     _bound_jobs_store=lambda jid: None), \
+                                     _bound_jobs_store=lambda *a: None), \
                  mock.patch.multiple(sv, result_payload=lambda s, p: {"names": {}},
                                      reference_input=lambda x: x,
                                      publish_completion=lambda **kw: (kw["mark_done"]() or ("K", None))):

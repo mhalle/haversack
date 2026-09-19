@@ -144,11 +144,95 @@ def test_orphaned_records_are_failed_and_live_ones_left_alone(monkeypatch, tmp_p
             pass
     monkeypatch.setattr(m, "scratch_vol", Vol())
     monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path))
+    import copy                                        # Modal hands back copies, not the
+    monkeypatch.setattr(m, "_jobs_snapshot", lambda: copy.deepcopy(dict(fake)))  # live values
     fake["stale"]["state"] = "queued"                  # reset: prove the pass does it
     monkeypatch.setattr(m.time, "time", lambda: now)
-    m._bound_jobs_store("me")
+    m._sweep_jobs_store("me")
     assert fake["stale"]["state"] == "failed"
     assert "inflight:K" not in fake
+
+
+class _CountingDict(dict):
+    """A jobs Dict that counts its per-key reads - each one a Modal round trip."""
+    gets = 0
+
+    def get(self, k, default=None):
+        self.gets += 1
+        return super().get(k, default)
+
+    def items(self):
+        return list(super().items())
+
+
+def test_the_sweep_reads_the_dict_once_not_once_per_key(monkeypatch, tmp_path):
+    """The per-job pass read every record with its own `get` (and every
+    marker's target with another), plus a call probe per long-queued record:
+    ~2 min per job at 1342 keys on 2026-09-19, holding the volume lock the
+    preview's `place` waited on, so it logged as "preview 127s" and set the
+    throughput of a 6-worker batch. Now one snapshot; a `get` is spent only
+    re-checking what is about to be written."""
+    from haversack import modal_app as m
+    now = 1_000_000.0
+    fake = _CountingDict()
+    for i in range(500):                               # a deep queue, young enough
+        fake[f"q{i}"] = {"id": f"q{i}", "state": "queued", "created": now - 10}
+        fake[f"inflight:K{i}"] = f"q{i}"
+    for i in range(200):
+        fake[f"d{i}"] = {"id": f"d{i}", "state": "done", "created": now - 60,
+                         "finished": now - 50}
+    fake["old"] = {"id": "old", "state": "done", "created": 0.0, "finished": 1.0}
+    fake["inflight:L"] = "d3"                          # landed: goes
+    fake["inflight:gone"] = "nobody"                   # target purged long ago: goes
+    fake["inflight:moved"] = "d4"                      # re-pointed after the snapshot: stays
+    snap_items = fake.items
+
+    def items_then_submit():
+        out = snap_items()
+        dict.__setitem__(fake, "inflight:moved", "q7")  # a new flight for that key
+        return out
+    monkeypatch.setattr(fake, "items", items_then_submit)
+    monkeypatch.setattr(m, "jobs_dict", fake)
+    monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path))
+    monkeypatch.setattr(m, "scratch_vol", type("V", (), {"commit": lambda s: None})())
+    monkeypatch.setattr(m, "_call_state", lambda cid: pytest.fail("young records are not probed"))
+    (tmp_path / "old").mkdir()
+
+    m._sweep_jobs_store("me", now=now)
+    assert "old" not in fake and not (tmp_path / "old").exists()
+    assert "inflight:L" not in fake and "inflight:gone" not in fake
+    assert fake["inflight:moved"] == "q7"
+    assert all(f"inflight:K{i}" in fake for i in range(500))
+    assert fake.gets <= 3, fake.gets                   # one re-check per marker dropped
+
+
+def test_the_per_job_pass_leaves_the_sweep_to_a_throttled_background_thread(monkeypatch, tmp_path):
+    """`run_job` must not wait on an O(Dict) sweep: the job's own inputs go
+    inline, the sweep runs off-thread at most once per SWEEP_INTERVAL_S."""
+    import threading
+    from haversack import modal_app as m
+    monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path))
+    monkeypatch.setattr(m, "scratch_vol", type("V", (), {"commit": lambda s: None})())
+    (tmp_path / "j").mkdir()
+    (tmp_path / "j" / "input_x.nii.gz").write_bytes(b"x")
+    ran, release = [], threading.Event()
+
+    def slow_sweep(jid, lock):
+        ran.append(jid)
+        release.wait(5)
+    monkeypatch.setattr(m, "_sweep_jobs_store", slow_sweep)
+    monkeypatch.setattr(m, "_last_sweep", 0.0)
+    m._bound_jobs_store("j", threading.Lock())
+    assert m._sweep_lock.locked()                      # returned with the sweep still running
+    assert not (tmp_path / "j" / "input_x.nii.gz").exists()
+    release.set()
+    for _ in range(200):
+        if not m._sweep_lock.locked():
+            break
+        threading.Event().wait(0.01)
+    m._bound_jobs_store("k", threading.Lock())         # inside the interval: no second sweep
+    assert not m._sweep_lock.locked()
+    assert ran == ["j"]
 
 
 def test_a_running_job_is_never_probed_as_an_orphan_by_its_own_container():

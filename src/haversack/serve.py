@@ -1878,16 +1878,21 @@ def artifact_overlap(pair, task, artifacts, *, preview_out, statistics_out,
     try:
         from .preview import render_preview
         from .statistics import compute_statistics
+        # the seconds are the render's own: `place` can wait on a lock the
+        # worker holds, and counting that wait here once passed a 2-minute
+        # jobs-Dict sweep off as a 127 s preview (2026-09-19)
         if "preview" in artifacts:
             t0 = time.time()
             png = render_preview(None, None, preview_out, title=task, pair=pair)
+            dt = time.time() - t0
             if png and place("preview.png", png):
-                placed.append(("preview", time.time() - t0))
+                placed.append(("preview", dt))
         if "statistics" in artifacts:
             t0 = time.time()
             sj = compute_statistics(None, None, statistics_out, pair=pair)
+            dt = time.time() - t0
             if sj and place("statistics.json", sj):
-                placed.append(("statistics", time.time() - t0))
+                placed.append(("statistics", dt))
     except Exception:
         pass
     finally:
