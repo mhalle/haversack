@@ -469,6 +469,74 @@ Measured on smoke deploys with 2 L40S workers and a 1300-record Dict, same IDC s
 old code logged "preview" at 65-69 s every job and ran ~1 job/min; the new one ran ~10.7
 jobs/min, with the preview at 0.5-2.0 s.
 
+## Running on a GPU that is not Modal's (assessed 2026-09-16, nothing run)
+
+The question was whether haversack runs on a local CUDA box, as a server there, and on another
+cloud. Everything below was read from the code and from providers' docs, not executed: the only
+CUDA it has ever run on is Modal's workers, and the only local GPU is the M2's MPS.
+
+- **A Linux box with an NVIDIA card should just work.** A Modal worker IS a Linux CUDA box:
+  its image is `uv_sync(extras=["torch", "serve", "cuda"])` and PyPI's Linux x86_64 torch wheel
+  is the CUDA build (that is where 2.14.0+cu130 came from). `resolve_device("auto")` picks cuda
+  before mps, `network.py` sizes the accumulator from `torch.cuda.mem_get_info`, and the
+  `cuda` extra (triton) only speeds up the ranked restore. So: `uv sync --extra cuda`, a driver
+  new enough for the cu13x wheel (or a torch built for an older CUDA), `--device cuda`. Every
+  engine has completed a job on CUDA, but only on Modal, and only on L40S-class memory - a
+  small consumer card's accumulator fallback on CUDA has not run.
+- **Windows is not the same answer.** PyPI's Windows torch is CPU-only, so a plain `uv sync`
+  gives no GPU silently (PyTorch's own wheel index is needed); triton has no official Windows
+  build; `filelock`'s msvcrt branch has never run. WSL2 turns it into the Linux case.
+- **`haversack serve --device cuda` is the same path**: the server builds an ordinary
+  `Segmenter(device=args.device)`, and SERVER.md's own remote example is a "gpu-box". What it
+  is not is Modal: one process, one dispatcher, so one GPU runs one job at a time (a server per
+  GPU via `CUDA_VISIBLE_DEVICES` and port, nothing balancing them); an engine that needs its
+  own environment (SynthStrip; VoxTell for now) needs its own server, and nothing routes
+  between them; the bearer token travels in the clear without a TLS proxy in front.
+- **Another cloud is a third executor, not a rewrite.** `create_app` is written against the
+  executor protocol (`LocalExecutor`, `ModalExecutor` - see the comment at the protocol in
+  `serve.py`), and `_execute_job` is platform-free. Modal's side is ~1900 lines (`modal_app.py`
+  plus the four adapters) over these primitives, each of which needs a counterpart: `App` and
+  the `asgi_app` CPU container; an `@app.cls` GPU worker per engine with its image; `.spawn()`
+  as the queue and `FunctionCall.cancel()` stopping the container (elsewhere cancel is
+  cooperative, the worker has to notice); `modal.Dict` for records and ~4/s progress writes;
+  four Volumes (weights, scratch, inputs, cache) with commit/reload semantics; proxy auth;
+  memory snapshots (no equivalent - colder starts).
+- **The result cache decides how big a port is.** Generation publication, leases, writer
+  claims and the entry lock assume atomic rename and flock. Object storage (GCS, S3) offers
+  neither: it would mean rebuilding them on generation preconditions with leases in a database,
+  i.e. new concurrency code in exactly the area three review rounds found real defects in. A
+  POSIX volume keeps the design as written. Design this first if a port is ever started.
+- **GCP, in order of cost.** (1) A GPU Compute Engine VM running `serve` behind a TLS load
+  balancer or IAP, cache on a persistent disk: days, no new code beyond a Dockerfile (the repo
+  has none) and deploy scripts; loses scale-to-zero. (2) Cloud Run with a GPU, one instance:
+  scales to zero, but the LocalExecutor's queue, job table and sqlite store die with the
+  instance, Cloud Run cannot attach a persistent disk, a GCS FUSE mount has no flock or atomic
+  directory rename (the untested fallback path), and work after the response needs
+  instance-based billing - it stays the local server wearing a costume. Check current GPU
+  types and request limits before believing any of this; they were not verified. (3) A real
+  `GcpExecutor` (Cloud Run API, Cloud Run Jobs or a GPU pool per engine image, Cloud Tasks or
+  Pub/Sub, Firestore, GCS, IAP): weeks, dominated by the cache, plus a GCP section in
+  `test_engine_completeness` or it goes hollow, plus several deployed smokes - every Modal
+  defect was found by deploying, none by the suite.
+- **NSF Jetstream2 (IU, allocated through ACCESS) is case (1).** It is OpenStack: VMs,
+  attached block volumes, public IPs - no managed queue or serverless GPU to target, so run
+  `serve` on a GPU VM and nothing new. GPU flavors per docs.jetstream-cloud.org/general/vmsizes
+  (read 2026-09-16): g3.medium / g3.large are 25 % / 50 % A100 slices (10 / 20 GB, 16 / 32
+  SU/h) on NVIDIA's proprietary vGPU driver, which can lag the cu13x wheel - check `nvidia-smi`
+  first; g3.xl full A100 40 GB (64 SU/h) and g4.xl L40S 48 GB (84 SU/h, the Modal default's
+  GPU, so the fairest timing comparison) and g5.xl H100 80 GB (128 SU/h) use the generic
+  driver, and g4/g5 need an emailed justification. For it: the allocation costs nothing to US
+  researchers, and a block volume is local ext4, where the cache's flock and rename are the
+  case it was designed for. Against: a running GPU VM burns SUs idle, and shelving it is manual
+  and takes the server down; a 10 GB slice probably pushes `total` at 1.5 mm onto the host
+  accumulator (allowed, noted, slower). Not believed suitable for PHI - check their policy
+  before clinical data; public IDC/TCIA/OpenNeuro inputs are fine. ("NSF Lightstream" was the
+  name asked about; nothing by that name was found, and Jetstream2 is the assumption.)
+- **The cheapest next step answers most of this at once:** on any Linux GPU VM (a Jetstream2
+  g3.xl or g4.xl will do), `serve --device cuda`, submit one scan twice (second is a cache
+  hit), cancel a running job, and run the fast suite. That is the first local-CUDA run, the
+  first server off the Mac, and the first cache locks off APFS.
+
 ## Known open, deliberately
 
 - **The API's submit rate is bounded by its own per-submit cost, not the workers
