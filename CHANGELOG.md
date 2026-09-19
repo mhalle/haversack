@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.12.4] - 2026-09-19
 
 - **A finished Modal job no longer answers 410 "purged" while its result is there.** On
   2026-09-19 (300 ts.v2:total jobs on IDC, 16 concurrent clients) `GET
