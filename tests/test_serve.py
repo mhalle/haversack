@@ -5617,3 +5617,139 @@ def test_submit_keeps_the_resolvers_rename_hint(tmp_path, task, says):
     r = client.post("/v1/jobs", files={"file": ("scan.nii.gz", volume_bytes(71))},
                     data={"task": task, "options": "{}"})
     assert r.status_code == 404 and says in r.json()["detail"], r.text
+
+
+def _asgi_post_upload(app, n):
+    """POST n uploads to `app` CONCURRENTLY on one event loop. TestClient cannot show this:
+    outside a `with` block it runs every request on a loop of its own, and two requests
+    that never share a loop cannot block each other."""
+    import asyncio
+    import httpx
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://t") as c:
+            return await asyncio.gather(*(c.post(
+                "/v1/jobs", data={"task": "total_fast"},
+                files={"file": ("scan.nii.gz", volume_bytes(next(_SUBMIT_N)))})
+                for _ in range(n)))
+    return asyncio.run(go())
+
+
+def test_concurrent_submits_hand_over_off_the_event_loop(tmp_path):
+    """2026-09-19: the route called executor.submit inline. ModalExecutor's is a dozen
+    blocking RPCs, so every submit in a container waited for the one before it: 1.48 s
+    each, 0.67 submits/s from 8 client threads. Two submits must be inside submit() at
+    once - with the call back on the loop, the first holds the loop at the barrier, the
+    second never arrives, and the barrier breaks."""
+    seg, ex, _ = make(tmp_path)
+    barrier = threading.Barrier(2, timeout=10)
+    loop_threads, submit_threads = set(), set()
+    real = ex.submit
+
+    def submit_(*a, **kw):
+        submit_threads.add(threading.get_ident())
+        barrier.wait()
+        return real(*a, **kw)
+    ex.submit = submit_
+    app = create_app(ex)
+
+    @app.middleware("http")
+    async def _note_loop_thread(request, call_next):
+        loop_threads.add(threading.get_ident())
+        return await call_next(request)
+    try:
+        rs = _asgi_post_upload(app, 2)
+        assert [r.status_code for r in rs] == [202, 202], [r.text for r in rs]
+        assert len(submit_threads) == 2 and not submit_threads & loop_threads
+    finally:
+        ex.close()
+
+
+def test_a_submit_refused_in_the_hand_over_leaves_no_job_dir(tmp_path):
+    """The directory's owner during the hand-over is the thread running submit(), so a
+    refusal there (QueueFull, raised under the executor's lock) is discarded there."""
+    seg, ex, _ = make(tmp_path)
+
+    def full(*a, **kw):
+        raise QueueFull("queue is full (1 pending)")
+    ex.submit = full
+    try:
+        before = {d.name for d in tmp_path.iterdir() if d.is_dir()}
+        (r,) = _asgi_post_upload(create_app(ex), 1)
+        assert r.status_code == 429
+        assert {d.name for d in tmp_path.iterdir() if d.is_dir()} == before
+    finally:
+        ex.close()
+
+
+def _cancel_during_hand_over(tmp_path, refuse=False):
+    """POST an upload, cancel the request while the hand-over thread is inside submit(),
+    then let submit() go on - to record the job, or to refuse it. Returns the executor
+    and the job directory submit() was handed."""
+    import asyncio
+    import httpx
+    seg, ex, _ = make(tmp_path)
+    inside, release, dirs = threading.Event(), threading.Event(), []
+    real = ex.submit
+
+    def slow(jid, jdir, *a, **kw):
+        dirs.append(jdir)
+        inside.set()
+        release.wait(10)
+        if refuse:
+            raise QueueFull("queue is full (1 pending)")
+        return real(jid, jdir, *a, **kw)
+    ex.submit = slow
+    app = create_app(ex)
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                                     base_url="http://t") as c:
+            t = asyncio.ensure_future(c.post(
+                "/v1/jobs", data={"task": "total_fast"},
+                files={"file": ("scan.nii.gz", volume_bytes(next(_SUBMIT_N)))}))
+            while not inside.is_set():
+                await asyncio.sleep(0.01)
+            t.cancel()
+            await asyncio.sleep(0.05)
+            release.set()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+    try:
+        asyncio.run(go())
+    finally:
+        release.set()
+    (jdir,) = dirs
+    return ex, jdir
+
+
+def test_a_cancelled_submit_does_not_discard_the_directory_its_job_owns(tmp_path):
+    """A cancellation that lands while the hand-over thread is inside submit() must not
+    remove the job directory: the thread runs on, and the job it records reads its upload
+    from there. Before the hand-over moved to a thread, nothing could be cancelled there."""
+    ex, jdir = _cancel_during_hand_over(tmp_path)
+    try:
+        deadline = time.time() + 5
+        while not ex.statuses() and time.time() < deadline:
+            time.sleep(0.02)
+        assert ex.statuses(), "the job was never recorded"
+        assert jdir.exists() and any(jdir.glob("input_*")), "its upload was discarded"
+    finally:
+        ex.close()
+
+
+def test_a_cancelled_submit_that_is_then_refused_leaves_no_job_dir(tmp_path):
+    """...and when that submit() refuses after all, nothing else is left to discard the
+    directory: the route stopped listening at the cancellation. The thread does it."""
+    ex, jdir = _cancel_during_hand_over(tmp_path, refuse=True)
+    try:
+        deadline = time.time() + 5
+        while jdir.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        assert not jdir.exists(), "a refused job's directory was left behind"
+        assert not ex.statuses()
+    finally:
+        ex.close()

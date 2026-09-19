@@ -750,3 +750,40 @@ def test_a_pinned_ask_answered_from_the_modal_cache_reports_its_pin(monkeypatch,
     assert fake["j1"]["cached"] is True and fake["j1"]["version"] == "v2.0.0-weights"
     assert ex.status_of("j1")["version"] == "v2.0.0-weights"
     assert "version" not in fake["j2"]
+
+
+def test_a_submit_commits_the_scratch_volume_only_when_it_holds_an_upload(monkeypatch,
+                                                                          tmp_path):
+    """2026-09-19: every submit committed the scratch volume - 0.67 s of the 1.48 each
+    POST /v1/jobs spent on Modal, paid by idc: jobs that wrote nothing there. An empty job
+    directory is removed instead (the worker's save makes it); one holding an upload is
+    committed so the worker sees it. The rest of the record is untouched: meta, the
+    inflight marker, the spawn."""
+    import types
+    m, fake = _swap_dict(monkeypatch)
+    commits = []
+    monkeypatch.setattr(m, "scratch_vol",
+                        types.SimpleNamespace(commit=lambda: commits.append(1)))
+    spawned = []
+    monkeypatch.setattr(m, "_spawn_worker", lambda task, jid, tokens=None: (
+        spawned.append(jid), types.SimpleNamespace(object_id="fc-" + jid))[1])
+    monkeypatch.setattr(m, "_emit", lambda jid, d: fake[jid].update(d))
+    ex = m.ModalExecutor()
+    monkeypatch.setattr(ex, "_fresh_weights_versions", lambda task: ["w=1"])
+    monkeypatch.setattr(ex, "cache_get", lambda key: None)
+
+    remote = tmp_path / "j1"
+    remote.mkdir()
+    ex.submit("j1", remote, None, "ts.v2:total_fast", {}, identity=("idc:x",),
+              source=[{"kind": "idc", "id": "x"}])
+    assert commits == [] and not remote.exists()
+    key = fake["j1"]["cache_key"]
+    assert fake[f"inflight:{key}"] == "j1" and fake["j1"]["call_id"] == "fc-j1"
+
+    upload = tmp_path / "j2"
+    upload.mkdir()
+    (upload / "input_scan.nii.gz").write_bytes(b"bytes the worker must see")
+    ex.submit("j2", upload, upload / "input_scan.nii.gz", "ts.v2:total_fast", {},
+              identity=("sha256:ab",))
+    assert commits == [1] and (upload / "input_scan.nii.gz").exists()
+    assert spawned == ["j1", "j2"]
