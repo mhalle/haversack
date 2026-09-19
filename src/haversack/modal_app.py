@@ -291,13 +291,15 @@ def _prefetch_candidate(current_jid: str, engine: str | None = None):
     series and never warmed its own next job, and every container downloaded
     the same MRI once."""
     cands = []
-    for k in jobs_dict.keys():
+    # one streamed items() read, not a get per key: at 1342 keys (2026-09-19)
+    # the per-key scan took about a minute, so the one-ahead warmed nothing
+    for k, m in jobs_dict.items():
         if ":" in str(k) or k == current_jid:
             continue                       # namespaced markers (inflight:/
                                            # artifacts:/cancel:) are not job
                                            # records; cancel: values are bare
                                            # floats and crashed this scan
-        m = jobs_dict.get(k) or {}
+        m = m or {}
         if not prefetchable(state=m.get("state"), kind=m.get("kind"),
                             refresh_input=m.get("refresh_input"),
                             sources=m.get("source")):

@@ -206,6 +206,20 @@ def test_the_sweep_reads_the_dict_once_not_once_per_key(monkeypatch, tmp_path):
     assert fake.gets <= 3, fake.gets                   # one re-check per marker dropped
 
 
+def test_the_prefetch_scan_reads_the_dict_once(monkeypatch):
+    """The prefetcher rescans every 2 s; a `get` per key made one scan take about
+    a minute at 1342 keys, long after the next job it meant to warm had started."""
+    from haversack import modal_app as m
+    fake = _CountingDict()
+    for i in range(300):
+        fake[f"d{i}"] = {"id": f"d{i}", "state": "done", "created": i}
+    fake["q"] = {"id": "q", "state": "queued", "created": 1000,
+                 "source": [{"kind": "s3", "id": "b/q"}]}
+    monkeypatch.setattr(m, "jobs_dict", fake)
+    assert m._prefetch_candidate("me") == ("s3", "s3:b/q", "q")
+    assert fake.gets == 0
+
+
 def test_the_per_job_pass_leaves_the_sweep_to_a_throttled_background_thread(monkeypatch, tmp_path):
     """`run_job` must not wait on an O(Dict) sweep: the job's own inputs go
     inline, the sweep runs off-thread at most once per SWEEP_INTERVAL_S."""
