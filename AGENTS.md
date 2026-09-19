@@ -505,6 +505,22 @@ pre-fix tree. What they established, so it is not relitigated:
   the orphan rule treats it as live. The worker records its own `call_id` on `running`.
 - The sweep removes directories and commits BEFORE deleting the records.
 - The job result route accepts a cache entry only when both digests are known and equal.
+- Round 2 (same day) reversed round 1's `_call_state` rule: it listed ENDED exceptions,
+  and Modal reports a crashed container as InternalFailure and a container that failed
+  before our code as the remote exception's own class, so a dead call read `unknown`
+  forever. Now `_PROBE_TRANSIENT` lists what says nothing about the call; all else is dead.
+- A cancel is a SIGUSR1 whose handler raises InputCancellation at any bytecode, imports
+  included (a half-imported `torch._dynamo` failed the next job in the container). A
+  container retires (`stop_fetching_inputs`) after a job cancelled while it ran, and first
+  drains the daemon artifact/sweep threads, which die with the container otherwise.
+- A DELETE of a Modal job during model loading was not honored: the API recorded
+  `cancelled`, no InputCancellation reached `run_job`, the token was not checked again,
+  and the worker's `done` replaced `cancelled`. Fixed without relying on the signal: the
+  worker checks `cancel:<jid>` after compute, before save and publication, and `_emit`
+  never replaces `cancelled`. STILL OPEN, and no longer load-bearing: where the signal's
+  exception went. Locally the same handler, fired in loading or mid-convolution, always
+  propagates; on Modal `_check_cancel_handler` found Modal's handler still installed after
+  such a job. It logs `[cancel] ...: SIGUSR1 handler is ...` if that ever changes.
 - Accepted, not fixed: the sweep's marker compare-and-delete is two Dict round trips (Modal's
   Dict has no conditional delete), so a submit installing a new marker for the same key in
   between loses it - duplicate compute at worst. `_release_inflight` has the same window.

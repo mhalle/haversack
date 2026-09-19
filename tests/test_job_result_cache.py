@@ -378,3 +378,31 @@ def test_two_concurrent_uploads_through_a_guarded_executor_both_finish(tmp_path)
     assert not t.is_alive(), "two concurrent uploads deadlocked on the volume guard"
     assert [r.status_code for r in out["r"]] == [202, 202], [r.text for r in out["r"]]
     ex.close()
+
+
+# -- review round 2 (mutation testing): the gaps it found ------------------------------
+
+def test_same_output_needs_the_jobs_own_digest():
+    from haversack.serve import same_output
+    d = {"outputs": [{"name": "labels", "sha256": "sha256:x"}]}
+    assert same_output(d, d)
+    assert not same_output({}, d) and not same_output({}, {}) and not same_output(d, {})
+    assert not same_output(d, {"outputs": [{"name": "labels", "sha256": "sha256:y"}]})
+
+
+def test_an_unreadable_entry_result_is_not_this_jobs_result(tmp_path):
+    _, ex, client = _make(tmp_path)
+    jid, s = _done_job(client, ex)
+    entry = Path(ex.cache_get(s["key"])[0]).parent
+    (entry / "result.json").write_text("{not json", encoding="utf-8")
+    assert ex._entry_holds(s["key"], s["result"]) is False
+    ex.close()
+
+
+def test_the_download_length_is_the_files(tmp_path):
+    _, ex, client = _make(tmp_path)
+    jid, s = _done_job(client, ex)
+    r = client.get(f"/v1/jobs/{jid}/result")
+    size = Path(ex.cache_get(s["key"])[0]).stat().st_size
+    assert int(r.headers["content-length"]) == len(r.content) == size
+    ex.close()

@@ -113,7 +113,7 @@ option. The result's `ETag` is its content digest, so `If-None-Match` gets a 304
 is not done answers 409; a result whose bytes were purged answers 410. A job with a key is
 served from the result cache's entry for that key - the same bytes the path surface serves -
 and from the job's own copy only when there is no entry or the key has since been recomputed
-to different bytes. On the local
+to different bytes. The download does not honor `Range`. On the local
 server the record itself keeps answering `GET /v1/jobs/{id}` (marked `evicted`) after it
 leaves memory or the server restarts, until `DELETE` removes it; Modal's records live in
 its job store for `HAVERSACK_JOBS_TTL_H`. `DELETE` cancels an active job or deletes a

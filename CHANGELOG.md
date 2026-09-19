@@ -35,6 +35,30 @@
   - *The job result route* treated an entry without a digest as the job's bytes (it serves
     the job's own copy now), advertised an evicted job's result that then answered 410,
     and still gave a 500 when the job's own copy vanished just before a plain download.
+- **Second review round and a Modal smoke** (`haversack-upload-smoke`, torn down):
+  - *A warm Modal worker was poisoned by a cancelled job.* A cancel raises in the job
+    wherever it is, and on the smoke it landed mid-import: the next job in the container
+    failed on a half-initialized `torch._dynamo`. A container retires after any job
+    cancelled while it ran, once earlier jobs' artifact threads have finished (a daemon
+    killed by the exit left its `artifacts:` marker answering 202 for up to 15 minutes).
+  - *A crashed worker's job would have stayed running forever* under round one's rule,
+    because Modal reports a lost container as InternalFailure. Now only a short list of
+    transient errors (the caller's own connection, throttling, service errors) reads as
+    unknown, and every other failure of a probe means the call ended.
+  - The content store's volume commit ran on the event loop during every upload; it runs
+    in a thread now. The job result download closes its file when a client disconnects
+    rather than at the next garbage collection. It no longer answers byte ranges, which
+    FileResponse did and no haversack client uses.
+  - The smoke: two and four concurrent 3.7 MB uploads all answered 202 in 5-12 s, and the
+    worker's own call id matched the spawn's.
+- **A Modal job DELETEd while it ran now stays cancelled.** On the smoke, a job cancelled
+  during model loading finished, published its result, and reported `done`: Modal's cancel
+  (a signal raising in the job) never reached the worker, the job's own check runs only at
+  a patch, and a worker's `done` could replace the API's `cancelled`. The worker now asks
+  for the cancel once more before it saves or publishes, as the local server does, and a
+  `cancelled` record is final. Verified on a smoke (`haversack-cancel-smoke`, torn down): a
+  job cancelled in loading stayed `cancelled`, its result answered 409, the same bytes
+  resubmitted computed afresh (nothing was published), and the container retired.
 
 ## [0.12.2] - 2026-09-19
 

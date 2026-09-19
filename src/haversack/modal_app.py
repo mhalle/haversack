@@ -420,12 +420,56 @@ def _purgeable(meta: dict, now: float, ttl_s: float) -> bool:
 ORPHAN_MIN_AGE_S = 120.0
 
 
-#: The answers from ``FunctionCall.get(timeout=0)`` that say the call has ENDED.
-#: Anything else raised - a dropped connection, a rate limit, a service hiccup on
-#: the caller's side - says nothing about the call, and is ``unknown``.
-_CALL_ENDED = ("NotFoundError", "RemoteError", "InputCancellation",
-               "FunctionTimeoutError", "OutputExpiredError", "ExecutionError",
-               "UserCodeException")
+def _retire_container(jid: str) -> None:
+    """Take no further input in this container once one of its jobs was cancelled.
+
+    Modal cancels a running sync input (the API's DELETE calls FunctionCall.cancel) by
+    a signal whose handler raises InputCancellation at whatever bytecode the job was
+    on - an import included. On 2026-09-19 a job cancelled in its first inference left
+    `torch._dynamo` half initialized, and the next job in the same warm container failed
+    on `partially initialized module 'torch._dynamo' has no attribute 'utils'`. What
+    else such an interruption leaves behind cannot be known, so the container is not
+    reused: the next job starts in a fresh one, restored from the snapshot."""
+    print(f"[cancel] {jid} cancelled while running; this container takes no more inputs",
+          flush=True)
+    try:
+        import modal.experimental
+        modal.experimental.stop_fetching_inputs()
+    except Exception as e:                  # never mask the cancellation itself
+        print(f"[cancel] could not retire the container: {e}", flush=True)
+    _drain_background()
+
+
+#: Daemon threads a finished job may leave running, which die with the container.
+_BACKGROUND_THREADS = ("haversack-artifacts", "haversack-sweep")
+
+
+def _drain_background(timeout_s: float = 120.0) -> None:
+    """Let an earlier job's artifact overlap, and a sweep, finish before the container
+    goes. They are daemons: a container that exits under them kills them mid-way, and
+    the overlap's last act is clearing its `artifacts:` marker - seen on 2026-09-19 as
+    ClientClosed in `_clear_pending_marker` on a stopped container, a marker that then
+    answers 202 to every probe of the key until the 900 s sweep. Retiring a container
+    makes that exit immediate, so the retire waits (bounded) first."""
+    deadline = time.monotonic() + timeout_s
+    for t in list(threading.enumerate()):
+        if t is threading.current_thread() or t.name not in _BACKGROUND_THREADS:
+            continue
+        t.join(max(0.0, deadline - time.monotonic()))
+
+
+def _check_cancel_handler(jid: str) -> None:
+    """Log when Modal's SIGUSR1 handler - its cancel - is no longer the installed one.
+
+    A diagnostic for the open question of 2026-09-19: Modal logged the cancel signal
+    of a job in model loading, and no InputCancellation reached run_job. Locally the
+    same signal propagates through loading and inference alike. If something in the
+    worker replaces the handler, this names it the first time it happens."""
+    import signal
+    h = signal.getsignal(signal.SIGUSR1)
+    name = getattr(h, "__name__", repr(h))
+    if name != "_cancel_input_signal_handler":
+        print(f"[cancel] {jid}: SIGUSR1 handler is {name!r}, not Modal's", flush=True)
 
 
 def _own_call_id():
@@ -436,6 +480,13 @@ def _own_call_id():
         return None
 
 
+#: The failures of a probe that say nothing about the CALL - the caller's own link
+#: to Modal dropped, was throttled, or hit a service hiccup. Every other exception
+#: from ``FunctionCall.get(timeout=0)`` is Modal's report of how the call ended.
+_PROBE_TRANSIENT = ("ConnectionError", "ServiceError", "ResourceExhaustedError",
+                    "InternalError", "ClientClosed", "AuthError")
+
+
 def _call_state(call_id) -> str:
     """``live``, ``finished``, ``dead`` or ``unknown``, from Modal's own view of a
     spawned call.
@@ -443,13 +494,18 @@ def _call_state(call_id) -> str:
     Measured 2026-09-06 against modal 1.5.5: a queued or running call raises the
     builtin TimeoutError from ``get(timeout=0)``; a call whose function returned
     hands back its result; a call cancelled by ``modal app stop`` raises
-    RemoteError; an unknown id raises NotFoundError. Erring toward "live" is the safe
-    direction: the thing that must never happen is failing a running job. So only an
-    answer that says the call ended counts as dead; any other failure is
-    ``unknown`` and callers treat it as live. Until 2026-09-19 every exception
-    counted as dead - tolerable while only the worker's reconcile asked, but once
-    the API's single-flight lookup asked on every read of a key, one transient
-    RPC error failed a running job (review, reproduced with a ConnectionError).
+    RemoteError; an unknown id raises NotFoundError. Read from the 1.5.5 source
+    since: a crashed container (OOM, segfault, lost host) is InternalFailure, and a
+    call whose container failed before our code ran re-raises that remote exception
+    as its own class (RuntimeError, OSError...) - all of them ended calls.
+
+    Until 2026-09-19 every exception counted as dead; once the API's single-flight
+    lookup probed on every read of a key, one dropped connection failed a running
+    job (review). An allowlist of ENDED exceptions came next and was wrong the other
+    way: a crashed worker's InternalFailure read as unknown, forever live, and its
+    key's flight never cleared (review round 2). So the short list is the transient
+    one, checked by class name within ``modal.exception`` and as the builtin
+    ConnectionError family; every other failure is an ended call.
     """
     if not call_id:
         return "dead"
@@ -458,9 +514,11 @@ def _call_state(call_id) -> str:
     except TimeoutError:
         return "live"
     except Exception as e:
-        ended = tuple(c for c in (getattr(modal.exception, n, None) for n in _CALL_ENDED)
-                      if isinstance(c, type))
-        return "dead" if isinstance(e, ended) else "unknown"
+        transient = tuple(c for c in (getattr(modal.exception, n, None)
+                                      for n in _PROBE_TRANSIENT) if isinstance(c, type))
+        if isinstance(e, transient + (ConnectionError,)):
+            return "unknown"
+        return "dead"
     return "finished"
 
 
@@ -694,8 +752,22 @@ def _emit(jid: str, update: dict) -> None:
     meta = jobs_dict.get(jid) or {}
     if meta.get("state") in _TERMINAL and update.get("state") not in _TERMINAL:
         return
+    if meta.get("state") == "cancelled" and update.get("state") not in (None, "cancelled"):
+        # A cancel is the caller's word and final. Another terminal state may replace
+        # a terminal one (a `done` landing after the orphan rule's `failed` is the job
+        # recovering), but a worker that ran on past a DELETE must not turn the record
+        # back into `done` - it did on the smoke of 2026-09-19.
+        return
     meta.update(update)
     jobs_dict[jid] = meta
+
+
+def _cancel_requested(jid: str) -> bool:
+    """Whether the API has asked this job to stop (its `cancel:` marker)."""
+    key = f"cancel:{jid}"
+    if hasattr(jobs_dict, "contains"):
+        return bool(jobs_dict.contains(key))
+    return jobs_dict.get(key) is not None
 
 
 _cls_extra = {"experimental_options": {"enable_gpu_snapshot": True}} if GPU_SNAPSHOT else {}
@@ -751,7 +823,7 @@ def _refresh_series(ctx, meta: dict, key: str, rep, already: set | None = None,
                          already=already)
 
 
-def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
+def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None:
     """The engine-agnostic job body shared by every worker: fetch/stage/
     read, then ctx._ensure + ctx._compute (the engine), then save +
     publish_completion + artifact overlap. Only _ensure/_compute/_prepare
@@ -762,8 +834,13 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
     from haversack.errors import Cancelled
     from haversack.progress import CancelToken, Reporter
     meta = jobs_dict.get(jid)
-    if meta is None or meta.get("state") == "cancelled":
-        return
+    if meta is None:
+        return None
+    if meta.get("state") == "cancelled":
+        # Cancelled before it started: none of the job ran, so there is nothing to
+        # distrust, and retiring here would cost a batch cancel a cold start per job.
+        # A signal landing in these few lines raises through run_job and retires there.
+        return None
     jdir = Path(SCRATCH_ROOT) / jid
     last = {"t": 0.0}
 
@@ -771,7 +848,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
         now = time.time()
         if now - last["t"] >= 0.25 or p.stage in ("restore", "finalize"):
             last["t"] = now
-            if jobs_dict.contains(f"cancel:{jid}") if hasattr(jobs_dict, "contains")                         else jobs_dict.get(f"cancel:{jid}") is not None:
+            if _cancel_requested(jid):
                 token.cancel()         # cooperative: honored at the next check
             _emit(jid, {"progress": asdict(p)})
 
@@ -791,6 +868,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
     prefetch_stop = threading.Event()
     _prefetch_next(jid, prefetch_stop, ctx.series_cache, ctx.read_ahead,
                    ctx._vol_lock, engine=getattr(ctx, "engine", None))   # CPU downloader + pre-reader
+    outcome = None
     try:
         if meta.get("kind") == "prepare":
             rep = Reporter.of(on_progress, cancel=token)
@@ -892,6 +970,13 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
                 input_path = next(jdir.glob("input_*"))
         from haversack.serve import RESULT_NAME, ResultCache, reference_input
         s = ctx._compute(input_path, meta, on_progress, token)
+        # Asked once more before anything is saved or published, as the local server
+        # does. The cooperative token is honored only at a patch, and Modal's own
+        # cancel - a signal raising InputCancellation - did not reach run_job on the
+        # smoke of 2026-09-19: a job DELETEd during model loading finished, published,
+        # and reported done.
+        if token.cancelled or _cancel_requested(jid):
+            raise Cancelled("cancelled before publication")
         record_inputs(s, entries, meta.get("input_identity") or [], ctx.series_cache)
         with ctx._vol_lock:
             s.save(jdir / RESULT_NAME)
@@ -950,6 +1035,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
     except Cancelled:
         _emit(jid, {"state": "cancelled", "finished": time.time()})
         _clear_own_artifacts_marker(jid, meta)
+        outcome = "cancelled"
     except Exception as e:               # noqa: BLE001 - reported to the client
         import traceback
         tb = traceback.format_exc()
@@ -966,6 +1052,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
         _bound_jobs_store(jid, ctx._vol_lock)
         if meta.get("cache_key"):
             _release_inflight(meta["cache_key"], jid)
+    return outcome
 
 
 class _WorkerBase:
@@ -1075,7 +1162,19 @@ class _WorkerBase:
 
     @modal.method()
     def run_job(self, jid: str, source_tokens: dict | None = None) -> None:
-        _execute_job(self, jid, source_tokens)
+        try:
+            outcome = _execute_job(self, jid, source_tokens)
+        except modal.exception.InputCancellation:
+            _retire_container(jid)
+            raise
+        _check_cancel_handler(jid)
+        if outcome == "cancelled":
+            # The API cancels twice - the cooperative marker and FunctionCall.cancel -
+            # and when the job ends by the first, the second's signal may already
+            # have raised somewhere a library swallowed it: the smoke of 2026-09-19
+            # saw the signal arrive and no InputCancellation reach run_job. Where it
+            # landed is unknowable, so a cancelled job retires the container either way.
+            _retire_container(jid)
 
 
 @app.cls(gpu=GPU, timeout=3600, memory=32768, scaledown_window=SCALEDOWN,

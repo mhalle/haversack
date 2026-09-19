@@ -57,8 +57,15 @@ def test_emit_is_terminal_wins():
         assert fake["j1"]["state"] == "cancelled"          # cancel survives
         modal_app._emit("j1", {"progress": {"stage": "y"}})
         assert fake["j1"]["state"] == "cancelled"          # stateless merge too
+        # a cancel is final (2026-09-19): a worker that ran on past the DELETE, as one
+        # did during model loading on a smoke, must not report done
         modal_app._emit("j1", {"state": "done", "finished": 3.0})
-        assert fake["j1"]["state"] == "done"               # terminal->terminal ok
+        assert fake["j1"]["state"] == "cancelled"
+        # other terminal states may still be replaced: a `done` after the orphan
+        # rule's `failed` is the job recovering from a false alarm
+        modal_app._emit("j2", {"state": "failed", "finished": 2.0})
+        modal_app._emit("j2", {"state": "done", "finished": 3.0})
+        assert fake["j2"]["state"] == "done"
     finally:
         modal_app.jobs_dict = orig
 
@@ -1010,7 +1017,63 @@ def test_only_an_answer_that_the_call_ended_counts_as_dead(monkeypatch):
     assert probe(modal.exception.ConnectionError("x")) == "unknown"
     assert probe(modal.exception.NotFoundError("x")) == "dead"
     assert probe(modal.exception.RemoteError("x")) == "dead"
+    # round 2: a crashed container is InternalFailure, and a container that failed
+    # before our code ran re-raises its own exception - both ended calls, never
+    # "unknown", which would keep the key's flight alive forever
+    assert probe(modal.exception.InternalFailure("x")) == "dead"
+    assert probe(RuntimeError("enter failed")) == "dead"
     assert m._call_state(None) == "dead"
+
+
+def test_a_container_whose_running_input_was_cancelled_takes_no_more(monkeypatch):
+    """A cancel raises InputCancellation wherever the job is - mid-import on 2026-09-19,
+    leaving torch._dynamo half initialized for the next job in the same warm container."""
+    import modal
+    import modal.experimental
+    from haversack import modal_app as m
+    retired = []
+    monkeypatch.setattr(modal.experimental, "stop_fetching_inputs",
+                        lambda: retired.append(True))
+
+    def cancelled(ctx, jid, tokens):
+        raise modal.exception.InputCancellation("Input was cancelled by user")
+    monkeypatch.setattr(m, "_execute_job", cancelled)
+    W = m.Worker._get_user_cls()
+    with pytest.raises(modal.exception.InputCancellation):
+        W.run_job._get_raw_f()(W.__new__(W), "j")
+    assert retired == [True]
+    monkeypatch.setattr(m, "_execute_job", lambda ctx, jid, tokens: None)
+    W.run_job._get_raw_f()(W.__new__(W), "j2")
+    assert retired == [True]                   # an ordinary finish retires nothing
+    # ended by the cooperative marker, with Modal's signal lost somewhere inside: the
+    # smoke's case - still retired
+    monkeypatch.setattr(m, "_execute_job", lambda ctx, jid, tokens: "cancelled")
+    W.run_job._get_raw_f()(W.__new__(W), "j3")
+    assert retired == [True, True]
+
+
+def test_execute_job_reports_a_cooperative_cancel(monkeypatch, tmp_path):
+    """run_job retires on this return value: a Cancelled raised mid-job gives it, and a
+    job cancelled before it started does not (a batch cancel must not cost a cold start
+    per job)."""
+    import types
+    from haversack.errors import Cancelled
+    m, fake = _swap_dict(monkeypatch)
+    monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path))
+    fake["c"] = {"id": "c", "state": "cancelled", "task": "ts.v2:total_fast"}
+    assert m._execute_job(None, "c") is None
+    fake["r"] = {"id": "r", "state": "queued", "task": "ts.v2:total_fast",
+                 "source": [{"kind": "upload"}]}
+    monkeypatch.setattr(m, "_prefetch_next", lambda *a, **k: None)
+    monkeypatch.setattr(m, "_bound_jobs_store", lambda *a, **k: None)
+    monkeypatch.setattr(m, "_own_call_id", lambda: None)
+
+    def ensure(task):
+        raise Cancelled("cancelled")
+    ctx = types.SimpleNamespace(_ensure=ensure, series_cache=None, read_ahead=None,
+                                _vol_lock=None, engine=None)
+    assert m._execute_job(ctx, "r") == "cancelled"
+    assert fake["r"]["state"] == "cancelled"
 
 
 def test_an_unknown_call_state_never_fails_a_job(monkeypatch):
@@ -1079,6 +1142,7 @@ def test_the_worker_records_its_own_call_and_a_prepare_records_its_spawn(monkeyp
                        for v in c.args[1].values)]
     assert running, "_execute_job no longer emits running"
     assert all("_own_call_id" in ast.unparse(c.args[1]) for c in running)
+    assert callable(getattr(m, "_own_call_id", None))    # named, and still defined
     monkeypatch.setattr(m, "_spawn_worker",
                         lambda task, jid, tokens=None: types.SimpleNamespace(object_id="fc-9"))
     m.ModalExecutor().submit_prepare("p", tmp_path, "ts.v2:total_fast")
@@ -1110,3 +1174,65 @@ def test_the_sweep_removes_directories_before_the_records_naming_them(monkeypatc
     lock.release()
     t.join(5)
     assert not {"P1", "P2"} & set(fake) and not list(tmp_path.iterdir())
+
+
+def test_retiring_waits_for_an_earlier_jobs_artifact_overlap(monkeypatch):
+    """A retired container exits right after its input; the overlap thread of the job
+    before, a daemon, would die mid-way and leave its artifacts marker set."""
+    import threading
+    import time as _time
+    import modal
+    import modal.experimental
+    from haversack import modal_app as m
+    monkeypatch.setattr(modal.experimental, "stop_fetching_inputs", lambda: None)
+    done = []
+    t = threading.Thread(target=lambda: (_time.sleep(0.5), done.append(True)),
+                         name="haversack-artifacts", daemon=True)
+    t.start()
+    m._retire_container("j")
+    assert done == [True]
+
+
+def test_a_job_cancelled_while_computing_is_not_published(monkeypatch, tmp_path):
+    """The smoke of 2026-09-19: DELETE during model loading, no InputCancellation reached
+    the worker, the token was never checked again, and the job saved, published and
+    reported done. The worker asks for the cancel marker once more after compute."""
+    import types
+    m, fake = _swap_dict(monkeypatch)
+    monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path))
+    (tmp_path / "r").mkdir()
+    (tmp_path / "r" / "input_ct.nii.gz").write_bytes(b"x")
+    monkeypatch.setattr(m, "scratch_vol", types.SimpleNamespace(commit=lambda: None,
+                                                                reload=lambda: None))
+    monkeypatch.setattr(m, "_prefetch_next", lambda *a, **k: None)
+    monkeypatch.setattr(m, "_bound_jobs_store", lambda *a, **k: None)
+    monkeypatch.setattr(m, "_own_call_id", lambda: None)
+    fake["r"] = {"id": "r", "state": "queued", "task": "ts.v2:total_fast",
+                 "source": [{"kind": "upload"}]}
+    saved = []
+
+    def compute(input_path, meta, on_progress, token):
+        fake["cancel:r"] = 1.0                    # the DELETE lands mid-compute
+        fake["r"] = dict(fake["r"], state="cancelled")
+        return types.SimpleNamespace(save=lambda p: saved.append(p))
+    import threading
+    ctx = types.SimpleNamespace(_ensure=lambda task: None, _compute=compute,
+                                series_cache=None,
+                                read_ahead=types.SimpleNamespace(pop=lambda key: None),
+                                _vol_lock=threading.Lock(), engine=None)
+    assert m._execute_job(ctx, "r") == "cancelled"
+    assert saved == [] and fake["r"]["state"] == "cancelled"
+
+
+def test_own_call_id_is_modals_current_call(monkeypatch):
+    """The name alone in the running emit proved nothing (review round 2): the helper
+    must return Modal's id, and None outside a call."""
+    import modal
+    from haversack import modal_app as m
+    monkeypatch.setattr(modal, "current_function_call_id", lambda: "fc-7")
+    assert m._own_call_id() == "fc-7"
+
+    def outside():
+        raise RuntimeError("not in a function call")
+    monkeypatch.setattr(modal, "current_function_call_id", outside)
+    assert m._own_call_id() is None

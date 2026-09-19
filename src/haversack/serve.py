@@ -3760,7 +3760,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 # another task, or as another channel - can be referred to by
                 # this digest instead of re-sent. `computed`, not `expect`: the
                 # digest was taken here, from these bytes, as they streamed.
-                store.put_file(dest, computed=digest)
+                # off the loop too: on Modal this commits the inputs volume, a blocking
+                # RPC that Modal's AsyncUsageWarning flagged on every upload (2026-09-19)
+                await asyncio.to_thread(store.put_file, dest, computed=digest)
             return dest, digest
 
         staged, idents = [], []
@@ -4078,18 +4080,26 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             fh = open(path, "rb")
         except FileNotFoundError:
             raise HTTPException(410, gone) from None
+        from starlette.background import BackgroundTask
         from starlette.responses import StreamingResponse
 
-        def chunks():
-            with fh:                           # closed however the send ends
-                while block := fh.read(1 << 20):
+        async def chunks():
+            # An async generator, closed with its response: a sync one parked in
+            # Starlette's threadpool iterator kept its handle open after a client
+            # disconnect until a gc pass (review round 2), and on Windows an open
+            # handle blocks the purge that unlinks it.
+            try:
+                while block := await asyncio.to_thread(fh.read, 1 << 20):
                     yield block
+            finally:
+                fh.close()
 
         name = f"{stem}_{jid}.seg.nrrd"
         return StreamingResponse(
             chunks(), media_type="application/octet-stream",
             headers={"ETag": etag, "Content-Length": str(os.fstat(fh.fileno()).st_size),
-                     "Content-Disposition": f'attachment; filename="{name}"'})
+                     "Content-Disposition": f'attachment; filename="{name}"'},
+            background=BackgroundTask(fh.close))
 
     @app.delete("/v1/jobs/{jid}", tags=["jobs"])
     def cancel(request: Request, jid: str):
