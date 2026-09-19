@@ -16,3 +16,6 @@ data/
 # the package manifests are code, not data: the data/ rule above must not swallow them
 !src/haversack/data/
 !src/haversack/data/*.json
+
+# agent working notes: kept locally, not tracked (2026-09-19)
+AGENTS.md
