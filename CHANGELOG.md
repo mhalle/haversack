@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+- **A Modal worker's job no longer reads its own files from a volume another thread may
+  be reloading.** While one thread reloads a volume, every path on it is ENOENT to the
+  container's other threads (measured on Modal 2026-09-19), and a worker runs the job beside
+  the prefetcher, which reloads the scratch volume whenever an upload is queued behind it.
+  The job dropped its volume lock and then read its upload from scratch through the whole
+  compute, and read its saved labels back from there for the digest, the artifact pair and
+  the cache put, so a prefetcher reload in between failed the job with FileNotFoundError.
+  The job's open upload also made the prefetcher's reload raise, which ended the prefetcher.
+  The job now copies its uploads, and saves its labels, to container-local disk under the
+  lock and works from those copies. The cache put and its commit take the lock too: Modal
+  reloads after a commit whenever its server asks, although in 61 measured commits it never
+  hid a file. A refused scratch reload no longer fails a job whose upload is already visible.
+  On Modal (two throwaway deploys, 24 distinct uploads submitted at once to one L40S
+  worker), the code before this change failed 14 of 24 jobs with FileNotFoundError on
+  their own `labels.seg.nrrd`, raised in the cache put. With the change, all 24 finished,
+  and every published generation (40 over both rounds) held its preview and statistics.
+  Probes on Modal also settled what the lock must cover: a reload hides only its own volume,
+  so the weights and inputs volumes, which only the job thread touches in a worker, need
+  nothing.
+
 ## [0.12.3] - 2026-09-19
 
 - **`GET /v1/jobs/{id}/result` reads the job's published result, not the worker's scratch
