@@ -244,6 +244,13 @@ options is the same as the header.
   `HAVERSACK_CACHE_DIR`; `--no-result-cache` keeps nothing): durable, content-addressed,
   shared by every server run on the machine. `haversack cache list` shows its size and
   `haversack cache clean results` sweeps it.
+- **Shared result store** (`--result-store s3://bucket/prefix`, or `gs://`, `az://`, or
+  `HAVERSACK_RESULT_STORE`; credentials from the environment as obstore reads them): every
+  server naming the same store serves every result any of them computed. The store is the
+  authority and `--cache-dir` becomes this server's local copy of it. The store must honor
+  conditional writes; the server checks at startup and refuses one that does not.
+  Unreferenced bytes are removed by `SharedResultCache.sweep`, which nothing runs on a
+  schedule yet.
 - **Weights** (`--model-root`, or the same default as the command line): shared with
   `haversack segment`, so a model either side downloaded is warm for both.
 - **Not shared with the command line:** `haversack segment` neither reads nor writes the

@@ -685,6 +685,10 @@ def _command_line() -> click.Group:
                                'unlike the workdir)')),
             click.Option(['--no-result-cache'], is_flag=True,
                          help='compute every request; keep nothing durable'),
+            click.Option(['--result-store'], envvar='HAVERSACK_RESULT_STORE',
+                         help=('share the result cache through an object store '
+                               '(s3://bucket/prefix, gs://..., az://...; credentials from '
+                               'the environment); --cache-dir becomes its local copy')),
             click.Option(['--token'],
                          help=('the bearer token that gates computation (reads stay open); '
                                'generated when omitted')),

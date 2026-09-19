@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased]
+
+- **`haversack serve --result-store s3://bucket/prefix` shares the result cache between
+  servers through an object store** (also `gs://`, `az://`; `HAVERSACK_RESULT_STORE`). The
+  POSIX cache's guarantees rest on rename and `flock`, which an object store does not have
+  and a filesystem emulating them over one (ZeroFS, assessed) loses on restart, so the store
+  gets its own protocol, the one build caches use: result bytes as blobs named by their
+  SHA-256 and written only if absent, and one pointer per key replaced by a conditional
+  write, so a publication is one write and an artifact can never land beside another
+  publication's labels. `--cache-dir` stays in front as each server's local copy, keeping
+  the store's generation token so a current copy downloads nothing. A store that does not
+  refuse a stale conditional write is refused at startup, naming it - asked, not assumed:
+  obstore's own local-disk store fails it. Anything missing or corrupt in the store reads as
+  a miss that the next computation repairs. `SharedResultCache.sweep` removes unreferenced
+  blobs after a day's grace and, optionally, entries past an age; nothing schedules it yet.
+  Not yet wired into the Modal deployment. `tools/probe_result_store.py` checks a bucket and
+  round-trips one result under a throwaway prefix. First real store, Cloudflare R2
+  (2026-09-19): both conditional writes honored, and two servers sharing one bucket served
+  each other's results - the second never ran its segmenter. A hit there costs one pointer
+  read, about 85 ms median from this Mac.
+
 ## [0.12.3] - 2026-09-19
 
 - **`GET /v1/jobs/{id}/result` reads the job's published result, not the worker's scratch

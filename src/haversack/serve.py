@@ -1442,6 +1442,18 @@ class ResultCache:
             result = {}
         return g / RESULT_NAME, result
 
+    def published_result(self, key: str):
+        """The current publication's result document, or None. Read without a lease: it
+        hands out no path. The one question ``LocalExecutor._entry_holds`` asks, named so
+        a cache whose entries are not directories can answer it too."""
+        g = self._resolve(key, lease=False)
+        if g is None:
+            return None
+        try:
+            return json.loads((g / "result.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
     def generation(self, key: str) -> str | None:
         """Which publication the entry at ``key`` currently holds, or None."""
         try:
@@ -1450,7 +1462,7 @@ class ResultCache:
             return None
 
     def put(self, key: str, labels_path, result: dict, meta: dict,
-            preview_path=None, statistics_path=None) -> str:
+            preview_path=None, statistics_path=None, generation=None) -> str:
         """Publish one generation of a result, returning its generation token.
 
         The generation is assembled COMPLETE in a directory of its own and becomes
@@ -1464,13 +1476,24 @@ class ResultCache:
         is still being written however quiet it has been, and what keeps the generation
         from being reclaimed in the instant between its rename and the pointer's. A
         publication that fails removes what it built itself - nobody else may.
+
+        ``generation`` is for a copy of a publication made elsewhere (``objectcache``: the
+        local copy keeps the store's token, which is how a hit is known to be current).
+        FileExistsError when that generation is already here: another filler got there
+        first, and its directory is not this call's to replace or remove.
         """
         import os
         import shutil
         d = self.root / key
         d.mkdir(parents=True, exist_ok=True)
-        gen = uuid.uuid4().hex
+        gen = generation or uuid.uuid4().hex
+        if generation and self._generation_dir(key, gen).exists():
+            raise FileExistsError(f"generation {gen} of {key} is already here")
         claim = self._claim(d, gen)
+        if generation and claim is None and (d / f"{self.CLAIM_PREFIX}{gen}").exists():
+            # the claim file is O_EXCL: a concurrent copy of the same generation holds it
+            raise FileExistsError(f"generation {gen} of {key} is being placed")
+        placed = False
         g = self._staging_dir(key, gen)        # assembled here, renamed into place below
         try:
             g.mkdir()
@@ -1493,12 +1516,15 @@ class ResultCache:
             # complete: the staging directory becomes a generation, and then one rename of
             # the pointer makes it the entry. Nothing between those two is observable.
             os.replace(g, self._generation_dir(key, gen))
+            placed = True
             tmp_ptr = d / f"{CURRENT_NAME}.{uuid.uuid4().hex[:8]}.tmp"
             tmp_ptr.write_text(gen, encoding="utf-8")
             os.replace(tmp_ptr, d / CURRENT_NAME)
         except BaseException:
             shutil.rmtree(g, ignore_errors=True)
-            if self.generation(key) != gen:
+            # only a generation this call renamed into place is its own to remove: with a
+            # supplied token, a failed rename can mean ANOTHER copy's directory is there
+            if placed and self.generation(key) != gen:
                 shutil.rmtree(self._generation_dir(key, gen), ignore_errors=True)
             raise
         finally:
@@ -1978,7 +2004,8 @@ class LocalExecutor:
                  keep_finished: int = 50, segment_fn=None, fetch_idc_fn=None,
                  cache_dir=None, keep_cached: int = 500,
                  input_cache_bytes: int = 8 << 30, read_fn=None, sources=None,
-                 artifacts=("preview", "statistics"), jobs_ttl_h: float = 24.0):
+                 artifacts=("preview", "statistics"), jobs_ttl_h: float = 24.0,
+                 result_store=None):
         self.segmenter = segmenter
         self.workdir = Path(workdir)
         self.workdir.mkdir(parents=True, exist_ok=True)
@@ -1998,6 +2025,16 @@ class LocalExecutor:
         self.artifacts = set(artifacts or ())
         self._artifacts_pending: dict = {}   # cache_key -> (owner jid, set at)
         self.cache = ResultCache(cache_dir, keep=keep_cached) if cache_dir else None
+        if result_store is not None:
+            # the shared store is the authority and the local cache its read-through copy
+            # (objectcache, 2026-09-19); a URL is opened and probed, a store object is used
+            if self.cache is None:
+                raise InputError("--result-store needs a local result cache in front of it; "
+                                 "drop --no-result-cache")
+            from .objectcache import SharedResultCache
+            self.cache = (SharedResultCache.open(result_store, self.cache)
+                          if isinstance(result_store, str)
+                          else SharedResultCache(result_store, self.cache))
         self._inflight: dict[str, str] = {}      # cache key -> active job id
         self._joiners: dict[str, int] = {}       # job id -> clients riding it besides the first
         self._cv = threading.Condition()
@@ -2743,14 +2780,8 @@ class LocalExecutor:
         test (``same_output``), read without a lease: this hands out no path."""
         if self.cache is None:
             return False
-        g = self.cache._resolve(key, lease=False)
-        if g is None:
-            return False
-        try:
-            published = json.loads((g / "result.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return False
-        return same_output(result, published)
+        published = self.cache.published_result(key)
+        return published is not None and same_output(result, published)
 
     def result_file(self, jid: str):
         """(state, labels path or None); (None, None) for an unknown job. The
@@ -4653,7 +4684,8 @@ def main_serve(args) -> int:
             raise InputError(f"{flag} {d}: {e.strerror or e}") from None
     ex = LocalExecutor(seg, workdir=workdir, max_pending=args.max_pending,
                        keep_finished=args.keep_finished, cache_dir=cache_dir,
-                       jobs_ttl_h=getattr(args, "jobs_ttl_hours", 24.0))
+                       jobs_ttl_h=getattr(args, "jobs_ttl_hours", 24.0),
+                       result_store=getattr(args, "result_store", None) or None)
     # The token: given, generated, or - only when asked for in so many words - none.
     # A generated token goes to a file only this user can read, and the bundled client
     # on this machine reads it back, so personal use needs no ceremony while a proxy or
