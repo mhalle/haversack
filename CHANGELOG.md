@@ -8,8 +8,7 @@
   between them (0.62 on a 760-job IDC run). The hand-over now runs in a worker thread, and a
   submit commits the scratch volume only when it wrote something there - that commit was
   0.67 s of every `idc:` submit. Measured on throwaway deploys, 200 submits from 8 threads:
-  3.08 submits/s with 6 workers, 7.26 with one. The workers' scans of the jobs Dict slowed
-  every RPC the API made; they are fixed below (not re-measured since).
+  6-8 submits/s with one worker or six.
 - **A Modal worker no longer spends ~2 minutes between jobs on housekeeping.** After every job
   the worker swept the whole jobs Dict inline, holding its volume lock: one `get` per record,
   another per `inflight:` marker's target, and a call probe per record queued longer than two
@@ -24,7 +23,8 @@
   deletes or fails is re-read first, and a flight that started since the listing keeps its
   marker. The job's own input is still deleted inline. The overlap log's seconds now cover
   the render only. On smoke deploys with 2 L40S workers and a 1300-record Dict: ~1 job/min
-  before, ~10.7 after.
+  before, ~10.7 after. With six workers and 200 queued jobs, the jobs drained during a 30 s
+  submit burst went from 15 to 199.
 
 ## [0.12.1] - 2026-09-19
 

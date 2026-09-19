@@ -211,8 +211,8 @@ def test_the_worker_scans_read_the_jobs_dict_in_one_rpc_whatever_its_size(monkey
                                                                             tmp_path):
     """Measured 2026-09-19: the prefetch scan (every 2 s per busy worker) and the
     reconcile + purge (after every job) each listed the Dict and `get` every
-    record, O(N^2) RPCs over a cohort of N - and six workers draining 200 jobs
-    slowed every API Dict RPC from ~0.08 s to ~0.25 s. Each scan is now one
+    record, O(N^2) RPCs over a cohort of N - six workers drained 15 of 200 queued
+    jobs during a 30 s submit burst, against 199 after. Each scan is now one
     streamed listing, however many records there are."""
     for n in (10, 200):
         fake = _CountingDict()

@@ -278,9 +278,9 @@ def _jobs_snapshot() -> list:
 
     The worker-side scans used to list the keys and then `get` each record: a
     cohort of N jobs cost O(N) RPCs per scan and O(N^2) over the cohort, all on
-    the Dict the API writes to. Measured 2026-09-19 with 200 submits in flight,
-    every API Dict RPC went from ~0.08 s to ~0.25 s and six workers cut submit
-    throughput from 7.26/s to 3.08/s. ``items()`` is a single DictContents
+    the Dict the API writes to. Measured 2026-09-19 with six workers and 200
+    queued jobs: the jobs drained during a 30 s submit burst went from 15 to
+    199 once each scan was one stream. ``items()`` is a single DictContents
     stream. It is neither ordered nor atomic - a write landing during the stream
     may or may not be in it - so a scan may DECIDE from it, but anything it
     deletes or fails is re-read first, as the per-key reads always were."""
@@ -494,11 +494,11 @@ def _reconcile_orphans(current_jid: str | None = None, now: float | None = None,
 
 
 #: The least time between two retention sweeps in one container. The sweep
-#: reads the whole jobs Dict, and ran after EVERY job: with six workers draining
-#: a 200-job cohort that was the load that slowed the API's own Dict RPCs 3x
-#: (2026-09-19). Nothing it does is urgent at this scale - the TTL is hours, an
-#: orphan is only probed after ORPHAN_MIN_AGE_S, a marker only aged out after
-#: 900 s, and a finished job releases its own inflight marker in `finally`.
+#: reads the whole jobs Dict, and ran after EVERY job: at 1342 keys that was
+#: ~130 s per job (2026-09-19). Nothing it does is urgent at this scale - the
+#: TTL is hours, an orphan is only probed after ORPHAN_MIN_AGE_S, a marker only
+#: aged out after 900 s, and a finished job releases its own inflight marker in
+#: `finally`.
 JOBS_SWEEP_EVERY_S = 60.0
 
 _sweep_lock = threading.Lock()

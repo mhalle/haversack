@@ -453,8 +453,11 @@ under `_vol_lock`, before `run_job` returned. It hid in the log as
 `[artifacts] overlap preview 127s`, because the timer included `place()`'s wait on that
 lock. If an overlap time looks absurd, check who holds `_vol_lock` before profiling the
 render. `_prefetch_candidate`, every 2 s per busy worker, and the per-job reconcile and purge
-together made a cohort of N jobs cost O(N^2) RPCs on the Dict the API writes to. With six
-workers draining 200 submits, every API Dict RPC slowed from ~0.08 s to ~0.25 s.
+together made a cohort of N jobs cost O(N^2) RPCs on the Dict the API writes to. In a
+same-session A/B with 200 queued `idc:` jobs, six workers drained 15 of them during a 30 s
+submit burst before the one-listing scans and 199 after (a second round: 76 -> 123); one
+worker, 1 -> 11. Submits/s moved within Modal's noise (6.63 -> 7.51, 6.12 -> 5.68 with six
+workers; 6.78 -> 8.03, 6.91 -> 7.19 with one).
 
 Now every scan is one streamed `items()` (`_jobs_snapshot`). The sweep runs in a background
 thread, at most once per `JOBS_SWEEP_EVERY_S` per container, never two at once, and takes
@@ -468,13 +471,15 @@ jobs/min, with the preview at 0.5-2.0 s.
 
 ## Known open, deliberately
 
-- **The submit path, after its fix (2026-09-19).** `POST /v1/jobs` runs off the event loop
-  and commits scratch only for an upload. Before: 0.67 submits/s, every step serialized on
+- **The API's submit rate is bounded by its own per-submit cost, not the workers
+  (2026-09-19).** After the submit fix (`POST /v1/jobs` off the event loop, no scratch commit
+  without an upload), 8 threads get 6-8 submits/s at ~1 s p50 latency with one worker or
+  six. Alone, a Dict put is ~0.05 s from a thread or `.aio` alike and reaches ~150/s at 8-way
+  concurrency, so threads are not the cost. Before the fix: 0.67/s, every step serialized on
   the loop (commit 0.67 s, emit 0.21, cache_get 0.14, spawn 0.14, meta and inflight 0.10
-  each). A Dict put alone is ~0.05 s from a thread or `.aio` alike and reaches ~150/s at
-  8-way concurrency, so threads are not the cost. `cache_get`'s `cache_vol.reload()` (~0.3 s)
-  is now the largest step left. The workers' Dict scans that slowed it are fixed (above);
-  the 7.26/s and 3.08/s were measured before that fix and have not been re-measured.
+  each). `cache_get`'s `cache_vol.reload()` (~0.3 s) is now the largest step left. The first
+  measurement (7.26/s with one worker, 3.08 with six) did not reproduce as a gap in a
+  same-session A/B (above); Modal timings swing ~2x run to run.
 - The two `_emit` functions are NOT consolidated: same name, different jobs (one merges
   persisted state terminal-wins, one pushes SSE snapshots). Merging them would invent a
   duplication. `_prefetch_next` and the inflight markers are still written twice.
