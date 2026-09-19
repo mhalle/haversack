@@ -2984,6 +2984,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
     import asyncio
 
     from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+    from fastapi.concurrency import run_in_threadpool
     from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
     seg = executor.segmenter
@@ -3635,7 +3636,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # refuses it. One this server cannot verify yet must not be answered from cache or
         # by joining a flight either: both are keyed on the version that IS installed,
         # which is unknown here - the worker re-keys on what it actually ran.
-        version, verified = (pin_status(written, canonical, unverified_ok=True)
+        # off the event loop: the check may reload the weights volume (ModalExecutor)
+        version, verified = (await run_in_threadpool(pin_status, written, canonical,
+                                                     unverified_ok=True)
                              if "@" in written else (None, True))
         if not verified:
             no_cache = True
@@ -3659,10 +3662,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # and a multi-input refusal abandoned up to N-1 already-streamed volumes
         # with it. Nothing reaps a directory that no record knows about, and on
         # Modal /scratch is a persistent Volume, so those were permanent.
+        # `handed` is set once the hand-over thread holds it (see _accept).
+        handed: list = []
         try:
             return await _accept(request, jid, jdir, binding, task, opts, src,
                                  file, no_cache, executor, seg,
-                                 caller_asked_no_cache, version=version)
+                                 caller_asked_no_cache, version=version,
+                                 handed=handed)
         except QueueFull as e:
             _discard(jdir)
             raise HTTPException(429, str(e), headers={"Retry-After": "30"}) from e
@@ -3673,12 +3679,16 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(422, {"code": "unknown_format",
                                       "message": str(e)}) from e
         except BaseException:
-            _discard(jdir)                 # 422/410, a client disconnect, a bug
+            # 422/410, a client disconnect, a bug - but not a cancellation that lands
+            # while the hand-over thread runs on: the job may own the directory by
+            # now, and that thread discards it itself if submit() refuses
+            if not handed:
+                _discard(jdir)
             raise
 
     async def _accept(request, jid, jdir, binding, task, opts, src, file,
                       no_cache, executor, seg, caller_asked_no_cache=False,
-                      version=None):
+                      version=None, handed=None):
         multi = len(binding) > 1
         # Only a multi-input job needs to look past the declared `file` part;
         # re-parsing the form for the single case would change nothing and
@@ -3821,23 +3831,39 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # two - the output bytes differ.
         identity = (tuple(sorted(f"{role}={i}" for (role, _), i in zip(staged, idents)))
                     if multi else (idents[0],))
-        if True:
-            rec = executor.submit(jid, jdir, staged[0][1], task, opts,
-                            # in the model's declared channel order, not the
-                            # order the client happened to list them: both
-                            # executors take "the first source" as the reference
-                            # image, and that must mean channel 0 either way
-                            source=[e for _, e in binding],
-                            identity=identity, no_cache=no_cache,
-                            # passed only when set, so an executor that predates pins
-                            # keeps its signature
-                            **({"version": version} if version else {}),
-                            refresh_input=caller_asked_no_cache,
-                            source_tokens=source_tokens_of(request),
-                            inputs=tuple(staged) if multi else ())
-        # the executor may have joined this ask to an identical flight already
-        # running: the status it answers with is that job's, under its id
-        return executor.status_of(getattr(rec, "id", None) or jid)
+        tokens = source_tokens_of(request)
+
+        def _hand_over():
+            try:
+                rec = executor.submit(jid, jdir, staged[0][1], task, opts,
+                                # in the model's declared channel order, not the
+                                # order the client happened to list them: both
+                                # executors take "the first source" as the reference
+                                # image, and that must mean channel 0 either way
+                                source=[e for _, e in binding],
+                                identity=identity, no_cache=no_cache,
+                                # passed only when set, so an executor that predates
+                                # pins keeps its signature
+                                **({"version": version} if version else {}),
+                                refresh_input=caller_asked_no_cache,
+                                source_tokens=tokens,
+                                inputs=tuple(staged) if multi else ())
+            except BaseException:
+                _discard(jdir)             # refused: no record ever owned it
+                raise
+            # the executor may have joined this ask to an identical flight already
+            # running: the status it answers with is that job's, under its id
+            return executor.status_of(getattr(rec, "id", None) or jid)
+
+        # In a worker thread, never on the event loop: ModalExecutor's submit is a
+        # dozen blocking RPCs (Dict writes, a spawn, a volume reload), and run inline
+        # they serialized every concurrent submit in the container behind one another
+        # - 1.48 s each, 0.67 submits/s from 8 clients however many there were
+        # (measured on Modal, 2026-09-19). Sync routes already run in this pool, so
+        # both executors were already called from threads.
+        if handed is not None:
+            handed.append(True)
+        return await run_in_threadpool(_hand_over)
 
     @app.get("/v1/jobs", tags=["jobs"])
     def jobs(request: Request):

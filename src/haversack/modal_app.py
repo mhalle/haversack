@@ -1292,7 +1292,16 @@ class ModalExecutor:
         # through a Dict to another container would be sending it a lie.
         from haversack.serve import result_key
         with self.volume_guard:
-            scratch_vol.commit()                # make any upload visible to the worker
+            # Make any upload visible to the worker - and only then: a commit was
+            # 0.67 s of every submit's 1.48 (2026-09-19), paid by idc:/input: jobs
+            # that wrote nothing. Judged by what IS in the directory, not by the
+            # source kinds, so no caller can write there and have it go unseen. An
+            # empty one is removed, leaving nothing uncommitted behind; the worker
+            # creates it when it saves (Segmentation.save makes its parents).
+            try:
+                jdir.rmdir()
+            except OSError:                     # not empty (or already gone)
+                scratch_vol.commit()
         key = None
         if identity:
             key = result_key(identity, task, options,
