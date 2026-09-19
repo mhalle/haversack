@@ -41,6 +41,13 @@
   so the weights and inputs volumes, which only the job thread touches in a worker, need
   nothing.
 
+- **A multi-input Modal job no longer takes one role's upload for another's.** The worker
+  found each role's file by the prefix `input_{role}_`, and a role is the model's own
+  spelling, so for roles `t1` and `t1_ce` the `t1` channel could be given the `t1_ce`
+  scan; a role containing `/` would have named a subdirectory. The role is now
+  hex-encoded in the file name and matched exactly. A job queued before a redeploy, or
+  run by a warm worker from before it, fails with a message naming the role instead.
+
 ## [0.12.3] - 2026-09-19
 
 - **`GET /v1/jobs/{id}/result` reads the job's published result, not the worker's scratch

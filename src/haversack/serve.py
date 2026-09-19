@@ -1762,6 +1762,26 @@ def reference_input(staged):
     return staged
 
 
+def upload_name(role: str, filename: str) -> str:
+    """A multi-input upload's file name in the job dir: the role HEX-encoded, so it can
+    be read back exactly. It was ``input_{role}_{name}``, matched by prefix, and a role is
+    the model's own spelling - underscores included - so roles ``t1`` and ``t1_ce`` both
+    matched ``input_t1_ce_...`` (review, 2026-09-19); a role with a ``/`` in it would
+    have named a subdirectory."""
+    return f"input_{role.encode('utf-8').hex()}_{Path(filename).name}"
+
+
+def upload_role(name: str) -> str | None:
+    """The role an :func:`upload_name` file was saved under, or None for any other name."""
+    parts = name.split("_", 2)
+    if len(parts) != 3 or parts[0] != "input":
+        return None
+    try:
+        return bytes.fromhex(parts[1]).decode("utf-8")
+    except ValueError:
+        return None
+
+
 def result_payload(seg, labels_path) -> dict:
     """A finished job's public result, built ONCE for both executors.
 
@@ -3773,7 +3793,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             import hashlib
             h = hashlib.sha256()
             name = Path(getattr(upload, "filename", None) or "input.nii.gz").name
-            dest = jdir / (f"input_{role}_{name}" if multi else f"input_{name}")
+            dest = jdir / (upload_name(role, name) if multi else f"input_{name}")
             # Executors backed by a snapshot-consistent volume expose a guard: a
             # concurrent reload elsewhere would discard this uncommitted write. The
             # guard is a threading.Lock, so it is taken in a worker thread and never

@@ -217,8 +217,9 @@ def test_a_multi_input_job_reads_its_uploads_from_local_copies(worker, tmp_path)
     m, jobs, scratch, cache = worker
     jdir = Path(m.SCRATCH_ROOT) / "mm"
     jdir.mkdir()
-    (jdir / "input_t1_a.nii.gz").write_bytes(b"t1")
-    (jdir / "input_flair_b.nii.gz").write_bytes(b"flair")
+    from haversack.serve import upload_name
+    (jdir / upload_name("t1", "a.nii.gz")).write_bytes(b"t1")
+    (jdir / upload_name("flair", "b.nii.gz")).write_bytes(b"flair")
     jobs["mm"] = {"id": "mm", "task": "ts.v2:total_fast", "state": "queued",
                   "source": [{"kind": "upload", "role": "flair"},
                              {"kind": "upload", "role": "t1"}],
@@ -311,3 +312,38 @@ def test_the_artifact_thread_touches_the_cache_volume_only_under_the_lock(worker
     m._WorkerBase._artifact_worker(ctx, object(), "key-prev", "prev", "ts.v2:total_fast")
     assert not unlocked, unlocked
     assert (Path(ResultCache(m.CACHE_ROOT).get("key-prev")[0]).parent / "preview.png").exists()
+
+
+@pytest.mark.parametrize("roles", [("t1", "t1_ce"), ("t1_ce", "t1"), ("T1", "a/b")])
+def test_each_role_gets_its_own_upload_when_one_role_prefixes_another(worker, roles):
+    """Uploads were matched by the prefix ``input_{role}_``, and a role is the model's own
+    spelling: ``t1`` matched ``t1_ce``'s file, whichever sorted first."""
+    from haversack.serve import upload_name, upload_role
+    m, jobs, scratch, cache = worker
+    jdir = Path(m.SCRATCH_ROOT) / "pp"
+    jdir.mkdir()
+    for r in roles:
+        name = upload_name(r, "scan.nii.gz")
+        assert upload_role(name) == r and "/" not in name
+        (jdir / name).write_bytes(r.encode())
+    jobs["pp"] = {"id": "pp", "task": "ts.v2:total_fast", "state": "queued",
+                  "source": [{"kind": "upload", "role": r} for r in roles],
+                  "cache_key": "key-pp", "created": time.time()}
+    got = {}
+
+    class Ctx(_Ctx):
+        def _compute(self, input_path, meta, on_progress, token):
+            got.update({r: Path(p).read_bytes() for r, p in input_path.items()})
+            return _Seg(b"x")
+
+    m._execute_job(Ctx(), "pp")
+    assert jobs["pp"]["state"] == "done", jobs["pp"].get("error")
+    assert got == {r: r.encode() for r in roles}
+
+
+def test_upload_role_reads_back_only_what_upload_name_wrote():
+    from haversack.serve import upload_name, upload_role
+    for role in ("t1", "t1_ce", "T1c", "a/b", "ünï"):
+        assert upload_role(upload_name(role, "x_y_z.nii.gz")) == role
+    for other in ("input_ct.nii.gz", "input_zz_x.nii.gz", "labels.seg.nrrd"):
+        assert upload_role(other) is None

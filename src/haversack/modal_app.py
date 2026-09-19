@@ -1234,8 +1234,14 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
                 role = entry.get("role") or "image"
                 kind = entry.get("kind", "upload")
                 if kind == "upload":
-                    staged[role] = next(u for u in uploads
-                                        if u.name.startswith(f"input_{role}_"))
+                    # exact, by the name serve saved it under - never a prefix match
+                    from haversack.serve import upload_role
+                    found = [u for u in uploads if upload_role(u.name) == role]
+                    if len(found) != 1:
+                        raise FileNotFoundError(
+                            f"job {jid}: {len(found)} uploads for role {role!r} on the "
+                            f"scratch volume, expected one")
+                    staged[role] = found[0]
                     continue
                 if kind == "input":
                     # pinned like any other input: the content store is LRU, and
