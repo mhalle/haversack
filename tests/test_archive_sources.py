@@ -392,7 +392,10 @@ def test_redirect_strips_auth_on_scheme_downgrade():
 # --- the two sources added 2026-09-05: a bucket allowlist and a release tag ---
 
 class _FakeStore:
-    """An obstore stand-in: objects by key, with the four calls the sources make."""
+    """An obstore stand-in: objects by key, with the four calls the sources make.
+
+    Listing strips a key's trailing slash, as obstore does: a directory marker
+    ``abc/`` is listed as ``abc`` and cannot be fetched under that name."""
 
     def __init__(self, objects):
         self.objects = dict(objects)
@@ -400,7 +403,7 @@ class _FakeStore:
 
     def list(self, prefix=None):
         self.calls.append(("list", prefix))
-        yield [{"path": k, "size": len(v)} for k, v in self.objects.items()
+        yield [{"path": k.rstrip("/"), "size": len(v)} for k, v in self.objects.items()
                if k.startswith(prefix or "")]
 
 
@@ -493,6 +496,33 @@ def test_a_trailing_slash_fetches_every_object_under_the_prefix(fake_cloud, tmp_
         GCSSource().fetch("idc-open-data/zzz/", tmp_path / "b")
     with pytest.raises(InputError, match="takes no !member"):
         GCSSource().fetch("idc-open-data/abc/!x", tmp_path / "b")
+
+
+def test_directory_markers_are_not_fetched_though_the_listing_strips_their_slash(
+        fake_cloud, tmp_path):
+    """idc:15fc0810-a2e2-4b32-8c3c-217ebc92ba32 carries a zero-byte marker
+    ``<uuid>/``; obstore lists it as ``<uuid>``, which has a basename, and its
+    GET was a NoSuchKey that failed the whole fetch (2026-09-19). A marker for
+    a subdirectory is the same case one level down."""
+    from haversack.sources import IDCSource
+    built, stores = fake_cloud
+    uuid = "15fc0810-a2e2-4b32-8c3c-217ebc92ba32"
+    store = stores[("aws", "idc-open-data")] = _FakeStore({
+        f"{uuid}/": b"", f"{uuid}/1.dcm": b"one", f"{uuid}/sub/": b"",
+        f"{uuid}/sub/2.dcm": b"two"})
+    got = IDCSource().fetch(uuid, tmp_path)
+    assert sorted(p.name for p in got.iterdir()) == ["1.dcm", "2.dcm"]
+    assert sorted(c[1] for c in store.calls if c[0] == "get") == \
+        [f"{uuid}/1.dcm", f"{uuid}/sub/2.dcm"]
+    # the same through an allowlisted bucket's <prefix>/ fetch
+    (tmp_path / "b").mkdir()
+    got = S3Source({"idc-open-data": None}).fetch(f"idc-open-data/{uuid}/", tmp_path / "b")
+    assert sorted(p.name for p in got.iterdir()) == ["1.dcm", "2.dcm"]
+    # a series that is nothing but its marker is empty, and says so
+    stores[("aws", "idc-open-data")] = _FakeStore({"x/": b""})
+    (tmp_path / "c").mkdir()
+    with pytest.raises(InputError, match="no objects under"):
+        S3Source({"idc-open-data": None}).fetch("idc-open-data/x/", tmp_path / "c")
 
 
 def test_a_prefix_over_the_cap_is_refused_before_any_object_moves(fake_cloud, tmp_path, monkeypatch):

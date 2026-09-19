@@ -398,9 +398,13 @@ def basename(member: str) -> str:
     """The last path segment of an archive member or object key, with Windows
     separators normalized.
 
-    Deliberately string slicing rather than ``Path(...).name``: a bucket's
-    pseudo-directory key ``abc/`` must come back as ``""`` so callers can skip
-    it, and pathlib normalizes the trailing slash away and answers ``abc``.
+    Deliberately string slicing rather than ``Path(...).name``: an archive's
+    directory entry ``abc/`` must come back as ``""`` so callers can skip it,
+    and pathlib normalizes the trailing slash away and answers ``abc``.
+
+    This does NOT catch a bucket's directory marker: obstore lists the marker
+    object ``abc/`` as ``abc``, slash stripped, which has a basename like any
+    file. ``sources._list_objects`` drops markers by position instead.
     """
     return str(member).replace("\\", "/").rsplit("/", 1)[-1]
 

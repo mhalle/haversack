@@ -490,7 +490,18 @@ def _object_store(cloud: str, bucket: str, region: str | None = None):
 
 
 def _list_objects(store, prefix: str) -> list:
-    """``[(key, size)]`` under ``prefix``, in listing order."""
+    """``[(key, size)]`` under ``prefix``, in listing order, without directory
+    markers.
+
+    A bucket's directory marker is a zero-byte object whose key ends in ``/``,
+    and obstore's listing strips that slash: IDC series
+    ``15fc0810-a2e2-4b32-8c3c-217ebc92ba32`` lists its marker as the key
+    ``15fc0810-...`` (2026-09-19), which has a basename of its own, and the GET
+    of that key is a 404 that failed the whole fetch. With the slash gone, a
+    marker is recognized by position instead: the listing prefix itself, or a
+    key that is a strict path-prefix of another listed key - no object can be
+    both a file and the directory other objects live in. A marker that keeps
+    its slash goes too."""
     out = []
     for page in store.list(prefix=prefix):
         for o in page:
@@ -498,7 +509,15 @@ def _list_objects(store, prefix: str) -> list:
                 out.append((str(o.get("path")), int(o.get("size") or 0)))
             else:
                 out.append((str(o), 0))
-    return out
+    return _without_directory_markers(out, prefix)
+
+
+def _without_directory_markers(keys: list, prefix: str) -> list:
+    dirs = {prefix.rstrip("/")}
+    for key, _ in keys:
+        parts = key.rstrip("/").split("/")
+        dirs.update("/".join(parts[:i]) for i in range(1, len(parts)))
+    return [(k, n) for k, n in keys if not k.endswith("/") and k not in dirs]
 
 
 class _Budget:
@@ -547,7 +566,8 @@ def _fetch_objects(store, keys: list, dest: Path, *, what: str, cap: int,
     if total > cap:
         raise InputError(f"{what}: {len(keys)} objects total {total} bytes, over the "
                          f"{cap}-byte fetch cap (HAVERSACK_MAX_FETCH_GB)")
-    # a bucket pseudo-directory key has no basename of its own
+    # _list_objects already dropped directory markers; this catches a key
+    # that still names no file of its own
     wanted = [k for k, _ in keys if content.basename(k) not in ("", ".", "..")]
     budget = _Budget(cap, what)
     names = content.flatten_names(wanted)

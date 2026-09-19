@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+- **A series with a directory marker in its bucket fetches again.** Some IDC series carry a
+  zero-byte marker object `<uuid>/`, and obstore lists it with the slash stripped, as `<uuid>`,
+  so the prefix fetch asked for an object that does not exist and failed the whole series with
+  `NoSuchKey` (`idc:15fc0810-a2e2-4b32-8c3c-217ebc92ba32`, colorectal_liver_metastases: 1 of 5
+  random abdominal CT series tried). The listing now drops a key that is the prefix itself or
+  a strict path-prefix of another listed key, for `idc:` and every `<bucket>/<prefix>/` fetch.
+
 ## [0.12.0] - 2026-09-13
 
 - **The segments index: what every task produces, before anything is installed.** Most
