@@ -446,6 +446,17 @@ multi-hour job fares against the 3600 s function timeout.
 
 ## Known open, deliberately
 
+- **The workers' jobs-Dict scans are O(records) per job, per worker (measured 2026-09-19,
+  not fixed).** `_prefetch_candidate` (every 2 s while a job runs), `_reconcile_orphans` and
+  `_bound_jobs_store` (after every job) each list the Dict and `get` every record, so a
+  cohort of N jobs costs O(N^2) RPCs, all on the Dict the API writes to. After the submit
+  fix (`POST /v1/jobs` off the event loop, no scratch commit without an upload), 200 `idc:`
+  submits from 8 threads ran at 7.26/s with one worker and 3.08/s with six: each API RPC
+  went from ~0.08 s to ~0.25 s. Alone, a Dict put is ~0.05 s from a thread or `.aio` alike
+  and reaches ~150/s at 8-way concurrency, so threads are not the cost. Before the fix:
+  0.67/s, every step serialized on the loop (commit 0.67 s, emit 0.21, cache_get 0.14,
+  spawn 0.14, meta and inflight 0.10 each). `cache_get`'s `cache_vol.reload()` (~0.3 s) is
+  now the largest step left.
 - The two `_emit` functions are NOT consolidated: same name, different jobs (one merges
   persisted state terminal-wins, one pushes SSE snapshots). Merging them would invent a
   duplication. `_prefetch_next` and the inflight markers are still written twice.

@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+- **A Modal deployment accepts concurrent submits concurrently again.** `POST /v1/jobs`
+  called the executor inline in an async route, and on Modal that is a dozen blocking RPCs:
+  every submit held the container's event loop for 1.48 s, so 8 clients got 0.67 submits/s
+  between them (0.62 on a 760-job IDC run). The hand-over now runs in a worker thread, and a
+  submit commits the scratch volume only when it wrote something there - that commit was
+  0.67 s of every `idc:` submit. Measured on throwaway deploys, 200 submits from 8 threads:
+  3.08 submits/s with 6 workers, 7.26 with one (the workers' scans of the jobs Dict slow
+  every RPC the API makes; see AGENTS.md).
+
 ## [0.12.1] - 2026-09-19
 
 - **A series with a directory marker in its bucket fetches again.** Some IDC series carry a
