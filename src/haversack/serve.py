@@ -4335,7 +4335,10 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                         raise HTTPException(422, str(e)) from None
                     jid, jdir = executor.new_job_dir()
                     try:
-                        executor.submit(jid, jdir, None, task, dict(gopts),
+                        # off the loop: on Modal a submit's cache lookup can wait out a
+                        # reload (adversarial review, 2026-09-19)
+                        await asyncio.to_thread(
+                            executor.submit, jid, jdir, None, task, dict(gopts),
                                         no_cache=skip,      # the same skip the lookup used
                                         # ...but the INPUT refresh follows the CALLER only:
                                         # `skip` also carries the engine's cache policy, and
@@ -4358,7 +4361,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     await asyncio.sleep(0.5)
                     nxt = executor.status_of(jid)
                     if nxt is None:        # record purged mid-watch: the cache
-                        if executor.cache_get(key) is not None:
+                        if await asyncio.to_thread(executor.cache_get, key) is not None:
                             nxt = {"state": "done"}
                         else:              # job gone, bytes gone - the honest
                                            # answer is absence, NOT a
@@ -4371,11 +4374,17 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 if snap.get("state") == "done" or hit is not None:
                     # a hit wins even against a failed/cancelled marker:
                     # under duplicate flights the sibling may have published
-                    if hit is None:            # done, but is it in view? (503 if unsure)
-                        hit = await asyncio.to_thread(confirm_absent, key, since)
+                    unseen = None
+                    if hit is None:            # done, but is it in view?
+                        try:
+                            hit = await asyncio.to_thread(confirm_absent, key, since)
+                        except ResultsNotVisible as e:   # the job's own copy may answer,
+                            unseen = e                   # as _job_result lets it
                     headers = _pref_headers(request, key, hit[1] if hit else None)
                     src_path = hit[0] if hit else \
                         (await asyncio.to_thread(executor.result_file, jid))[1]
+                    if src_path is None and unseen is not None:
+                        raise unseen
                     if src_path is None:       # evicted between done and read
                         raise HTTPException(404, "not materialized")
                     fresh = not_modified(request, headers["ETag"])
@@ -4541,7 +4550,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     raise HTTPException(422, str(e)) from None
                 jid, jdir = executor.new_job_dir()
                 try:
-                    executor.submit(jid, jdir, None, task, dict(opts),
+                    await asyncio.to_thread(       # off the loop, as on the labels URL
+                        executor.submit, jid, jdir, None, task, dict(opts),
                                     no_cache=((wants_no_cache(request) and authed(request))
                                               or not engine_serves_from_cache(task)),
                                     # the CALLER's directive alone - an engine that
@@ -4562,13 +4572,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 await asyncio.sleep(0.5)
                 nxt = executor.status_of(jid)
                 if nxt is None:            # record purged mid-watch
-                    if executor.cache_get(key) is not None:
+                    if await asyncio.to_thread(executor.cache_get, key) is not None:
                         nxt = {"state": "done"}
                     else:                  # job gone, bytes gone: absence,
                                            # never a synthesized failure
                         raise HTTPException(404, "not materialized")
                 snap = nxt
-            hit = executor.cache_get(key)
+            hit = await asyncio.to_thread(executor.cache_get, key)
             if hit is not None:            # a hit wins even against a failed/
                 return hit                 # cancelled marker (duplicate flights)
             st = snap.get("state")
@@ -4590,6 +4600,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             Prefer budget, shared with the materialize leg - two legs must
             not each spend wait_max."""
             path = Path(hit[0]).parent / filename
+            since = time.monotonic()
 
             async def look():
                 """The file, or None. Asked again of the entry when the path in hand
@@ -4623,6 +4634,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                         detail=f"{what} still materializing")
             if (found := await look()) is not None:   # placed between our probe and
                 return found                          # the pending flag clearing
+            if _confirm is not None:
+                # a stale view is not an absence: ask one newer than this request, and
+                # answer 503 if none can be had (adversarial review, 2026-09-19)
+                again = await asyncio.to_thread(confirm_absent, key, since)
+                p = Path(again[0]).parent / filename if again is not None else None
+                if p is not None and p.exists():
+                    return p
             raise HTTPException(404, f"no {what} for this result")
 
         def _register_statistics(tok: str, gopts: dict):

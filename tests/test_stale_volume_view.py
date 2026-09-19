@@ -297,3 +297,226 @@ def test_an_artifact_placed_after_the_copy_is_still_found(monkeypatch, tmp_path)
     r = client.get(PATH.replace("labels.seg.nrrd", "preview.png"))
     assert r.status_code == 200, r.text
     assert r.content == png.read_bytes()
+
+
+# -- adversarial review, 2026-09-19: each finding pinned ----------------------------
+
+def test_a_path_wait_that_ends_done_falls_back_to_the_jobs_copy(monkeypatch, tmp_path):
+    """The path route that rode a flight to done answered 503 while the job route served
+    the same bytes: it raised the confirm's ResultsNotVisible before trying the job's
+    own copy, which _job_result does."""
+    import threading
+    import time
+    m, jobs, vol, ex, client = _modal(monkeypatch, tmp_path, refusals=10 ** 6)
+    key, jid = _key(ex), "aaaaaaaaaaaa"
+    jobs[jid] = {"id": jid, "task": "total_fast", "state": "running",
+                 "created": time.time(), "started": time.time(), "cache_key": key}
+    jobs[f"inflight:{key}"] = jid
+    src, res = _commit_elsewhere(m, vol, tmp_path, key, jid=jid)
+    scratch = Path(m.SCRATCH_ROOT) / jid / RESULT_NAME
+    scratch.parent.mkdir(parents=True)
+    scratch.write_bytes(src.read_bytes())
+
+    def finish():
+        time.sleep(0.7)
+        jobs[jid] = {**jobs[jid], "state": "done", "finished": time.time(), "result": res}
+    threading.Thread(target=finish).start()
+    r = client.get(PATH, headers={"Prefer": "wait=5"})
+    assert r.status_code == 200, r.text
+    assert r.content == src.read_bytes()
+
+
+def test_an_artifact_committed_elsewhere_is_not_a_404_from_a_stale_view(monkeypatch, tmp_path):
+    m, jobs, vol, ex, client = _modal(monkeypatch, tmp_path, refusals=0)
+    _commit_elsewhere(m, vol, tmp_path, _key(ex))
+    assert client.get(PATH).status_code == 200            # the entry is in view
+    Path(m.CACHE_ROOT).rename(vol.hidden)                 # committed state, not this view
+    import shutil
+    shutil.copytree(vol.hidden, m.CACHE_ROOT)
+    from haversack.serve import ResultCache
+    png = b"\x89PNG\r\n\x1a\n"
+    (ResultCache(vol.hidden)._resolve(_key(ex), lease=False) / "preview.png").write_bytes(png)
+    monkeypatch.setattr(m, "_cache_view_as_of", float("-inf"))
+    vol.refusals = 10 ** 6
+    r = client.get(PATH.replace("labels.seg.nrrd", "preview.png"))
+    assert r.status_code == 503, r.text                   # 0.12.3 + first fix: 404
+    vol.refusals = 0
+    r = client.get(PATH.replace("labels.seg.nrrd", "preview.png"))
+    assert r.status_code == 200 and r.content == png, r.text
+
+
+@pytest.mark.parametrize("artifact", ["preview.png", "statistics.json"])
+@pytest.mark.parametrize("refusals, expected", [(1, 200), (10 ** 6, 503)])
+def test_derived_artifacts_confirm_a_stale_miss(monkeypatch, tmp_path, artifact,
+                                               refusals, expected):
+    """preview and statistics reach the entry through _materialize_entry: a stale miss
+    there is read again from a newer view, or is a 503 - never 'not materialized'."""
+    m, jobs, vol, ex, client = _modal(monkeypatch, tmp_path, refusals=refusals)
+    _commit_elsewhere(m, vol, tmp_path, _key(ex))
+    from haversack.serve import ResultCache
+    body = b"\x89PNG\r\n\x1a\n" if artifact.endswith("png") else b'{"segments": {}}'
+    (ResultCache(vol.hidden)._resolve(_key(ex), lease=False) / artifact).write_bytes(body)
+    r = client.get(PATH.replace("labels.seg.nrrd", artifact))
+    assert r.status_code == expected, r.text
+    if expected == 503:
+        assert r.headers["retry-after"]
+
+
+def test_an_artifact_placed_after_the_first_look_is_found_by_the_wait(monkeypatch, tmp_path):
+    """The route's own copy predates the artifact: the pending wait must ask the entry
+    again, not poll a local path the artifact will never reach."""
+    m, jobs, vol, ex, client = _modal(monkeypatch, tmp_path, refusals=0)
+    _commit_elsewhere(m, vol, tmp_path, _key(ex))
+    client.get(PATH)                                       # in view, copied, no preview
+    from haversack.serve import ResultCache
+    png = b"\x89PNG\r\n\x1a\n"
+    state = {"n": 0}
+    real = ex.cache_get
+
+    def cache_get(key):
+        hit = real(key)
+        state["n"] += 1
+        if state["n"] == 1:                                # placed right after the first
+            g = ResultCache(m.CACHE_ROOT)._resolve(key, lease=False)
+            (g / "preview.png").write_bytes(png)
+        return hit
+    monkeypatch.setattr(ex, "cache_get", cache_get)
+    monkeypatch.setattr(ex, "artifact_state",
+                        lambda key: "pending" if state["n"] < 3 else "absent")
+    r = client.get(PATH.replace("labels.seg.nrrd", "preview.png"),
+                   headers={"Prefer": "wait=5"})
+    assert r.status_code == 200, r.text
+    assert r.content == png
+
+
+def test_a_jobs_copy_is_never_rewritten_in_place(monkeypatch, tmp_path):
+    """result_file copied the scratch file onto the path an earlier response was
+    streaming: a 200 MB body came out 2 MB. A new copy is a new file."""
+    import os
+    m, jobs, vol, ex, client = _modal(monkeypatch, tmp_path, refusals=0)
+    jid = "402631ac7d0e"
+    jobs[jid] = {"id": jid, "task": "total_fast", "state": "done"}
+    p = Path(m.SCRATCH_ROOT) / jid / RESULT_NAME
+    p.parent.mkdir(parents=True)
+    p.write_bytes(b"x" * 4096)
+    _, first = ex.result_file(jid)
+    with open(first, "rb") as fh:
+        fh.read(10)
+        _, second = ex.result_file(jid)
+        assert os.fstat(fh.fileno()).st_ino != os.stat(second).st_ino
+        assert fh.read() == b"x" * 4086
+
+
+def test_a_cache_hit_jobs_own_copy_is_local_and_its_record_names_the_volume(monkeypatch,
+                                                                          tmp_path):
+    """submit recorded this container's COPY as cache_path - a path no other container
+    has; and result_file must hand out a local copy, not the volume's file."""
+    import shutil
+    m, jobs, vol, ex, client = _modal(monkeypatch, tmp_path, refusals=0)
+    src, _ = _commit_elsewhere(m, vol, tmp_path, _key(ex))
+    meta = ex.submit("j2", tmp_path / "jd", None, "total_fast", {},
+                     identity=(f"idc:{U}",))
+    assert meta["cached"] is True
+    assert meta["cache_path"].startswith(m.CACHE_ROOT), meta["cache_path"]
+    jobs["j2"] = meta
+    _, own = ex.result_file("j2")
+    assert own is not None and not str(own).startswith(m.CACHE_ROOT)
+    shutil.rmtree(m.CACHE_ROOT)
+    assert Path(own).read_bytes() == src.read_bytes()
+
+
+def test_the_trim_never_takes_a_copy_handed_out_during_it(monkeypatch, tmp_path):
+    """The trim decided from one listing and deleted later; a lookup that touched a copy
+    in between lost it (410 or 500 at the open)."""
+    import os
+    import shutil
+    import threading
+    import time
+    m, jobs, vol, ex, client = _modal(monkeypatch, tmp_path, refusals=0)
+    from haversack.serve import ResultCache
+    src = tmp_path / RESULT_NAME
+    _NrrdSeg().save(src)
+    for k in ("a" * 64, "b" * 64):
+        ResultCache(m.CACHE_ROOT).put(k, src, {"outputs": []}, {})
+        m._read_cache(k)
+    old = time.time() - 3600
+    for d in Path(m.MIRROR_ROOT).glob("*/*"):
+        os.utime(d, (old, old))
+    monkeypatch.setattr(m, "MIRROR_MAX_BYTES", 0)
+    real_rmtree = shutil.rmtree
+
+    def slow_rmtree(p, *a, **k):
+        time.sleep(0.3)
+        return real_rmtree(p, *a, **k)
+    monkeypatch.setattr(shutil, "rmtree", slow_rmtree)
+    t = threading.Thread(target=m._trim_mirror)
+    t.start()
+    time.sleep(0.1)                                   # the trim is deleting the first
+    hit = m._read_cache("b" * 64)                     # ...when the second is handed out
+    t.join()
+    assert Path(hit[0]).exists()
+
+
+def test_lookups_do_not_queue_a_reload_each(monkeypatch, tmp_path):
+    """Every lookup queued its own exclusive reload, and readers yield to waiting
+    writers: under load a read waited 6 s. Concurrent askers now share a reload."""
+    import threading
+    import time
+    m, jobs, vol, ex, client = _modal(monkeypatch, tmp_path, refusals=0)
+    _commit_elsewhere(m, vol, tmp_path, "k" * 64)
+    real = vol.reload
+
+    def slow():
+        time.sleep(0.05)
+        real()
+    monkeypatch.setattr(vol, "reload", slow)
+    waits = []
+
+    def ask():
+        t = time.monotonic()
+        assert ex.cache_get("k" * 64) is not None
+        waits.append(time.monotonic() - t)
+    threads = [threading.Thread(target=ask) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(waits) == 20
+    assert vol.reloads <= 3, vol.reloads             # one each: 20, serialized
+    assert max(waits) < 0.5, max(waits)
+
+
+def test_no_cache_lookup_or_submit_runs_on_the_event_loop(monkeypatch, tmp_path):
+    """On Modal a lookup can wait out a reload, and a submit looks up: on the loop thread
+    that froze every request in the container (a 1.5 s stall, review 2026-09-19)."""
+    import asyncio
+    m, jobs, vol, ex, client = _modal(monkeypatch, tmp_path, refusals=0)
+    on_loop = []
+
+    def running_loop():
+        try:
+            asyncio.get_running_loop()
+            return True
+        except RuntimeError:
+            return False
+
+    real_get = ex.cache_get
+
+    def cache_get(key):
+        on_loop.append(("cache_get", running_loop()))
+        return real_get(key)
+
+    def submit(*a, **k):
+        on_loop.append(("submit", running_loop()))
+        from haversack.serve import QueueFull
+        raise QueueFull("probe")
+    monkeypatch.setattr(ex, "cache_get", cache_get)
+    monkeypatch.setattr(ex, "submit", submit)
+    monkeypatch.setattr(m, "_confirm_cache_absent", lambda key, since: None)
+    from haversack import serve
+    monkeypatch.setattr(serve, "_idc_enabled", lambda: True)
+    for url in (PATH, PATH.replace("labels.seg.nrrd", "preview.png"),
+                PATH.replace("labels.seg.nrrd", "statistics.json")):
+        client.get(url, headers={"Prefer": "wait=0"})
+    assert any(k == "submit" for k, _ in on_loop), on_loop
+    assert not [k for k, loop in on_loop if loop], on_loop

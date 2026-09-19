@@ -161,7 +161,17 @@ def _other_threads(m, ctx, stop, key, placed, errors):
                 m.scratch_vol.reload()
             time.sleep(0.0005)
 
-    return [threading.Thread(target=artifacts), threading.Thread(target=prefetch_and_sweep)]
+    def cache_commits():
+        # the sweep's and the jobs' own cache commits, which Modal may end in a reload:
+        # without these the only cache reload racing an unlocked add_artifact was the
+        # job's _put, too rare to catch (mutation review, 2026-09-19)
+        while not stop.is_set():
+            with ctx._vol_lock:
+                m.cache_vol.commit()
+            time.sleep(0.0005)
+
+    return [threading.Thread(target=artifacts), threading.Thread(target=prefetch_and_sweep),
+            threading.Thread(target=cache_commits)]
 
 
 def test_jobs_and_artifacts_racing_reloads_lose_nothing(worker, tmp_path, monkeypatch):
@@ -250,3 +260,54 @@ def test_a_refused_reload_still_stages_what_is_visible(worker):
     m._execute_job(ctx, "rf")
     assert jobs["rf"]["state"] == "done", jobs["rf"].get("error")
     assert ctx.read == [body]
+
+
+def test_the_publication_reads_the_local_labels_not_scratch(worker, monkeypatch):
+    """Deterministic where the race test is not (a mutant reading the labels back from
+    scratch was killed 2 runs in 5): what publication and the cache put read is the
+    job's local copy."""
+    from haversack import serve
+    m, jobs, scratch, cache = worker
+    seen = []
+    real = serve.publish_completion
+
+    def publish_completion(**kw):
+        seen.append(Path(kw["labels_path"]))
+        return real(**kw)
+    monkeypatch.setattr(serve, "publish_completion", publish_completion)
+    ctx = _Ctx()
+    _submit(m, jobs, "j00")
+    m._execute_job(ctx, "j00")
+    assert jobs["j00"]["state"] == "done", jobs["j00"].get("error")
+    assert seen and not any(str(p).startswith(m.SCRATCH_ROOT) for p in seen), seen
+
+
+def test_the_artifact_thread_touches_the_cache_volume_only_under_the_lock(worker,
+                                                                           monkeypatch):
+    """ResultCache() mkdirs its root: built outside _vol_lock in the artifact thread, it
+    recreated a root a reload was hiding (the race test caught it 2 runs in 5)."""
+    from haversack import serve
+    m, jobs, scratch, cache = worker
+    src = Path(m.CACHE_ROOT).parent / "prev-labels"
+    src.write_bytes(b"previous labels")
+    ResultCache(m.CACHE_ROOT).put("key-prev", src, {"outputs": []}, {"job": "prev"})
+    ctx = _Ctx()
+    unlocked = []
+    real_init = serve.ResultCache.__init__
+
+    def init(self, *a, **k):
+        if not ctx._vol_lock.locked():
+            unlocked.append("ResultCache()")
+        real_init(self, *a, **k)
+    monkeypatch.setattr(serve.ResultCache, "__init__", init)
+    png = Path(m.CACHE_ROOT).parent / "p.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    def overlap(pair, task, artifacts, *, preview_out, statistics_out, place, finish):
+        out = png.with_name("render.png")
+        shutil.copyfile(png, out)
+        finish([("preview", 0.0)] if place("preview.png", out) else [])
+    monkeypatch.setattr(serve, "artifact_overlap", overlap)
+    m._WorkerBase._artifact_worker(ctx, object(), "key-prev", "prev", "ts.v2:total_fast")
+    assert not unlocked, unlocked
+    assert (Path(ResultCache(m.CACHE_ROOT).get("key-prev")[0]).parent / "preview.png").exists()
