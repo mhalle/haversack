@@ -240,7 +240,7 @@ class _HidingVolume:
             self.away.rename(self.root)
 
     def commit(self):
-        self.reload()                          # Modal's commit ends in a reload
+        self.reload()                          # the worst case: Modal may reload after one
 
 
 def test_lookups_racing_reloads_never_miss_a_published_entry(monkeypatch, tmp_path):

@@ -63,6 +63,10 @@ ARTIFACTS = set(filter(None, os.environ.get("HAVERSACK_ARTIFACTS",
 RESULTS_KEEP = int(os.environ.get("HAVERSACK_RESULTS_KEEP", "500"))
 WEIGHTS_ROOT, SCRATCH_ROOT, CACHE_ROOT = "/weights", "/scratch", "/cache"
 INPUTS_ROOT = "/inputs"
+#: container-local copies of a running job's own files - its uploads and its labels -
+#: so that nothing reads them from the scratch volume outside ``_vol_lock`` (see
+#: ``_stage_uploads``)
+JOB_LOCAL_ROOT = "/tmp/haversack-jobs"
 # Inputs get a bigger floor than fetched series: a re-fetchable IDC series
 # costs a download when evicted, an uploaded volume is simply gone.
 INPUTS_GB = float(os.environ.get("HAVERSACK_INPUTS_GB", "50"))
@@ -1046,6 +1050,63 @@ def _refresh_series(ctx, meta: dict, key: str, rep, already: set | None = None,
                          already=already)
 
 
+# -- one worker container, several threads, four volumes ---------------------------
+#
+# While a thread runs ``Volume.reload()``, every path on THAT volume is ENOENT to the
+# container's other threads, and the reload is refused while any of them holds a file on
+# it open. Measured on Modal 2026-09-19 (modal 1.5.5, a thread listing 260 entries while
+# another looped): a reload of the same volume, 63,412 ENOENT in 72,989 listings; a
+# reload or commit of ANOTHER volume, none; a commit of the same volume, none in 61
+# commits - alone, with another container committing, and with files open for reading
+# or writing, none refused either. Modal's source reloads after a commit whenever the
+# server's reply asks it to (``skip_reload``), which it never did here; commits are
+# locked like reloads all the same, because that is the server's choice, not ours.
+#
+# A worker runs up to four threads at once: the job, the prefetcher (reloads scratch
+# for a queued upload), the previous job's artifact overlap (places into the cache,
+# commits it) and the retention sweep (removes job directories, commits scratch). So
+# every access to the scratch or cache volume in a worker holds ``ctx._vol_lock``, as
+# does every reload or commit of either. Held only for file operations - a copy, a
+# save, a put, a commit - never across a compute or a Dict scan (a sweep holding it once
+# logged as a 127 s preview).
+#
+# Before 2026-09-19 the job itself broke this: it dropped the lock, then ran on its
+# upload from the volume and read its saved labels back from it (digest, artifact pair,
+# the cache put) - a prefetcher reload in between was a FileNotFoundError failing the
+# job, and the job's open upload made the prefetcher's reload raise, ending the
+# prefetcher. It now works on container-local copies taken under the lock. ``_put``
+# held no lock either; it does now, for the commit (above) and because it touches the
+# cache volume the artifact thread commits.
+#
+# The weights and inputs volumes are touched only by the job thread in a worker, and a
+# reload or commit of one volume hides no other, so their commits (``_ensure``,
+# VoxTell's HF cache, the content store) race nothing here.
+
+
+def _stage_uploads(ctx, jdir: Path, local: Path) -> list:
+    """Copy the job's uploaded inputs (``input_*``) off the scratch volume into the
+    container-local ``local``, under ``ctx._vol_lock`` with the reload that makes them
+    visible; returns the local copies. The job reads only these: a reload or commit in
+    another thread hides the volume's files for its duration, and the compute that
+    reads an upload lasts far longer than any lock may be held."""
+    import shutil
+    local.mkdir(parents=True, exist_ok=True)
+    out = []
+    with ctx._vol_lock:
+        try:
+            scratch_vol.reload()
+        except Exception as e:             # noqa: BLE001 - refused; what is visible may do
+            print(f"[stage] {jdir.name}: scratch reload refused: {e}", flush=True)
+        for f in sorted(jdir.glob("input_*")):
+            dst = local / f.name
+            shutil.copyfile(f, dst)
+            out.append(dst)
+    if not out:
+        raise FileNotFoundError(f"job {jdir.name}: no uploaded input is visible on the "
+                                f"scratch volume")
+    return out
+
+
 def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None:
     """The engine-agnostic job body shared by every worker: fetch/stage/
     read, then ctx._ensure + ctx._compute (the engine), then save +
@@ -1065,6 +1126,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         # A signal landing in these few lines raises through run_job and retires there.
         return None
     jdir = Path(SCRATCH_ROOT) / jid
+    local = Path(JOB_LOCAL_ROOT) / jid          # this job's files, off the volume
     last = {"t": 0.0}
 
     def on_progress(p):
@@ -1109,15 +1171,16 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             # written to the job dir under that role, and remote siblings fetch
             # exactly like a single-input job through the same pinned cache.
             rep = Reporter.of(on_progress, cancel=token)
-            with ctx._vol_lock:
-                scratch_vol.reload()
+            uploads = (_stage_uploads(ctx, jdir, local)
+                       if any(e.get("kind", "upload") == "upload" for e in entries) else [])
             staged = {}
             refreshed: set = set()     # one refresh per identifier, not per role
             for entry in entries:
                 role = entry.get("role") or "image"
                 kind = entry.get("kind", "upload")
                 if kind == "upload":
-                    staged[role] = next(jdir.glob(f"input_{role}_*"))
+                    staged[role] = next(u for u in uploads
+                                        if u.name.startswith(f"input_{role}_"))
                     continue
                 if kind == "input":
                     # pinned like any other input: the content store is LRU, and
@@ -1188,9 +1251,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
                 print(f"[read] upload {jid} preread", flush=True)
                 input_path = preread
             else:
-                with ctx._vol_lock:
-                    scratch_vol.reload()
-                input_path = next(jdir.glob("input_*"))
+                input_path = _stage_uploads(ctx, jdir, local)[0]
         from haversack.serve import RESULT_NAME, ResultCache, reference_input
         s = ctx._compute(input_path, meta, on_progress, token)
         # Asked once more before anything is saved or published, as the local server
@@ -1201,11 +1262,19 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         if token.cancelled or _cancel_requested(jid):
             raise Cancelled("cancelled before publication")
         record_inputs(s, entries, meta.get("input_identity") or [], ctx.series_cache)
+        # Saved locally and copied to the volume under the lock: everything after this
+        # reads the labels - their digest, the artifact pair, the cache put - and reads
+        # the local file, which no reload in another thread can hide.
+        import shutil
+        local.mkdir(parents=True, exist_ok=True)
+        labels = local / RESULT_NAME
+        s.save(labels)
         with ctx._vol_lock:
-            s.save(jdir / RESULT_NAME)
+            jdir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(labels, jdir / RESULT_NAME)   # the api's fallback reads it
             scratch_vol.commit()
         from haversack.serve import result_payload
-        result = result_payload(s, jdir / RESULT_NAME)
+        result = result_payload(s, labels)
         # The publication order (re-key, pair load, pending marker,
         # cache put, done, overlap start) lives in one place -
         # haversack.serve.publish_completion; this side supplies the Dict
@@ -1228,12 +1297,17 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             _clear_pending_marker(key, jid)
 
         def _put(key: str) -> str:
-            gen = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).put(
-                key, jdir / RESULT_NAME, result,
-                {"identity": meta.get("input_identity"), "task": meta["task"],
-                 "options": meta.get("options"), "job": jid,
-                 "computed": started})
-            cache_vol.commit()
+                # Under the lock (see the block above _stage_uploads): the previous job's
+            # artifact thread places into and commits this volume, and a commit that
+            # ends in a reload would hide the generation add_artifact checks for - which
+            # then drops the artifact without a word - or fail this put mid-way.
+            with ctx._vol_lock:
+                gen = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).put(
+                    key, labels, result,
+                    {"identity": meta.get("input_identity"), "task": meta["task"],
+                     "options": meta.get("options"), "job": jid,
+                     "computed": started})
+                cache_vol.commit()
             return gen
 
         def _mark_done() -> None:
@@ -1250,7 +1324,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             identity=tuple(meta.get("input_identity") or ()),
             options=meta.get("options") or {},
             cache_key=meta.get("cache_key"),
-            labels_path=jdir / RESULT_NAME, input_image=reference_input(input_path),
+            labels_path=labels, input_image=reference_input(input_path),
             artifacts=ARTIFACTS, cache_enabled=True,
             migrate_key=_migrate, set_pending=_set_pending,
             clear_pending=_clear_pending, put=_put,
@@ -1272,6 +1346,8 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         for digest in content_pinned:
             ctx.content.unpin(digest)
         prefetch_stop.set()            # end the scan loop with the run
+        import shutil
+        shutil.rmtree(local, ignore_errors=True)
         _bound_jobs_store(jid, ctx._vol_lock)
         if meta.get("cache_key"):
             _release_inflight(meta["cache_key"], jid)
@@ -1865,7 +1941,8 @@ class ModalExecutor:
     def cache_delete(self, key):
         from haversack.serve import ResultCache
         _reload_cache_view()
-        # a commit reloads too (Modal's commit ends in one): exclusive, like a reload
+        # exclusive, like a reload: Modal reloads after a commit when its server asks
+        # (it never hid a file in 61 measured commits, but nothing promises that)
         with _cache_view.exclusive():
             deleted = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).delete(key)
             if deleted:
