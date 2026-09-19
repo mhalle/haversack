@@ -473,7 +473,8 @@ jobs/min, with the preview at 0.5-2.0 s.
   the loop (commit 0.67 s, emit 0.21, cache_get 0.14, spawn 0.14, meta and inflight 0.10
   each). A Dict put alone is ~0.05 s from a thread or `.aio` alike and reaches ~150/s at
   8-way concurrency, so threads are not the cost. `cache_get`'s `cache_vol.reload()` (~0.3 s)
-  is now the largest step left. The workers' Dict scans that slowed it are fixed (above).
+  is now the largest step left. The workers' Dict scans that slowed it are fixed (above);
+  the 7.26/s and 3.08/s were measured before that fix and have not been re-measured.
 - The two `_emit` functions are NOT consolidated: same name, different jobs (one merges
   persisted state terminal-wins, one pushes SSE snapshots). Merging them would invent a
   duplication. `_prefetch_next` and the inflight markers are still written twice.

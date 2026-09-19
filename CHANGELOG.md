@@ -9,7 +9,7 @@
   submit commits the scratch volume only when it wrote something there - that commit was
   0.67 s of every `idc:` submit. Measured on throwaway deploys, 200 submits from 8 threads:
   3.08 submits/s with 6 workers, 7.26 with one. The workers' scans of the jobs Dict slowed
-  every RPC the API made; they are fixed below.
+  every RPC the API made; they are fixed below (not re-measured since).
 - **A Modal worker no longer spends ~2 minutes between jobs on housekeeping.** After every job
   the worker swept the whole jobs Dict inline, holding its volume lock: one `get` per record,
   another per `inflight:` marker's target, and a call probe per record queued longer than two
