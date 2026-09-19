@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.12.1] - 2026-09-19
 
 - **A series with a directory marker in its bucket fetches again.** Some IDC series carry a
   zero-byte marker object `<uuid>/`, and obstore lists it with the slash stripped, as `<uuid>`,
