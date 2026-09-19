@@ -1787,6 +1787,19 @@ def etag_of(key: str, result=None) -> str:
     return f'"{digest}"' if digest else f'"{key[:32]}"'
 
 
+def same_output(own, published) -> bool:
+    """Whether a published entry holds the bytes a job reported: both content digests
+    known and equal. A missing digest is not a match - an entry whose result.json is
+    unreadable reads as ``{}``, and a legacy entry may carry no ``outputs``, and the
+    first version accepted both and served another publication's bytes as the job's
+    (review, 2026-09-19)."""
+    def digest(r):
+        outs = (r or {}).get("outputs") or []
+        return outs[0].get("sha256") if outs else None
+    a = digest(own)
+    return a is not None and a == digest(published)
+
+
 def not_modified(request, etag: str):
     """A 304 when the client already holds this exact content, else None.
 
@@ -2706,8 +2719,7 @@ class LocalExecutor:
         # ...and gone means gone from BOTH places the result route looks: the job's copy
         # and its published entry (no lease - this hands out no path)
         gone = not (r.get("labels_path") and Path(r["labels_path"]).exists()) and not (
-            r.get("cache_key") and self.cache is not None
-            and self.cache._resolve(r["cache_key"], lease=False) is not None)
+            r.get("cache_key") and self._entry_holds(r["cache_key"], r.get("result")))
         d = {"id": r["id"], "task": r.get("task"), "state": r.get("state"),
              "created": r.get("created"), "started": r.get("started"),
              "finished": r.get("finished"), "input_identity": r.get("input_identity") or [],
@@ -2725,6 +2737,20 @@ class LocalExecutor:
 
     def statuses(self) -> list[dict]:
         return [self.status(r, brief=True) for r in self.jobs()]
+
+    def _entry_holds(self, key: str, result) -> bool:
+        """Whether the entry at ``key`` holds this job's bytes - the result route's own
+        test (``same_output``), read without a lease: this hands out no path."""
+        if self.cache is None:
+            return False
+        g = self.cache._resolve(key, lease=False)
+        if g is None:
+            return False
+        try:
+            published = json.loads((g / "result.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        return same_output(result, published)
 
     def result_file(self, jid: str):
         """(state, labels path or None); (None, None) for an unknown job. The
@@ -3711,12 +3737,22 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             h = hashlib.sha256()
             name = Path(getattr(upload, "filename", None) or "input.nii.gz").name
             dest = jdir / (f"input_{role}_{name}" if multi else f"input_{name}")
-            # executors backed by a snapshot-consistent volume expose a guard:
-            # a concurrent reload elsewhere would discard this uncommitted write
-            with _write_guard(executor), open(dest, "wb") as f:
-                while chunk := await upload.read(1 << 20):
-                    h.update(chunk)
-                    f.write(chunk)
+            # Executors backed by a snapshot-consistent volume expose a guard: a
+            # concurrent reload elsewhere would discard this uncommitted write. The
+            # guard is a threading.Lock, so it is taken in a worker thread and never
+            # held across an await: until 2026-09-19 the loop awaited upload.read()
+            # under it, Starlette ran reads over 1 MB in a thread, and a second
+            # upload's acquire() then blocked the event loop the first needed to
+            # resume - two concurrent uploads deadlocked the api container. The
+            # multipart parser has spooled the part by now, so `upload.file` is a
+            # local read.
+            def _write():
+                upload.file.seek(0)
+                with _write_guard(executor), open(dest, "wb") as f:
+                    while chunk := upload.file.read(1 << 20):
+                        h.update(chunk)
+                        f.write(chunk)
+            await asyncio.to_thread(_write)
             digest = f"sha256:{h.hexdigest()}"
             store = getattr(executor, "content", None)
             if store is not None:
@@ -3989,16 +4025,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         key = status.get("cache_key") or status.get("key")
         if key:
             hit = executor.cache_get(key)
-            if hit is not None and _same_output(own, hit[1]):
+            if hit is not None and same_output(own, hit[1]):
                 return state, Path(hit[0]), hit[1]
         state, path = executor.result_file(jid)
         return state, path, own
 
-    def _same_output(own, published) -> bool:
-        """Whether a published entry holds the bytes a job reported, by content digest;
-        without a digest on either side the shared key is all there is to go on."""
-        a, b = etag_of("", own), etag_of("", published)
-        return a == b or '""' in (a, b)
 
     @app.get("/v1/jobs/{jid}/result", tags=["jobs"])
     def result(request: Request, jid: str, format: str = None):
@@ -4039,9 +4070,26 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         fresh = not_modified(request, etag)
         if fresh is not None:
             return fresh
-        return FileResponse(path, media_type="application/octet-stream",
-                            filename=f"{stem}_{jid}.seg.nrrd",
-                            headers={"ETag": etag})
+        # Opened HERE, not by FileResponse at send time: a job's own copy can leave
+        # between the existence check and the send (a purge, a Modal scratch reload),
+        # and FileResponse then raised mid-response - a 500 where SERVER.md says 410.
+        # An open handle keeps the bytes readable however the path changes after.
+        try:
+            fh = open(path, "rb")
+        except FileNotFoundError:
+            raise HTTPException(410, gone) from None
+        from starlette.responses import StreamingResponse
+
+        def chunks():
+            with fh:                           # closed however the send ends
+                while block := fh.read(1 << 20):
+                    yield block
+
+        name = f"{stem}_{jid}.seg.nrrd"
+        return StreamingResponse(
+            chunks(), media_type="application/octet-stream",
+            headers={"ETag": etag, "Content-Length": str(os.fstat(fh.fileno()).st_size),
+                     "Content-Disposition": f'attachment; filename="{name}"'})
 
     @app.delete("/v1/jobs/{jid}", tags=["jobs"])
     def cancel(request: Request, jid: str):

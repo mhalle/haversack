@@ -251,3 +251,130 @@ def test_a_modal_cache_hit_records_its_key(monkeypatch, tmp_path):
     assert meta["cached"] is True and fake["j2"]["cache_key"] == key
     assert client.get("/v1/jobs/j2").json()["key"] == key
     assert client.get("/v1/jobs/j2/result").status_code == 200
+
+
+# -- review round 2026-09-19: each finding pinned ------------------------------------
+
+def test_an_entry_without_a_digest_is_not_taken_for_the_jobs_bytes(tmp_path):
+    """An unreadable result.json reads as {}, and a legacy entry may carry no outputs:
+    the first version matched either and served another publication's bytes."""
+    _, ex, client = _make(tmp_path)
+    jid, s = _done_job(client, ex)
+    job_bytes = (ex.get(jid).dir / RESULT_NAME).read_bytes()
+    other = tmp_path / "other.seg.nrrd"
+    _NrrdSeg(fill=7).save(other)
+    ex.cache.put(s["key"], other, {}, {"task": s["task"]})
+    r = client.get(f"/v1/jobs/{jid}/result")
+    assert r.status_code == 200 and r.content == job_bytes
+    assert r.headers["etag"] == f'"{s["result"]["outputs"][0]["sha256"]}"'
+    _drop_scratch(ex, jid)
+    assert client.get(f"/v1/jobs/{jid}/result").status_code == 410
+    ex.close()
+
+
+def test_an_evicted_record_does_not_advertise_an_entry_holding_other_bytes(tmp_path):
+    seg = _Segmenter(steps=1)
+    ex = LocalExecutor(seg, workdir=tmp_path / "w", cache_dir=tmp_path / "c",
+                       keep_finished=1)
+    client = TestClient(create_app(ex))
+    first = submit(client)
+    s = wait_state(client, first, ("done",))
+    (ex.get(first).dir / RESULT_NAME).unlink()
+    for _ in range(2):
+        wait_state(client, submit(client), ("done",))
+    other = tmp_path / "other.seg.nrrd"
+    _NrrdSeg(fill=7).save(other)
+    ex.cache.put(s["key"], other, {"outputs": [{"name": "labels", "sha256": "sha256:f"}]},
+                 {"task": s["task"]})
+    st = client.get(f"/v1/jobs/{first}").json()
+    assert st["result_available"] is False and "result" not in st["links"]
+    assert client.get(f"/v1/jobs/{first}/result").status_code == 410
+    ex.close()
+
+
+def test_a_file_that_leaves_after_the_check_is_410_not_500(tmp_path, monkeypatch):
+    """FileResponse opened the path at send time; a purge or a scratch reload in
+    between raised mid-response."""
+    seg = _Segmenter(steps=1)
+    ex = LocalExecutor(seg, workdir=tmp_path / "w")               # no cache: job copy only
+    client = TestClient(create_app(ex), raise_server_exceptions=False)
+    jid = submit(client)
+    wait_state(client, jid, ("done",))
+    real = ex.result_file
+
+    def then_gone(j):
+        state, p = real(j)
+        Path(p).unlink()
+        return state, p
+    monkeypatch.setattr(ex, "result_file", then_gone)
+    assert client.get(f"/v1/jobs/{jid}/result").status_code == 410
+    ex.close()
+
+
+def test_the_conversion_answers_410_when_its_input_leaves_and_cleans_up(tmp_path, monkeypatch):
+    import tempfile
+    seg = _Segmenter(steps=1)
+    ex = LocalExecutor(seg, workdir=tmp_path / "w")
+    client = TestClient(create_app(ex), raise_server_exceptions=False)
+    jid = submit(client)
+    wait_state(client, jid, ("done",))
+    conv = tmp_path / "tmp"
+    conv.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(conv))
+    real_read = sitk.ReadImage
+    leave = {"on": True}
+
+    def read(path, *a, **k):
+        if leave["on"]:
+            Path(path).unlink()
+        raise RuntimeError("ImageFileReader_Execute: does not exist")
+    monkeypatch.setattr(sitk, "ReadImage", read)
+    assert client.get(f"/v1/jobs/{jid}/result?format=nii.gz").status_code == 410
+    assert not list(conv.glob("haversack-conv-*"))
+    # a read that fails with the file still there is a real error, not a 410
+    jid2 = submit(client)
+    wait_state(client, jid2, ("done",))
+    leave["on"] = False
+    assert client.get(f"/v1/jobs/{jid2}/result?format=nii.gz").status_code == 500
+    monkeypatch.setattr(sitk, "ReadImage", real_read)
+    ex.close()
+
+
+def test_two_concurrent_uploads_through_a_guarded_executor_both_finish(tmp_path):
+    """The volume guard is a threading.Lock, and the route held it across `await
+    upload.read()`: Starlette reads a part over 1 MB in a thread, a second upload's
+    acquire() blocked the event loop, and the first could never resume (review
+    2026-09-19; the Modal api container)."""
+    import asyncio
+    import tempfile
+    import threading
+    httpx = pytest.importorskip("httpx")
+    seg = _Segmenter(steps=1)
+    ex = LocalExecutor(seg, workdir=tmp_path / "w")
+    ex.volume_guard = threading.Lock()
+    app = create_app(ex)
+    rng = np.random.default_rng(0)
+
+    def big(seed):
+        img = sitk.GetImageFromArray(rng.integers(0, 30000, (40, 128, 128), np.int16))
+        with tempfile.TemporaryDirectory() as td:
+            f = Path(td) / "v.nii.gz"
+            sitk.WriteImage(img, str(f), True)
+            return f.read_bytes()
+    bodies = [big(0), big(1)]
+    assert all(len(b) > 1 << 20 for b in bodies)
+
+    async def main():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+            return await asyncio.gather(*(
+                c.post("/v1/jobs", data={"task": "total_fast"},
+                       files={"file": ("ct.nii.gz", b, "application/octet-stream")})
+                for b in bodies))
+    out = {}
+    t = threading.Thread(target=lambda: out.update(r=asyncio.run(main())), daemon=True)
+    t.start()
+    t.join(20)
+    assert not t.is_alive(), "two concurrent uploads deadlocked on the volume guard"
+    assert [r.status_code for r in out["r"]] == [202, 202], [r.text for r in out["r"]]
+    ex.close()

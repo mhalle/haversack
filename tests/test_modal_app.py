@@ -989,3 +989,124 @@ def test_a_plain_get_on_an_orphaned_flight_answers_at_once(monkeypatch, tmp_path
     assert _time.monotonic() - t0 < 5, "joined a flight that will never land"
     assert r.status_code == 404, r.text
     assert fake["j"]["state"] == "failed"
+
+
+# -- review round 2026-09-19: each finding pinned ------------------------------------
+
+def test_only_an_answer_that_the_call_ended_counts_as_dead(monkeypatch):
+    """Every exception used to count as dead: one dropped connection on a read of a
+    key failed a running job, and anonymous traffic could trigger it."""
+    import modal
+    from haversack import modal_app as m
+
+    def probe(exc):
+        class FC:
+            def get(self, timeout=None):
+                raise exc
+        monkeypatch.setattr(modal.FunctionCall, "from_id", lambda cid: FC())
+        return m._call_state("fc-1")
+    assert probe(TimeoutError()) == "live"
+    assert probe(ConnectionError("reset")) == "unknown"
+    assert probe(modal.exception.ConnectionError("x")) == "unknown"
+    assert probe(modal.exception.NotFoundError("x")) == "dead"
+    assert probe(modal.exception.RemoteError("x")) == "dead"
+    assert m._call_state(None) == "dead"
+
+
+def test_an_unknown_call_state_never_fails_a_job(monkeypatch):
+    import time as _time
+    m, fake = _swap_dict(monkeypatch)
+    monkeypatch.setattr(m, "_call_state", lambda cid: "unknown")
+    ex = m.ModalExecutor()
+    monkeypatch.setattr(ex, "_flight_seen_live", {})
+    fake["j"] = {"id": "j", "state": "running", "created": _time.time() - 3600,
+                 "call_id": "fc-1"}
+    fake["inflight:K"] = "j"
+    assert ex.find_inflight("K") == "j" and fake["j"]["state"] == "running"
+    assert m._reconcile_orphans(None, _time.time()) == []
+
+
+def test_a_job_that_finishes_during_the_probe_is_not_failed(monkeypatch):
+    """The re-read before the failing emit: a job done between the probe and the
+    write must stay done."""
+    import time as _time
+    m, fake = _swap_dict(monkeypatch)
+    fake["j"] = {"id": "j", "state": "running", "created": _time.time() - 3600,
+                 "call_id": "fc-1"}
+
+    def finishes(cid):
+        fake["j"] = dict(fake["j"], state="done")
+        return "dead"
+    monkeypatch.setattr(m, "_call_state", finishes)
+    assert m._fail_if_orphaned("j", dict(fake["j"], state="running"), _time.time()) is False
+    assert fake["j"]["state"] == "done"
+    fake["j"] = {"id": "j", "state": "running", "created": _time.time() - 3600,
+                 "call_id": "fc-1"}
+    assert m._reconcile_orphans(None, _time.time()) == [] and fake["j"]["state"] == "done"
+
+
+def test_a_young_flight_is_not_remembered_as_live(monkeypatch):
+    """An unprobed young record memoized as live would hide its death for another
+    FLIGHT_LIVE_TTL_S once it came of age - the 30 s wait this rule removes."""
+    import time as _time
+    m, fake = _swap_dict(monkeypatch)
+    probes = []
+    monkeypatch.setattr(m, "_call_state", lambda cid: probes.append(cid) or "dead")
+    ex = m.ModalExecutor()
+    monkeypatch.setattr(ex, "_flight_seen_live", {})
+    t0 = _time.time()
+    fake["j"] = {"id": "j", "state": "queued", "created": t0, "call_id": "fc-1"}
+    fake["inflight:K"] = "j"
+    assert ex.find_inflight("K") == "j" and probes == []
+    monkeypatch.setattr(m.time, "time", lambda: t0 + m.ORPHAN_MIN_AGE_S + 1)
+    assert ex.find_inflight("K") is None and probes == ["fc-1"]
+
+
+def test_the_worker_records_its_own_call_and_a_prepare_records_its_spawn(monkeypatch, tmp_path):
+    """Both writes of the record are read-modify-writes; a warm worker that read it
+    before the API's call_id emit wrote it back without the id, and a prepare never
+    had one - the orphan rule reads either as dead."""
+    import ast
+    import inspect
+    import textwrap
+    import types
+    m, fake = _swap_dict(monkeypatch)
+    tree = ast.parse(textwrap.dedent(inspect.getsource(m._execute_job)))
+    running = [c for c in ast.walk(tree)
+               if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "_emit"
+               and len(c.args) == 2 and isinstance(c.args[1], ast.Dict)
+               and any(isinstance(v, ast.Constant) and v.value == "running"
+                       for v in c.args[1].values)]
+    assert running, "_execute_job no longer emits running"
+    assert all("_own_call_id" in ast.unparse(c.args[1]) for c in running)
+    monkeypatch.setattr(m, "_spawn_worker",
+                        lambda task, jid, tokens=None: types.SimpleNamespace(object_id="fc-9"))
+    m.ModalExecutor().submit_prepare("p", tmp_path, "ts.v2:total_fast")
+    assert fake["p"]["call_id"] == "fc-9"
+
+
+def test_the_sweep_removes_directories_before_the_records_naming_them(monkeypatch, tmp_path):
+    """A sweep waiting on the volume lock with its records already deleted, in a
+    container then scaled down, leaked directories no record named."""
+    import threading
+    import time as _time
+    import types
+    m, fake = _swap_dict(monkeypatch)
+    monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path))
+    monkeypatch.setattr(m, "scratch_vol", types.SimpleNamespace(commit=lambda: None,
+                                                                reload=lambda: None))
+    monkeypatch.setattr(m, "_call_state", lambda cid: "live")
+    old = _time.time() - 30 * 24 * 3600
+    for j in ("P1", "P2"):
+        fake[j] = {"id": j, "state": "done", "created": old, "finished": old}
+        (tmp_path / j).mkdir()
+    lock = threading.Lock()
+    lock.acquire()                              # the next job's save holds it
+    t = threading.Thread(target=m._sweep_jobs_store, args=("CUR", lock), daemon=True)
+    t.start()
+    t.join(0.5)
+    assert t.is_alive()
+    assert {"P1", "P2"} <= set(fake), "records deleted while their directories remain"
+    lock.release()
+    t.join(5)
+    assert not {"P1", "P2"} & set(fake) and not list(tmp_path.iterdir())

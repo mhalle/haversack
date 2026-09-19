@@ -19,6 +19,22 @@
   2026-09-19 fell back to HEAD). The API's single-flight lookup now applies the reconcile's
   rule itself: a record older than two minutes whose call is gone is failed on the spot and
   the read answers at once. A live call is probed at most once per 30 s per job.
+- **Review of both fixes and of 0.12.2's Modal changes** (four adversarial agents, each
+  finding reproduced before it was fixed):
+  - *Two concurrent uploads deadlocked the Modal api container* (since 2026-08-27). The
+    upload held the volume guard, a thread lock, across an `await`; a second upload's
+    acquire blocked the event loop the first needed. The write now runs in a thread.
+  - *A transient Modal error failed a running job.* Every exception from a call probe
+    counted as dead; only the answers that say a call ended do now, and anything else is
+    treated as alive. This mattered once reads of a key began probing.
+  - *A running job could lose its call id*, since the API's and the worker's updates of the
+    record race; the worker now records its own. Prepare jobs never recorded one, and the
+    reconcile failed any that ran past two minutes.
+  - *The sweep deleted job records before their directories*, so a container stopped
+    mid-sweep leaked directories nothing names. It now removes the directories first.
+  - *The job result route* treated an entry without a digest as the job's bytes (it serves
+    the job's own copy now), advertised an evicted job's result that then answered 410,
+    and still gave a 500 when the job's own copy vanished just before a plain download.
 
 ## [0.12.2] - 2026-09-19
 

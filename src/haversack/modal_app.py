@@ -420,16 +420,36 @@ def _purgeable(meta: dict, now: float, ttl_s: float) -> bool:
 ORPHAN_MIN_AGE_S = 120.0
 
 
+#: The answers from ``FunctionCall.get(timeout=0)`` that say the call has ENDED.
+#: Anything else raised - a dropped connection, a rate limit, a service hiccup on
+#: the caller's side - says nothing about the call, and is ``unknown``.
+_CALL_ENDED = ("NotFoundError", "RemoteError", "InputCancellation",
+               "FunctionTimeoutError", "OutputExpiredError", "ExecutionError",
+               "UserCodeException")
+
+
+def _own_call_id():
+    """The id of the call this worker is serving, or None outside one."""
+    try:
+        return modal.current_function_call_id()
+    except Exception:
+        return None
+
+
 def _call_state(call_id) -> str:
-    """``live``, ``finished`` or ``dead``, from Modal's own view of a spawned call.
+    """``live``, ``finished``, ``dead`` or ``unknown``, from Modal's own view of a
+    spawned call.
 
     Measured 2026-09-06 against modal 1.5.5: a queued or running call raises the
     builtin TimeoutError from ``get(timeout=0)``; a call whose function returned
     hands back its result; a call cancelled by ``modal app stop`` raises
-    RemoteError; an unknown id raises NotFoundError. TimeoutError is the one
-    answer that means "still alive", so it is the only one treated that way and
-    every other failure counts as dead. Erring toward "live" is the safe
-    direction: the thing that must never happen is failing a running job.
+    RemoteError; an unknown id raises NotFoundError. Erring toward "live" is the safe
+    direction: the thing that must never happen is failing a running job. So only an
+    answer that says the call ended counts as dead; any other failure is
+    ``unknown`` and callers treat it as live. Until 2026-09-19 every exception
+    counted as dead - tolerable while only the worker's reconcile asked, but once
+    the API's single-flight lookup asked on every read of a key, one transient
+    RPC error failed a running job (review, reproduced with a ConnectionError).
     """
     if not call_id:
         return "dead"
@@ -437,8 +457,10 @@ def _call_state(call_id) -> str:
         modal.FunctionCall.from_id(call_id).get(timeout=0)
     except TimeoutError:
         return "live"
-    except Exception:
-        return "dead"
+    except Exception as e:
+        ended = tuple(c for c in (getattr(modal.exception, n, None) for n in _CALL_ENDED)
+                      if isinstance(c, type))
+        return "dead" if isinstance(e, ended) else "unknown"
     return "finished"
 
 
@@ -452,7 +474,7 @@ def _fail_if_orphaned(jid: str, meta: dict, now: float) -> bool:
     failed, so a job finishing meanwhile is left alone."""
     if now - float(meta.get("started") or meta.get("created") or now) < ORPHAN_MIN_AGE_S:
         return False
-    if _call_state(meta.get("call_id")) == "live":
+    if _call_state(meta.get("call_id")) in ("live", "unknown"):
         return False
     cur = jobs_dict.get(jid) or {}                 # re-read: it may just have finished
     if cur.get("state") not in ("queued", "running"):
@@ -591,17 +613,22 @@ def _sweep_jobs_store(current_jid: str, vol_lock=None) -> None:
     records = {k: v for k, v in snap if ":" not in k}
     purged = [k for k, m in records.items()
               if k != current_jid and k not in failed and _purgeable(m, now, ttl_s)]
-    for k in purged:
-        try:
-            del jobs_dict[k]
-        except Exception:
-            pass
     if purged:
+        # Directories first, records after: the sweep outlives run_job in a daemon
+        # thread and may wait here on the next job's save, so a container scaled
+        # down or preempted in between must leave records naming what is left, for
+        # the next sweep to retry. The other order leaked directories no record
+        # names, which nothing ever cleans (review, 2026-09-19).
         import contextlib
         with vol_lock if vol_lock is not None else contextlib.nullcontext():
             for k in purged:
                 shutil.rmtree(Path(SCRATCH_ROOT) / k, ignore_errors=True)
             scratch_vol.commit()
+    for k in purged:
+        try:
+            del jobs_dict[k]
+        except Exception:
+            pass
     gone = set(purged)
     for k, v in snap:
         if k.startswith("inflight:"):
@@ -755,7 +782,12 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> None:
     # deployment (an inputs volume against /dev/shm), so its pins release through
     # its own object and cannot share the list above
     content_pinned = []
-    _emit(jid, {"state": "running", "started": started})
+    # The worker names its own call: the API's `call_id` emit after the spawn and
+    # this one are both read-modify-writes of the record, and a warm worker that read
+    # it first wrote it back without the id - which the orphan rule reads as dead once
+    # the job is two minutes old, failing it mid-run (review, 2026-09-19).
+    _emit(jid, {"state": "running", "started": started,
+                **({"call_id": cid} if (cid := _own_call_id()) else {})})
     prefetch_stop = threading.Event()
     _prefetch_next(jid, prefetch_stop, ctx.series_cache, ctx.read_ahead,
                    ctx._vol_lock, engine=getattr(ctx, "engine", None))   # CPU downloader + pre-reader
@@ -1289,7 +1321,10 @@ class ModalExecutor:
         meta = {"id": jid, "task": task, "options": {}, "kind": "prepare",
                 "state": "queued", "created": time.time(), "source": []}
         jobs_dict[jid] = meta
-        _spawn_worker(task, jid)
+        call = _spawn_worker(task, jid)
+        # the orphan rule reads a record with no call as dead: a prepare that
+        # ran past two minutes was failed by the reconcile (review, 2026-09-19)
+        _emit(jid, {"call_id": call.object_id})
         return meta
 
     artifacts = ARTIFACTS                  # advertised in job links, like the local executor

@@ -493,6 +493,22 @@ an async route, as the Dict reads beside it already are). Smoke `haversack-infli
 a job submitted and the app stopped while it was queued, redeployed, and 125 s later a HEAD
 and a plain GET answered 404 in 1.5 s and 0.7 s; the record read `failed` (orphaned).
 
+### Review round, 2026-09-19 — both fixes above and 0.12.2's Modal changes
+
+Four time-boxed agents (job-result lifetimes, orphan-on-read, mutation testing, 0.12.2's
+submit/sweep); every finding was reproduced, fixed and pinned by a test that fails on the
+pre-fix tree. What they established, so it is not relitigated:
+- Never hold `volume_guard` (a `threading.Lock`) across an `await`: two concurrent uploads
+  deadlocked the api container that way from 2026-08-27. Take it in a worker thread.
+- `_call_state` is `live`/`finished`/`dead`/`unknown`; only the Modal exceptions in
+  `_CALL_ENDED` are dead. A probe that fails any other way says nothing about the call, and
+  the orphan rule treats it as live. The worker records its own `call_id` on `running`.
+- The sweep removes directories and commits BEFORE deleting the records.
+- The job result route accepts a cache entry only when both digests are known and equal.
+- Accepted, not fixed: the sweep's marker compare-and-delete is two Dict round trips (Modal's
+  Dict has no conditional delete), so a submit installing a new marker for the same key in
+  between loses it - duplicate compute at worst. `_release_inflight` has the same window.
+
 ## Running on a GPU that is not Modal's (assessed 2026-09-16, nothing run)
 
 The question was whether haversack runs on a local CUDA box, as a server there, and on another
