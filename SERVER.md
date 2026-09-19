@@ -110,7 +110,11 @@ so a dropped stream needs no replay - resubscribe, or poll the status URL. `GET
 /v1/jobs/{id}/result` returns the labels as `.seg.nrrd` (names, colors, extents, and the
 full provenance in the header); `?format=nii.gz` converts on the way out and is the lossy
 option. The result's `ETag` is its content digest, so `If-None-Match` gets a 304. A job that
-is not done answers 409; a result whose bytes were purged answers 410. A job with a key is
+is not done answers 409; a result whose bytes were purged answers 410. A server that cannot
+yet see a finished result - on Modal, the api container's view of the result volume can trail
+the worker's publication - answers 503 with `Retry-After` instead: retry it, it is not gone.
+The path surface answers the same 503 where it cannot tell a miss from a stale view, rather
+than 404 or a second compute. A job with a key is
 served from the result cache's entry for that key - the same bytes the path surface serves -
 and from the job's own copy only when there is no entry or the key has since been recomputed
 to different bytes. The download does not honor `Range`. On the local
@@ -289,7 +293,8 @@ Deploy-time knobs, all environment variables because Modal resolves decorators a
 `HAVERSACK_SCALEDOWN`, `HAVERSACK_MAX_CONTAINERS`, `HAVERSACK_SNAPSHOT` (memory snapshots,
 default on), `HAVERSACK_WARM_TASK` (the task loaded at startup, default `ts.v2:total_fast`),
 `HAVERSACK_JOBS_TTL_H` (default 72), `HAVERSACK_RESULTS_KEEP` (default 500),
-`HAVERSACK_INPUTS_GB` (default 50), `HAVERSACK_ARTIFACTS` (default `preview,statistics`),
+`HAVERSACK_INPUTS_GB` (default 50), `HAVERSACK_API_MIRROR_GB` (default 2: the api container's
+local copies of the results it serves), `HAVERSACK_ARTIFACTS` (default `preview,statistics`),
 `HAVERSACK_IDC_CLOUD` (`aws`, or `gcp` to read IDC's Google Cloud mirror first - for a
 deployment that lives there),
 and `HAVERSACK_PUBLIC=1`, which adds an anonymous read-only twin that serves cache hits and

@@ -192,6 +192,7 @@ def _modal(monkeypatch, tmp_path):
     monkeypatch.setattr(m, "jobs_dict", fake)
     monkeypatch.setattr(m, "CACHE_ROOT", str(tmp_path / "cache"))
     monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path / "scratch"))
+    monkeypatch.setattr(m, "MIRROR_ROOT", str(tmp_path / "mirror"))
     vol = types.SimpleNamespace(reload=lambda: None, commit=lambda: None)
     monkeypatch.setattr(m, "cache_vol", vol)
     monkeypatch.setattr(m, "scratch_vol", vol)
@@ -228,15 +229,29 @@ def test_modal_job_result_reads_the_entry_not_the_workers_scratch(monkeypatch, t
 
 @pytest.mark.parametrize("fmt", [None, "nii.gz"])
 def test_modal_job_result_with_neither_copy_is_410(monkeypatch, tmp_path, fmt):
+    """Both volumes reloaded, and neither the entry nor the scratch copy is there: gone."""
     m, fake, ex, client = _modal(monkeypatch, tmp_path)
+    fake["j"] = {"id": "j", "task": "total_fast", "state": "done", "cache_key": "q" * 64,
+                 "result": {"outputs": [{"name": "labels", "sha256": "sha256:0"}]}}
+    r = client.get("/v1/jobs/j/result" + (f"?format={fmt}" if fmt else ""))
+    assert r.status_code == 410, r.text
 
-    def refuses():                        # Modal's reload can raise (open files)
+
+@pytest.mark.parametrize("fmt", [None, "nii.gz"])
+def test_modal_job_result_whose_scratch_cannot_be_reloaded_is_503(monkeypatch, tmp_path, fmt):
+    """The entry is verifiably absent, but the job's own copy lives on a volume whose
+    reload was refused (open files): unseen is not gone. Until 0.12.3 this was a 410."""
+    m, fake, ex, client = _modal(monkeypatch, tmp_path)
+    monkeypatch.setattr(m, "CACHE_CONFIRM_DELAYS_S", (0.0, 0.0))
+
+    def refuses():
         raise RuntimeError("there are open files preventing the operation")
     monkeypatch.setattr(m, "scratch_vol", type("V", (), {"reload": staticmethod(refuses)})())
     fake["j"] = {"id": "j", "task": "total_fast", "state": "done", "cache_key": "q" * 64,
                  "result": {"outputs": [{"name": "labels", "sha256": "sha256:0"}]}}
     r = client.get("/v1/jobs/j/result" + (f"?format={fmt}" if fmt else ""))
-    assert r.status_code == 410, r.text
+    assert r.status_code == 503, r.text
+    assert r.headers["retry-after"]
 
 
 def test_a_modal_cache_hit_records_its_key(monkeypatch, tmp_path):

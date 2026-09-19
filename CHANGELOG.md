@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased]
+
+- **A finished Modal job no longer answers 410 "purged" while its result is there.** On
+  2026-09-19 (300 ts.v2:total jobs on IDC, 16 concurrent clients) `GET
+  /v1/jobs/{id}/result` said 410 for 191 jobs whose results the workers had committed, and
+  200 minutes later. Reproduced on a throwaway deployment, the cause was in the api
+  container itself: while a Modal volume reloads, every path on it is missing to the
+  container's other threads (measured: 734,714 of 735,326 listings, and none with no
+  reload running), and the api reloaded the result volume on every request's thread - so
+  a lookup racing another request's reload missed, and the miss was believed. The api's
+  whole view of the volume emptied and refilled every 0.5-3 s under that load. Lookups
+  and reloads now exclude each other within the container, and the api serves a
+  container-local copy of each result rather than streaming the volume's file - which
+  also ends the second cause, reloads that Modal refused (silently, until now) while
+  streamed files were open. A miss is an answer only when read from a view newer than
+  the request; when no reload takes, the answer is 503 with `Retry-After` - never 410,
+  which now means a purge the server has verified. The by-path routes (labels GET and
+  HEAD, `meta.json`, preview, statistics) and the anonymous twin take the same rule: a
+  miss there was a 404, and with `Prefer: wait` a second compute of a result that
+  already existed. A refused reload is logged, once a minute per volume. The api
+  container's copies are capped by `HAVERSACK_API_MIRROR_GB` (default 2).
+
 ## [0.12.3] - 2026-09-19
 
 - **`GET /v1/jobs/{id}/result` reads the job's published result, not the worker's scratch

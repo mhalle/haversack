@@ -1667,6 +1667,22 @@ class QueueFull(HaversackError):
     """The pending queue is at its bound; the caller should retry later."""
 
 
+class ResultsNotVisible(HaversackError):
+    """A result may exist, but this server's view of where it lives is stale and could
+    not be refreshed: HTTP 503 with Retry-After, never a 404 or a 410.
+
+    On Modal a view is refreshed by a volume reload, which is refused while any file on
+    the volume is open in the container - as every streamed result is. A miss read from
+    such a view said "purged" for 191 of 300 finished jobs (2026-09-19) whose entries the
+    workers had committed. An executor that can tell a stale view from a current one
+    raises this from ``confirm_absent``; one whose view is always current (a local
+    filesystem) never does.
+    """
+
+#: seconds a client is told to wait before asking again after a ResultsNotVisible
+NOT_VISIBLE_RETRY_AFTER_S = 5
+
+
 def _local_scratch():
     """A container-LOCAL staging directory, deliberately not on any volume.
 
@@ -2951,8 +2967,11 @@ class CacheOnlyExecutor:
             raise LookupError(f"unknown task {t!r}")
 
     def __init__(self, cache_get, key_fn, tasks_fn, *, inflight_fn=None,
-                 resolve_fn=None, list_fn=None, sources=None, versions_fn=None):
+                 resolve_fn=None, list_fn=None, sources=None, versions_fn=None,
+                 confirm_absent=None):
         self._get, self._key, self._inflight = cache_get, key_fn, inflight_fn
+        if confirm_absent is not None:     # optional: without it a miss is taken as read
+            self.confirm_absent = confirm_absent
         self._versions = versions_fn
         self.segmenter = self._TaskView(tasks_fn, resolve_fn)
         self.sources = _source_registry(sources)
@@ -3132,6 +3151,22 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                       {"name": "inputs", "description": "send content once, refer to it by digest"},
                       {"name": "results", "description": "results addressed by source, identifier and task"}])
 
+    @app.exception_handler(ResultsNotVisible)
+    async def _not_visible(request: Request, exc: ResultsNotVisible):
+        return JSONResponse({"detail": {"code": "not_visible_yet", "message": str(exc)}},
+                            status_code=503,
+                            headers={"Retry-After": str(NOT_VISIBLE_RETRY_AFTER_S)})
+
+    _confirm = getattr(executor, "confirm_absent", None)
+
+    def confirm_absent(key: str, since: float):
+        """``cache_get``'s miss for ``key``, re-asked of a view newer than ``since`` (a
+        ``time.monotonic()`` taken before the lookup): the entry, or None only when its
+        absence is verified. Raises ResultsNotVisible (503) when the executor cannot
+        refresh its view; an executor without the method reads a current view already.
+        Blocking and bounded (~2 s on Modal) - async routes call it off the loop."""
+        return None if _confirm is None else _confirm(key, since)
+
     def authed(request) -> bool:
         if read_only:
             return False               # the twin can never compute
@@ -3277,7 +3312,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             # `inputs[].kind` is "image" everywhere today, and a task that
             # consumes a mask would have to declare so before this composes into
             # anything meaningful.
-            state, path, _ = _job_result(str(from_job))   # the job's published entry first
+            # the job's published entry first; off the loop, as its confirming reload
+            # may wait (a 503 when it cannot see, never a 410 for what it cannot see)
+            state, path, _ = await asyncio.to_thread(_job_result, str(from_job))
             if state is None:
                 raise HTTPException(404, {"code": "no_job",
                                           "message": f"no job {from_job!r}"})
@@ -4016,7 +4053,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         on Modal (2026-09-19, ts.v2:total on 440 IDC series: 162 failed, intermittently
         per job) where the api container did not see the worker's scratch file, while the
         entry answered by path for every one.
+
+        A done job with neither copy in view is gone (410) only once a view newer than
+        its completion says so: 0.12.3 answered 410 from whatever the container last saw,
+        and on Modal that was 191 of 300 finished jobs whose entries had been committed
+        (2026-09-19). The miss is re-asked through ``confirm_absent``, which raises
+        ResultsNotVisible (503) when no current view can be had; so may ``result_file``.
         """
+        since = time.monotonic()               # before the record: done precedes this
         status = executor.status_of(jid)
         if status is None:
             return None, None, None
@@ -4025,11 +4069,19 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             return state, None, None
         own = status.get("result")
         key = status.get("cache_key") or status.get("key")
+        unseen = None
         if key:
             hit = executor.cache_get(key)
+            if hit is None:
+                try:
+                    hit = confirm_absent(key, since)
+                except ResultsNotVisible as e:  # the job's own copy may still answer
+                    unseen = e
             if hit is not None and same_output(own, hit[1]):
                 return state, Path(hit[0]), hit[1]
         state, path = executor.result_file(jid)
+        if path is None and unseen is not None:
+            raise unseen
         return state, path, own
 
 
@@ -4185,6 +4237,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 key = keyed(norm(ident), task, gopts)
                 if key is None:
                     raise HTTPException(404, "unknown resource")
+                since = time.monotonic()
                 hit = executor.cache_get(key)
                 if hit is not None:
                     return Response(status_code=200, headers=_resource_headers(key))
@@ -4195,6 +4248,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     snap = executor.status_of(jid) or {}
                     return Response(status_code=202,
                                     headers=_progress_headers(snap.get("progress")))
+                # a miss from a stale view is not "not materialized" (503 if unverifiable)
+                if confirm_absent(key, since) is not None:
+                    return Response(status_code=200, headers=_resource_headers(key))
                 raise HTTPException(404, "not materialized")
 
         _grid_routes(_register_probe)
@@ -4217,8 +4273,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 # a recompute from this URL also needs Prefer: wait.
                 skip = (wants_no_cache(request) and authed(request)) or \
                     not engine_serves_from_cache(task)
-                hit = None if skip else executor.cache_get(key)
-                if hit is not None:
+
+                def serve_hit(hit):
                     headers = _pref_headers(request, key, hit[1])
                     # the client may already hold these exact bytes
                     fresh = not_modified(request, headers["ETag"])
@@ -4226,7 +4282,21 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                         return fresh
                     return FileResponse(hit[0], media_type="application/octet-stream",
                                         filename=fname, headers=headers)
+
+                since = time.monotonic()
+                # off the loop: on Modal a lookup waits out any reload in progress
+                hit = None if skip else await asyncio.to_thread(executor.cache_get, key)
+                if hit is not None:
+                    return serve_hit(hit)
                 jid = executor.find_inflight(key)  # single flight: ride an existing run
+                if jid is None and not skip:
+                    # Nothing running and nothing in view: before calling that "not
+                    # materialized" - or computing it again - ask a view newer than this
+                    # request (on Modal a refused reload leaves an old one; 2026-09-19).
+                    # Unverifiable is a 503: a duplicate compute is no answer to it.
+                    hit = await asyncio.to_thread(confirm_absent, key, since)
+                    if hit is not None:
+                        return serve_hit(hit)
                 is_authed = authed(request)
                 if not is_authed and jid is None:
                     raise HTTPException(404, "not materialized; authenticated access can "
@@ -4296,12 +4366,16 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                            # have succeeded under no cache)
                             raise HTTPException(404, "not materialized")
                     snap = nxt
-                hit = executor.cache_get(key)
+                since = time.monotonic()
+                hit = await asyncio.to_thread(executor.cache_get, key)
                 if snap.get("state") == "done" or hit is not None:
                     # a hit wins even against a failed/cancelled marker:
                     # under duplicate flights the sibling may have published
+                    if hit is None:            # done, but is it in view? (503 if unsure)
+                        hit = await asyncio.to_thread(confirm_absent, key, since)
                     headers = _pref_headers(request, key, hit[1] if hit else None)
-                    src_path = hit[0] if hit else executor.result_file(jid)[1]
+                    src_path = hit[0] if hit else \
+                        (await asyncio.to_thread(executor.result_file, jid))[1]
                     if src_path is None:       # evicted between done and read
                         raise HTTPException(404, "not materialized")
                     fresh = not_modified(request, headers["ETag"])
@@ -4388,7 +4462,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 key = keyed(norm(ident), task, gopts)
                 if key is None:
                     raise HTTPException(404, "unknown resource")
-                hit = None if _skip_cache(request) else executor.cache_get(key)
+                since = time.monotonic()
+                skip = _skip_cache(request)
+                hit = None if skip else executor.cache_get(key)
+                if hit is None and not skip:
+                    hit = confirm_absent(key, since)   # 503 when a stale view cannot tell
                 if hit is None:
                     raise HTTPException(404, "not materialized")
                 return JSONResponse(hit[1], headers=_resource_headers(key))
@@ -4403,11 +4481,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     raise HTTPException(404, "unknown resource")
                 w = _prefer_wait_raw(request, wait_max)
                 deadline = None if w is None else time.time() + w
-                hit = None if _skip_cache(request) else executor.cache_get(key)
+                since = None if _skip_cache(request) else time.monotonic()
+                hit = None if since is None else \
+                    await asyncio.to_thread(executor.cache_get, key)
                 if hit is None:
                     hit = await _materialize_entry(request, norm(ident),
                                                    canon_task(task), gopts, key,
-                                                   deadline)
+                                                   deadline, since)
                 png = await _await_artifact(request, key, hit,
                                             "preview.png", "preview",
                                             deadline=deadline)
@@ -4417,7 +4497,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         _grid_routes(_register_preview)
 
         async def _materialize_entry(request, ident: str, task: str, opts: dict,
-                                     key: str, deadline: float):
+                                     key: str, deadline: float, since: float | None = None):
             """Initiate the segmentation chain from an artifact GET - the
             refined rule (user decision): authorized callers with explicit
             intent (Prefer: wait) may materialize the whole dependency chain
@@ -4428,8 +4508,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             only. (Deliberate asymmetry: without Prefer this returns
             immediately - implicit reads never hold a connection - while the
             labels URL holds wait_default for watchers.) Returns the cache
-            hit, or raises 202/404/429."""
+            hit, or raises 202/404/429 - or 503 when ``since`` (the lookup's
+            monotonic time; None when the lookup was skipped) cannot be confirmed
+            against a current view."""
             jid = executor.find_inflight(key)
+            if jid is None and since is not None:
+                hit = await asyncio.to_thread(confirm_absent, key, since)
+                if hit is not None:
+                    return hit
             if jid is None:
                 if not authed(request):
                     raise HTTPException(404, "not materialized; authenticated "
@@ -4504,8 +4590,19 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             Prefer budget, shared with the materialize leg - two legs must
             not each spend wait_max."""
             path = Path(hit[0]).parent / filename
-            if path.exists():
-                return path
+
+            async def look():
+                """The file, or None. Asked again of the entry when the path in hand
+                lacks it: on Modal that path is a local copy taken at lookup, which
+                an artifact placed since does not reach (2026-09-19)."""
+                if path.exists():
+                    return path
+                again = await asyncio.to_thread(executor.cache_get, key)
+                p = Path(again[0]).parent / filename if again is not None else None
+                return p if p is not None and p.exists() else None
+
+            if (found := await look()) is not None:
+                return found
             state_fn = getattr(executor, "artifact_state", None)
             pending = state_fn is not None and state_fn(key) == "pending"
             if pending:
@@ -4513,19 +4610,19 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     deadline = time.time()
                 while time.time() < deadline:
                     await asyncio.sleep(0.2)
-                    if path.exists():
-                        return path
+                    if (found := await look()) is not None:
+                        return found
                     if state_fn(key) != "pending":
                         break
-                if path.exists():
-                    return path
+                if (found := await look()) is not None:
+                    return found
                 if state_fn(key) == "pending":
                     raise HTTPException(202,
                                         headers=_progress_headers(
                                             None, {"Retry-After": "2"}),
                                         detail=f"{what} still materializing")
-            if path.exists():                  # placed between our probe and the
-                return path                    # pending flag clearing
+            if (found := await look()) is not None:   # placed between our probe and
+                return found                          # the pending flag clearing
             raise HTTPException(404, f"no {what} for this result")
 
         def _register_statistics(tok: str, gopts: dict):
@@ -4535,11 +4632,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     raise HTTPException(404, "unknown resource")
                 w = _prefer_wait_raw(request, wait_max)
                 deadline = None if w is None else time.time() + w
-                hit = None if _skip_cache(request) else executor.cache_get(key)
+                since = None if _skip_cache(request) else time.monotonic()
+                hit = None if since is None else \
+                    await asyncio.to_thread(executor.cache_get, key)
                 if hit is None:
                     hit = await _materialize_entry(request, norm(ident),
                                                    canon_task(task), opts, key,
-                                                   deadline)
+                                                   deadline, since)
                 return key, hit, deadline
 
             @app.get(base + f"/statistics{tok}.json", tags=["results"])
@@ -4592,7 +4691,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
 
 def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
-                      list_fn=None, resolve_fn=None, versions_fn=None):
+                      list_fn=None, resolve_fn=None, versions_fn=None, confirm_absent=None):
     """The anonymous read-only twin: cache hits and nothing else.
 
     Since review R4 this is create_app itself over a CacheOnlyExecutor with
@@ -4609,11 +4708,13 @@ def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
     ``key_fn(identity, task, opts)`` maps a source identity string
     ("idc:<uuid>") and grid options to the result-cache key - the twin must
     key exactly as the writer did. ``list_fn`` (optional) backs
-    /v1/segmentations; omit it to keep the twin listing-free.
+    /v1/segmentations; omit it to keep the twin listing-free. ``confirm_absent(key,
+    since)`` (optional) re-asks a miss of a current view - see ResultsNotVisible.
     """
     ex = CacheOnlyExecutor(cache_get, key_fn, tasks_fn, inflight_fn=inflight,
                            resolve_fn=resolve_fn, list_fn=list_fn,
-                           sources=sources, versions_fn=versions_fn)
+                           sources=sources, versions_fn=versions_fn,
+                           confirm_absent=confirm_absent)
     return create_app(ex, read_only=True)
 
 
