@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.12.2] - 2026-09-19
 
 - **A Modal deployment accepts concurrent submits concurrently again.** `POST /v1/jobs`
   called the executor inline in an async route, and on Modal that is a dozen blocking RPCs:
