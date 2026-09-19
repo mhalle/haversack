@@ -447,27 +447,33 @@ multi-hour job fares against the 3600 s function timeout.
 ### Per-job work on Modal must not be O(jobs Dict) (2026-09-19)
 
 A `modal.Dict` `get` is ~60-80 ms and a `FunctionCall` probe ~60 ms, so anything that does one
-per record after every job grows with the queue. The old inline `_bound_jobs_store` did ~2700
-of them at 1342 keys: ~130 s per job, under `_vol_lock`, before `run_job` returned. It hid in
-the log as `[artifacts] overlap preview 127s` because the timer included `place()`'s wait on
-that lock. If an overlap time looks absurd, check who holds `_vol_lock` before profiling the
-render. Now: one `items()` snapshot, a background sweep every `SWEEP_INTERVAL_S`, and
-compare-and-delete for markers. `test_the_sweep_reads_the_dict_once_not_once_per_key` counts
-the `get`s. Not re-measured on a Modal deploy yet.
+per record grows with the queue. Two sessions found the same scans from two sides the same
+night. The old inline `_bound_jobs_store` did ~2700 round trips at 1342 keys: ~130 s per job,
+under `_vol_lock`, before `run_job` returned. It hid in the log as
+`[artifacts] overlap preview 127s`, because the timer included `place()`'s wait on that
+lock. If an overlap time looks absurd, check who holds `_vol_lock` before profiling the
+render. `_prefetch_candidate`, every 2 s per busy worker, and the per-job reconcile and purge
+together made a cohort of N jobs cost O(N^2) RPCs on the Dict the API writes to. With six
+workers draining 200 submits, every API Dict RPC slowed from ~0.08 s to ~0.25 s.
+
+Now every scan is one streamed `items()` (`_jobs_snapshot`). The sweep runs in a background
+thread, at most once per `JOBS_SWEEP_EVERY_S` per container, never two at once, and takes
+`_vol_lock` only for file operations. `items()` is neither ordered nor atomic, so a scan may
+decide from it, but everything it deletes or fails is re-read first. That covers a marker
+re-pointed since the listing, and a marker listed without its job. The tests count RPCs with
+a Dict that hands out copies, as Modal's does; a plain dict shares the record objects.
+Measured on smoke deploys with 2 L40S workers and a 1300-record Dict, same IDC series: the
+old code logged "preview" at 65-69 s every job and ran ~1 job/min; the new one ran ~10.7
+jobs/min, with the preview at 0.5-2.0 s.
 
 ## Known open, deliberately
 
-- **The workers' jobs-Dict scans are O(records) per job, per worker (measured 2026-09-19,
-  not fixed).** `_prefetch_candidate` (every 2 s while a job runs), `_reconcile_orphans` and
-  `_bound_jobs_store` (after every job) each list the Dict and `get` every record, so a
-  cohort of N jobs costs O(N^2) RPCs, all on the Dict the API writes to. After the submit
-  fix (`POST /v1/jobs` off the event loop, no scratch commit without an upload), 200 `idc:`
-  submits from 8 threads ran at 7.26/s with one worker and 3.08/s with six: each API RPC
-  went from ~0.08 s to ~0.25 s. Alone, a Dict put is ~0.05 s from a thread or `.aio` alike
-  and reaches ~150/s at 8-way concurrency, so threads are not the cost. Before the fix:
-  0.67/s, every step serialized on the loop (commit 0.67 s, emit 0.21, cache_get 0.14,
-  spawn 0.14, meta and inflight 0.10 each). `cache_get`'s `cache_vol.reload()` (~0.3 s) is
-  now the largest step left.
+- **The submit path, after its fix (2026-09-19).** `POST /v1/jobs` runs off the event loop
+  and commits scratch only for an upload. Before: 0.67 submits/s, every step serialized on
+  the loop (commit 0.67 s, emit 0.21, cache_get 0.14, spawn 0.14, meta and inflight 0.10
+  each). A Dict put alone is ~0.05 s from a thread or `.aio` alike and reaches ~150/s at
+  8-way concurrency, so threads are not the cost. `cache_get`'s `cache_vol.reload()` (~0.3 s)
+  is now the largest step left. The workers' Dict scans that slowed it are fixed (above).
 - The two `_emit` functions are NOT consolidated: same name, different jobs (one merges
   persisted state terminal-wins, one pushes SSE snapshots). Merging them would invent a
   duplication. `_prefetch_next` and the inflight markers are still written twice.

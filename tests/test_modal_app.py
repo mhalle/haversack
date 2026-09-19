@@ -1,4 +1,5 @@
 """The Modal deployment module is import-safe and shaped as create_app expects."""
+import copy
 import pathlib
 import re
 
@@ -108,6 +109,14 @@ def test_a_worker_warms_only_the_jobs_that_will_run_on_it(monkeypatch):
     assert m._prefetch_candidate("cur") == ("s3", "s3:b/mprage", "fs")   # unfiltered: oldest
 
 
+def _bound(m, jid):
+    """The per-job pass, then its background sweep to completion, if one started."""
+    t = m._bound_jobs_store(jid)
+    if t is not None:
+        t.join(10)
+        assert not t.is_alive()
+
+
 def test_orphaned_records_are_failed_and_live_ones_left_alone(monkeypatch, tmp_path):
     """Records whose spawned call is gone (a `modal app stop` between deploys)
     stayed queued forever: never purged, poisoning single-flight for their key,
@@ -144,92 +153,211 @@ def test_orphaned_records_are_failed_and_live_ones_left_alone(monkeypatch, tmp_p
             pass
     monkeypatch.setattr(m, "scratch_vol", Vol())
     monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path))
-    import copy                                        # Modal hands back copies, not the
-    monkeypatch.setattr(m, "_jobs_snapshot", lambda: copy.deepcopy(dict(fake)))  # live values
     fake["stale"]["state"] = "queued"                  # reset: prove the pass does it
     monkeypatch.setattr(m.time, "time", lambda: now)
-    m._sweep_jobs_store("me")
+    monkeypatch.setattr(m, "_last_sweep", float("-inf"))   # this container's first job
+    monkeypatch.setattr(m, "_sweep_thread", None)
+    _bound(m, "me")
     assert fake["stale"]["state"] == "failed"
     assert "inflight:K" not in fake
 
 
 class _CountingDict(dict):
-    """A jobs Dict that counts its per-key reads - each one a Modal round trip."""
-    gets = 0
+    """A jobs Dict that counts its RPCs and, like Modal's, hands out COPIES - a
+    plain dict shares the record objects `_emit` mutates, so a listing taken
+    before a write would show it. `items()` can also be made to answer a stale
+    listing, as Modal's unordered, non-atomic DictContents stream may."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.rpcs = {"get": 0, "keys": 0, "items": 0}
+        self.listing = None
 
     def get(self, k, default=None):
-        self.gets += 1
-        return super().get(k, default)
+        self.rpcs["get"] += 1
+        return copy.deepcopy(super().get(k, default))
+
+    def __getitem__(self, k):
+        self.rpcs["get"] += 1
+        return copy.deepcopy(super().__getitem__(k))
+
+    def keys(self):
+        self.rpcs["keys"] += 1
+        return super().keys()
 
     def items(self):
-        return list(super().items())
+        self.rpcs["items"] += 1
+        return copy.deepcopy(list(self.listing if self.listing is not None
+                                  else super().items()))
 
 
-def test_the_sweep_reads_the_dict_once_not_once_per_key(monkeypatch, tmp_path):
-    """The per-job pass read every record with its own `get` (and every
-    marker's target with another), plus a call probe per long-queued record:
-    ~2 min per job at 1342 keys on 2026-09-19, holding the volume lock the
-    preview's `place` waited on, so it logged as "preview 127s" and set the
-    throughput of a 6-worker batch. Now one snapshot; a `get` is spent only
-    re-checking what is about to be written."""
+def _sweep_env(monkeypatch, tmp_path, fake):
     from haversack import modal_app as m
-    now = 1_000_000.0
-    fake = _CountingDict()
-    for i in range(500):                               # a deep queue, young enough
-        fake[f"q{i}"] = {"id": f"q{i}", "state": "queued", "created": now - 10}
-        fake[f"inflight:K{i}"] = f"q{i}"
-    for i in range(200):
-        fake[f"d{i}"] = {"id": f"d{i}", "state": "done", "created": now - 60,
-                         "finished": now - 50}
-    fake["old"] = {"id": "old", "state": "done", "created": 0.0, "finished": 1.0}
-    fake["inflight:L"] = "d3"                          # landed: goes
-    fake["inflight:gone"] = "nobody"                   # target purged long ago: goes
-    fake["inflight:moved"] = "d4"                      # re-pointed after the snapshot: stays
-    fake["inflight:new"] = "late"                      # its record landed after the stream
-    snap_items = fake.items
+    commits = []
 
-    def items_then_submit():
-        out = snap_items()
-        dict.__setitem__(fake, "inflight:moved", "q7")  # a new flight for that key
-        dict.__setitem__(fake, "late", {"id": "late", "state": "queued", "created": now})
-        return [kv for kv in out if kv[0] != "late"]
-    monkeypatch.setattr(fake, "items", items_then_submit)
+    class Vol:
+        def commit(self):
+            commits.append(1)
     monkeypatch.setattr(m, "jobs_dict", fake)
+    monkeypatch.setattr(m, "scratch_vol", Vol())
     monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path))
-    monkeypatch.setattr(m, "scratch_vol", type("V", (), {"commit": lambda s: None})())
-    monkeypatch.setattr(m, "_call_state", lambda cid: pytest.fail("young records are not probed"))
-    (tmp_path / "old").mkdir()
-
-    m._sweep_jobs_store("me", now=now)
-    assert "old" not in fake and not (tmp_path / "old").exists()
-    assert "inflight:L" not in fake and "inflight:gone" not in fake
-    assert fake["inflight:moved"] == "q7"
-    assert fake["inflight:new"] == "late"             # a live flight keeps its marker
-    assert all(f"inflight:K{i}" in fake for i in range(500))
-    assert fake.gets <= 5, fake.gets                   # re-checks of what is written or unseen
+    monkeypatch.setattr(m, "_last_sweep", float("-inf"))
+    monkeypatch.setattr(m, "_sweep_thread", None)
+    monkeypatch.setattr(m, "_call_state", lambda cid: "live")
+    return m, commits
 
 
-def test_the_prefetch_scan_reads_the_dict_once(monkeypatch):
-    """The prefetcher rescans every 2 s; a `get` per key made one scan take about
-    a minute at 1342 keys, long after the next job it meant to warm had started."""
-    from haversack import modal_app as m
+def test_the_worker_scans_read_the_jobs_dict_in_one_rpc_whatever_its_size(monkeypatch,
+                                                                            tmp_path):
+    """Measured 2026-09-19: the prefetch scan (every 2 s per busy worker) and the
+    reconcile + purge (after every job) each listed the Dict and `get` every
+    record, O(N^2) RPCs over a cohort of N - and six workers draining 200 jobs
+    slowed every API Dict RPC from ~0.08 s to ~0.25 s. Each scan is now one
+    streamed listing, however many records there are."""
+    for n in (10, 200):
+        fake = _CountingDict()
+        m, _ = _sweep_env(monkeypatch, tmp_path, fake)
+        now = m.time.time()
+        for i in range(n):
+            fake[f"j{i}"] = {"id": f"j{i}", "state": "queued", "created": now - 1,
+                             "task": "ts.v2:total", "source": [{"kind": "s3", "id": f"b/{i}"}]}
+            fake[f"inflight:K{i}"] = f"j{i}"
+            fake[f"artifacts:K{i}"] = {"state": "pending", "t": now, "job": f"j{i}"}
+            fake[f"cancel:c{i}"] = now
+            fake[f"d{i}"] = {"id": f"d{i}", "state": "done", "created": now - 5,
+                             "finished": now - 1}
+        assert m._prefetch_candidate("j0", "nnunetv2") == ("s3", "s3:b/1", "j1")
+        assert m._reconcile_orphans("j0") == []
+        _bound(m, "j0")
+        assert fake.rpcs == {"get": 0, "keys": 0, "items": 3}, (n, fake.rpcs)
+
+
+def test_the_retention_sweep_runs_at_most_once_per_interval_per_container(monkeypatch,
+                                                                           tmp_path):
+    """The finished job's own upload goes after every job; the whole-Dict sweep
+    at most once per JOBS_SWEEP_EVERY_S - and on the first job of a container."""
     fake = _CountingDict()
-    for i in range(300):
-        fake[f"d{i}"] = {"id": f"d{i}", "state": "done", "created": i}
-    fake["q"] = {"id": "q", "state": "queued", "created": 1000,
-                 "source": [{"kind": "s3", "id": "b/q"}]}
-    monkeypatch.setattr(m, "jobs_dict", fake)
-    assert m._prefetch_candidate("me") == ("s3", "s3:b/q", "q")
-    assert fake.gets == 0
+    m, commits = _sweep_env(monkeypatch, tmp_path, fake)
+    clock = [1000.0]
+    monkeypatch.setattr(m.time, "monotonic", lambda: clock[0])
+    old = m.time.time() - m.JOBS_TTL_H * 3600 - 10
+
+    def job(jid):
+        (tmp_path / jid).mkdir()
+        (tmp_path / jid / "input_x.nii.gz").write_bytes(b"x")
+        fake[jid] = {"id": jid, "state": "done", "created": old, "finished": old}
+        _bound(m, jid)
+        assert not (tmp_path / jid / "input_x.nii.gz").exists(), "the upload stays"
+
+    job("a")
+    assert fake.rpcs["items"] == 1 and len(commits) == 1
+    job("b")                                           # a moment later: no sweep
+    assert "a" in fake and fake.rpcs["items"] == 1 and len(commits) == 2
+    clock[0] += m.JOBS_SWEEP_EVERY_S - 1
+    job("c")
+    assert fake.rpcs["items"] == 1
+    clock[0] += 1                                      # the interval has passed
+    job("d")                                           # its own commit + the purge's
+    assert fake.rpcs["items"] == 2 and len(commits) == 5
+    assert sorted(k for k in fake if ":" not in k) == ["d"]   # a b c purged, d is current
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["d"]   # and their directories
 
 
-def test_the_per_job_pass_leaves_the_sweep_to_a_throttled_background_thread(monkeypatch, tmp_path):
-    """`run_job` must not wait on an O(Dict) sweep: the job's own inputs go
-    inline, the sweep runs off-thread at most once per SWEEP_INTERVAL_S."""
+def test_the_sweep_rereads_before_it_deletes_what_a_stale_listing_shows(monkeypatch,
+                                                                         tmp_path):
+    """The listing is one stream, unordered and not atomic: a write landing while
+    it runs may be missing from it. So a marker is deleted only if a fresh read
+    still says it should be - the guard the per-key reads gave for free."""
+    fake = _CountingDict()
+    m, _ = _sweep_env(monkeypatch, tmp_path, fake)
+    now = m.time.time()
+    old = now - m.JOBS_TTL_H * 3600 - 10
+    fake.listing = [
+        # purged in this pass, but a NEWER flight has installed its marker since
+        ("old", {"id": "old", "state": "done", "created": old, "finished": old}),
+        ("inflight:K", "old"),
+        # a marker listed without its job: the job is queued, written mid-stream
+        ("inflight:L", "new"),
+        # a pending marker listed stale, since replaced by a new flight's
+        ("artifacts:A", {"state": "pending", "t": now - 1000, "job": "x"}),
+        ("cancel:c", now - 1000),
+        # the control: stale in the listing and stale now
+        ("inflight:M", "gone"),
+        ("artifacts:B", {"state": "pending", "t": now - 1000, "job": "y"}),
+    ]
+    fake.update({"inflight:K": "newer", "inflight:L": "new",
+                 "new": {"id": "new", "state": "queued", "created": now},
+                 "newer": {"id": "newer", "state": "queued", "created": now},
+                 "old": dict(fake.listing[0][1]),
+                 "artifacts:A": {"state": "pending", "t": now, "job": "z"},
+                 "cancel:c": now,
+                 "inflight:M": "gone",
+                 "artifacts:B": {"state": "pending", "t": now - 1000, "job": "y"}})
+    _bound(m, "cur")
+    assert "old" not in fake                            # the purge itself happened
+    assert fake["inflight:K"] == "newer", "a newer flight's marker was deleted"
+    assert fake["inflight:L"] == "new", "a live job's marker was deleted"
+    assert fake["artifacts:A"]["job"] == "z", "a fresh pending marker was deleted"
+    assert "cancel:c" in fake, "a fresh cancel was deleted"
+    assert "inflight:M" not in fake and "artifacts:B" not in fake
+
+
+def test_a_marker_whose_job_ended_is_dropped_in_the_sweep(monkeypatch, tmp_path):
+    """The marker rules the snapshot must keep: a terminal (or absent) job's
+    inflight marker goes, an active job's stays; a pending marker and a cancel
+    go only past 900 s; a job's own record is never purged under it."""
+    fake = _CountingDict()
+    m, _ = _sweep_env(monkeypatch, tmp_path, fake)
+    now = m.time.time()
+    old = now - m.JOBS_TTL_H * 3600 - 10
+    fake.update({
+        "f": {"id": "f", "state": "failed", "created": now - 5, "finished": now - 1},
+        "inflight:F": "f",
+        "q": {"id": "q", "state": "queued", "created": now - 5},
+        "inflight:Q": "q",
+        "inflight:X": "nobody",
+        "inflight:N": 3.0,                              # garbage value
+        "artifacts:Young": {"state": "pending", "t": now - 10, "job": "q"},
+        "artifacts:Old": {"state": "pending", "t": now - 901, "job": "q"},
+        "artifacts:Legacy": "junk",
+        "cancel:young": now - 10,
+        "cancel:old": now - 901,
+        "cur": {"id": "cur", "state": "done", "created": old, "finished": old},
+        "junk": "not a record",                         # purgeable garbage...
+        "inflight:J": "junk",                           # ...and its marker
+    })
+    _bound(m, "cur")
+    assert set(fake) == {"f", "q", "inflight:Q", "artifacts:Young", "cancel:young", "cur"}
+
+
+def test_an_orphan_failed_in_the_sweep_loses_its_marker_in_the_same_sweep(monkeypatch,
+                                                                          tmp_path):
+    """The listing shows the orphan as queued - it was taken before the
+    reconcile failed it - so the marker rule must count what the reconcile
+    returned, or the marker outlives its flight to the next sweep."""
+    fake = _CountingDict()
+    m, _ = _sweep_env(monkeypatch, tmp_path, fake)
+    monkeypatch.setattr(m, "_call_state", lambda cid: "dead")
+    old = m.time.time() - 3600
+    fake.update({"o": {"id": "o", "state": "queued", "created": old, "call_id": "x"},
+                 "inflight:K": "o"})
+    _bound(m, "cur")
+    assert fake["o"]["state"] == "failed"
+    assert "inflight:K" not in fake
+
+
+def test_the_job_does_not_wait_for_the_sweep_and_sweeps_never_overlap(monkeypatch,
+                                                                       tmp_path):
+    """Observed 2026-09-19: the inline sweep took ~130 s per job at 1342 keys,
+    under the volume lock the preview's `place` waits on ("preview 127s"), and
+    `run_job` did not return until it was done. The job's own input goes
+    inline; the sweep runs in a thread, and a second one never starts while a
+    slow one (a deep queue's probes) is still running."""
     import threading
-    from haversack import modal_app as m
-    monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path))
-    monkeypatch.setattr(m, "scratch_vol", type("V", (), {"commit": lambda s: None})())
+    fake = _CountingDict()
+    m, _ = _sweep_env(monkeypatch, tmp_path, fake)
+    clock = [1000.0]
+    monkeypatch.setattr(m.time, "monotonic", lambda: clock[0])
     (tmp_path / "j").mkdir()
     (tmp_path / "j" / "input_x.nii.gz").write_bytes(b"x")
     ran, release = [], threading.Event()
@@ -238,18 +366,18 @@ def test_the_per_job_pass_leaves_the_sweep_to_a_throttled_background_thread(monk
         ran.append(jid)
         release.wait(5)
     monkeypatch.setattr(m, "_sweep_jobs_store", slow_sweep)
-    monkeypatch.setattr(m, "_last_sweep", 0.0)
-    m._bound_jobs_store("j", threading.Lock())
-    assert m._sweep_lock.locked()                      # returned with the sweep still running
+    lock = threading.Lock()
+    t = m._bound_jobs_store("j", lock)
+    assert t is not None and t.is_alive()              # returned with the sweep running
     assert not (tmp_path / "j" / "input_x.nii.gz").exists()
+    assert not lock.locked()                           # and nothing left holding the lock
+    clock[0] += m.JOBS_SWEEP_EVERY_S + 1               # due again, but the first still runs
+    assert m._bound_jobs_store("k", lock) is None
     release.set()
-    for _ in range(200):
-        if not m._sweep_lock.locked():
-            break
-        threading.Event().wait(0.01)
-    m._bound_jobs_store("k", threading.Lock())         # inside the interval: no second sweep
-    assert not m._sweep_lock.locked()
+    t.join(5)
     assert ran == ["j"]
+    assert m._bound_jobs_store("l", lock) is not None  # finished and due: the next may start
+    m._sweep_thread.join(5)
 
 
 def test_a_running_job_is_never_probed_as_an_orphan_by_its_own_container():

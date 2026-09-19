@@ -8,8 +8,8 @@
   between them (0.62 on a 760-job IDC run). The hand-over now runs in a worker thread, and a
   submit commits the scratch volume only when it wrote something there - that commit was
   0.67 s of every `idc:` submit. Measured on throwaway deploys, 200 submits from 8 threads:
-  3.08 submits/s with 6 workers, 7.26 with one (the workers' scans of the jobs Dict slow
-  every RPC the API makes; see AGENTS.md).
+  3.08 submits/s with 6 workers, 7.26 with one. The workers' scans of the jobs Dict slowed
+  every RPC the API made; they are fixed below.
 - **A Modal worker no longer spends ~2 minutes between jobs on housekeeping.** After every job
   the worker swept the whole jobs Dict inline, holding its volume lock: one `get` per record,
   another per `inflight:` marker's target, and a call probe per record queued longer than two
@@ -17,11 +17,14 @@
   that cost ~130 s per job. It set throughput, because `run_job` did not return until the
   sweep finished: 6 L40S workers ran ts.v2:total_fast at ~2.6 jobs/min when inference takes
   seconds. It also showed up in the log as `preview 127s`, because the preview's timer
-  included the wait on that lock (the render itself takes ~1 s). The sweep now reads the Dict
-  once (`items()`), runs in a background thread at most every 5 minutes per container, and
-  holds the volume lock only for directory removal. A marker is re-read before it is deleted,
-  so a flight that started since the snapshot keeps its marker. The job's own input is still
-  deleted inline. The overlap log's seconds now cover the render only.
+  included the wait on that lock (the render itself takes ~1 s). Every worker scan of the Dict,
+  including the prefetcher's every 2 s, is now one streamed `items()`. The sweep runs in a
+  background thread at most once a minute per container, never two at once, and holds the
+  volume lock only for file operations. The listing is not atomic, so whatever the sweep
+  deletes or fails is re-read first, and a flight that started since the listing keeps its
+  marker. The job's own input is still deleted inline. The overlap log's seconds now cover
+  the render only. On smoke deploys with 2 L40S workers and a 1300-record Dict: ~1 job/min
+  before, ~10.7 after.
 
 ## [0.12.1] - 2026-09-19
 

@@ -273,6 +273,20 @@ def _clear_own_artifacts_marker(jid: str, meta: dict) -> None:
         _clear_pending_marker(key, jid)
 
 
+def _jobs_snapshot() -> list:
+    """Every ``(key, value)`` in the jobs Dict, from ONE streamed RPC.
+
+    The worker-side scans used to list the keys and then `get` each record: a
+    cohort of N jobs cost O(N) RPCs per scan and O(N^2) over the cohort, all on
+    the Dict the API writes to. Measured 2026-09-19 with 200 submits in flight,
+    every API Dict RPC went from ~0.08 s to ~0.25 s and six workers cut submit
+    throughput from 7.26/s to 3.08/s. ``items()`` is a single DictContents
+    stream. It is neither ordered nor atomic - a write landing during the stream
+    may or may not be in it - so a scan may DECIDE from it, but anything it
+    deletes or fails is re-read first, as the per-key reads always were."""
+    return [(str(k), v) for k, v in jobs_dict.items()]
+
+
 def _prefetch_candidate(current_jid: str, engine: str | None = None):
     """The oldest OTHER queued job whose input may be warmed, as
     ``(kind, series_key, jid)``, or None. Which jobs qualify is decided by
@@ -289,17 +303,18 @@ def _prefetch_candidate(current_jid: str, engine: str | None = None):
     the nnU-Net worker's upload into a read-ahead nothing there would pop,
     the nnU-Net worker spent its one-ahead slot staging a FastSurfer job's
     series and never warmed its own next job, and every container downloaded
-    the same MRI once."""
+    the same MRI once.
+
+    Reads the Dict as one :func:`_jobs_snapshot` - it runs every 2 s per busy
+    worker, and a `get` per record made that O(records) RPCs each time."""
     cands = []
-    # one streamed items() read, not a get per key: at 1342 keys (2026-09-19)
-    # the per-key scan took about a minute, so the one-ahead warmed nothing
-    for k, m in jobs_dict.items():
-        if ":" in str(k) or k == current_jid:
+    for k, m in _jobs_snapshot():
+        if ":" in k or k == current_jid:
             continue                       # namespaced markers (inflight:/
                                            # artifacts:/cancel:) are not job
                                            # records; cancel: values are bare
                                            # floats and crashed this scan
-        m = m or {}
+        m = m if isinstance(m, dict) else {}
         if not prefetchable(state=m.get("state"), kind=m.get("kind"),
                             refresh_input=m.get("refresh_input"),
                             sources=m.get("source")):
@@ -428,7 +443,7 @@ def _call_state(call_id) -> str:
 
 
 def _reconcile_orphans(current_jid: str | None = None, now: float | None = None,
-                       snapshot: dict | None = None) -> list:
+                       snapshot: list | None = None) -> list:
     """Fail every active record whose spawned call is gone. Returns their ids.
 
     The local server reconciles its job store at startup; this deployment had
@@ -443,16 +458,11 @@ def _reconcile_orphans(current_jid: str | None = None, now: float | None = None,
     call has returned is the same thing from the other side: the worker died
     before its terminal emit, and no emit is coming.
 
-    Runs at container start and after every job. Only records older than
-    ``ORPHAN_MIN_AGE_S`` are probed, and the record is re-read immediately
-    before it is failed, so a job finishing while this runs is left alone.
-
-    ``snapshot`` is the Dict as :func:`_jobs_snapshot` read it; without one
-    this reads its own. Records are judged from the snapshot, never one
-    ``get`` per key: that was ~60-80 ms a key, and with the Dict a batch
-    leaves behind (1342 keys on 2026-09-19) the per-job pass took ~2 min.
-    A record this fails is updated in the snapshot too, so the caller's
-    marker pass sees it terminal.
+    Runs at container start and in the retention sweep, which passes the
+    ``snapshot`` it has already taken (see :func:`_jobs_snapshot`). Only records
+    older than ``ORPHAN_MIN_AGE_S`` are probed, and the record is re-read
+    immediately before it is failed, so a job finishing while this runs is left
+    alone.
     """
     now = time.time() if now is None else now
     failed = []
@@ -461,9 +471,10 @@ def _reconcile_orphans(current_jid: str | None = None, now: float | None = None,
             snapshot = _jobs_snapshot()
         except Exception:
             return failed
-    for k, m in list(snapshot.items()):
-        if ":" in k or k == current_jid or not isinstance(m, dict):
+    for k, m in snapshot:
+        if ":" in k or k == current_jid:
             continue
+        m = m if isinstance(m, dict) else {}
         if m.get("state") not in ("queued", "running"):
             continue
         if now - float(m.get("started") or m.get("created") or now) < ORPHAN_MIN_AGE_S:
@@ -476,120 +487,155 @@ def _reconcile_orphans(current_jid: str | None = None, now: float | None = None,
         _emit(k, {"state": "failed", "finished": now,
                   "error": "orphaned: the deployment that spawned this job was "
                            "stopped or replaced before it finished - resubmit it"})
-        snapshot[k] = jobs_dict.get(k) or m
         failed.append(k)
     if failed:
         print(f"[reconcile] {len(failed)} orphaned job(s) failed: {' '.join(failed)}", flush=True)
     return failed
 
 
-def _jobs_snapshot() -> dict:
-    """The whole jobs Dict in one streamed ``items()`` read - the cost of a
-    bare ``keys()`` - as ``{str(key): value}``."""
-    return {str(k): v for k, v in jobs_dict.items()}
+#: The least time between two retention sweeps in one container. The sweep
+#: reads the whole jobs Dict, and ran after EVERY job: with six workers draining
+#: a 200-job cohort that was the load that slowed the API's own Dict RPCs 3x
+#: (2026-09-19). Nothing it does is urgent at this scale - the TTL is hours, an
+#: orphan is only probed after ORPHAN_MIN_AGE_S, a marker only aged out after
+#: 900 s, and a finished job releases its own inflight marker in `finally`.
+JOBS_SWEEP_EVERY_S = 60.0
 
-
-#: The least time between two sweeps of the jobs Dict by one container. The
-#: sweep is O(Dict) - plus one call probe per record queued longer than
-#: ORPHAN_MIN_AGE_S, which a batch has hundreds of - and nothing it does is
-#: urgent: records live JOBS_TTL_H, and orphans come from a stopped deploy.
-SWEEP_INTERVAL_S = 300.0
 _sweep_lock = threading.Lock()
-_last_sweep = 0.0
+_last_sweep = float("-inf")               # time.monotonic() of this container's last claim
+_sweep_thread = None                      # the running sweep, if any
 
 
-def _bound_jobs_store(current_jid: str, vol_lock) -> None:
-    """The retention policy for the jobs store, run after every job: delete the
-    finished job's own input upload now (the bulk of the bytes - nothing reads
-    an input after the job is terminal), and start a :func:`_sweep_jobs_store`
-    in the background when none has run for SWEEP_INTERVAL_S.
-
-    The sweep used to run here, inline, after every job, under the volume
-    lock. Observed 2026-09-19 (ts.v2:total_fast over IDC, 6 L40S workers, 1342
-    Dict keys): ~2 min per job, which is what the overlap thread's
-    "preview 127s" was - the render takes ~1 s, then `place` waited on the lock
-    - and `run_job` did not return until it finished, so it set throughput."""
+def _sweep_due() -> bool:
+    """Claim this container's next sweep: True at most once per
+    ``JOBS_SWEEP_EVERY_S`` (and on the first job, since container start runs
+    only the reconcile). The claim is taken before the sweep runs, so a sweep
+    that fails is not retried by every following job."""
     global _last_sweep
+    with _sweep_lock:
+        t = time.monotonic()
+        if t - _last_sweep < JOBS_SWEEP_EVERY_S:
+            return False
+        _last_sweep = t
+        return True
+
+
+def _bound_jobs_store(current_jid: str, vol_lock=None):
+    """The retention policy for the jobs store, after every job: delete the
+    finished job's own input upload (the bulk of the bytes - nothing reads an
+    input after the job is terminal) every time, and at most once per
+    ``JOBS_SWEEP_EVERY_S`` start :func:`_sweep_jobs_store` in a background
+    thread, which is returned (None when no sweep was due). Keeps the jobs Dict
+    listable and the jobs Volume bounded by traffic x TTL at ~result-size per
+    job instead of ~input-size.
+
+    The sweep is off the job's path, and ``vol_lock`` is held only for file
+    operations and commits, never across Dict round trips. Before 2026-09-19
+    the sweep ran here, inline and under the lock, after every job: with 1342
+    Dict keys (558 queued, each probed) that was ~130 s per job, `run_job` did
+    not return until it finished, and the overlap thread's `place` waited on
+    the lock - so it logged as "preview 127s" (the render takes ~1 s). Even
+    one snapshot plus the orphan probes a deep queue needs is tens of seconds,
+    which is why "once a minute" alone would still stall a job a minute."""
+    import contextlib
+    lock = vol_lock if vol_lock is not None else contextlib.nullcontext()
     try:
-        with vol_lock:
+        with lock:
             jdir = Path(SCRATCH_ROOT) / current_jid
             for f in jdir.glob("input_*"):
                 f.unlink(missing_ok=True)
             scratch_vol.commit()
     except Exception as e:
-        print(f"[purge] input cleanup failed: {e}", flush=True)
-    if time.time() - _last_sweep < SWEEP_INTERVAL_S or not _sweep_lock.acquire(blocking=False):
-        return
-    _last_sweep = time.time()
+        print(f"[purge] failed: {e}", flush=True)
+    global _sweep_thread
+    if _sweep_thread is not None and _sweep_thread.is_alive():
+        return None                        # a deep queue's sweep can outlast the interval
+    if not _sweep_due():
+        return None
 
     def run():
         try:
             _sweep_jobs_store(current_jid, vol_lock)
-        finally:
-            _sweep_lock.release()
+        except Exception as e:
+            print(f"[purge] failed: {e}", flush=True)
 
-    threading.Thread(target=run, name="haversack-sweep", daemon=True).start()
+    _sweep_thread = threading.Thread(target=run, name="haversack-sweep", daemon=True)
+    _sweep_thread.start()
+    return _sweep_thread
 
 
-def _sweep_jobs_store(current_jid: str, vol_lock=None, now: float | None = None) -> None:
+def _sweep_jobs_store(current_jid: str, vol_lock=None) -> None:
     """Fail orphans, purge terminal records + their directories past
-    HAVERSACK_JOBS_TTL_H, and drop markers whose job is gone. Keeps the jobs
-    Dict listable and the jobs Volume bounded by traffic x TTL at ~result-size
-    per job instead of ~input-size.
-
-    Judged from ONE snapshot of the Dict. Writes touch only what goes, and a
-    marker is re-read right before it is deleted: a submit may have pointed
-    it at a new flight since the snapshot, and that marker is not this pass's
-    to drop. The volume lock is held for the directory removal and commit
-    only, never across Dict round trips."""
-    import contextlib
+    HAVERSACK_JOBS_TTL_H, and drop markers whose job is gone - all decided from
+    ONE :func:`_jobs_snapshot`. Every marker delete re-reads the marker (and,
+    for an inflight marker whose job the snapshot did not show, the job) first:
+    the snapshot is not atomic, and a newer flight may have installed its own
+    marker since."""
     import shutil
-    now = time.time() if now is None else now
-    ttl_s = JOBS_TTL_H * 3600.0
-    lock = vol_lock if vol_lock is not None else contextlib.nullcontext()
-    try:
-        snap = _jobs_snapshot()
-        _reconcile_orphans(current_jid, now, snapshot=snap)   # first, so their markers drop below
-        purged = [k for k, m in snap.items()
-                  if ":" not in k and k != current_jid and _purgeable(m, now, ttl_s)]
-        for k in purged:
+    now, ttl_s = time.time(), JOBS_TTL_H * 3600.0
+    snap = _jobs_snapshot()
+    failed = set(_reconcile_orphans(current_jid, now, snap))  # first, so their
+                                                               # markers drop below
+    records = {k: v for k, v in snap if ":" not in k}
+    purged = [k for k, m in records.items()
+              if k != current_jid and k not in failed and _purgeable(m, now, ttl_s)]
+    for k in purged:
+        try:
+            del jobs_dict[k]
+        except Exception:
+            pass
+    if purged:
+        import contextlib
+        with vol_lock if vol_lock is not None else contextlib.nullcontext():
+            for k in purged:
+                shutil.rmtree(Path(SCRATCH_ROOT) / k, ignore_errors=True)
+            scratch_vol.commit()
+    gone = set(purged)
+    for k, v in snap:
+        if k.startswith("inflight:"):
+            jid = v                            # markers hold the job id
+            if not isinstance(jid, str) or jid in gone:
+                tgt = None
+            elif jid in failed:
+                tgt = {"state": "failed"}
+            else:
+                tgt = records.get(jid)
+            # A flight that has landed - or crashed - is no flight. Judged by
+            # state, not by `purgeable(ttl=0)`: that is a strict "older than
+            # zero seconds", which a record failed in this same pass (the
+            # reconcile above stamps the same `now`) does not satisfy, so its
+            # marker lived on to the next job.
+            if tgt is not None and tgt.get("state") not in _TERMINAL:
+                continue
+            if jobs_dict.get(k) != jid:
+                continue                       # a newer flight owns it now
+            if tgt is None and isinstance(jid, str) and jid not in gone:
+                fresh = jobs_dict.get(jid)     # absent from the snapshot only?
+                if isinstance(fresh, dict) and fresh.get("state") not in _TERMINAL:
+                    continue
             try:
                 del jobs_dict[k]
             except Exception:
                 pass
-            snap.pop(k, None)
-        if purged:
-            with lock:
-                for k in purged:
-                    shutil.rmtree(Path(SCRATCH_ROOT) / k, ignore_errors=True)
-                scratch_vol.commit()
-            print(f"[purge] {len(purged)} finished jobs past {JOBS_TTL_H:g}h TTL", flush=True)
-        for k, v in snap.items():
-            if k.startswith("inflight:"):
-                tgt = snap.get(v) if isinstance(v, str) else None
-                if tgt is None and isinstance(v, str) and v not in purged:
-                    # items() is not atomic: a submit landing mid-stream can put
-                    # its marker in the snapshot without its record. Ask.
-                    tgt = jobs_dict.get(v)
-                # A flight that has landed - or crashed - is no flight. Judged by
-                # state, not by `purgeable(ttl=0)`: that is a strict "older than
-                # zero seconds", which a record failed in this same pass (the
-                # reconcile above stamps the same `now`) does not satisfy, so its
-                # marker lived on to the next job.
-                gone = tgt is None or tgt.get("state") in _TERMINAL
-            elif k.startswith("artifacts:"):   # a killed overlap thread leaves
-                gone = now - float((v or {}).get("t") or 0) > 900   # a stale pending marker
-            elif k.startswith("cancel:"):
-                gone = now - float(v or 0) > 900
-            else:
-                continue
-            if gone and jobs_dict.get(k) == v:     # compare-and-delete
+        elif k.startswith("artifacts:"):       # a killed overlap thread leaves
+            if now - float((v if isinstance(v, dict) else {}).get("t") or 0) <= 900:
+                continue                       # a stale pending marker behind
+            m = jobs_dict.get(k)               # re-read: a new flight may own it
+            if now - float((m if isinstance(m, dict) else {}).get("t") or 0) > 900:
                 try:
                     del jobs_dict[k]
                 except Exception:
                     pass
-    except Exception as e:
-        print(f"[purge] failed: {e}", flush=True)
+        elif k.startswith("cancel:"):
+            if now - float(v or 0) <= 900:
+                continue
+            if now - float(jobs_dict.get(k) or 0) > 900:
+                try:
+                    del jobs_dict[k]
+                except Exception:
+                    pass
+    if purged:
+        print(f"[purge] {len(purged)} finished jobs past {JOBS_TTL_H:g}h TTL", flush=True)
 
 
 from haversack.jobpolicy import (TERMINAL as _TERMINAL,  # noqa: E402
