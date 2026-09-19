@@ -518,6 +518,13 @@ def test_directory_markers_are_not_fetched_though_the_listing_strips_their_slash
     (tmp_path / "b").mkdir()
     got = S3Source({"idc-open-data": None}).fetch(f"idc-open-data/{uuid}/", tmp_path / "b")
     assert sorted(p.name for p in got.iterdir()) == ["1.dcm", "2.dcm"]
+    # a real object at a directory's path is kept: only an empty one is a marker
+    stores[("aws", "idc-open-data")] = _FakeStore({
+        "y/": b"", "y/sub": b"a file", "y/sub/2.dcm": b"two"})
+    (tmp_path / "d").mkdir()
+    got = S3Source({"idc-open-data": None}).fetch("idc-open-data/y/", tmp_path / "d")
+    assert sorted(p.name for p in got.iterdir()) == ["2.dcm", "sub"]
+    assert (got / "sub").read_bytes() == b"a file"
     # a series that is nothing but its marker is empty, and says so
     stores[("aws", "idc-open-data")] = _FakeStore({"x/": b""})
     (tmp_path / "c").mkdir()

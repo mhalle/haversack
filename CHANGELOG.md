@@ -7,7 +7,7 @@
   so the prefix fetch asked for an object that does not exist and failed the whole series with
   `NoSuchKey` (`idc:15fc0810-a2e2-4b32-8c3c-217ebc92ba32`, colorectal_liver_metastases: 1 of 5
   random abdominal CT series tried). The listing now drops a key that is the prefix itself or
-  a strict path-prefix of another listed key, for `idc:` and every `<bucket>/<prefix>/` fetch.
+  a zero-byte strict path-prefix of another listed key, for `idc:` and every `<bucket>/<prefix>/` fetch.
 
 ## [0.12.0] - 2026-09-13
 

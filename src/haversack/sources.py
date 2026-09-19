@@ -499,9 +499,12 @@ def _list_objects(store, prefix: str) -> list:
     ``15fc0810-...`` (2026-09-19), which has a basename of its own, and the GET
     of that key is a 404 that failed the whole fetch. With the slash gone, a
     marker is recognized by position instead: the listing prefix itself, or a
-    key that is a strict path-prefix of another listed key - no object can be
-    both a file and the directory other objects live in. A marker that keeps
-    its slash goes too."""
+    zero-byte key that is a strict path-prefix of another listed key. The size
+    check is for the interior case only: S3 lets a real object ``a/b`` sit
+    beside ``a/b/c``, and once the slash is stripped the listing cannot tell it
+    from a marker ``a/b/`` except by its bytes. The prefix itself needs no
+    check - a listing under ``abc/`` cannot hold an object named ``abc``. A
+    marker that keeps its slash goes too."""
     out = []
     for page in store.list(prefix=prefix):
         for o in page:
@@ -513,11 +516,13 @@ def _list_objects(store, prefix: str) -> list:
 
 
 def _without_directory_markers(keys: list, prefix: str) -> list:
-    dirs = {prefix.rstrip("/")}
+    top = prefix.rstrip("/")
+    dirs = set()
     for key, _ in keys:
         parts = key.rstrip("/").split("/")
         dirs.update("/".join(parts[:i]) for i in range(1, len(parts)))
-    return [(k, n) for k, n in keys if not k.endswith("/") and k not in dirs]
+    return [(k, n) for k, n in keys
+            if not (k.endswith("/") or k == top or (n == 0 and k in dirs))]
 
 
 class _Budget:
