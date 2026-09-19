@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.12.3] - 2026-09-19
 
 - **`GET /v1/jobs/{id}/result` reads the job's published result, not the worker's scratch
   copy.** On a Modal deployment (2026-09-19, ts.v2:total on 440 IDC series) it answered 500
