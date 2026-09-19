@@ -2703,7 +2703,11 @@ class LocalExecutor:
             return None
         # The durable record outlives the bytes: an evicted or pre-restart job keeps
         # answering, its result reported as gone rather than the id 404ing.
-        gone = not (r.get("labels_path") and Path(r["labels_path"]).exists())
+        # ...and gone means gone from BOTH places the result route looks: the job's copy
+        # and its published entry (no lease - this hands out no path)
+        gone = not (r.get("labels_path") and Path(r["labels_path"]).exists()) and not (
+            r.get("cache_key") and self.cache is not None
+            and self.cache._resolve(r["cache_key"], lease=False) is not None)
         d = {"id": r["id"], "task": r.get("task"), "state": r.get("state"),
              "created": r.get("created"), "started": r.get("started"),
              "finished": r.get("finished"), "input_identity": r.get("input_identity") or [],
@@ -3247,7 +3251,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             # `inputs[].kind` is "image" everywhere today, and a task that
             # consumes a mask would have to declare so before this composes into
             # anything meaningful.
-            state, path = executor.result_file(str(from_job))
+            state, path, _ = _job_result(str(from_job))   # the job's published entry first
             if state is None:
                 raise HTTPException(404, {"code": "no_job",
                                           "message": f"no job {from_job!r}"})
@@ -3963,16 +3967,50 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                  headers={"Cache-Control": "no-cache",
                                           "X-Accel-Buffering": "no"})
 
+    def _job_result(jid: str):
+        """``(state, labels path or None, result)`` for a job; state None for an unknown one.
+
+        A job with a cache key is read from its PUBLISHED entry, through the same leased
+        ``cache_get`` the path surface uses; the job's own copy is the fallback, for
+        results with no entry (uploads without an identity, a server with no cache) and
+        for an entry since republished with different bytes - the job's result is what
+        that job produced, and its ETag says so. Reading the job's copy first was a 500
+        on Modal (2026-09-19, ts.v2:total on 440 IDC series: 162 failed, intermittently
+        per job) where the api container did not see the worker's scratch file, while the
+        entry answered by path for every one.
+        """
+        status = executor.status_of(jid)
+        if status is None:
+            return None, None, None
+        state = status.get("state")
+        if state != "done":
+            return state, None, None
+        own = status.get("result")
+        key = status.get("cache_key") or status.get("key")
+        if key:
+            hit = executor.cache_get(key)
+            if hit is not None and _same_output(own, hit[1]):
+                return state, Path(hit[0]), hit[1]
+        state, path = executor.result_file(jid)
+        return state, path, own
+
+    def _same_output(own, published) -> bool:
+        """Whether a published entry holds the bytes a job reported, by content digest;
+        without a digest on either side the shared key is all there is to go on."""
+        a, b = etag_of("", own), etag_of("", published)
+        return a == b or '""' in (a, b)
+
     @app.get("/v1/jobs/{jid}/result", tags=["jobs"])
     def result(request: Request, jid: str, format: str = None):
         require_auth(request)
-        state, path = executor.result_file(jid)
+        state, path, res = _job_result(jid)
         if state is None:
             raise HTTPException(404, f"no job {jid!r}")
         if state != "done":
             raise HTTPException(409, f"job is {state}, not done")
+        gone = "result no longer on the server; recompute it"
         if path is None:                       # done, but the bytes were purged
-            raise HTTPException(410, "result no longer on the server; recompute it")
+            raise HTTPException(410, gone)
         task_name = (executor.status_of(jid) or {}).get("task", "labels")
         stem = _task_stem(task_name)           # canonical eco:name is not filename-safe
         if format in ("nii.gz", "nii"):        # the LOSSY conversion, by request only
@@ -3983,16 +4021,21 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             from starlette.background import BackgroundTask
             tmpd = tempfile.mkdtemp(prefix="haversack-conv-")
             out = Path(tmpd) / f"{stem}_{jid}.nii.gz"
-            sitk.WriteImage(sitk.ReadImage(str(path)), str(out), True)
+            try:
+                sitk.WriteImage(sitk.ReadImage(str(path)), str(out), True)
+            except RuntimeError:
+                shutil.rmtree(tmpd, ignore_errors=True)
+                if Path(path).exists():
+                    raise
+                raise HTTPException(410, gone) from None   # left between check and read
             return FileResponse(out, media_type="application/gzip", filename=out.name,
                                 background=BackgroundTask(shutil.rmtree, tmpd,
                                                           ignore_errors=True))
         # The route a client uses for results that are NOT path-addressable -
         # uploads, and every multi-input job - so this is where revalidation
-        # actually saves a download. The validator is the content digest the job
-        # already published in `outputs`; no re-hashing per request.
-        status = executor.status_of(jid) or {}
-        etag = etag_of(jid, status.get("result"))
+        # actually saves a download. The validator is the content digest of the
+        # bytes served, published in `outputs`; no re-hashing per request.
+        etag = etag_of(jid, res)
         fresh = not_modified(request, etag)
         if fresh is not None:
             return fresh

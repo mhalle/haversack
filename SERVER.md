@@ -110,7 +110,10 @@ so a dropped stream needs no replay - resubscribe, or poll the status URL. `GET
 /v1/jobs/{id}/result` returns the labels as `.seg.nrrd` (names, colors, extents, and the
 full provenance in the header); `?format=nii.gz` converts on the way out and is the lossy
 option. The result's `ETag` is its content digest, so `If-None-Match` gets a 304. A job that
-is not done answers 409; a result whose bytes were purged answers 410. On the local
+is not done answers 409; a result whose bytes were purged answers 410. A job with a key is
+served from the result cache's entry for that key - the same bytes the path surface serves -
+and from the job's own copy only when there is no entry or the key has since been recomputed
+to different bytes. On the local
 server the record itself keeps answering `GET /v1/jobs/{id}` (marked `evicted`) after it
 leaves memory or the server restarts, until `DELETE` removes it; Modal's records live in
 its job store for `HAVERSACK_JOBS_TTL_H`. `DELETE` cancels an active job or deletes a

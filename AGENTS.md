@@ -469,6 +469,19 @@ Measured on smoke deploys with 2 L40S workers and a 1300-record Dict, same IDC s
 old code logged "preview" at 65-69 s every job and ran ~1 job/min; the new one ran ~10.7
 jobs/min, with the preview at 0.5-2.0 s.
 
+### A job's result is read from its cache entry, not the worker's scratch (2026-09-19)
+
+`GET /v1/jobs/{id}/result` read `/scratch/<jid>/labels.seg.nrrd`, which the api container
+does not reliably see: 500 for 162 of 440 finished ts.v2:total IDC jobs on
+`haversack-radar-val`, intermittently per job, while the same entry by path answered 200 for
+all. serve's `_job_result` now resolves the job's key through `executor.cache_get` (leased,
+as the path surface does) and uses `result_file` only as the fallback - no entry, or an entry
+republished with a different digest. Smoke `haversack-jobresult-smoke` (torn down, its three
+per-app volumes deleted): with the job's scratch file deleted by `modal volume rm`, the result and
+`?format=nii.gz` answered 200 three times each, bytes identical to the path route; after
+evicting the entry, 410 for both the computed job and a cache-hit job. An L40S worker took
+~12 min to be scheduled that day - Modal capacity, not the code.
+
 ## Running on a GPU that is not Modal's (assessed 2026-09-16, nothing run)
 
 The question was whether haversack runs on a local CUDA box, as a server there, and on another

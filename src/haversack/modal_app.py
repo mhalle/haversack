@@ -1416,6 +1416,10 @@ class ModalExecutor:
                             "cached": True, "created": time.time(),
                             "started": time.time(), "finished": time.time(),
                             "result": hit[1], "cache_path": str(hit[0]),
+                            # the handle the job result route resolves - and leases -
+                            # the entry by; cache_path names one generation, which a
+                            # later publication of the key lets pruning reclaim
+                            "cache_key": key,
                             # a pinned ask answered from the cache still reports its pin,
                             # as the local executor does (seen missing on Modal, 2026-09-12)
                             **({"version": version} if version else {})}
@@ -1527,6 +1531,10 @@ class ModalExecutor:
         return state, True
 
     def result_file(self, jid):
+        """(state, the job's own copy of its labels or None). serve's result route asks
+        this only after the job's published cache entry, which is the copy this
+        container can rely on: the scratch file is the worker's, and on 2026-09-19 the
+        api container did not see it for 162 of 440 finished IDC jobs."""
         from haversack.serve import RESULT_NAME
         meta = jobs_dict.get(jid)
         if meta is None:
@@ -1538,8 +1546,11 @@ class ModalExecutor:
             except Exception:
                 pass
             return meta["state"], (p if p.exists() else None)
-        with self.volume_guard:
-            scratch_vol.reload()
+        try:
+            with self.volume_guard:
+                scratch_vol.reload()
+        except Exception:                    # e.g. open files; judge by what is visible
+            pass
         p = Path(SCRATCH_ROOT) / jid / RESULT_NAME
         return meta["state"], (p if p.exists() else None)
 

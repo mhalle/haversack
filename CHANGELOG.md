@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+- **`GET /v1/jobs/{id}/result` reads the job's published result, not the worker's scratch
+  copy.** On a Modal deployment (2026-09-19, ts.v2:total on 440 IDC series) it answered 500
+  for 162 finished jobs, intermittently per job: the api container did not see the file the
+  worker wrote to its scratch volume, while the same result by path answered 200 for every
+  one. The route, with or without `?format=`, and `POST /v1/inputs` `from_job` now resolve
+  the job's key through the leased cache lookup the path surface uses, and fall back to the
+  job's own copy only where there is no entry, or where a later recompute republished the
+  key with different bytes. With neither copy the answer is 410, as SERVER.md always said,
+  including when the file leaves between the check and the conversion. A Modal job answered
+  from the cache at submit now records its key, as the local server's does.
+
 ## [0.12.2] - 2026-09-19
 
 - **A Modal deployment accepts concurrent submits concurrently again.** `POST /v1/jobs`
