@@ -442,6 +442,27 @@ def _call_state(call_id) -> str:
     return "finished"
 
 
+def _fail_if_orphaned(jid: str, meta: dict, now: float) -> bool:
+    """Fail an active record whose spawned call is gone; True when it did.
+
+    The one rule for "this flight will never land", shared by the worker's reconcile
+    and the API's single-flight lookup: only a record older than ``ORPHAN_MIN_AGE_S``
+    is probed (a fresh one may not have its call_id yet, and a call finishing races
+    its own terminal emit), and the record is re-read immediately before it is
+    failed, so a job finishing meanwhile is left alone."""
+    if now - float(meta.get("started") or meta.get("created") or now) < ORPHAN_MIN_AGE_S:
+        return False
+    if _call_state(meta.get("call_id")) == "live":
+        return False
+    cur = jobs_dict.get(jid) or {}                 # re-read: it may just have finished
+    if cur.get("state") not in ("queued", "running"):
+        return False
+    _emit(jid, {"state": "failed", "finished": now,
+                "error": "orphaned: the deployment that spawned this job was "
+                         "stopped or replaced before it finished - resubmit it"})
+    return True
+
+
 def _reconcile_orphans(current_jid: str | None = None, now: float | None = None,
                        snapshot: list | None = None) -> list:
     """Fail every active record whose spawned call is gone. Returns their ids.
@@ -477,17 +498,8 @@ def _reconcile_orphans(current_jid: str | None = None, now: float | None = None,
         m = m if isinstance(m, dict) else {}
         if m.get("state") not in ("queued", "running"):
             continue
-        if now - float(m.get("started") or m.get("created") or now) < ORPHAN_MIN_AGE_S:
-            continue
-        if _call_state(m.get("call_id")) == "live":
-            continue
-        m = jobs_dict.get(k) or {}                 # re-read: it may just have finished
-        if m.get("state") not in ("queued", "running"):
-            continue
-        _emit(k, {"state": "failed", "finished": now,
-                  "error": "orphaned: the deployment that spawned this job was "
-                           "stopped or replaced before it finished - resubmit it"})
-        failed.append(k)
+        if _fail_if_orphaned(k, m, now):
+            failed.append(k)
     if failed:
         print(f"[reconcile] {len(failed)} orphaned job(s) failed: {' '.join(failed)}", flush=True)
     return failed
@@ -1450,12 +1462,47 @@ class ModalExecutor:
             pass
         return ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).get(key)
 
+    #: jid -> monotonic time its call was last seen live, so a key asked about
+    #: repeatedly costs one call probe per FLIGHT_LIVE_TTL_S, not one per request
+    _flight_seen_live: dict = {}
+    FLIGHT_LIVE_TTL_S = 30.0
+
     def find_inflight(self, key):
         jid = jobs_dict.get(f"inflight:{key}")
         if not jid:
             return None
         meta = jobs_dict.get(jid) or {}
-        return jid if meta.get("state") in ("queued", "running") else None
+        if meta.get("state") not in ("queued", "running"):
+            return None
+        return jid if self._flight_alive(jid, meta) else None
+
+    def _flight_alive(self, jid, meta) -> bool:
+        """Whether an active record's spawned call can still finish it.
+
+        A deployment stopped mid-job leaves its records `queued`/`running` and their
+        `inflight:` markers in the Dict, and only a WORKER's reconcile failed them - so
+        after a restart with no new jobs nothing did, and every plain GET of such a key
+        joined a flight that would never land and waited out its 30 s (the 1,206-job
+        run of 2026-09-19 worked around it with HEAD). The lookup now applies the
+        reconcile's own rule, :func:`_fail_if_orphaned`, so the record is failed here
+        and the next asker sees no flight. A live answer is remembered for
+        ``FLIGHT_LIVE_TTL_S``: the probe is a ~60 ms round trip."""
+        seen = self._flight_seen_live.get(jid)
+        if seen is not None and time.monotonic() - seen < self.FLIGHT_LIVE_TTL_S:
+            return True
+        now = time.time()
+        if _fail_if_orphaned(jid, meta, now):
+            self._flight_seen_live.pop(jid, None)
+            print(f"[reconcile] orphaned job {jid} failed on a read of its key", flush=True)
+            return False
+        if now - float(meta.get("started") or meta.get("created") or now) >= ORPHAN_MIN_AGE_S:
+            seen = self._flight_seen_live
+            if len(seen) > 4096:                   # an api container lives for days
+                cut = time.monotonic() - self.FLIGHT_LIVE_TTL_S
+                for k in [k for k, t in seen.items() if t < cut]:
+                    seen.pop(k, None)
+            seen[jid] = time.monotonic()           # probed, and live
+        return True
 
     def cache_delete(self, key):
         from haversack.serve import ResultCache

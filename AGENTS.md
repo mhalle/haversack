@@ -482,6 +482,17 @@ per-app volumes deleted): with the job's scratch file deleted by `modal volume r
 evicting the entry, 410 for both the computed job and a cache-hit job. An L40S worker took
 ~12 min to be scheduled that day - Modal capacity, not the code.
 
+### A stopped deployment's flights are failed on read, not only by a worker (2026-09-19)
+
+`_fail_if_orphaned` is the one "this flight will never land" rule: the worker's
+`_reconcile_orphans` and the API's `find_inflight` both call it. Before, only the reconcile
+did, at worker start and in the sweep, so after `modal app stop` and a redeploy with no new
+jobs, every plain GET of an orphaned key waited out `wait_default` (30 s). The API memoizes
+a live answer per job for `FLIGHT_LIVE_TTL_S` (the probe is ~60 ms, and it is a blocking call in
+an async route, as the Dict reads beside it already are). Smoke `haversack-inflight-smoke`:
+a job submitted and the app stopped while it was queued, redeployed, and 125 s later a HEAD
+and a plain GET answered 404 in 1.5 s and 0.7 s; the record read `failed` (orphaned).
+
 ## Running on a GPU that is not Modal's (assessed 2026-09-16, nothing run)
 
 The question was whether haversack runs on a local CUDA box, as a server there, and on another

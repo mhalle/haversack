@@ -915,3 +915,77 @@ def test_a_submit_commits_the_scratch_volume_only_when_it_holds_an_upload(monkey
               identity=("sha256:ab",))
     assert commits == [1] and (upload / "input_scan.nii.gz").exists()
     assert spawned == ["j1", "j2"]
+
+
+def test_a_flight_whose_call_is_gone_is_no_flight(monkeypatch):
+    """The 1,206-job run (2026-09-19): records a stopped deployment left `running` kept
+    their `inflight:` markers until some WORKER reconciled, so after a restart with no new
+    jobs every plain GET of such a key joined a dead flight and waited 30 s. The API's
+    lookup applies the reconcile's rule itself: an old record with a dead call is failed
+    and no flight is returned; a live one is probed once per FLIGHT_LIVE_TTL_S; a young
+    one (its call_id may not be written yet) is never probed."""
+    import time as _time
+    m, fake = _swap_dict(monkeypatch)
+    probes = []
+    states = {"dead": "dead", "live": "live"}
+    monkeypatch.setattr(m, "_call_state", lambda cid: probes.append(cid) or states[cid])
+    ex = m.ModalExecutor()
+    monkeypatch.setattr(ex, "_flight_seen_live", {})
+    old = _time.time() - 3600
+    fake["orphan"] = {"id": "orphan", "state": "running", "created": old, "call_id": "dead"}
+    fake["inflight:A"] = "orphan"
+    fake["alive"] = {"id": "alive", "state": "running", "created": old, "call_id": "live"}
+    fake["inflight:B"] = "alive"
+    fake["young"] = {"id": "young", "state": "queued", "created": _time.time()}
+    fake["inflight:C"] = "young"
+
+    assert ex.find_inflight("A") is None
+    assert fake["orphan"]["state"] == "failed" and "orphaned" in fake["orphan"]["error"]
+    assert ex.find_inflight("A") is None and probes == ["dead"]   # failed: no second probe
+
+    assert ex.find_inflight("B") == "alive" and ex.find_inflight("B") == "alive"
+    assert probes == ["dead", "live"]                              # remembered
+
+    assert ex.find_inflight("C") == "young" and probes == ["dead", "live"]
+
+
+def test_a_plain_get_on_an_orphaned_flight_answers_at_once(monkeypatch, tmp_path):
+    """End to end through the path route: 404 (not materialized), not a 30 s wait."""
+    import time as _time
+    import types
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from haversack.serve import create_app
+    m, fake = _swap_dict(monkeypatch)
+    monkeypatch.setattr(m, "CACHE_ROOT", str(tmp_path / "cache"))
+    vol = types.SimpleNamespace(reload=lambda: None, commit=lambda: None)
+    monkeypatch.setattr(m, "cache_vol", vol)
+    monkeypatch.setattr(m, "_call_state", lambda cid: "dead")
+    ex = m.ModalExecutor()
+    monkeypatch.setattr(ex, "_flight_seen_live", {})
+    monkeypatch.setattr(ex, "_fresh_weights_versions", lambda task: [])
+
+    class Seg:
+        def tasks(self):
+            return ["total_fast"]
+
+        def describe(self, task):
+            return {"name": task}
+
+        def engine_for(self, task):
+            from haversack.engines import registry
+            return registry.engine_for_task(str(task))
+
+    ex.segmenter = Seg()
+    client = TestClient(create_app(ex))
+    series = "a05fb365-dfd2-4116-ab8e-a7262d2c169c"
+    from haversack.serve import result_key
+    key = result_key((f"idc:{series}",), "total_fast", {}, [])
+    fake["j"] = {"id": "j", "state": "running", "created": _time.time() - 3600,
+                 "call_id": "fc-gone", "cache_key": key}
+    fake[f"inflight:{key}"] = "j"
+    t0 = _time.monotonic()
+    r = client.get(f"/v1/idc/{series}/total_fast/labels.seg.nrrd")
+    assert _time.monotonic() - t0 < 5, "joined a flight that will never land"
+    assert r.status_code == 404, r.text
+    assert fake["j"]["state"] == "failed"

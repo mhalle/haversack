@@ -12,6 +12,13 @@
   key with different bytes. With neither copy the answer is 410, as SERVER.md always said,
   including when the file leaves between the check and the conversion. A Modal job answered
   from the cache at submit now records its key, as the local server's does.
+- **A Modal read no longer joins a flight a stopped deployment left behind.** Stopping an app
+  mid-job leaves its records `queued` or `running` with their `inflight:` markers, and only a
+  worker's reconcile failed them - so after a restart with no new jobs, a plain GET of such a
+  key joined a flight that would never land and waited its full 30 s (the 1,206-job run of
+  2026-09-19 fell back to HEAD). The API's single-flight lookup now applies the reconcile's
+  rule itself: a record older than two minutes whose call is gone is failed on the spot and
+  the read answers at once. A live call is probed at most once per 30 s per job.
 
 ## [0.12.2] - 2026-09-19
 
