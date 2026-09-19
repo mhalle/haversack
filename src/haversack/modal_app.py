@@ -567,6 +567,10 @@ def _sweep_jobs_store(current_jid: str, vol_lock=None, now: float | None = None)
         for k, v in snap.items():
             if k.startswith("inflight:"):
                 tgt = snap.get(v) if isinstance(v, str) else None
+                if tgt is None and isinstance(v, str) and v not in purged:
+                    # items() is not atomic: a submit landing mid-stream can put
+                    # its marker in the snapshot without its record. Ask.
+                    tgt = jobs_dict.get(v)
                 # A flight that has landed - or crashed - is no flight. Judged by
                 # state, not by `purgeable(ttl=0)`: that is a strict "older than
                 # zero seconds", which a record failed in this same pass (the

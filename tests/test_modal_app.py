@@ -185,12 +185,14 @@ def test_the_sweep_reads_the_dict_once_not_once_per_key(monkeypatch, tmp_path):
     fake["inflight:L"] = "d3"                          # landed: goes
     fake["inflight:gone"] = "nobody"                   # target purged long ago: goes
     fake["inflight:moved"] = "d4"                      # re-pointed after the snapshot: stays
+    fake["inflight:new"] = "late"                      # its record landed after the stream
     snap_items = fake.items
 
     def items_then_submit():
         out = snap_items()
         dict.__setitem__(fake, "inflight:moved", "q7")  # a new flight for that key
-        return out
+        dict.__setitem__(fake, "late", {"id": "late", "state": "queued", "created": now})
+        return [kv for kv in out if kv[0] != "late"]
     monkeypatch.setattr(fake, "items", items_then_submit)
     monkeypatch.setattr(m, "jobs_dict", fake)
     monkeypatch.setattr(m, "SCRATCH_ROOT", str(tmp_path))
@@ -202,8 +204,9 @@ def test_the_sweep_reads_the_dict_once_not_once_per_key(monkeypatch, tmp_path):
     assert "old" not in fake and not (tmp_path / "old").exists()
     assert "inflight:L" not in fake and "inflight:gone" not in fake
     assert fake["inflight:moved"] == "q7"
+    assert fake["inflight:new"] == "late"             # a live flight keeps its marker
     assert all(f"inflight:K{i}" in fake for i in range(500))
-    assert fake.gets <= 3, fake.gets                   # one re-check per marker dropped
+    assert fake.gets <= 5, fake.gets                   # re-checks of what is written or unseen
 
 
 def test_the_prefetch_scan_reads_the_dict_once(monkeypatch):
