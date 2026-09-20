@@ -29,7 +29,8 @@ obstore = pytest.importorskip("obstore")
 from obstore.store import LocalStore, MemoryStore  # noqa: E402
 
 from haversack import objectcache  # noqa: E402
-from haversack.objectcache import (BlobStore, ObjectStoreUnsuitable,  # noqa: E402
+from provender import Blobs as BlobStore  # noqa: E402  (the store moved to provender)
+from haversack.objectcache import (ObjectStoreUnsuitable,  # noqa: E402
                                    SharedResultCache, check_conditional_writes, open_store)
 from haversack.serve import RESULT_NAME, ResultCache  # noqa: E402
 

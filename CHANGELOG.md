@@ -22,6 +22,18 @@
   bucket served each other's results - the second never ran its segmenter - and the soak
   saw no torn read and no error while a sweeper with no grace deleted blobs underneath it.
   A hit costs one pointer read, about 85 ms median from this Mac.
+- **The blob half is now `provender`, a package shared with feldglas.** A second project
+  needed content-addressed blobs on the same kind of store, and two copies of one protocol
+  is how this repo's defects have always started - so `BlobStore`, `open_store` and the
+  conditional-write probe moved out to https://github.com/mhalle/provender (pinned by tag,
+  as rankfield and duckn are) and haversack keeps the pointer, the policy, and the live set
+  the sweep needs, which is the only part that knows what a result is. Reviewing the
+  extraction from the other side found two more: a sweep with no grace by default deletes a
+  blob uploaded a second ago (every client writes the blob before the index entry naming
+  it), and the package's own probe tool had been broken by a guard the day before, because
+  nothing imported it. Both fixed in provender 0.1.1, the second with a test that runs the
+  probe.
+
 - **A republication keeps its predecessors: bounded history in the shared store.** The
   pointer carries the generations it replaced - up to `HISTORY_KEEP` (4) and
   `HISTORY_MAX_AGE_S` (30 days), whichever runs out first - and the sweep treats their

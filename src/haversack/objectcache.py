@@ -9,7 +9,11 @@ its lock" stops proving death. What an object store DOES offer is enough for a d
 protocol, the one build caches use (Bazel's ActionCache over a CAS):
 
 - **Blobs** under ``blobs/sha256/<hex>``, named by their own bytes and written only if
-  absent. Immutable, so a reader never holds anything and nothing needs a lease.
+  absent. Immutable, so a reader never holds anything and nothing needs a lease. That half
+  is ``provender`` (2026-09-20), a package of its own because feldglas needed exactly it
+  and two copies of one protocol is how this repo's defects have always started. What is
+  haversack's here is the POINTER and the policy around it - including, for the sweep, the
+  live set, which is the only part that knows what a result is.
 - **One pointer per key**, ``results/<key>.json``: the files by digest plus the result and
   meta documents inline. Publication is uploading the blobs and then ONE conditional write
   of the pointer (create-if-absent, or replace-if-unchanged against the etag read), so the
@@ -35,7 +39,6 @@ this repo has been wrong before.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import sys
 import tempfile
@@ -45,15 +48,19 @@ import uuid
 import weakref
 from pathlib import Path
 
+from provender import Blobs, GRACE_S, check_store, open_store, update_mode
+from provender import StoreUnsuitable as _StoreUnsuitable
+
 from .errors import InputError
 
 #: Bump if the pointer document changes shape incompatibly; a reader refuses (reads as a
 #: miss) any pointer whose format it does not know, rather than guessing at its fields.
 POINTER_FORMAT = 1
-#: How old an unreferenced blob must be before ``sweep`` may delete it. Generous: a blob is
-#: unreferenced for the few seconds between its upload and its pointer's write, and what a
-#: too-short grace costs is a republication, while a long one costs only storage.
-BLOB_GRACE_S = 24 * 3600
+#: How old an unreferenced blob must be before ``sweep`` may delete it - provender's
+#: default, and for the same reason: a blob is unreferenced for the few seconds between its
+#: upload and its pointer's write, and a too-short grace costs a republication while a long
+#: one costs only storage.
+BLOB_GRACE_S = GRACE_S
 #: Conditional-write attempts before a publication gives up. Each retry means another
 #: writer published this key in between, so this many in a row is a storm, not a race.
 SWAP_ATTEMPTS = 16
@@ -71,12 +78,29 @@ WARN_INTERVAL_S = 60.0
 #: Where a fill assembles its downloads, and how long a dead fill's directory survives.
 WORK_PREFIX = ".fill-"
 WORK_GRACE_S = 3600.0
-_CHUNK = 1 << 20
 _warned_at = 0.0
 
 
 class ObjectStoreUnsuitable(InputError):
-    """The store cannot carry the protocol - it does not honor conditional writes."""
+    """The store cannot carry the protocol - it does not honor conditional writes.
+
+    provender raises its own ``StoreUnsuitable`` (a ValueError); this is the same fact as
+    an ``InputError``, which is what `serve` turns into one line naming the fix instead of
+    a traceback from inside a dependency.
+    """
+
+
+def check_conditional_writes(store, prefix: str = "") -> None:
+    """Ask the store whether it can carry the protocol; ``ObjectStoreUnsuitable`` if not.
+
+    The pointer needs BOTH conditional writes, so this never passes ``updates=False``.
+    """
+    try:
+        check_store(store, prefix)
+    except _StoreUnsuitable as e:
+        raise ObjectStoreUnsuitable(
+            f"{e}; use S3, GCS, Azure or R2, or drop --result-store for a local-only "
+            "cache") from None
 
 
 def _miss(where: str, exc: BaseException) -> None:
@@ -97,91 +121,6 @@ def _miss(where: str, exc: BaseException) -> None:
         _warned_at = now
         print(f"warning: result store unreachable ({where}): {type(exc).__name__}: {exc}; "
               "serving as a cache miss", file=sys.stderr, flush=True)
-
-
-def open_store(url: str):
-    """``(store, prefix)`` for ``s3://bucket/prefix``, ``gs://...``, ``az://...``,
-    ``file:///path`` or ``memory://``. Credentials come from the environment, as obstore
-    reads them (``AWS_*``, ``GOOGLE_*``, ``AZURE_*``); nothing here takes a secret.
-
-    ``memory://`` is process-local and exists for tests. ``file://`` opens, and is then
-    refused by ``check_conditional_writes``: obstore's local store cannot replace an object
-    conditionally (measured 2026-09-19, obstore 0.11.1) - the plain ``ResultCache`` is the
-    right cache for a local disk anyway.
-    """
-    from urllib.parse import urlparse
-    u = urlparse(url)
-    scheme = u.scheme.lower()
-    if scheme == "memory":
-        from obstore.store import MemoryStore
-        return MemoryStore(), _prefix(u.netloc + u.path)
-    if scheme == "file":
-        from obstore.store import LocalStore
-        root = Path(u.path)
-        root.mkdir(parents=True, exist_ok=True)
-        return LocalStore(root), ""
-    if scheme in ("s3", "s3a", "gs", "az", "abfs", "abfss") and u.netloc:
-        from obstore.store import from_url
-        return from_url(f"{scheme}://{u.netloc}"), _prefix(u.path)
-    raise InputError(f"result store {url!r}: expected s3://bucket[/prefix], gs://..., "
-                     "az://..., file:///path or memory://")
-
-
-def _prefix(path: str) -> str:
-    p = path.strip("/")
-    return f"{p}/" if p else ""
-
-
-def check_conditional_writes(store, prefix: str = "") -> None:
-    """Refuse a store on which the pointer protocol would silently lose publications.
-
-    Four questions, each answered by the store rather than assumed: a create-if-absent over
-    an existing object must fail; a replace with the current etag must succeed; a replace
-    with a STALE etag must fail. A store that answers any of them wrong - or that does not
-    implement the question - would let two writers both believe they published.
-    """
-    import obstore
-    from obstore.exceptions import (AlreadyExistsError, NotSupportedError,
-                                    PreconditionError)
-    path = f"{prefix}.probe/{uuid.uuid4().hex}"
-    name = type(store).__name__
-
-    def refuse(why: str) -> ObjectStoreUnsuitable:
-        return ObjectStoreUnsuitable(
-            f"result store ({name}) {why}: the shared result cache needs create-if-absent "
-            "and replace-if-unchanged writes; use S3, GCS or Azure, or drop --result-store "
-            "for a local-only cache")
-    try:
-        try:
-            obstore.put(store, path, b"0", mode="create")
-        except (NotImplementedError, NotSupportedError, TypeError) as e:
-            raise refuse(f"cannot create-if-absent ({e})") from None
-        try:
-            obstore.put(store, path, b"1", mode="create")
-        except AlreadyExistsError:
-            pass
-        except (NotImplementedError, NotSupportedError, TypeError) as e:
-            raise refuse(f"cannot create-if-absent ({e})") from None
-        else:
-            raise refuse("overwrote an existing object on create-if-absent")
-        stale = _update_mode(obstore.head(store, path))
-        try:
-            obstore.put(store, path, b"2", mode=stale)
-        except (NotImplementedError, NotSupportedError, TypeError) as e:
-            raise refuse(f"cannot replace-if-unchanged ({e})") from None
-        except PreconditionError:
-            raise refuse("refused a replace carrying the current etag") from None
-        try:
-            obstore.put(store, path, b"3", mode=stale)
-        except PreconditionError:
-            pass
-        else:
-            raise refuse("accepted a replace carrying a stale etag")
-    finally:
-        try:
-            obstore.delete(store, path)
-        except Exception:                      # noqa: BLE001 - a probe left behind is litter
-            pass
 
 
 def _well_formed(ptr) -> bool:
@@ -234,108 +173,6 @@ def _generations(ptr) -> list:
     return out
 
 
-def _update_mode(meta) -> dict:
-    """The replace-if-unchanged mode for an object whose metadata is ``meta``. ``version``
-    only when the store reports one: passing None is a TypeError in obstore."""
-    mode = {"e_tag": meta["e_tag"]}
-    if meta.get("version") is not None:
-        mode["version"] = meta["version"]
-    return mode
-
-
-class BlobStore:
-    """Bytes named by their SHA-256, under ``<prefix>blobs/sha256/<hex>``."""
-
-    def __init__(self, store, prefix: str = ""):
-        self.store = store
-        self.prefix = prefix
-        #: digests this process has read and found wrong: never deduplicated onto again.
-        self.suspect: set[str] = set()
-
-    def path(self, digest: str) -> str:
-        algo, _, hexd = digest.partition(":")
-        if algo != "sha256" or len(hexd) != 64 or not all(c in "0123456789abcdef" for c in hexd):
-            raise ValueError(f"not a sha256 digest: {digest!r}")
-        return f"{self.prefix}blobs/sha256/{hexd}"
-
-    def put_file(self, src) -> dict:
-        """Upload ``src`` unless its bytes are already stored; ``{"digest", "size"}``.
-
-        Create-if-absent, so a concurrent upload of the same bytes is not a conflict - it
-        is the same object by definition, and whichever landed first is kept.
-        """
-        import obstore
-        from obstore.exceptions import AlreadyExistsError
-        src = Path(src)
-        h = hashlib.sha256()
-        with open(src, "rb") as f:
-            for chunk in iter(lambda: f.read(_CHUNK), b""):
-                h.update(chunk)
-        blob = {"digest": f"sha256:{h.hexdigest()}", "size": src.stat().st_size}
-        if blob["digest"] in self.suspect:
-            # a read found the stored object wrong: replace it rather than dedupe onto it
-            obstore.put(self.store, self.path(blob["digest"]), src)
-            # `-=` rather than .discard(): `tests/test_jobpolicy.py` counts every `.discard`
-            # call in the package to prove one module decides to drop a cached input, and
-            # a set operation here is not that decision. Keep its guard sharp.
-            self.suspect -= {blob["digest"]}
-        elif not self.has(blob["digest"]):
-            try:
-                obstore.put(self.store, self.path(blob["digest"]), src, mode="create")
-            except AlreadyExistsError:
-                pass
-        return blob
-
-    def has(self, digest: str) -> bool:
-        import obstore
-        try:
-            obstore.head(self.store, self.path(digest))
-        except FileNotFoundError:
-            return False
-        return True
-
-    def fetch(self, digest: str, dest) -> bool:
-        """Write the blob to ``dest``, verified against its name; False when it is gone -
-        or was wrong, in which case it is deleted.
-
-        Verified because the name is a promise the store does not check: a truncated or
-        corrupted object would otherwise be published into the local cache as a result.
-        Deleted because ``put_file`` skips an upload whose name already exists, so a bad
-        blob left in place would survive every recompute that should replace it; bytes
-        that do not hash to their name are provably nobody's.
-        """
-        import obstore
-        dest = Path(dest)
-        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex[:8]}.part")
-        h = hashlib.sha256()
-        try:
-            with open(tmp, "wb") as f:
-                for chunk in obstore.get(self.store, self.path(digest)).stream(
-                        min_chunk_size=_CHUNK):
-                    h.update(chunk)
-                    f.write(chunk)
-            if f"sha256:{h.hexdigest()}" != digest:
-                # NOT deleted. The bytes read here do not hash to the name, but this client
-                # cannot tell a corrupt object from a stream that ended early, and a blob is
-                # shared by every result whose output was identical - the first version
-                # deleted it, which took unrelated entries down with it (review,
-                # 2026-09-19). Suspect instead: this process stops deduplicating onto it, so
-                # the next publication of those bytes REPLACES it, and until then the answer
-                # is a miss. Always reported, never throttled: unlike a store being down,
-                # this should not happen.
-                self.suspect.add(digest)
-                print(f"warning: blob {digest} does not hash to its name ({h.hexdigest()}); "
-                      "serving as a cache miss and re-uploading it on the next publication",
-                      file=sys.stderr, flush=True)
-                return False
-            tmp.replace(dest)
-            return True
-        except FileNotFoundError:
-            return False
-        finally:
-            tmp.unlink(missing_ok=True)
-
-
 class SharedResultCache:
     """``ResultCache``'s interface, with the object store as the authority and a local
     ``ResultCache`` as the copy requests are served from. See the module docstring."""
@@ -346,7 +183,7 @@ class SharedResultCache:
         self.store = store
         self.prefix = prefix
         self.local = local
-        self.blobs = BlobStore(store, prefix)
+        self.blobs = Blobs(store, prefix)
         # weak: a lock lives while a filler holds it and is forgotten after. A plain dict
         # keeps one entry per key forever, in a process that runs for weeks (review).
         self._fill_locks: "weakref.WeakValueDictionary[str, threading.Lock]" = (
@@ -388,7 +225,7 @@ class SharedResultCache:
                 raise
             _miss(f"reading the pointer for {key[:12]}", e)
             return None, None
-        mode = _update_mode(got.meta)
+        mode = update_mode(got.meta)
         try:
             ptr = json.loads(bytes(got.bytes()))
         except (ValueError, UnicodeDecodeError):
@@ -723,32 +560,21 @@ class SharedResultCache:
     def sweep(self, *, max_age_s: float | None = None, grace_s: float = BLOB_GRACE_S,
               now: float | None = None) -> dict:
         """Delete what no pointer needs: pointers published more than ``max_age_s`` ago
-        (when given), then blobs no remaining pointer references that are older than
-        ``grace_s``.
+        (when given), then blobs no remaining pointer - current OR kept history - refers
+        to, through provender's sweep.
 
-        Blobs are LISTED before pointers are read. A publication that lands after the
-        listing uploaded its blobs after it too, so they are not candidates; one that lands
-        before the pointers are read is seen referencing them. What slips between is a
-        blob that already existed and was not re-uploaded - ``put`` re-checks its blobs
-        after writing the pointer for exactly that, and a read that still finds one missing
-        is a miss the next compute repairs.
+        What is haversack's here is the LIVE SET, which is the only part that knows what a
+        result is. The grace belongs to provender and is the same idea it always was: a
+        blob is unreferenced for the moments between its upload and its pointer's write,
+        and ``put`` re-checks its blobs afterwards for exactly that window. At the default
+        grace nothing young is a candidate at all; at ``grace_s=0`` what slips through is
+        a miss the next computation repairs.
 
         Expiring a pointer is an unconditional delete, so a republication that lands
         between reading the pointer and deleting it is expired with it: a miss.
         """
-        import datetime as _dt
-
         import obstore
         now = time.time() if now is None else now
-        blob_base = f"{self.prefix}blobs/sha256/"
-        candidates = []
-        for batch in obstore.list(self.store, blob_base):
-            for obj in batch:
-                modified = obj["last_modified"]
-                if isinstance(modified, _dt.datetime):
-                    modified = modified.timestamp()
-                if modified < now - grace_s:
-                    candidates.append(obj["path"])
         referenced, expired = set(), 0
         pointers, unreadable = self._scan_pointers()
         for ptr in pointers:
@@ -761,7 +587,7 @@ class SharedResultCache:
                 continue
             for gen in _generations(ptr):      # the current publication AND its history
                 for blob in gen["files"].values():
-                    referenced.add(self.blobs.path(blob["digest"]))
+                    referenced.add(blob["digest"])
         if unreadable:
             # A pointer this version cannot read may still name live blobs - a writer on a
             # newer POINTER_FORMAT is the case that matters. Its blobs would look
@@ -772,16 +598,11 @@ class SharedResultCache:
                   "pointers; deleting no blobs this sweep", file=sys.stderr, flush=True)
             return {"expired_pointers": expired, "deleted_blobs": 0,
                     "unreadable_pointers": unreadable}
-        deleted = 0
-        for path in candidates:
-            if path in referenced:
-                continue
-            try:
-                obstore.delete(self.store, path)
-            except FileNotFoundError:
-                pass
-            deleted += 1
-        return {"expired_pointers": expired, "deleted_blobs": deleted,
+        # an empty live set is a refusal in provender unless it is meant - and here it IS
+        # meant, because every pointer was read and none of them referenced anything
+        got = self.blobs.sweep(keep=referenced, grace_s=grace_s, now=now,
+                               allow_empty=not referenced)
+        return {"expired_pointers": expired, "deleted_blobs": got["deleted"],
                 "unreadable_pointers": 0}
 
 
