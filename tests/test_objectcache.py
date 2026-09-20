@@ -32,7 +32,7 @@ from haversack import objectcache  # noqa: E402
 from provender import Blobs as BlobStore  # noqa: E402  (the store moved to provender)
 from haversack.objectcache import (ObjectStoreUnsuitable,  # noqa: E402
                                    SharedResultCache, check_conditional_writes, open_store)
-from haversack.serve import RESULT_NAME, ResultCache  # noqa: E402
+from haversack.serve import CURRENT_NAME, RESULT_NAME, ResultCache  # noqa: E402
 
 KEY = "ab" * 32
 
@@ -261,11 +261,22 @@ class TestMisses(_Hosts):
         self.publish(self.a, b"one")
         obstore.put(self.store, f"pre/results/{KEY}.json", b"{not json")
         self.assertIsNone(self.b.get(KEY))
-        obstore.put(self.store, f"pre/results/{KEY}.json",
-                    json.dumps({"format": 999}).encode())
-        self.assertIsNone(self.b.get(KEY))
-        self.publish(self.a, b"two")               # and a publication replaces it
+        self.publish(self.a, b"two")               # garbage is nobody's: publish over it
         self.assertEqual(b"two", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_an_entry_from_a_NEWER_haversack_is_a_miss_and_is_not_overwritten(self):
+        """Refusing is the difference between a miss and taking another host's current
+        result and its whole history out of the index in one write (review, 2026-09-20).
+        Garbage gets published over; something that says it came from a later version does
+        not."""
+        self.publish(self.a, b"one")
+        newer = {**self.pointer(), "format": objectcache.POINTER_FORMAT + 1}
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(newer).encode())
+        self.assertIsNone(self.b.get(KEY), "cannot read it")
+        with self.assertRaises(ObjectStoreUnsuitable) as cm:
+            self.publish(self.a, b"two")
+        self.assertIn("newer haversack", str(cm.exception))
+        self.assertEqual(newer, self.pointer(), "left exactly as it was")
 
     def test_a_blob_swept_before_the_pointer_is_put_back(self):
         """put skipped the upload because the blob existed; a sweep then took it before
@@ -707,8 +718,14 @@ def test_a_broken_store_is_a_miss_on_the_wire_not_a_500(tmp_path):
                 raise PermissionDeniedError("403 from the bucket")
             return real(st, path, *a, **kw)
         with unittest.mock.patch.object(obstore, "get", boom):
-            assert client.get(f"/v1/jobs/{jid}/result").status_code == 410
+            # this host holds the result it just computed, so the outage is not a miss:
+            # it serves its own copy rather than throwing away warm work
+            assert client.get(f"/v1/jobs/{jid}/result").status_code == 200
             assert client.get("/v1/segmentations").status_code == 200
+            assert ex.cache_get(s["key"]) is not None
+        ex.cache.local.delete(s["key"])        # now nothing here holds it
+        with unittest.mock.patch.object(obstore, "get", boom):
+            assert client.get(f"/v1/jobs/{jid}/result").status_code == 410
             assert ex.cache_get(s["key"]) is None
     finally:
         ex.close()
@@ -724,7 +741,7 @@ def test_no_async_route_blocks_the_event_loop_on_the_cache():
 
     from haversack import serve as serve_mod
     tree = ast.parse(inspect.getsource(serve_mod))
-    blocking = {"cache_get", "status_of"}
+    blocking = {"cache_get", "status_of", "submit"}
     problems = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.AsyncFunctionDef):
@@ -1481,6 +1498,7 @@ class TestSweepOrdering(_Hosts):
         producing identical output uploads nothing, so the blob is old while the pointer
         naming it is new. provender refreshes the timestamp on dedup; without that this
         loses a result that was just computed (review, 2026-09-20)."""
+        self.publish(self.a, b"unrelated", key="ee" * 32)   # a live key, so the sweep runs
         self.publish(self.a, b"identical", key="cd" * 32)
         self.a.delete("cd" * 32, purge=False)          # the blob is now an orphan
         real = SharedResultCache._scan_pointers
@@ -1493,8 +1511,9 @@ class TestSweepOrdering(_Hosts):
                 self.publish(self.b, b"identical")     # dedupes onto the orphan
             return got
         with unittest.mock.patch.object(SharedResultCache, "_scan_pointers", scan):
-            self.a.sweep(grace_s=0)
+            got = self.a.sweep(grace_s=0)
         self.assertTrue(raced)
+        self.assertEqual(0, got["unreadable_pointers"], "the sweep really ran")
         self.assertEqual(b"identical", Path(self.host("cold2").get(KEY)[0]).read_bytes())
 
     def test_an_index_that_is_not_where_we_looked_sweeps_nothing(self):
@@ -1550,9 +1569,11 @@ class TestPurgeWindow(_Hosts):
         self.a.delete(KEY)
         self.assertEqual(b"shared", Path(self.b.get("cd" * 32)[0]).read_bytes())
 
-    def test_one_published_inside_the_window_loses_them_until_it_republishes(self):
-        """Accepted deliberately: between "a deletion might not delete" and "a concurrent
-        publication might be recomputed", this errs toward deleting."""
+    def test_one_published_inside_the_window_keeps_them(self):
+        """The window is closed, and by the same pair of mechanisms the sweep uses: the
+        candidates are listed before the entries are read, and a deduplicated write
+        refreshes the blob, which the re-check before each delete sees. It cost three
+        attempts to get here (reviews of 2026-09-20)."""
         self.publish(self.a, b"shared")
         real = SharedResultCache._scan_pointers
         raced = []
@@ -1563,16 +1584,17 @@ class TestPurgeWindow(_Hosts):
                 raced.append(True)
                 self.publish(self.b, b"shared", key="cd" * 32)
             return got
+        seen = []
         with unittest.mock.patch.object(SharedResultCache, "_scan_pointers", scan):
-            self.a.delete(KEY)
+            self.a.delete(KEY, report=seen.append)
         self.assertTrue(raced)
-        # the publishing host still serves from its own copy - the bytes are only missing
-        # for a host that has to fetch them
-        self.assertEqual(b"shared", Path(self.b.get("cd" * 32)[0]).read_bytes())
+        # asked of a host that has to FETCH them: the publisher would serve from its own
+        # disk and hide the loss
         cold = self.host("cold")
-        self.assertIsNone(cold.get("cd" * 32), "a miss, not a torn read")
-        self.publish(self.b, b"shared", key="cd" * 32)      # its next publication heals it
         self.assertEqual(b"shared", Path(cold.get("cd" * 32)[0]).read_bytes())
+        self.assertFalse(seen[0]["purged"],
+                         "and the deletion says it could not finish, rather than claiming "
+                         "bytes are gone that are not")
 
 
 class TestGapsFromTheThirdMutationRun(_Hosts):
@@ -1627,3 +1649,163 @@ class TestGapsFromTheThirdMutationRun(_Hosts):
         got = self.b.pull()
         self.assertEqual(1, got["pulled"], "incomplete is not current")
         self.assertEqual({"outputs": ["one"]}, self.b.local.get(KEY)[1])
+
+
+class TestPurgeReChecksToo(_Hosts):
+    def test_a_publication_that_dedupes_during_a_purge_keeps_its_bytes(self):
+        """`delete` decides "unreferenced" by scanning the other entries; a publication
+        that lands after that scan and deduplicates onto these bytes refreshes them, and
+        the re-check before each delete is what tells the two apart."""
+        self.publish(self.a, b"shared")
+        real = SharedResultCache._scan_pointers
+        raced = []
+
+        def scan(cache, **kw):
+            got = real(cache, **kw)
+            if not raced:
+                raced.append(True)
+                self.publish(self.b, b"shared", key="cd" * 32)
+            return got
+        with unittest.mock.patch.object(SharedResultCache, "_scan_pointers", scan):
+            self.a.delete(KEY)
+        self.assertTrue(raced)
+        self.assertEqual(b"shared", Path(self.host("cold3").get("cd" * 32)[0]).read_bytes())
+
+    def test_and_says_it_could_not_finish(self):
+        self.publish(self.a, b"shared")
+        real = SharedResultCache._scan_pointers
+        raced, seen = [], []
+
+        def scan(cache, **kw):
+            got = real(cache, **kw)
+            if not raced:
+                raced.append(True)
+                self.publish(self.b, b"shared", key="cd" * 32)
+            return got
+        with unittest.mock.patch.object(SharedResultCache, "_scan_pointers", scan):
+            self.a.delete(KEY, report=seen.append)
+        self.assertFalse(seen[0]["purged"], "a deletion that left bytes says so")
+
+
+# -- the fourth review round (one reviewer, whole-branch, 2026-09-20) --------------------
+
+
+class TestAnOrphanedGenerationIsAdopted(_Hosts):
+    """A generation directory that is here but not current: a crash between its rename and
+    the pointer write, a second process placing it, or a pointer that moved back to it.
+    Returning a miss left the key unreadable on that host FOR EVER - every read
+    re-downloaded, repaired, and still answered None - and on a compute server that miss
+    became a recompute that overwrote the generation an operator had just rolled back to."""
+
+    def orphan(self, cache, gen):
+        """The state a crash between the two steps leaves."""
+        (cache.local.root / KEY / CURRENT_NAME).unlink()
+
+    def test_a_crash_between_the_rename_and_the_pointer_is_repaired_on_the_next_read(self):
+        gen = self.publish(self.a, b"one")
+        self.b.get(KEY)
+        self.orphan(self.b, gen)
+        self.assertIsNone(self.b.local.get(KEY), "the local copy is unreachable")
+        hit = self.b.get(KEY)
+        self.assertIsNotNone(hit, "and the next read fixes it")
+        self.assertEqual(b"one", Path(hit[0]).read_bytes())
+        self.assertEqual(gen, self.b.local.generation(KEY))
+
+    def test_it_is_adopted_without_downloading_anything(self):
+        gen = self.publish(self.a, b"one")
+        self.b.get(KEY)
+        self.orphan(self.b, gen)
+        with unittest.mock.patch.object(BlobStore, "fetch",
+                                        side_effect=AssertionError("downloaded")):
+            self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_an_incomplete_directory_is_not_adopted(self):
+        gen = self.publish(self.a, b"one")
+        self.b.get(KEY)
+        self.orphan(self.b, gen)
+        (self.b.local._generation_dir(KEY, gen) / "result.json").unlink()
+        self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+        self.assertEqual({"outputs": ["one"]}, self.b.get(KEY)[1],
+                         "it is filled properly rather than published half-formed")
+
+    def test_a_rollback_survives_a_host_that_still_holds_the_newer_generation(self):
+        """The workflow the history decision exists for: host x served A then B; an
+        operator rolls the store back to A; x must serve A, not recompute over it."""
+        gen_a = self.publish(self.a, b"version A")
+        self.b.get(KEY)                        # x holds A
+        self.publish(self.a, b"version B")
+        self.b.get(KEY)                        # x holds B, and still has A on disk
+        self.a._swap(KEY, lambda cur: {**cur, "generation": gen_a,
+                                       "files": {RESULT_NAME: self.a.blobs.put_file(
+                                           self.file("a-again", b"version A"))},
+                                       "result": {"outputs": ["version A"]},
+                                       "published": time.time()})
+        hit = self.b.get(KEY)
+        self.assertIsNotNone(hit, "the rollback is readable on the host that had B")
+        self.assertEqual(b"version A", Path(hit[0]).read_bytes())
+
+
+class TestTheStoreIsNotInTheAvailabilityPath(_Hosts):
+    def faulty(self):
+        from obstore.exceptions import GenericError
+        real = obstore.get
+
+        def boom(store, path, *a, **kw):
+            if "results/" in str(path):
+                raise GenericError("the bucket is unreachable")
+            return real(store, path, *a, **kw)
+        return unittest.mock.patch.object(obstore, "get", boom)
+
+    def test_a_host_serves_its_own_complete_copy_while_the_store_is_down(self):
+        self.publish(self.a, b"one")
+        self.b.get(KEY)                        # b now holds it
+        with self.faulty():
+            hit = self.b.get(KEY)
+        self.assertIsNotNone(hit, "a warm cache is not thrown away by an outage")
+        self.assertEqual(b"one", Path(hit[0]).read_bytes())
+
+    def test_a_host_that_holds_nothing_still_answers_a_miss(self):
+        self.publish(self.a, b"one")
+        with self.faulty():
+            self.assertIsNone(self.b.get(KEY))
+
+    def test_a_publication_the_store_refused_keeps_its_bytes_here(self):
+        """The segmentation is finished and on this disk: failing the job is right, losing
+        the work is not."""
+        from obstore.exceptions import GenericError
+        with unittest.mock.patch.object(obstore, "put",
+                                        side_effect=GenericError("bucket down")):
+            with self.assertRaises(GenericError):
+                self.publish(self.a, b"expensive")
+        self.assertEqual(b"expensive", Path(self.a.local.get(KEY)[0]).read_bytes())
+
+
+class TestLocalWriteFailuresAreMisses(_Hosts):
+    def test_a_full_disk_during_a_fill_is_a_miss_not_an_exception(self):
+        self.publish(self.a, b"one")
+        with unittest.mock.patch.object(ResultCache, "put",
+                                        side_effect=OSError(28, "No space left on device")):
+            self.assertIsNone(self.b.get(KEY))
+
+    def test_a_cache_directory_that_cannot_be_written_is_a_miss(self):
+        self.publish(self.a, b"one")
+        with unittest.mock.patch.object(SharedResultCache, "_fresh_work_dir",
+                                        side_effect=OSError(30, "Read-only file system")):
+            self.assertIsNone(self.b.get(KEY))
+
+
+class TestASlowFillIsNotReaped(_Hosts):
+    def test_a_work_directory_belonging_to_a_live_process_survives(self):
+        """Age is not liveness - this repo's own rule. A fill slower than the grace had
+        its work deleted under it and reported the blob gone."""
+        import os
+        live = self.b.local.root / f"{objectcache.WORK_PREFIX}{os.getpid()}-abcd"
+        live.mkdir(parents=True)
+        os.utime(live, (0, 0))                 # far older than WORK_GRACE_S
+        dead = self.b.local.root / f"{objectcache.WORK_PREFIX}999999-dead"
+        dead.mkdir(parents=True)
+        os.utime(dead, (0, 0))
+        self.publish(self.a, b"one")
+        self.b.get(KEY)
+        self.assertTrue(live.exists(), "a live fill's work is not reaped by age")
+        self.assertFalse(dead.exists(), "a dead one's is")

@@ -39,6 +39,7 @@ this repo has been wrong before.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import tempfile
@@ -128,6 +129,15 @@ def check_conditional_writes(store, prefix: str = "") -> None:
         raise ObjectStoreUnsuitable(
             f"{e}; use S3, GCS, Azure or R2, or drop --result-store for a local-only "
             "cache") from None
+
+
+def _warn_once(message: str) -> None:
+    """Report a deviation at most once a minute, like ``_miss``."""
+    global _warned_at
+    now = time.time()
+    if now - _warned_at >= WARN_INTERVAL_S:
+        _warned_at = now
+        print(f"warning: {message}", file=sys.stderr, flush=True)
 
 
 def _miss(where: str, exc: BaseException) -> None:
@@ -270,14 +280,30 @@ class SharedResultCache:
             raise ValueError(f"not a result key: {key!r}")
         return f"{self.prefix}results/{key}.json"
 
-    def _read_pointer(self, key: str, *, for_write: bool = False):
+    def _is_newer_format(self, key: str) -> bool:
+        """Does an entry this version cannot read say it came from a LATER one?
+
+        Only that is worth refusing to overwrite: it is another haversack's current result
+        and its whole history. Garbage under the same name - a truncated write, a stray
+        object - is nobody's data, and refusing to publish over it would strand the key
+        for ever.
+        """
+        import obstore
+        try:
+            raw = json.loads(bytes(obstore.get(self.store, self._pointer_path(key)).bytes()))
+        except Exception:                      # noqa: BLE001 - unreadable is not "newer"
+            return False
+        fmt = raw.get("format") if isinstance(raw, dict) else None
+        return isinstance(fmt, int) and not isinstance(fmt, bool) and fmt > POINTER_FORMAT
+
+    def _read_pointer(self, key: str, *, raise_faults: bool = False):
         """``(pointer, update mode)`` or ``(None, None)``. A pointer this code cannot read
         - unknown format, not JSON - is reported as absent: a miss, never a guess.
 
-        A store FAULT (credentials, network, a 503) is a miss too on a read, and is raised
-        for a writer: ``for_write`` marks the caller as one. Reporting a fault as "absent"
-        to a writer would have it publish over a pointer it could not read - the very race
-        the conditional write exists to lose.
+        A store FAULT (credentials, network, a 503) is a miss here, and is RAISED for a
+        caller that passes ``raise_faults`` - every writer, because reporting a fault as
+        "absent" would have it publish over a pointer it could not read, and `get`, which
+        falls back to this host's own copy rather than losing it.
         """
         import obstore
         try:
@@ -285,7 +311,7 @@ class SharedResultCache:
         except FileNotFoundError:
             return None, None
         except Exception as e:                 # noqa: BLE001 - a read degrades, see _miss
-            if for_write:
+            if raise_faults:
                 raise
             _miss(f"reading the pointer for {key[:12]}", e)
             return None, None
@@ -303,7 +329,15 @@ class SharedResultCache:
         import obstore
         from obstore.exceptions import AlreadyExistsError, PreconditionError
         for _ in range(SWAP_ATTEMPTS):
-            ptr, mode = self._read_pointer(key, for_write=True)
+            ptr, mode = self._read_pointer(key, raise_faults=True)
+            if ptr is None and mode is not None and self._is_newer_format(key):
+                # an object is there that this version cannot read - most likely a newer
+                # POINTER_FORMAT. Writing over it would take another host's current result
+                # and its whole history out of the index in one write (review, 2026-09-20).
+                raise ObjectStoreUnsuitable(
+                    f"result {key[:12]}...: the store holds an entry this version cannot "
+                    "read (a newer haversack wrote it); refusing to overwrite it. Upgrade "
+                    "this host, or use a different --result-store prefix")
             new = update(ptr)
             if new is None:
                 return None
@@ -381,8 +415,23 @@ class SharedResultCache:
     def get(self, key: str):
         """``(labels path, result)`` from the local copy of the CURRENT generation, filling
         it from the store first when the local copy is older or missing; None on a miss -
-        including a pointer whose blobs have been swept."""
-        ptr, _ = self._read_pointer(key)
+        including a pointer whose blobs have been swept.
+
+        When the STORE cannot be reached and this host holds a complete copy, that copy is
+        served. It may be stale - another host may have republished - but a cache serving
+        what it already computed is what a cache is for, and answering a miss instead threw
+        away a warm result and asked for a GPU on every request the outage lasted (review,
+        2026-09-20). The deviation is reported, throttled.
+        """
+        try:
+            ptr, _ = self._read_pointer(key, raise_faults=True)
+        except Exception as e:                 # noqa: BLE001 - the store is unreachable
+            _miss(f"reading the pointer for {key[:12]}", e)
+            local = self.local.get(key)
+            if local is not None:
+                _warn_once(f"{key[:12]}...: the store is unreachable; serving this host's "
+                           "own copy, which may have been superseded elsewhere")
+            return local
         if ptr is None:
             return None
         if not self._fill(key, ptr):
@@ -393,6 +442,7 @@ class SharedResultCache:
         """Make the local copy hold ``ptr``'s generation with all of its files."""
         import shutil
         import tempfile
+        import time as _time
 
         from .serve import ARTIFACT_NAMES, RESULT_NAME
         gen, files = ptr["generation"], ptr.get("files") or {}
@@ -405,10 +455,17 @@ class SharedResultCache:
             # pointer: a pointer is written by another host, and a name of its choosing
             # ("../..", an absolute path) would decide where these bytes land.
             wanted = [n for n in (RESULT_NAME, *ARTIFACT_NAMES) if n in files]
+            if not have_gen and self.local.adopt(key, gen, names=wanted):
+                return True                    # already here whole, only the pointer was
+                                               # wrong: no download, no repair
             missing = [n for n in wanted if not (have_gen and (local_dir / n).exists())]
             if not missing:
                 return True
-            work = self._fresh_work_dir()
+            try:
+                work = self._fresh_work_dir()
+            except OSError as e:               # a full or read-only cache directory
+                _miss(f"making room to fill {key[:12]}", e)
+                return False
             try:
                 got = []
                 for name in missing:
@@ -433,12 +490,23 @@ class SharedResultCache:
                                        preview_path=_present(work / "preview.png"),
                                        statistics_path=_present(work / "statistics.json"),
                                        generation=gen)
-                    except FileExistsError:
-                        # The generation directory is already here and INCOMPLETE - a file
-                        # deleted under it, or another process mid-copy. Put back what is
-                        # missing, atomically, rather than declaring the copy current
-                        # while its labels are gone: a re-pull is the obvious repair and
-                        # it has to actually repair (review, 2026-09-20).
+                    except FileExistsError as e:
+                        if "being placed" in str(e):
+                            # another PROCESS holds the claim (two servers over one
+                            # --cache-dir). Its copy will be here in a moment; a miss here
+                            # is a duplicate GPU compute of a key the store already holds
+                            for _ in range(20):
+                                _time.sleep(0.05)
+                                if self._holds(key, ptr):
+                                    return True
+                            return False
+                        # The generation directory is already here: a crash between its
+                        # rename and the pointer write, another process placing it, or a
+                        # pointer that moved back to it. Put back whatever is missing,
+                        # atomically, and then make it current - returning a miss instead
+                        # left the key unreadable on this host for ever, and on a compute
+                        # server the miss became a recompute that overwrote a rollback
+                        # (review, 2026-09-20).
                         for name in got:
                             _place(local_dir, name, work / name)
                         # the DOCUMENTS too: `local.put` writes them and it just raised, so
@@ -451,7 +519,13 @@ class SharedResultCache:
                             doc_tmp.write_text(json.dumps(doc), encoding="utf-8")
                             _place(local_dir, name, doc_tmp)
                         return (self.local.generation(key) == gen
-                                and (local_dir / RESULT_NAME).exists())
+                                or self.local.adopt(key, gen, names=wanted))
+                    except OSError as e:
+                        # ENOSPC, EROFS, EACCES: the store gave good bytes and this host
+                        # cannot keep them. A miss, like every other read failure - it used
+                        # to leave the route a 500 (review, 2026-09-20)
+                        _miss(f"keeping a local copy of {key[:12]}", e)
+                        return False
                 else:
                     for name in got:
                         self.local.add_artifact(key, name, work / name, generation=gen)
@@ -490,14 +564,25 @@ class SharedResultCache:
         """
         import shutil
         import time as _time
+        import os
+        from .cache_admin import _alive                 # noqa: PLC2701
         root = self.local.root
+        mine = f"{WORK_PREFIX}{os.getpid()}-"
         for stale in root.glob(f"{WORK_PREFIX}*"):
             try:
-                if _time.time() - stale.stat().st_mtime > WORK_GRACE_S:
-                    shutil.rmtree(stale, ignore_errors=True)
+                if _time.time() - stale.stat().st_mtime <= WORK_GRACE_S:
+                    continue
+                # age is not liveness, and this repo says so everywhere else: a fill that
+                # is slow (a slow store is the case in scope) had its work deleted under it
+                # and reported the blob gone (review, 2026-09-20). A directory named by a
+                # live process on this host is left alone.
+                pid = stale.name[len(WORK_PREFIX):].split("-")[0]
+                if pid.isdigit() and _alive(int(pid)):
+                    continue
+                shutil.rmtree(stale, ignore_errors=True)
             except OSError:
                 pass
-        return Path(tempfile.mkdtemp(prefix=WORK_PREFIX, dir=root))
+        return Path(tempfile.mkdtemp(prefix=mine, dir=root))
 
     def put(self, key: str, labels_path, result: dict, meta: dict,
             preview_path=None, statistics_path=None) -> str:
@@ -506,16 +591,21 @@ class SharedResultCache:
         from .serve import RESULT_NAME
         sources = {RESULT_NAME: labels_path, "preview.png": preview_path,
                    "statistics.json": statistics_path}
-        files = {name: self.blobs.put_file(src) for name, src in sources.items()
-                 if src and Path(src).exists()}
         gen, now = uuid.uuid4().hex, time.time()
+        def keep_the_work():               # one per `with`: a generator cannot be re-entered
+            return _keeping_the_work(self, key, labels_path, result, meta, preview_path,
+                                     statistics_path, gen)
+        with keep_the_work():
+            files = {name: self.blobs.put_file(src) for name, src in sources.items()
+                     if src and Path(src).exists()}
 
         def publish(current):
             # what is being replaced joins the history, and the oldest falls off it
             return {"format": POINTER_FORMAT, "generation": gen, "published": now,
                     "files": files, "result": result, "meta": meta,
                     "history": _kept_history(current, now, gen)}
-        pointer = self._swap(key, publish)
+        with keep_the_work():
+            pointer = self._swap(key, publish)
         self._verify(pointer["files"], sources)
         try:
             self.local.put(key, labels_path, result, meta, preview_path=preview_path,
@@ -615,7 +705,10 @@ class SharedResultCache:
         except FileNotFoundError:
             pass
         local = self.local.delete(key)
-        purged = self._purge(key, mine) if (purge and mine) else not mine
+        # an unreadable pointer names blobs this version cannot see, so "nothing left to
+        # purge" is not something it knows
+        purged = (self._purge(key, mine) if (purge and mine)
+                  else (not existed or ptr is not None))
         if report:
             report({"key": key, "existed": existed or local, "purged": purged,
                     "blobs": len(mine)})
@@ -631,16 +724,21 @@ class SharedResultCache:
         per entry, and a bucket several servers fill would make one DELETE cost thousands
         of requests.
 
-        The scan and the deletes are not one step, so an entry published in between that
-        DEDUPLICATED onto these bytes loses them: its next read is a miss and its next
-        publication puts them back (`put` re-checks its blobs after writing the pointer).
-        That window is accepted deliberately - between "a deletion might not delete" and "a
-        concurrent publication might have to be recomputed", this errs toward deleting.
-        Measured on R2 (2026-09-20): two keys over identical bytes, one deleted in a loop
-        while the other was republished, 348 reads of the survivor, no torn read, and it
-        was readable at the end.
+        The scan and the deletes are not one step, and an entry published in between may
+        DEDUPLICATE onto these bytes - which is why the candidates are listed first and
+        each one re-checked against that listing before it goes: a deduplicated write
+        refreshes the blob, so it no longer matches what was listed and is kept. What
+        cannot be finished is REPORTED (``purged``) rather than assumed, because for a
+        deletion "I could not tell" must not look like "done"; `haversack cache sweep`
+        finishes it once the store is quiet. Measured on R2 (2026-09-20): two keys over
+        identical bytes, one deleted in a loop while the other was republished, 348 reads
+        of the survivor, no torn read, and it was readable at the end.
         """
         import obstore
+        # LISTED BEFORE the pointers are read, exactly as `sweep` does it: a publication
+        # landing after this listing cannot be in it, and one that deduplicated onto these
+        # bytes refreshed them, which the re-check before each delete then sees
+        listed = self.blobs.entries()
         pointers, unreadable = self._scan_pointers(limit=PURGE_SCAN_LIMIT + 1)
         if len(pointers) > PURGE_SCAN_LIMIT:
             print(f"warning: {key[:12]}... was deleted, but this store holds more than "
@@ -659,12 +757,19 @@ class SharedResultCache:
         keep = {b["digest"] for ptr in pointers
                 for g in _generations(ptr, now=0, keep_undated=True)
                 for b in g["files"].values()}
-        for digest in digests - keep:
-            try:
-                obstore.delete(self.store, self.blobs.path(digest))
-            except FileNotFoundError:
-                pass
-        return True
+        # through provender's sweep, not a bare delete: it re-checks each object against
+        # the state it was listed in, which is the only thing that distinguishes a blob a
+        # publication just deduplicated onto from one that is really unreferenced
+        mine = [b for b in listed if b["digest"] in digests - keep]
+        if not mine:
+            return True
+        got = self.blobs.sweep(keep=keep, candidates=mine, allow_empty=not keep)
+        if got.get("refreshed"):
+            print(f"warning: {key[:12]}... was deleted, but {got['refreshed']} of its "
+                  "blob(s) were written or refreshed while that was decided, so they were "
+                  "left in place. Run `haversack cache sweep` once the store is quiet.",
+                  file=sys.stderr, flush=True)
+        return not got.get("refreshed")
 
     def list(self, limit: int = 500) -> list:
         """The newest published entries, read from the pointers alone.
@@ -881,7 +986,7 @@ class SharedResultCache:
             # and re-upload of every result. `_swap` asks again under the conditional
             # write, so a key published in between is still not lost.
             try:
-                current, _mode = self._read_pointer(key, for_write=True)
+                current, _mode = self._read_pointer(key, raise_faults=True)
             except Exception as e:                     # noqa: BLE001
                 out["failed"] += 1
                 if report:
@@ -1017,6 +1122,27 @@ def _refuses(conflict: str, current, meta) -> bool:
     if not isinstance(theirs, (int, float)) or not isinstance(ours, (int, float)):
         return True                            # not comparable: do not overwrite
     return theirs >= ours
+
+
+@contextlib.contextmanager
+def _keeping_the_work(cache, key, labels_path, result, meta, preview_path, statistics_path,
+                      gen):
+    """Keep this host's copy of a result the STORE refused.
+
+    The segmentation is finished and its bytes are on this disk. Failing the job is right -
+    the publication did not happen, and no other host can see it - but discarding the work
+    as well means a GPU run per request for as long as the outage lasts (review,
+    2026-09-20). This host serves it; the others recompute.
+    """
+    try:
+        yield
+    except Exception:                          # noqa: BLE001 - the raise is the news
+        try:
+            cache.local.put(key, labels_path, result, meta, preview_path=preview_path,
+                            statistics_path=statistics_path, generation=gen)
+        except Exception:                      # noqa: BLE001
+            pass
+        raise
 
 
 def _kept_history(current, now: float, gen: str | None = None) -> list:

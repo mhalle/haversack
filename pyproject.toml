@@ -42,7 +42,7 @@ dependencies = [
     # was `objectcache.BlobStore` here until a second project needed the same thing, and one
     # copy of a protocol is the only way two of them do not drift. stdlib + obstore, with
     # obstore imported at call time, so a lean install pays nothing for it.
-    "provender>=0.1.3",
+    "provender>=0.1.4",
     # The command line (2026-09-11): click gives each command its own function, `--version`,
     # shell completion, and help for positionals, which click added in 8.5 - hence the floor.
     # typer was weighed: it is click underneath plus rich, shellingham and a pre-1.0 API, for
@@ -177,7 +177,7 @@ conflicts = [
 
 [tool.uv.sources]
 rankfield = { git = "https://github.com/mhalle/rankfield.git", tag = "v0.3.2" }
-provender = { git = "https://github.com/mhalle/provender.git", tag = "v0.1.3" }
+provender = { git = "https://github.com/mhalle/provender.git", tag = "v0.1.4" }
 # nnunetv2 comes from PyPI: haversack uses only stock nnunetv2 APIs (verified against 2.8.1). It
 # used to be a `path = "../upstream/nnUNet"` source here, but uv applies these sources to a
 # `git+https://...` install too, and that relative path exists only in the dev workspace - so

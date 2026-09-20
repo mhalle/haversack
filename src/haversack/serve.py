@@ -1442,6 +1442,36 @@ class ResultCache:
             result = {}
         return g / RESULT_NAME, result
 
+    def adopt(self, key: str, gen: str, *, names=()) -> bool:
+        """Make an existing, COMPLETE generation directory this entry's current one.
+
+        `put` publishes what it assembles; this publishes what is already here. A copy of
+        another host's publication can arrive in three ways - a crash between the rename
+        and the pointer write, a second process placing the same generation, a pointer that
+        moved back to a generation this host still holds - and in all three the directory
+        is right and only the pointer is wrong. Without this the entry was a permanent miss
+        on that host: every read re-downloaded, repaired, and still answered None, and on a
+        compute server the miss became a recompute that overwrote the very generation an
+        operator had just rolled back to (review, 2026-09-20).
+
+        False unless every file named in ``names``, the two documents and the labels are
+        present: adopting an incomplete directory would publish half a result.
+        """
+        import os
+        where = self._generation_dir(key, gen)
+        wanted = {RESULT_NAME, "result.json", "meta.json", *names}
+        if not all((where / n).exists() for n in wanted):
+            return False
+        d = self.root / key
+        tmp = d / f"{CURRENT_NAME}.{uuid.uuid4().hex[:8]}.tmp"
+        try:
+            tmp.write_text(gen, encoding="utf-8")
+            os.replace(tmp, d / CURRENT_NAME)
+        except OSError:
+            Path(tmp).unlink(missing_ok=True)
+            return False
+        return True
+
     def published_result(self, key: str):
         """The current publication's result document, or None. Read without a lease: it
         hands out no path. The one question ``LocalExecutor._entry_holds`` asks, named so
@@ -3068,6 +3098,17 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
     sources = getattr(executor, "sources", None) or _source_registry(None)
     _key_override = getattr(executor, "resource_key", None)
 
+    async def _offload_submit(*a, **kw):
+        """`submit` off the event loop too.
+
+        With a shared result store it looks up the key before queueing - a pointer read,
+        and on a hit a download - and on Modal it is a dozen blocking RPCs. The earlier
+        pass moved `cache_get` and `status_of`; these two call sites on the path surface
+        were missed (review, 2026-09-20).
+        """
+        import functools
+        return await run_in_threadpool(functools.partial(executor.submit, *a, **kw))
+
     async def _offload(fn, *a):
         """Run a blocking executor call off the event loop.
 
@@ -4318,7 +4359,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                         raise HTTPException(422, str(e)) from None
                     jid, jdir = executor.new_job_dir()
                     try:
-                        executor.submit(jid, jdir, None, task, dict(gopts),
+                        await _offload_submit(jid, jdir, None, task, dict(gopts),
                                         no_cache=skip,      # the same skip the lookup used
                                         # ...but the INPUT refresh follows the CALLER only:
                                         # `skip` also carries the engine's cache policy, and
@@ -4508,7 +4549,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     raise HTTPException(422, str(e)) from None
                 jid, jdir = executor.new_job_dir()
                 try:
-                    executor.submit(jid, jdir, None, task, dict(opts),
+                    await _offload_submit(jid, jdir, None, task, dict(opts),
                                     no_cache=((wants_no_cache(request) and authed(request))
                                               or not engine_serves_from_cache(task)),
                                     # the CALLER's directive alone - an engine that

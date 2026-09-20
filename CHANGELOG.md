@@ -24,6 +24,26 @@
   A hit costs one pointer read - about 85 ms median from this Mac, measured before
   history existed; a key republished four times carries ~5x the pointer, which has not
   been re-measured on a real bucket.
+- **Fourth review round (one reviewer, the whole branch): eight more, including the same
+  window a third time.** Deduplication defeats BOTH earlier attempts at it - pre-listed
+  candidates and a refreshed timestamp - because the blob is genuinely old while only the
+  reference to it is new, and the test that was supposed to pin it passed for the wrong
+  reason (with one key in the store, an empty live set refused the whole sweep). provender
+  0.1.4 re-checks each candidate against the state it was listed in immediately before
+  deleting it, which with the refresh is what finally closes it; `delete` lists before it
+  scans, for the same reason. Also: a generation directory that is present but not current
+  - a crash between its rename and the pointer write, a second process placing it, a
+  pointer rolled back to it - is now ADOPTED rather than answered as a miss, which had
+  made such a key permanently unreadable on that host and, on a compute server, let the
+  next request overwrite a rollback; a store outage no longer turns a complete local copy
+  into a miss, and a publication the store refuses keeps its bytes on this disk rather
+  than discarding finished GPU work; local write failures during a read (a full or
+  read-only cache) are misses, not 500s; an entry written by a NEWER haversack is never
+  overwritten, while garbage still is; `executor.submit` joins the calls that run off the
+  event loop; a slow fill's work directory is no longer reaped by age while its process is
+  alive; and two processes sharing one `--cache-dir` wait for each other instead of both
+  computing.
+
 - **Third review round (four agents, same day): sixteen more, and `haversack cache sweep`.**
   The one that mattered: deduplication defeats the sweep's candidate listing, because a
   recomputation producing identical bytes uploads nothing - so the blob is old while the
