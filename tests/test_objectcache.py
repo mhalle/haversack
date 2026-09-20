@@ -15,8 +15,10 @@ the protocol stands on. What these tests hold it to:
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -182,8 +184,8 @@ class TestArtifacts(_Hosts):
         real = SharedResultCache._read_pointer
         state = {"raced": False}
 
-        def read(cache, key):
-            got = real(cache, key)
+        def read(cache, key, **kw):
+            got = real(cache, key, **kw)
             if cache is self.a and not state["raced"]:
                 state["raced"] = True
                 self.publish(self.b, b"two")
@@ -203,8 +205,8 @@ class TestArtifacts(_Hosts):
         real = SharedResultCache._read_pointer
         state = {"raced": False}
 
-        def read(cache, key):
-            got = real(cache, key)
+        def read(cache, key, **kw):
+            got = real(cache, key, **kw)
             if cache is self.a and not state["raced"]:
                 state["raced"] = True
                 self.publish(self.b, b"two")
@@ -226,14 +228,28 @@ class TestMisses(_Hosts):
         self.publish(self.a, b"one")               # same bytes: the blob must be re-uploaded
         self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
 
-    def test_a_corrupt_blob_is_a_miss_and_is_removed(self):
+    def test_a_corrupt_blob_is_a_miss_and_is_replaced_not_deleted(self):
+        """A reader cannot tell a corrupt object from a stream that ended early, and a
+        blob is shared by every result with identical output - so deleting it on one
+        client's reading took unrelated entries with it (review, 2026-09-19). The reader
+        stops deduplicating onto it instead, and the next publication replaces it."""
         self.publish(self.a, b"one")
+        digest = f"sha256:{hashlib.sha256(b'one').hexdigest()}"
         obstore.put(self.store, self._blob_path(b"one"), b"not one")
         self.assertIsNone(self.b.get(KEY))
-        self.assertFalse(self.b.blobs.has(f"sha256:{hashlib.sha256(b'one').hexdigest()}"),
-                         "left in place, put_file would skip it and it would never heal")
-        self.publish(self.a, b"one")
+        self.assertTrue(self.b.blobs.has(digest), "not deleted: other keys may share it")
+        self.assertIn(digest, self.b.blobs.suspect)
+        self.publish(self.b, b"one")           # the host that saw it wrong republishes
         self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+        self.assertNotIn(digest, self.b.blobs.suspect)
+
+    def test_an_unrelated_key_survives_a_corrupt_blob(self):
+        self.publish(self.a, b"same", key="cd" * 32)
+        self.publish(self.a, b"same")          # one blob, two keys
+        obstore.put(self.store, self._blob_path(b"same"), b"wrong")
+        self.assertIsNone(self.b.get(KEY))
+        self.assertTrue(self.b.blobs.has(f"sha256:{hashlib.sha256(b'same').hexdigest()}"),
+                        "deleting it would take the other key down too")
 
     def test_an_unreadable_pointer_is_a_miss(self):
         self.publish(self.a, b"one")
@@ -280,7 +296,8 @@ class TestSweep(_Hosts):
         self.publish(self.a, b"one")
         later = objectcache.time.time() + objectcache.BLOB_GRACE_S + 60
         got = self.a.sweep(now=later, max_age_s=3600)
-        self.assertEqual({"expired_pointers": 1, "deleted_blobs": 1}, got)
+        self.assertEqual({"expired_pointers": 1, "deleted_blobs": 1,
+                          "unreadable_pointers": 0}, got)
         self.assertIsNone(self.b.get(KEY))
 
     def test_another_prefix_is_not_touched(self):
@@ -372,3 +389,321 @@ def test_an_unsuitable_store_stops_the_server_at_startup(tmp_path):
     with pytest.raises(ObjectStoreUnsuitable):
         LocalExecutor(_Segmenter(steps=1), workdir=tmp_path / "w", cache_dir=tmp_path / "c",
                       result_store=f"file://{tmp_path / 'bucket'}")
+
+
+# -- what the 2026-09-19 review round found ---------------------------------------------
+#
+# Three agents reviewed the module, its tests and its wiring. Every class below pins one
+# finding: the first version of each behaved as the test's own docstring describes.
+
+POINTER_FORMAT_NEXT = objectcache.POINTER_FORMAT + 1
+
+
+class TestStoreFaultsAreMisses(_Hosts):
+    """A store fault on a READ is a miss; on a WRITE it raises.
+
+    ``obstore``'s errors do not subclass OSError, so only FileNotFoundError was caught and
+    everything else - expired credentials, DNS, a 503 - left ``cache_get`` as a bare 500 on
+    routes SERVER.md promises 404/410 for, anonymous ones included. That is the class of
+    defect 0.12.3 fixed for the scratch read, arriving through a different door.
+    """
+
+    def faulty(self, which="get"):
+        from obstore.exceptions import PermissionDeniedError
+        real = getattr(obstore, which)
+
+        def boom(store, path, *a, **kw):
+            if "results/" in str(path) or "blobs/" in str(path):
+                raise PermissionDeniedError("403 from the bucket")
+            return real(store, path, *a, **kw)
+        return unittest.mock.patch.object(obstore, which, boom)
+
+    def test_a_read_of_an_unreachable_store_is_a_miss(self):
+        self.publish(self.a, b"one")
+        with self.faulty("get"):
+            self.assertIsNone(self.b.get(KEY))
+            self.assertIsNone(self.b.published_result(KEY))
+            self.assertIsNone(self.b.generation(KEY))
+
+    def test_a_write_to_an_unreachable_store_raises(self):
+        from obstore.exceptions import PermissionDeniedError
+        with self.faulty("get"):
+            with self.assertRaises(PermissionDeniedError):
+                self.publish(self.a, b"one")
+
+    def test_a_blob_fault_mid_fill_is_a_miss(self):
+        self.publish(self.a, b"one")
+
+        def boom(blobs, digest, dest):
+            raise OSError("connection reset mid-stream")
+        with unittest.mock.patch.object(BlobStore, "fetch", boom):
+            self.assertIsNone(self.b.get(KEY))
+        self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_a_local_copy_that_cannot_be_written_does_not_fail_the_publication(self):
+        """The publication HAPPENED - every host can read it - so a full disk here must
+        not fail the job that produced it."""
+        with unittest.mock.patch.object(ResultCache, "put",
+                                        side_effect=OSError(28, "No space left on device")):
+            gen = self.publish(self.a, b"one")
+        self.assertEqual(gen, self.b.generation(KEY))
+        self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_add_artifact_never_raises_on_the_overlap_thread(self):
+        gen = self.publish(self.a, b"one")
+        with self.faulty("put"):
+            self.assertFalse(self.a.add_artifact(KEY, "preview.png",
+                                                 self.file("p.png", b"png"), generation=gen))
+
+
+class TestDamagedPointers(_Hosts):
+    """A pointer is written by another host: every field is data, not a promise."""
+
+    def damaged(self, ptr):
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(ptr).encode())
+
+    def test_a_pointer_missing_its_fields_is_a_miss(self):
+        for ptr in ({"format": 1},                                     # no generation
+                    {"format": 1, "generation": "g", "files": []},     # files not a dict
+                    {"format": 1, "generation": "g",
+                     "files": {"labels.seg.nrrd": {"digest": "sha256:zz", "size": 1}}},
+                    {"format": 1, "generation": "g",
+                     "files": {"labels.seg.nrrd": {"digest": "sha256:" + "a" * 64}}}):
+            with self.subTest(ptr=ptr):
+                self.damaged(ptr)
+                self.assertIsNone(self.b.get(KEY))
+                self.assertIsNone(self.b.generation(KEY))
+                self.assertEqual([], self.b.list())
+                self.b.sweep()                 # must not raise either
+
+    def test_a_pointer_may_not_choose_where_bytes_land(self):
+        blob = self.b.blobs.put_file(self.file("evil", b"evil"))
+        escape = str(self.tmp / "escaped")
+        self.damaged({"format": 1, "generation": "g",
+                      "files": {"labels.seg.nrrd": blob, f"../../{escape}": blob}})
+        self.b.get(KEY)
+        self.assertFalse(Path(escape).exists(), "a foreign name decided a local path")
+
+    def test_a_stray_object_does_not_abort_list_or_sweep(self):
+        """One `.tmp` file from someone's sync used to raise out of both - and a sweep
+        that never runs is a bucket that never stops growing."""
+        self.publish(self.a, b"one")
+        obstore.put(self.store, "pre/results/.tmp-upload.json", b"{}")
+        obstore.put(self.store, "pre/results/notes.json", b"not a pointer")
+        self.assertEqual([KEY], [e["key"] for e in self.b.list()])
+        got = self.b.sweep(grace_s=0)
+        self.assertEqual(2, got["unreadable_pointers"])
+        self.assertEqual(0, got["deleted_blobs"],
+                         "blobs it cannot account for are not deleted")
+        self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_a_newer_pointer_format_is_never_garbage_collected(self):
+        """An old host's sweeper meeting a new writer's pointer: it cannot read which
+        blobs are live, so it deletes none."""
+        self.publish(self.a, b"one")
+        ptr = self.pointer()
+        ptr["format"] = POINTER_FORMAT_NEXT
+        self.damaged(ptr)
+        got = self.a.sweep(grace_s=0)
+        self.assertEqual(0, got["deleted_blobs"])
+        self.assertEqual(1, got["unreadable_pointers"])
+        self.assertTrue(self.a.blobs.has(ptr["files"][RESULT_NAME]["digest"]))
+
+
+class TestArtifactBlobs(_Hosts):
+    def test_a_missing_artifact_blob_does_not_lose_the_labels(self):
+        """A lost thumbnail is not worth a GPU recompute."""
+        gen = self.publish(self.a, b"one")
+        self.a.add_artifact(KEY, "preview.png", self.file("p.png", b"png"), generation=gen)
+        obstore.delete(self.store, f"pre/blobs/sha256/{hashlib.sha256(b'png').hexdigest()}")
+        hit = self.b.get(KEY)
+        self.assertIsNotNone(hit)
+        self.assertEqual(b"one", Path(hit[0]).read_bytes())
+        self.assertFalse((Path(hit[0]).parent / "preview.png").exists())
+
+    def test_an_artifacts_blob_is_re_checked_after_the_pointer(self):
+        """The same sweep window ``put`` closes: the upload was skipped because the blob
+        was there, and it was swept before the pointer named it."""
+        gen = self.publish(self.a, b"one")
+        png = self.file("p.png", b"png")
+        self.a.blobs.put_file(png)             # the blob exists, so the next upload skips
+        real = SharedResultCache._swap
+
+        def swap(cache, key, update):
+            written = real(cache, key, update)
+            obstore.delete(self.store,
+                           f"pre/blobs/sha256/{hashlib.sha256(b'png').hexdigest()}")
+            return written
+        with unittest.mock.patch.object(SharedResultCache, "_swap", swap):
+            self.assertTrue(self.a.add_artifact(KEY, "preview.png", png, generation=gen))
+        hit = self.b.get(KEY)
+        self.assertEqual(b"png", (Path(hit[0]).parent / "preview.png").read_bytes())
+
+    def test_an_artifact_name_must_be_an_artifact(self):
+        self.publish(self.a, b"one")
+        with self.assertRaises(ValueError):
+            self.a.add_artifact(KEY, RESULT_NAME, self.file("p.png", b"png"))
+
+    def test_an_artifact_on_a_key_that_was_never_published_is_refused(self):
+        self.assertFalse(self.a.add_artifact("cd" * 32, "preview.png",
+                                             self.file("p.png", b"png")))
+
+
+class TestGapsFromMutation(_Hosts):
+    """Facts the first round of tests left unpinned (mutation run, 2026-09-19)."""
+
+    def test_the_publishing_host_keeps_its_own_copy(self):
+        gen = self.publish(self.a, b"one")
+        self.assertEqual(gen, self.a.local.generation(KEY))
+        with unittest.mock.patch.object(BlobStore, "fetch",
+                                        side_effect=AssertionError("downloaded its own")):
+            self.assertEqual(b"one", Path(self.a.get(KEY)[0]).read_bytes())
+
+    def test_delete_removes_the_local_copy_too(self):
+        self.publish(self.a, b"one")
+        self.a.delete(KEY)
+        self.assertIsNone(self.a.local.get(KEY))
+
+    def test_list_is_newest_first_and_honors_its_limit(self):
+        for i, key in enumerate(("aa" * 32, "bb" * 32, "cc" * 32)):
+            self.a.put(key, self.file(f"l{i}", f"l{i}".encode()), {}, {"computed": float(i)})
+        self.assertEqual(["cc" * 32, "bb" * 32, "aa" * 32], [e["key"] for e in self.b.list()])
+        self.assertEqual(2, len(self.b.list(limit=2)))
+
+    def test_list_reads_only_as_many_pointers_as_asked_for(self):
+        for i, key in enumerate(("aa" * 32, "bb" * 32, "cc" * 32)):
+            self.a.put(key, self.file(f"l{i}", f"l{i}".encode()), {}, {"computed": float(i)})
+        real, seen = SharedResultCache._read_pointer, []
+
+        def read(cache, key, **kw):
+            seen.append(key)
+            return real(cache, key, **kw)
+        with unittest.mock.patch.object(SharedResultCache, "_read_pointer", read):
+            self.b.list(limit=1)
+        self.assertEqual(1, len(seen), "a bucket of 40,000 entries is 40,000 round trips")
+
+    def test_evict_bounds_the_local_copy(self):
+        with unittest.mock.patch.object(ResultCache, "evict") as evict:
+            self.a.evict()
+        evict.assert_called_once()
+
+    def test_a_swept_result_blob_is_a_miss_on_the_publishing_host_too(self):
+        self.publish(self.a, b"one")
+        obstore.delete(self.store, f"pre/blobs/sha256/{hashlib.sha256(b'one').hexdigest()}")
+        self.a.local.delete(KEY)               # its copy is gone; the store must answer
+        self.assertIsNone(self.a.get(KEY))
+
+    def test_a_publication_storm_raises_rather_than_losing_the_pointer(self):
+        real = SharedResultCache._read_pointer
+
+        def read(cache, key, **kw):
+            got = real(cache, key, **kw)
+            self.publish(self.b, b"racing")    # always lose the race
+            return got
+        with unittest.mock.patch.object(SharedResultCache, "_read_pointer", read):
+            with self.assertRaises(RuntimeError):
+                self.publish(self.a, b"one")
+
+    def test_two_threads_filling_one_key_download_once(self):
+        import threading
+        self.publish(self.a, b"one")
+        real, calls = BlobStore.fetch, []
+
+        def fetch(blobs, digest, dest):
+            calls.append(digest)
+            time.sleep(0.05)
+            return real(blobs, digest, dest)
+        with unittest.mock.patch.object(BlobStore, "fetch", fetch):
+            threads = [threading.Thread(target=self.b.get, args=(KEY,)) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        self.assertEqual(1, len(calls), f"downloaded {len(calls)} times")
+
+    def test_a_dead_fills_work_directory_is_swept_by_the_next_fill(self):
+        stale = self.b.local.root / f"{objectcache.WORK_PREFIX}dead"
+        stale.mkdir(parents=True)
+        os.utime(stale, (0, 0))                # older than WORK_GRACE_S
+        self.publish(self.a, b"one")
+        self.b.get(KEY)
+        self.assertFalse(stale.exists(), "nothing else reclaims a dotted directory")
+
+    def test_the_bucket_prefix_is_parsed(self):
+        self.assertEqual("p/q/", open_store("s3://bucket/p/q")[1])
+        self.assertEqual("", open_store("s3://bucket")[1])
+
+    def test_a_key_may_not_escape_its_prefix(self):
+        for bad in ("../../escape", ".hidden", "", "a/b"):
+            with self.subTest(key=bad), self.assertRaises(ValueError):
+                self.a._pointer_path(bad)
+        with self.assertRaises(ValueError):
+            self.a.blobs.path("sha256:../../results/" + "a" * 44)
+
+    def test_max_age_spares_a_fresh_pointer(self):
+        self.publish(self.a, b"one")
+        got = self.a.sweep(now=time.time() + 60, max_age_s=3600)
+        self.assertEqual(0, got["expired_pointers"])
+        self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+
+
+def test_a_broken_store_is_a_miss_on_the_wire_not_a_500(tmp_path):
+    """SERVER.md promises 404 for a result that is not there and 410 for bytes that are
+    gone. A store fault used to answer 500 on every one of these routes, to anonymous
+    callers included (review, 2026-09-19)."""
+    from fastapi.testclient import TestClient
+    from obstore.exceptions import PermissionDeniedError
+
+    from haversack.serve import LocalExecutor, create_app
+    from test_job_result_cache import _Segmenter
+    from test_serve import submit, wait_state
+
+    store = MemoryStore()
+    ex = LocalExecutor(_Segmenter(steps=1), workdir=tmp_path / "w", cache_dir=tmp_path / "c",
+                       result_store=store)
+    try:
+        client = TestClient(create_app(ex))
+        jid = submit(client)
+        s = wait_state(client, jid, ("done",))
+        (ex.get(jid).dir / RESULT_NAME).unlink()        # only the entry is left
+        real = obstore.get
+
+        def boom(st, path, *a, **kw):
+            if "results/" in str(path) or "blobs/" in str(path):
+                raise PermissionDeniedError("403 from the bucket")
+            return real(st, path, *a, **kw)
+        with unittest.mock.patch.object(obstore, "get", boom):
+            assert client.get(f"/v1/jobs/{jid}/result").status_code == 410
+            assert client.get("/v1/segmentations").status_code == 200
+            assert ex.cache_get(s["key"]) is None
+    finally:
+        ex.close()
+
+
+def test_no_async_route_blocks_the_event_loop_on_the_cache():
+    """A cache lookup is a network round trip once a store is configured, and a hit can
+    download the labels. Inside an async handler that stalls every other request, so these
+    calls go through the threadpool - checked as PARSED CALLS, because a comment or a
+    docstring satisfies a grep (AGENTS.md, 2026-09-12)."""
+    import ast
+    import inspect
+
+    from haversack import serve as serve_mod
+    tree = ast.parse(inspect.getsource(serve_mod))
+    blocking = {"cache_get", "status_of"}
+    problems = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        inner = {n for f in ast.walk(node)
+                 if isinstance(f, ast.FunctionDef)
+                 for n in ast.walk(f)}          # a sync helper defined inside is not ours
+        for call in ast.walk(node):
+            if call in inner or not isinstance(call, ast.Call):
+                continue
+            fn = call.func
+            if (isinstance(fn, ast.Attribute) and fn.attr in blocking
+                    and isinstance(fn.value, ast.Name) and fn.value.id == "executor"):
+                problems.append(f"{node.name} (line {call.lineno}) calls executor."
+                                f"{fn.attr} directly; use `await _offload(...)`")
+    assert not problems, "\n  ".join(problems)

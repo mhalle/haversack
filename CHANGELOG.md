@@ -16,10 +16,28 @@
   a miss that the next computation repairs. `SharedResultCache.sweep` removes unreferenced
   blobs after a day's grace and, optionally, entries past an age; nothing schedules it yet.
   Not yet wired into the Modal deployment. `tools/probe_result_store.py` checks a bucket and
-  round-trips one result under a throwaway prefix. First real store, Cloudflare R2
-  (2026-09-19): both conditional writes honored, and two servers sharing one bucket served
-  each other's results - the second never ran its segmenter. A hit there costs one pointer
-  read, about 85 ms median from this Mac.
+  round-trips one result under a throwaway prefix, and `tools/soak_result_store.py` runs
+  publishers, readers and a sweeper as separate processes against it. First real store,
+  Cloudflare R2 (2026-09-19): both conditional writes honored, two servers sharing one
+  bucket served each other's results - the second never ran its segmenter - and the soak
+  saw no torn read and no error while a sweeper with no grace deleted blobs underneath it.
+  A hit costs one pointer read, about 85 ms median from this Mac.
+- **Review round on the above, same day: three agents, thirteen defects, all fixed.** The
+  one that mattered: obstore's errors do not subclass OSError, so a store fault - expired
+  credentials, DNS, a 503 - left `cache_get` as a bare 500 on routes SERVER.md promises
+  404/410 for, anonymous ones included; the same class of defect 0.12.3 had just fixed for
+  the scratch read. Reads now degrade to a miss (reported, throttled) and only WRITES
+  raise. Also: a cache lookup is a network round trip, so the async routes hand it to the
+  threadpool instead of stalling the event loop; a pointer's every field is validated
+  because another host wrote it, and only known filenames decide where bytes land; one
+  stray object under `results/` no longer aborts `list` and `sweep` for good; a sweep that
+  meets a pointer it cannot read deletes no blobs, so an old host cannot collect a newer
+  writer's results; a corrupt blob is no longer deleted (it is shared by every identical
+  result) but suspected and replaced on the next publication; a missing artifact blob no
+  longer costs the whole result; an artifact's blob gets the same post-pointer re-check as
+  the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
+  be written no longer fails a publication that already succeeded; and `list` reads at most
+  `limit` pointers rather than one per entry in the bucket.
 
 ## [0.12.3] - 2026-09-19
 

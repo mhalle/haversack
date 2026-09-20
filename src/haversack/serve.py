@@ -2032,9 +2032,20 @@ class LocalExecutor:
                 raise InputError("--result-store needs a local result cache in front of it; "
                                  "drop --no-result-cache")
             from .objectcache import SharedResultCache
-            self.cache = (SharedResultCache.open(result_store, self.cache)
-                          if isinstance(result_store, str)
-                          else SharedResultCache(result_store, self.cache))
+            try:
+                self.cache = (SharedResultCache.open(result_store, self.cache)
+                              if isinstance(result_store, str)
+                              else SharedResultCache(result_store, self.cache))
+            except InputError:
+                raise                          # already names what to do about it
+            except Exception as e:             # noqa: BLE001
+                # a wrong bucket, absent credentials, DNS: one line naming the fix, like
+                # every other startup failure, not a traceback from inside obstore
+                raise InputError(
+                    f"--result-store {result_store}: {type(e).__name__}: {e}; check the "
+                    "bucket name and that credentials are in the environment "
+                    "(AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_ENDPOINT / "
+                    "AWS_REGION for S3-compatible stores)") from None
         self._inflight: dict[str, str] = {}      # cache key -> active job id
         self._joiners: dict[str, int] = {}       # job id -> clients riding it besides the first
         self._cv = threading.Condition()
@@ -3057,6 +3068,17 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
     sources = getattr(executor, "sources", None) or _source_registry(None)
     _key_override = getattr(executor, "resource_key", None)
 
+    async def _offload(fn, *a):
+        """Run a blocking executor call off the event loop.
+
+        A cache lookup used to be a stat and a read of a local file, so an async route
+        could make it inline. With a shared result store it is a network round trip, and a
+        miss on the local copy downloads the labels - on the event loop that stalls every
+        other request in flight for as long as it takes (review, 2026-09-19). The SYNC
+        routes never needed this: Starlette already runs those in the threadpool.
+        """
+        return await run_in_threadpool(fn, *a)
+
     def derive_key(identity: str, task: str, opts: dict) -> str:
         """One key derivation for every route. An executor may pin it
         (CacheOnlyExecutor must: the twin has no segmenter to read weights
@@ -3999,7 +4021,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             executor.subscribe(jid, loop, q)
             # a transition between the first fetch and the subscribe was never
             # pushed; re-fetch so the stream can't idle on a stale snapshot
-            first = executor.status_of(jid) or first
+            first = await _offload(executor.status_of, jid) or first
 
         def sse(payload: dict) -> str:
             return f"event: status\ndata: {json.dumps(payload)}\n\n"
@@ -4018,7 +4040,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                             yield ": keepalive\n\n"
                     else:                       # poll branch: Modal, or any pushless executor
                         await asyncio.sleep(0.7)
-                        nxt = executor.status_of(jid)
+                        nxt = await _offload(executor.status_of, jid)
                         if nxt is None:
                             break
                         if nxt != snap:
@@ -4248,7 +4270,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 # a recompute from this URL also needs Prefer: wait.
                 skip = (wants_no_cache(request) and authed(request)) or \
                     not engine_serves_from_cache(task)
-                hit = None if skip else executor.cache_get(key)
+                hit = None if skip else await _offload(executor.cache_get, key)
                 if hit is not None:
                     headers = _pref_headers(request, key, hit[1])
                     # the client may already hold these exact bytes
@@ -4314,12 +4336,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                             headers={"Retry-After": "30"}) from e
                 wait = _prefer_wait(request, wait_default, wait_max)
                 deadline = time.time() + wait
-                snap = executor.status_of(jid) or {}
+                snap = await _offload(executor.status_of, jid) or {}
                 while snap.get("state") not in TERMINAL and time.time() < deadline:
                     await asyncio.sleep(0.5)
-                    nxt = executor.status_of(jid)
+                    nxt = await _offload(executor.status_of, jid)
                     if nxt is None:        # record purged mid-watch: the cache
-                        if executor.cache_get(key) is not None:
+                        if await _offload(executor.cache_get, key) is not None:
                             nxt = {"state": "done"}
                         else:              # job gone, bytes gone - the honest
                                            # answer is absence, NOT a
@@ -4327,7 +4349,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                            # have succeeded under no cache)
                             raise HTTPException(404, "not materialized")
                     snap = nxt
-                hit = executor.cache_get(key)
+                hit = await _offload(executor.cache_get, key)
                 if snap.get("state") == "done" or hit is not None:
                     # a hit wins even against a failed/cancelled marker:
                     # under duplicate flights the sibling may have published
@@ -4434,7 +4456,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     raise HTTPException(404, "unknown resource")
                 w = _prefer_wait_raw(request, wait_max)
                 deadline = None if w is None else time.time() + w
-                hit = None if _skip_cache(request) else executor.cache_get(key)
+                hit = None if _skip_cache(request) else await _offload(executor.cache_get, key)
                 if hit is None:
                     hit = await _materialize_entry(request, norm(ident),
                                                    canon_task(task), gopts, key,
@@ -4501,19 +4523,19 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     shutil.rmtree(jdir, ignore_errors=True)
                     raise HTTPException(429, str(e),
                                         headers={"Retry-After": "30"}) from e
-            snap = executor.status_of(jid) or {}
+            snap = await _offload(executor.status_of, jid) or {}
             wait_until = time.time() if deadline is None else deadline
             while snap.get("state") not in TERMINAL and time.time() < wait_until:
                 await asyncio.sleep(0.5)
-                nxt = executor.status_of(jid)
+                nxt = await _offload(executor.status_of, jid)
                 if nxt is None:            # record purged mid-watch
-                    if executor.cache_get(key) is not None:
+                    if await _offload(executor.cache_get, key) is not None:
                         nxt = {"state": "done"}
                     else:                  # job gone, bytes gone: absence,
                                            # never a synthesized failure
                         raise HTTPException(404, "not materialized")
                 snap = nxt
-            hit = executor.cache_get(key)
+            hit = await _offload(executor.cache_get, key)
             if hit is not None:            # a hit wins even against a failed/
                 return hit                 # cancelled marker (duplicate flights)
             st = snap.get("state")
@@ -4566,7 +4588,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     raise HTTPException(404, "unknown resource")
                 w = _prefer_wait_raw(request, wait_max)
                 deadline = None if w is None else time.time() + w
-                hit = None if _skip_cache(request) else executor.cache_get(key)
+                hit = None if _skip_cache(request) else await _offload(executor.cache_get, key)
                 if hit is None:
                     hit = await _materialize_entry(request, norm(ident),
                                                    canon_task(task), opts, key,

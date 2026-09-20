@@ -37,9 +37,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
+import tempfile
 import threading
 import time
 import uuid
+import weakref
 from pathlib import Path
 
 from .errors import InputError
@@ -54,11 +57,38 @@ BLOB_GRACE_S = 24 * 3600
 #: Conditional-write attempts before a publication gives up. Each retry means another
 #: writer published this key in between, so this many in a row is a storm, not a race.
 SWAP_ATTEMPTS = 16
+#: How often a store fault on a READ path may be reported. A store that is down faults on
+#: every request, and a line per request is a denial of service on the operator's terminal.
+WARN_INTERVAL_S = 60.0
+#: Where a fill assembles its downloads, and how long a dead fill's directory survives.
+WORK_PREFIX = ".fill-"
+WORK_GRACE_S = 3600.0
 _CHUNK = 1 << 20
+_warned_at = 0.0
 
 
 class ObjectStoreUnsuitable(InputError):
     """The store cannot carry the protocol - it does not honor conditional writes."""
+
+
+def _miss(where: str, exc: BaseException) -> None:
+    """A store fault on a READ is a miss - but never a silent one.
+
+    The local cache has always treated an unreadable entry as a miss (``ResultCache.get``
+    swallows OSError), and the wire depends on it: SERVER.md promises 404 for a result that
+    is not there and 410 for bytes that are gone, never 500. A shared store adds faults the
+    local cache does not have - expired credentials, DNS, a 503 - and the first version let
+    every one of them out of ``cache_get`` into a bare 500 on routes that are open to
+    anonymous callers (found by review, 2026-09-19; the same class of defect as the scratch
+    read that 0.12.3 fixed). So reads degrade and WRITES still raise: a publication that
+    cannot reach the store must fail its job rather than pretend.
+    """
+    global _warned_at
+    now = time.time()
+    if now - _warned_at >= WARN_INTERVAL_S:
+        _warned_at = now
+        print(f"warning: result store unreachable ({where}): {type(exc).__name__}: {exc}; "
+              "serving as a cache miss", file=sys.stderr, flush=True)
 
 
 def open_store(url: str):
@@ -103,7 +133,8 @@ def check_conditional_writes(store, prefix: str = "") -> None:
     implement the question - would let two writers both believe they published.
     """
     import obstore
-    from obstore.exceptions import AlreadyExistsError, PreconditionError
+    from obstore.exceptions import (AlreadyExistsError, NotSupportedError,
+                                    PreconditionError)
     path = f"{prefix}.probe/{uuid.uuid4().hex}"
     name = type(store).__name__
 
@@ -115,20 +146,20 @@ def check_conditional_writes(store, prefix: str = "") -> None:
     try:
         try:
             obstore.put(store, path, b"0", mode="create")
-        except (NotImplementedError, TypeError) as e:
+        except (NotImplementedError, NotSupportedError, TypeError) as e:
             raise refuse(f"cannot create-if-absent ({e})") from None
         try:
             obstore.put(store, path, b"1", mode="create")
         except AlreadyExistsError:
             pass
-        except (NotImplementedError, TypeError) as e:
+        except (NotImplementedError, NotSupportedError, TypeError) as e:
             raise refuse(f"cannot create-if-absent ({e})") from None
         else:
             raise refuse("overwrote an existing object on create-if-absent")
         stale = _update_mode(obstore.head(store, path))
         try:
             obstore.put(store, path, b"2", mode=stale)
-        except (NotImplementedError, TypeError) as e:
+        except (NotImplementedError, NotSupportedError, TypeError) as e:
             raise refuse(f"cannot replace-if-unchanged ({e})") from None
         except PreconditionError:
             raise refuse("refused a replace carrying the current etag") from None
@@ -143,6 +174,36 @@ def check_conditional_writes(store, prefix: str = "") -> None:
             obstore.delete(store, path)
         except Exception:                      # noqa: BLE001 - a probe left behind is litter
             pass
+
+
+def _well_formed(ptr) -> bool:
+    """Is this pointer one this code may act on?
+
+    Checked FIELD BY FIELD, because a pointer is written by another host and read back
+    here: the first version checked only that it was a dict with a known format, and then
+    indexed ``generation``, ``files[...]["digest"]`` and ``["size"]`` blind - a truncated or
+    hand-edited pointer raised KeyError/TypeError out of a read that had promised a miss
+    (review, 2026-09-19). A digest is checked here too, where it is DATA; ``BlobStore.path``
+    keeps its own check for the bytes this process supplies.
+    """
+    if not isinstance(ptr, dict) or ptr.get("format") != POINTER_FORMAT:
+        return False
+    if not isinstance(ptr.get("generation"), str) or not ptr["generation"]:
+        return False
+    files = ptr.get("files")
+    if not isinstance(files, dict):
+        return False
+    for name, blob in files.items():
+        if not isinstance(name, str) or not isinstance(blob, dict):
+            return False
+        if not isinstance(blob.get("size"), int):
+            return False
+        digest = blob.get("digest")
+        if (not isinstance(digest, str) or not digest.startswith("sha256:")
+                or len(digest) != len("sha256:") + 64
+                or any(c not in "0123456789abcdef" for c in digest[len("sha256:"):])):
+            return False
+    return True
 
 
 def _update_mode(meta) -> dict:
@@ -160,6 +221,8 @@ class BlobStore:
     def __init__(self, store, prefix: str = ""):
         self.store = store
         self.prefix = prefix
+        #: digests this process has read and found wrong: never deduplicated onto again.
+        self.suspect: set[str] = set()
 
     def path(self, digest: str) -> str:
         algo, _, hexd = digest.partition(":")
@@ -181,7 +244,14 @@ class BlobStore:
             for chunk in iter(lambda: f.read(_CHUNK), b""):
                 h.update(chunk)
         blob = {"digest": f"sha256:{h.hexdigest()}", "size": src.stat().st_size}
-        if not self.has(blob["digest"]):
+        if blob["digest"] in self.suspect:
+            # a read found the stored object wrong: replace it rather than dedupe onto it
+            obstore.put(self.store, self.path(blob["digest"]), src)
+            # `-=` rather than .discard(): `tests/test_jobpolicy.py` counts every `.discard`
+            # call in the package to prove one module decides to drop a cached input, and
+            # a set operation here is not that decision. Keep its guard sharp.
+            self.suspect -= {blob["digest"]}
+        elif not self.has(blob["digest"]):
             try:
                 obstore.put(self.store, self.path(blob["digest"]), src, mode="create")
             except AlreadyExistsError:
@@ -217,10 +287,18 @@ class BlobStore:
                     h.update(chunk)
                     f.write(chunk)
             if f"sha256:{h.hexdigest()}" != digest:
-                try:
-                    obstore.delete(self.store, self.path(digest))
-                except FileNotFoundError:
-                    pass
+                # NOT deleted. The bytes read here do not hash to the name, but this client
+                # cannot tell a corrupt object from a stream that ended early, and a blob is
+                # shared by every result whose output was identical - the first version
+                # deleted it, which took unrelated entries down with it (review,
+                # 2026-09-19). Suspect instead: this process stops deduplicating onto it, so
+                # the next publication of those bytes REPLACES it, and until then the answer
+                # is a miss. Always reported, never throttled: unlike a store being down,
+                # this should not happen.
+                self.suspect.add(digest)
+                print(f"warning: blob {digest} does not hash to its name ({h.hexdigest()}); "
+                      "serving as a cache miss and re-uploading it on the next publication",
+                      file=sys.stderr, flush=True)
                 return False
             tmp.replace(dest)
             return True
@@ -241,7 +319,10 @@ class SharedResultCache:
         self.prefix = prefix
         self.local = local
         self.blobs = BlobStore(store, prefix)
-        self._fill_locks: dict[str, threading.Lock] = {}
+        # weak: a lock lives while a filler holds it and is forgotten after. A plain dict
+        # keeps one entry per key forever, in a process that runs for weeks (review).
+        self._fill_locks: "weakref.WeakValueDictionary[str, threading.Lock]" = (
+            weakref.WeakValueDictionary())
         self._fill_guard = threading.Lock()
 
     @classmethod
@@ -260,22 +341,31 @@ class SharedResultCache:
             raise ValueError(f"not a result key: {key!r}")
         return f"{self.prefix}results/{key}.json"
 
-    def _read_pointer(self, key: str):
+    def _read_pointer(self, key: str, *, for_write: bool = False):
         """``(pointer, update mode)`` or ``(None, None)``. A pointer this code cannot read
-        - unknown format, not JSON - is reported as absent: a miss, never a guess."""
+        - unknown format, not JSON - is reported as absent: a miss, never a guess.
+
+        A store FAULT (credentials, network, a 503) is a miss too on a read, and is raised
+        for a writer: ``for_write`` marks the caller as one. Reporting a fault as "absent"
+        to a writer would have it publish over a pointer it could not read - the very race
+        the conditional write exists to lose.
+        """
         import obstore
         try:
             got = obstore.get(self.store, self._pointer_path(key))
         except FileNotFoundError:
+            return None, None
+        except Exception as e:                 # noqa: BLE001 - a read degrades, see _miss
+            if for_write:
+                raise
+            _miss(f"reading the pointer for {key[:12]}", e)
             return None, None
         mode = _update_mode(got.meta)
         try:
             ptr = json.loads(bytes(got.bytes()))
         except (ValueError, UnicodeDecodeError):
             return None, mode
-        if not isinstance(ptr, dict) or ptr.get("format") != POINTER_FORMAT:
-            return None, mode
-        return ptr, mode
+        return (ptr if _well_formed(ptr) else None), mode
 
     def _swap(self, key: str, update):
         """Replace the pointer with ``update(current)`` by conditional write, rereading on
@@ -284,7 +374,7 @@ class SharedResultCache:
         import obstore
         from obstore.exceptions import AlreadyExistsError, PreconditionError
         for _ in range(SWAP_ATTEMPTS):
-            ptr, mode = self._read_pointer(key)
+            ptr, mode = self._read_pointer(key, for_write=True)
             new = update(ptr)
             if new is None:
                 return None
@@ -332,15 +422,29 @@ class SharedResultCache:
         with self._fill_lock(key):
             local_dir = self.local._generation_dir(key, gen)
             have_gen = self.local.generation(key) == gen and (local_dir / RESULT_NAME).exists()
-            wanted = [n for n in files if n in ARTIFACT_NAMES or n == RESULT_NAME]
+            # ONLY these names, and they are spelled out here rather than taken from the
+            # pointer: a pointer is written by another host, and a name of its choosing
+            # ("../..", an absolute path) would decide where these bytes land.
+            wanted = [n for n in (RESULT_NAME, *ARTIFACT_NAMES) if n in files]
             missing = [n for n in wanted if not (have_gen and (local_dir / n).exists())]
             if not missing:
                 return True
-            work = Path(tempfile.mkdtemp(prefix=".fill-", dir=self.local.root))
+            work = self._fresh_work_dir()
             try:
+                got = []
                 for name in missing:
-                    if not self.blobs.fetch(files[name]["digest"], work / name):
+                    try:
+                        here = self.blobs.fetch(files[name]["digest"], work / name)
+                    except Exception as e:     # noqa: BLE001 - a read degrades, see _miss
+                        _miss(f"fetching {name} of {key[:12]}", e)
+                        here = False
+                    if here:
+                        got.append(name)
+                    elif name == RESULT_NAME:
                         return False           # swept: a miss, and the next compute heals it
+                    # an artifact that is gone is not a reason to lose the labels: a missing
+                    # preview used to make the whole entry a miss, and a lost thumbnail is
+                    # not worth a GPU recompute (review, 2026-09-19)
                 if not have_gen:
                     try:
                         self.local.put(key, work / RESULT_NAME, ptr.get("result") or {},
@@ -349,9 +453,12 @@ class SharedResultCache:
                                        statistics_path=_present(work / "statistics.json"),
                                        generation=gen)
                     except FileExistsError:
-                        pass                   # another process filled it first
+                        # another process placed this generation; it is only usable if that
+                        # process also made it current - otherwise this read is a miss
+                        # rather than a different generation served as if it were current
+                        return self.local.generation(key) == gen
                 else:
-                    for name in missing:
+                    for name in got:
                         self.local.add_artifact(key, name, work / name, generation=gen)
                 return True
             finally:
@@ -359,7 +466,30 @@ class SharedResultCache:
 
     def _fill_lock(self, key: str) -> threading.Lock:
         with self._fill_guard:
-            return self._fill_locks.setdefault(key, threading.Lock())
+            lock = self._fill_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._fill_locks[key] = lock
+            return lock                        # the caller's reference keeps it alive
+
+    def _fresh_work_dir(self) -> Path:
+        """Where a fill assembles what it downloaded, with older leavings removed first.
+
+        Dotted, so `cache_admin` and eviction skip it - which means a process killed
+        mid-fill leaks a directory nothing reclaims (the 2026-09-09 finding, in a new
+        place). Whoever creates it owns removing it, so every fill also clears the ones
+        left by fills that died.
+        """
+        import shutil
+        import time as _time
+        root = self.local.root
+        for stale in root.glob(f"{WORK_PREFIX}*"):
+            try:
+                if _time.time() - stale.stat().st_mtime > WORK_GRACE_S:
+                    shutil.rmtree(stale, ignore_errors=True)
+            except OSError:
+                pass
+        return Path(tempfile.mkdtemp(prefix=WORK_PREFIX, dir=root))
 
     def put(self, key: str, labels_path, result: dict, meta: dict,
             preview_path=None, statistics_path=None) -> str:
@@ -374,24 +504,43 @@ class SharedResultCache:
         pointer = {"format": POINTER_FORMAT, "generation": gen, "published": time.time(),
                    "files": files, "result": result, "meta": meta}
         self._swap(key, lambda _current: pointer)
-        # A blob that already existed was not uploaded - and a sweep may have taken it
-        # between that check and the pointer. Put it back: the pointer now protects it.
-        for name, blob in files.items():
-            if not self.blobs.has(blob["digest"]):
-                self.blobs.put_file(sources[name])
-        self.local.put(key, labels_path, result, meta, preview_path=preview_path,
-                       statistics_path=statistics_path, generation=gen)
+        self._verify(files, sources)
+        try:
+            self.local.put(key, labels_path, result, meta, preview_path=preview_path,
+                           statistics_path=statistics_path, generation=gen)
+        except Exception as e:                 # noqa: BLE001
+            # The publication HAPPENED - every host can read it - so a local copy that
+            # cannot be written must not fail the job that just produced it (a full disk
+            # did exactly that: `put` raised after the result was visible cluster-wide,
+            # review 2026-09-19). The next read on this host fills the copy again.
+            _miss(f"keeping a local copy of {key[:12]}", e)
         return gen
+
+    def _verify(self, files: dict, sources: dict) -> None:
+        """Put back any blob that was not uploaded because it already existed and has since
+        been swept - the window between that check and the pointer write. The pointer now
+        references them, so this is the last moment anything may quietly remove them."""
+        for name, blob in files.items():
+            try:
+                if not self.blobs.has(blob["digest"]):
+                    self.blobs.put_file(sources[name])
+            except Exception as e:             # noqa: BLE001 - the pointer is already out
+                _miss(f"re-checking {name}", e)
 
     def add_artifact(self, key: str, name: str, src_path, generation=None) -> bool:
         """Add an artifact to the publication it was rendered for; False when that
         publication is no longer current (or the entry is gone). The pointer's conditional
         write is what makes it safe: an artifact can never be recorded beside another
-        publication's labels, whatever the ordering."""
+        publication's labels - PROVIDED a generation is named, which is what
+        ``serve.publish_completion`` does. Without one this grafts the artifact onto
+        whatever publication is current, which for a late worker is not the one it rendered.
+
+        Never raises: this runs on the overlap thread after "done" has been served, and a
+        store fault there must not take the rest of that thread's work (the statistics) with
+        it (review, 2026-09-19)."""
         from .serve import ARTIFACT_NAMES
         if name not in ARTIFACT_NAMES:
             raise ValueError(f"not an artifact: {name!r}")
-        blob = self.blobs.put_file(src_path)
 
         def update(ptr):
             if ptr is None or (generation and ptr["generation"] != generation):
@@ -399,8 +548,14 @@ class SharedResultCache:
             files = dict(ptr.get("files") or {})
             files[name] = blob
             return {**ptr, "files": files}
-        written = self._swap(key, update)
-        if written is None:
+        try:
+            blob = self.blobs.put_file(src_path)
+            written = self._swap(key, update)
+            if written is None:
+                return False
+            self._verify({name: blob}, {name: src_path})   # the sweep window, as in `put`
+        except Exception as e:                 # noqa: BLE001
+            _miss(f"placing {name} on {key[:12]}", e)
             return False
         self.local.add_artifact(key, name, src_path, generation=written["generation"])
         return True
@@ -418,10 +573,17 @@ class SharedResultCache:
         return ptr is not None or local
 
     def list(self, limit: int = 500) -> list:
-        """Every published entry, newest first, read from the pointers alone."""
+        """The newest published entries, read from the pointers alone.
+
+        At most ``limit`` pointers are READ: they are ordered by the listing's own
+        last-modified first. Reading every pointer in the bucket and then slicing was one
+        request per entry - fine for a local directory, minutes and tens of thousands of
+        requests on a bucket several servers share (review, 2026-09-19). The order within
+        the answer is still the publication time each pointer records.
+        """
         from .serve import RESULT_NAME, resource_links
         out = []
-        for ptr in self._pointers():
+        for ptr in self._scan_pointers(newest_first=True, limit=limit)[0]:
             meta, files = ptr.get("meta") or {}, ptr.get("files") or {}
             if RESULT_NAME not in files:
                 continue
@@ -445,18 +607,42 @@ class SharedResultCache:
 
     # -- store maintenance ---------------------------------------------------------------
 
-    def _pointers(self):
+    def _scan_pointers(self, *, newest_first: bool = False, limit: int | None = None):
+        """``(pointers this code can read, how many it could NOT)``.
+
+        An object under ``results/`` that is not a
+        pointer this version understands - a stray upload, a `.tmp` file from someone's
+        sync, a FORMAT FROM A NEWER WRITER - is skipped and counted, never raised: one
+        stray object used to abort both ``list`` and ``sweep`` permanently, and a sweep
+        that never runs is a bucket that never stops growing (review, 2026-09-19).
+
+        ``newest_first`` orders by the pointers' own last-modified before reading any of
+        them, so ``limit`` costs that many reads instead of one per entry in the bucket.
+        """
         import obstore
         base = f"{self.prefix}results/"
+        entries = []
         for batch in obstore.list(self.store, base):
             for obj in batch:
                 name = obj["path"][len(base):]
                 if "/" in name or not name.endswith(".json"):
                     continue
-                key = name[:-len(".json")]
-                ptr, _ = self._read_pointer(key)
-                if ptr is not None:
-                    yield {**ptr, "_key": key}
+                entries.append((obj.get("last_modified"), name[:-len(".json")]))
+        if newest_first:
+            entries.sort(key=lambda e: (e[0] is not None, e[0]), reverse=True)
+        out, unreadable = [], 0
+        for _, key in entries:
+            if limit is not None and len(out) >= limit:
+                break
+            try:
+                ptr, _mode = self._read_pointer(key)
+            except ValueError:                 # not a key this code would ever write
+                ptr = None
+            if ptr is None:
+                unreadable += 1
+                continue
+            out.append({**ptr, "_key": key})
+        return out, unreadable
 
     def sweep(self, *, max_age_s: float | None = None, grace_s: float = BLOB_GRACE_S,
               now: float | None = None) -> dict:
@@ -488,7 +674,8 @@ class SharedResultCache:
                 if modified < now - grace_s:
                     candidates.append(obj["path"])
         referenced, expired = set(), 0
-        for ptr in self._pointers():
+        pointers, unreadable = self._scan_pointers()
+        for ptr in pointers:
             if max_age_s is not None and (ptr.get("published") or 0) < now - max_age_s:
                 try:
                     obstore.delete(self.store, self._pointer_path(ptr["_key"]))
@@ -498,6 +685,16 @@ class SharedResultCache:
                 continue
             for blob in (ptr.get("files") or {}).values():
                 referenced.add(self.blobs.path(blob["digest"]))
+        if unreadable:
+            # A pointer this version cannot read may still name live blobs - a writer on a
+            # newer POINTER_FORMAT is the case that matters. Its blobs would look
+            # unreferenced, and an old host's sweeper would collect a new host's results
+            # (review, 2026-09-19). Expiry above is per-pointer and safe; deleting blobs is
+            # not, so it waits until whatever is unreadable has been explained.
+            print(f"warning: {unreadable} object(s) under results/ could not be read as "
+                  "pointers; deleting no blobs this sweep", file=sys.stderr, flush=True)
+            return {"expired_pointers": expired, "deleted_blobs": 0,
+                    "unreadable_pointers": unreadable}
         deleted = 0
         for path in candidates:
             if path in referenced:
@@ -507,7 +704,8 @@ class SharedResultCache:
             except FileNotFoundError:
                 pass
             deleted += 1
-        return {"expired_pointers": expired, "deleted_blobs": deleted}
+        return {"expired_pointers": expired, "deleted_blobs": deleted,
+                "unreadable_pointers": 0}
 
 
 def _present(p: Path):

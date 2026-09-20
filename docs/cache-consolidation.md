@@ -121,10 +121,29 @@ local tier's eviction measured against diskcache before writing a third LRU by h
 
 ## Order of work
 
-1. **Adversarial review + soak of `objectcache` as it stands.** Multi-process publication and
-   reading against a real bucket; a writer killed mid-publication; the sweep racing a
-   publication. This is cheap and it either finds defects now or raises confidence in the
-   protocol the rest of the plan rests on. **Do this before writing more.**
+1. ~~**Adversarial review + soak of `objectcache` as it stands.**~~ **DONE 2026-09-19.**
+   Three review agents (protocol, its tests, the serve wiring) found **thirteen defects,
+   all fixed and each pinned by a test that fails on the pre-fix commit** (17 of the new
+   tests do). The soak - publishers, readers and a sweeper as separate processes against
+   R2, one publisher killed mid-flight - saw no torn read and no error, at zero sweep grace
+   and at the shipped one.
+
+   What the round taught, for the consolidation to carry forward:
+   - **A store fault is not an OSError.** obstore's exceptions do not subclass it, so the
+     local cache's "any read failure is a miss" did not carry over and every fault became a
+     500. The local blob store must make the same promise explicitly, and a test must hold
+     both backends to it.
+   - **A pointer written by another host is data, not a promise.** Validate it field by
+     field, and never let a name in it decide a local path.
+   - **Cleanup must refuse what it cannot account for.** A sweep meeting a pointer format
+     it does not know deletes nothing - otherwise an old host collects a new one's results.
+     This is the object-store form of "death is proved, never inferred", and the local
+     content-addressed store will need its own version.
+   - **Shared bytes make deletion collateral.** Deduplication means one blob belongs to
+     many results; a single client's bad read is not grounds to delete it.
+   - **A blocking call changes what a route may do.** A lookup that was a stat became a
+     network round trip, and the async routes had to move it off the event loop. Every
+     backend the consolidation adds has to be re-examined for this, not assumed.
 2. **`haversack cache push/pull`** (design in the session of 2026-09-19): migrate an existing
    local or Modal cache into the store, preserving each entry's generation token so the local
    copy is instantly current. Idempotent by construction.
