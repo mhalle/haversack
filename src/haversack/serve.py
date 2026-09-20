@@ -1442,7 +1442,7 @@ class ResultCache:
             result = {}
         return g / RESULT_NAME, result
 
-    def adopt(self, key: str, gen: str, *, names=()) -> bool:
+    def adopt(self, key: str, gen: str, *, names=(), sizes=None) -> bool:
         """Make an existing, COMPLETE generation directory this entry's current one.
 
         `put` publishes what it assembles; this publishes what is already here. A copy of
@@ -1455,13 +1455,23 @@ class ResultCache:
         operator had just rolled back to (review, 2026-09-20).
 
         False unless every file named in ``names``, the two documents and the labels are
-        present: adopting an incomplete directory would publish half a result.
+        present AND the right size: adopting on existence alone published a 0-byte labels
+        file as a 200, which is precisely what a power loss leaves behind a rename on a
+        journaled filesystem - the case this method was written for (review, 2026-09-20).
+        ``sizes`` is the publisher's own record, ``{name: bytes}``; a file with no recorded
+        size must merely be non-empty.
         """
         import os
         where = self._generation_dir(key, gen)
         wanted = {RESULT_NAME, "result.json", "meta.json", *names}
-        if not all((where / n).exists() for n in wanted):
-            return False
+        sizes = sizes or {}
+        for n in wanted:
+            try:
+                on_disk = (where / n).stat().st_size
+            except OSError:
+                return False
+            if on_disk != sizes[n] if n in sizes else not on_disk:
+                return False
         d = self.root / key
         tmp = d / f"{CURRENT_NAME}.{uuid.uuid4().hex[:8]}.tmp"
         try:
@@ -1528,6 +1538,16 @@ class ResultCache:
         if generation and self._generation_dir(key, gen).exists():
             raise FileExistsError(f"generation {gen} of {key} is already here")
         claim = self._claim(d, gen)
+        if claim is None and generation and self._writer_gone(d, gen) is True:
+            # a filler killed between its claim and its release leaves the claim behind,
+            # and every later fill on this host then read "someone is placing it" and
+            # missed - for ever on a host that never computes, because only a successful
+            # put of this key prunes it (review, 2026-09-20). Death is proved the same way
+            # everywhere else here: the lock its holder could not have released.
+            import shutil
+            shutil.rmtree(self._staging_dir(key, gen), ignore_errors=True)
+            (d / f"{self.CLAIM_PREFIX}{gen}").unlink(missing_ok=True)
+            claim = self._claim(d, gen)
         if generation and claim is None and (d / f"{self.CLAIM_PREFIX}{gen}").exists():
             # the claim file is O_EXCL: a concurrent copy of the same generation holds it
             raise FileExistsError(f"generation {gen} of {key} is being placed")
@@ -4456,14 +4476,17 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 key = keyed(norm(ident), task, gopts)
                 if key is None:
                     raise HTTPException(404, "unknown resource")
-                jid = executor.find_inflight(key)
-                if jid is not None:
-                    executor.cancel(jid)
+                # the delete FIRST: it can refuse (an entry a newer haversack wrote),
+                # and cancelling a running compute for a delete that then does not
+                # happen is work thrown away for nothing (review, 2026-09-20)
                 try:
                     deleted = executor.cache_delete(key)
                 except InputError as e:        # an entry a newer haversack wrote:
                     # refusing is the honest answer, and 409 says what to do about it
                     raise HTTPException(409, str(e)) from None
+                jid = executor.find_inflight(key)
+                if jid is not None:
+                    executor.cancel(jid)
                 if not deleted and jid is None:
                     raise HTTPException(404, "not materialized")
                 out = {"deleted": deleted}
@@ -4485,14 +4508,17 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             key = keyed(norm(ident), task, {})
             if key is None:
                 raise HTTPException(404, "unknown resource")
-            jid = executor.find_inflight(key)
-            if jid is not None:
-                executor.cancel(jid)
+            # the delete FIRST: it can refuse (an entry a newer haversack wrote),
+            # and cancelling a running compute for a delete that then does not
+            # happen is work thrown away for nothing (review, 2026-09-20)
             try:
                 deleted = executor.cache_delete(key)
             except InputError as e:        # an entry a newer haversack wrote:
                 # refusing is the honest answer, and 409 says what to do about it
                 raise HTTPException(409, str(e)) from None
+            jid = executor.find_inflight(key)
+            if jid is not None:
+                executor.cancel(jid)
             if not deleted and jid is None:
                 raise HTTPException(404, "not materialized")
             out = {"deleted": deleted}

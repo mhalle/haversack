@@ -24,6 +24,24 @@
   A hit costs one pointer read - about 85 ms median from this Mac, measured before
   history existed; a key republished four times carries ~5x the pointer, which has not
   been re-measured on a real bucket.
+- **Fifth review round (the same reviewer, on the fixes it asked for): nine more.** Two
+  were serious and both were in the new code. A filler killed between its claim and its
+  release left that claim behind, and every later fill on that host then read "someone is
+  placing it" and missed - permanently on a host that never computes, since only a
+  successful publication of that key prunes a claim; death is now proved the way it is
+  everywhere else here, and a live writer's claim (which holds a lock) still stands. And
+  `adopt` published on existence alone, so a zero-length labels file - exactly what a power
+  loss leaves behind a rename - was served as a 200; it checks the sizes the pointer
+  records now. The purge's re-check was narrowed rather than closed, because S3 and R2 date
+  objects to the whole second: it waits out the remainder, and only on a store whose own
+  timestamps say that is needed. The outage fallback is bounded by when this host last saw
+  the entry alive (15 minutes), so an unreachable store cannot resurrect a DELETED result
+  indefinitely; a publication the store REFUSES keeps no local copy, since a refusal is
+  deliberate and repeatable where an outage is not; the work-directory reaper now does what
+  its comment always claimed; and a DELETE that will be refused no longer cancels a running
+  compute first. The six sweep scripts are in `tools/config_sweep/` - results nobody can
+  re-run are not evidence.
+
 - **Configuration sweep: six environments nobody had run, three defects.** The reviewers
   could attack code but not environments. Two servers sharing one `--cache-dir` (the
   per-GPU deployment) came through clean - 446 reads, no torn read, a coherent directory

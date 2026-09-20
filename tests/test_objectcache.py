@@ -1813,8 +1813,7 @@ class TestASlowFillIsNotReaped(_Hosts):
         its work deleted under it and reported the blob gone."""
         import os
         live = self.b.local.root / f"{objectcache.WORK_PREFIX}{os.getpid()}-abcd"
-        live.mkdir(parents=True)
-        os.utime(live, (0, 0))                 # far older than WORK_GRACE_S
+        live.mkdir(parents=True)               # running now: newer than WORK_GRACE_S
         dead = self.b.local.root / f"{objectcache.WORK_PREFIX}999999-dead"
         dead.mkdir(parents=True)
         os.utime(dead, (0, 0))
@@ -1822,6 +1821,18 @@ class TestASlowFillIsNotReaped(_Hosts):
         self.b.get(KEY)
         self.assertTrue(live.exists(), "a live fill's work is not reaped by age")
         self.assertFalse(dead.exists(), "a dead one's is")
+
+    def test_a_pid_that_looks_alive_but_is_ancient_is_reaped_anyway(self):
+        """On a directory two HOSTS share, a pid means nothing across the boundary - and a
+        number gets reused. Past the grace, age is the only thing left to judge by, and the
+        comment used to promise that while the code did not do it (review, 2026-09-20)."""
+        import os
+        ancient = self.b.local.root / f"{objectcache.WORK_PREFIX}{os.getpid()}-ancient"
+        ancient.mkdir(parents=True)
+        os.utime(ancient, (0, 0))
+        self.publish(self.a, b"one")
+        self.b.get(KEY)
+        self.assertFalse(ancient.exists())
 
 
 class TestFillsHandOverRatherThanCopy(_Hosts):
@@ -1853,3 +1864,137 @@ class TestFillsHandOverRatherThanCopy(_Hosts):
         self.assertFalse((self.a.local.root / KEY).exists(),
                          "an empty entry directory counts against the cache's bound and "
                          "resolves to nothing")
+
+
+# -- the fifth review round (2026-09-20): what the previous round's fixes broke -----------
+
+
+class TestAStaleClaimDoesNotStrandAKey(_Hosts):
+    """A filler SIGKILLed between its claim and its release left `<key>/.writer-<gen>`
+    behind. Every later fill on that host then read "someone is placing it" and missed -
+    for ever on a host that never computes, because only a successful publication of that
+    key prunes the claim."""
+
+    def stale_claim(self, cache, gen, *, host=None, pid=999999, state="locked"):
+        import socket
+        d = cache.local.root / KEY
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{ResultCache.CLAIM_PREFIX}{gen}").write_text(
+            f"{host or socket.gethostname()}\n{pid}\n{state}\n")
+
+    def test_a_dead_writers_claim_is_cleared_and_the_key_is_served(self):
+        gen = self.publish(self.a, b"one")
+        self.stale_claim(self.b, gen)
+        self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+        self.assertEqual(gen, self.b.local.generation(KEY))
+
+    def test_a_LIVE_writers_claim_is_still_respected(self):
+        """A live writer HOLDS the lock, which is the whole proof: it is not takeable, so
+        death cannot be concluded and the claim stands."""
+        import os
+
+        from haversack import filelock
+        gen = self.publish(self.a, b"one")
+        self.stale_claim(self.b, gen, pid=os.getpid())
+        held = os.open(self.b.local.root / KEY / f"{ResultCache.CLAIM_PREFIX}{gen}",
+                       os.O_RDWR)
+        try:
+            filelock.lock(held, blocking=False)
+            self.assertIsNone(self.b.get(KEY), "another process really is placing it")
+        finally:
+            os.close(held)
+
+    def test_a_claim_from_another_host_is_left_alone(self):
+        """An advisory lock need not reach across machines, so this host cannot judge it -
+        and must not delete another host's work to find out."""
+        gen = self.publish(self.a, b"one")
+        self.stale_claim(self.b, gen, host="some-other-machine")
+        self.assertIsNone(self.b.get(KEY))
+        self.assertTrue((self.b.local.root / KEY
+                         / f"{ResultCache.CLAIM_PREFIX}{gen}").exists())
+
+
+class TestAdoptChecksSizes(_Hosts):
+    def test_a_truncated_generation_is_not_adopted(self):
+        """A power loss behind a rename leaves the directory with zero-length files, which
+        is exactly the case adoption was written for - it published one as a 200."""
+        gen = self.publish(self.a, b"one")
+        self.b.get(KEY)
+        where = self.b.local._generation_dir(KEY, gen)
+        (self.b.local.root / KEY / CURRENT_NAME).unlink()
+        (where / RESULT_NAME).write_bytes(b"")          # truncated by the power loss
+        hit = self.b.get(KEY)
+        self.assertIsNotNone(hit)
+        self.assertEqual(b"one", Path(hit[0]).read_bytes(),
+                         "it is refilled rather than published empty")
+
+    def test_a_complete_generation_is_still_adopted_without_downloading(self):
+        gen = self.publish(self.a, b"one")
+        self.b.get(KEY)
+        (self.b.local.root / KEY / CURRENT_NAME).unlink()
+        with unittest.mock.patch.object(BlobStore, "fetch",
+                                        side_effect=AssertionError("downloaded")):
+            self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+        self.assertEqual(gen, self.b.local.generation(KEY))
+
+
+class TestTheOutageFallbackIsBounded(_Hosts):
+    def faulty(self):
+        from obstore.exceptions import GenericError
+        real = obstore.get
+
+        def boom(store, path, *a, **kw):
+            if "results/" in str(path):
+                raise GenericError("unreachable")
+            return real(store, path, *a, **kw)
+        return unittest.mock.patch.object(obstore, "get", boom)
+
+    def test_a_recently_confirmed_copy_is_served(self):
+        self.publish(self.a, b"one")
+        self.b.get(KEY)
+        with self.faulty():
+            self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_a_copy_nobody_has_confirmed_lately_is_a_miss(self):
+        """A host in an outage cannot know an entry was deleted elsewhere, and deletion is
+        the one thing this design promises means gone - so the fallback is bounded by when
+        this host last saw the entry alive."""
+        import os
+        self.publish(self.a, b"one")
+        hit = self.b.get(KEY)
+        stale = time.time() - objectcache.OUTAGE_GRACE_S - 60
+        os.utime(Path(hit[0]).parent / objectcache.CONFIRMED_NAME, (stale, stale))
+        with self.faulty():
+            self.assertIsNone(self.b.get(KEY))
+
+    def test_the_publishing_host_counts_as_having_confirmed_it(self):
+        self.publish(self.a, b"one")
+        with self.faulty():
+            self.assertEqual(b"one", Path(self.a.get(KEY)[0]).read_bytes())
+
+
+class TestWorkKeptOnlyForAnOutage(_Hosts):
+    def test_a_refused_publication_keeps_nothing(self):
+        """A refusal is deliberate and repeatable; keeping a copy for it only fills the
+        disk with generations no read will ever reach."""
+        self.publish(self.a, b"one")
+        newer = {**self.pointer(), "format": objectcache.POINTER_FORMAT + 1}
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(newer).encode())
+        before = self.b.local.generation(KEY)
+        with self.assertRaises(ObjectStoreUnsuitable):
+            self.publish(self.b, b"two")
+        self.assertEqual(before, self.b.local.generation(KEY), "no generation was kept")
+
+
+class TestADeleteRefusalCancelsNothing(_Hosts):
+    def test_the_delete_is_decided_before_anything_is_cancelled(self):
+        """A 409 that has already killed a running compute is work thrown away for a
+        deletion that did not happen."""
+        import inspect
+
+        from haversack import serve as serve_mod
+        src = inspect.getsource(serve_mod)
+        for chunk in src.split("cache_delete(key)")[:-1]:
+            tail = chunk[-600:]
+            self.assertNotIn("executor.cancel(", tail,
+                             "the cancel must follow the delete, not precede it")

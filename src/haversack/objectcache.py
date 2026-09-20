@@ -79,6 +79,14 @@ HISTORY_MAX_AGE_S = 30 * 24 * 3600
 #: still lists - the rollback data the history decision exists to provide (review,
 #: 2026-09-20). Listing is cheap to get wrong; deleting is not.
 HISTORY_GC_MARGIN_S = 24 * 3600
+#: How much older than the listing a blob must be before `delete`'s purge will judge it.
+#: The purge spares a blob whose timestamp MOVED since it was listed, which is how a
+#: publication that deduplicated onto it survives - but S3 and R2 record last-modified to
+#: the SECOND, so a refresh inside the listing's own second moves nothing (review,
+#: 2026-09-20). One second plus a margin makes any later refresh land in a later second.
+#: Paid only on a store whose timestamps are that coarse, and only for blobs written just
+#: now: see ``_settled``.
+PURGE_FRESH_S = 1.5
 #: How many entries ``delete`` will read to establish that an entry's bytes are shared.
 #: Past this the purge does not run: it is one GET per entry, and this cost was removed
 #: from `list` for exactly that reason (review, 2026-09-20). `cache sweep` does the same
@@ -87,6 +95,15 @@ PURGE_SCAN_LIMIT = 2000
 #: How often a store fault on a READ path may be reported. A store that is down faults on
 #: every request, and a line per request is a denial of service on the operator's terminal.
 WARN_INTERVAL_S = 60.0
+#: How long a host may go on serving its own copy while the store is unreachable, measured
+#: from the last time it saw that entry in the store. A host in an outage cannot know that
+#: an entry was deleted elsewhere, and "deletion means gone" is this branch's own rule - so
+#: the fallback that keeps a warm cache usable is bounded rather than open-ended (review,
+#: 2026-09-20). Long enough to ride out a blip, short enough that a deletion is not
+#: outlived by a cache nobody is watching.
+OUTAGE_GRACE_S = 15 * 60
+#: Touched in the generation directory whenever the store confirmed this copy is current.
+CONFIRMED_NAME = ".confirmed"
 #: Where a fill assembles its downloads, and how long a dead fill's directory survives.
 WORK_PREFIX = ".fill-"
 WORK_GRACE_S = 3600.0
@@ -129,6 +146,26 @@ def check_conditional_writes(store, prefix: str = "") -> None:
         raise ObjectStoreUnsuitable(
             f"{e}; use S3, GCS, Azure or R2, or drop --result-store for a local-only "
             "cache") from None
+
+
+def _settled(candidates) -> None:
+    """Wait until a refresh of these blobs would be VISIBLE, on a store that dates objects
+    to the whole second.
+
+    The purge spares a blob whose timestamp moved since it was listed; that is what keeps a
+    publication that deduplicated onto it. A store recording last-modified to the second
+    cannot show a move that happened inside the listing's own second, so this waits out the
+    remainder - at most ``PURGE_FRESH_S``, and only when the store's own timestamps say it
+    is needed. A store with sub-second times (obstore's in-memory one, most filesystems)
+    waits not at all, which is measured here rather than assumed.
+    """
+    times = [b["modified"] for b in candidates
+             if isinstance(b.get("modified"), (int, float)) and not isinstance(b, bool)]
+    if not times or any(t != int(t) for t in times):
+        return                                 # sub-second resolution: a move is visible
+    wait = PURGE_FRESH_S - (time.time() - max(times))
+    if wait > 0:
+        time.sleep(min(wait, PURGE_FRESH_S))
 
 
 def _warn_once(message: str) -> None:
@@ -424,18 +461,19 @@ class SharedResultCache:
         2026-09-20). The deviation is reported, throttled.
         """
         try:
+            self._pointer_path(key)            # a malformed key is not an outage
+        except ValueError:
+            return None
+        try:
             ptr, _ = self._read_pointer(key, raise_faults=True)
         except Exception as e:                 # noqa: BLE001 - the store is unreachable
             _miss(f"reading the pointer for {key[:12]}", e)
-            local = self.local.get(key)
-            if local is not None:
-                _warn_once(f"{key[:12]}...: the store is unreachable; serving this host's "
-                           "own copy, which may have been superseded elsewhere")
-            return local
+            return self._fallback(key)
         if ptr is None:
             return None
         if not self._fill(key, ptr):
             return None
+        self._confirm(key, ptr["generation"])
         return self.local.get(key)
 
     def _fill(self, key: str, ptr) -> bool:
@@ -455,7 +493,9 @@ class SharedResultCache:
             # pointer: a pointer is written by another host, and a name of its choosing
             # ("../..", an absolute path) would decide where these bytes land.
             wanted = [n for n in (RESULT_NAME, *ARTIFACT_NAMES) if n in files]
-            if not have_gen and self.local.adopt(key, gen, names=wanted):
+            file_sizes = {n: b["size"] for n, b in (ptr.get("files") or {}).items()
+                          if isinstance(b, dict) and isinstance(b.get("size"), int)}
+            if not have_gen and self.local.adopt(key, gen, names=wanted, sizes=file_sizes):
                 return True                    # already here whole, only the pointer was
                                                # wrong: no download, no repair
             missing = [n for n in wanted if not (have_gen and (local_dir / n).exists())]
@@ -523,7 +563,8 @@ class SharedResultCache:
                             doc_tmp.write_text(json.dumps(doc), encoding="utf-8")
                             _place(local_dir, name, doc_tmp)
                         return (self.local.generation(key) == gen
-                                or self.local.adopt(key, gen, names=wanted))
+                                or self.local.adopt(key, gen, names=wanted,
+                                                    sizes=file_sizes))
                     except OSError as e:
                         # ENOSPC, EROFS, EACCES: the store gave good bytes and this host
                         # cannot keep them. A miss, like every other read failure - it used
@@ -536,6 +577,41 @@ class SharedResultCache:
                 return True
             finally:
                 shutil.rmtree(work, ignore_errors=True)
+
+    def _fallback(self, key: str):
+        """This host's own copy, while the store cannot be reached - if it was confirmed
+        current recently enough.
+
+        An unbounded fallback serves a result that may have been DELETED elsewhere, and
+        deletion is the one thing this design promises means gone. A host in an outage
+        cannot tell; what it can know is when it last saw the entry alive in the store, so
+        that is the bound (review, 2026-09-20).
+        """
+        import time as _time
+        local = self.local.get(key)
+        if local is None:
+            return None
+        try:
+            seen = (Path(local[0]).parent / CONFIRMED_NAME).stat().st_mtime
+        except OSError:
+            seen = 0.0
+        if _time.time() - seen > OUTAGE_GRACE_S:
+            _warn_once(f"{key[:12]}...: the store is unreachable and this host last saw "
+                       "the entry more than "
+                       f"{OUTAGE_GRACE_S // 60:.0f} minutes ago; answering a miss rather "
+                       "than serving a result that may since have been deleted")
+            return None
+        _warn_once(f"{key[:12]}...: the store is unreachable; serving this host's own "
+                   "copy, confirmed current less than "
+                   f"{OUTAGE_GRACE_S // 60:.0f} minutes ago")
+        return local
+
+    def _confirm(self, key: str, gen: str) -> None:
+        """Record that the store just said this copy is current."""
+        try:
+            (self.local._generation_dir(key, gen) / CONFIRMED_NAME).touch()
+        except OSError:
+            pass                               # a read-only cache: the fallback shortens
 
     def _holds(self, key: str, ptr) -> bool:
         """Does this host already hold that publication COMPLETE - its files and both
@@ -581,13 +657,20 @@ class SharedResultCache:
                 # (configuration sweep, 2026-09-20). Where death cannot be proved - a pid
                 # from another host sharing this directory, a name this code did not write
                 # - age is the fallback, and a live fill is never touched.
-                pid = stale.name[len(WORK_PREFIX):].split("-")[0]
-                if pid.isdigit():
-                    if not _alive(int(pid)):
-                        shutil.rmtree(stale, ignore_errors=True)
-                    continue
-                if _time.time() - stale.stat().st_mtime > WORK_GRACE_S:
+                pid, old = stale.name[len(WORK_PREFIX):].split("-")[0], (
+                    _time.time() - stale.stat().st_mtime > WORK_GRACE_S)
+                if pid.isdigit() and _alive(int(pid)) and not old:
+                    continue                   # a fill this host can see running
+                if pid.isdigit() and _alive(int(pid)):
+                    # old AND apparently alive: either a fill that has run for hours, or a
+                    # pid belonging to another host sharing this directory (whose numbers
+                    # mean nothing here) or a number since reused. Age decides, because
+                    # nothing else can (review, 2026-09-20)
                     shutil.rmtree(stale, ignore_errors=True)
+                    continue
+                if not pid.isdigit() and not old:
+                    continue                   # a name this code did not write: age only
+                shutil.rmtree(stale, ignore_errors=True)
             except OSError:
                 pass
         return Path(tempfile.mkdtemp(prefix=mine, dir=root))
@@ -624,6 +707,8 @@ class SharedResultCache:
             # did exactly that: `put` raised after the result was visible cluster-wide,
             # review 2026-09-19). The next read on this host fills the copy again.
             _miss(f"keeping a local copy of {key[:12]}", e)
+        else:
+            self._confirm(key, gen)            # it saw the entry current: it wrote it
         return gen
 
     def _verify(self, files: dict, sources: dict) -> None:
@@ -778,7 +863,10 @@ class SharedResultCache:
         # through provender's sweep, not a bare delete: it re-checks each object against
         # the state it was listed in, which is the only thing that distinguishes a blob a
         # publication just deduplicated onto from one that is really unreferenced
-        mine = [b for b in listed if b["digest"] in digests - keep]
+        wanted = digests - keep
+        mine = [b for b in listed if b["digest"] in wanted]
+        _settled(mine)                         # see below: coarse timestamps only
+        deferred = 0
         if not mine:
             return True
         got = self.blobs.sweep(keep=keep, candidates=mine, allow_empty=not keep)
@@ -1150,10 +1238,20 @@ def _keeping_the_work(cache, key, labels_path, result, meta, preview_path, stati
     The segmentation is finished and its bytes are on this disk. Failing the job is right -
     the publication did not happen, and no other host can see it - but discarding the work
     as well means a GPU run per request for as long as the outage lasts (review,
-    2026-09-20). This host serves it; the others recompute.
+    2026-09-20).
+
+    What the kept copy is good for is narrower than it sounds: the store has no pointer, so
+    an ordinary read is a miss, and only the OUTAGE fallback - reads failing too - serves
+    it. It is kept for the case that motivated it, a store that is down rather than one
+    that refuses: a refusal (a newer-format entry, a publication storm) is deliberate and
+    repeatable, and keeping a copy for it only fills this disk with generations nothing
+    will read.
     """
+    from .errors import InputError
     try:
         yield
+    except (InputError, RuntimeError):         # refused, not unreachable: nothing to keep
+        raise
     except Exception:                          # noqa: BLE001 - the raise is the news
         try:
             cache.local.put(key, labels_path, result, meta, preview_path=preview_path,
