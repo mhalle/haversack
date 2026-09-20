@@ -1349,10 +1349,12 @@ class TestDeleteMeansGone(_Hosts):
         self.assertTrue(self.a.blobs.has(f"sha256:{hashlib.sha256(b'patient').hexdigest()}"),
                         "kept, because nothing could establish they were unreferenced")
 
-    def test_deleting_an_entry_this_version_cannot_read_still_says_it_deleted_it(self):
+    def test_deleting_an_entry_this_version_cannot_PARSE_still_says_it_deleted_it(self):
+        """Garbage under a key - a truncated write, a stray object - is nobody's data, so
+        an operator can still remove the entry. Something a NEWER haversack wrote is
+        different, and is refused: see TestVersionSkewOnOneBucket."""
         self.publish(self.a, b"one")
-        obstore.put(self.store, f"pre/results/{KEY}.json",
-                    json.dumps({"format": 999}).encode())
+        obstore.put(self.store, f"pre/results/{KEY}.json", b"{not a pointer")
         cold = SharedResultCache(self.store, ResultCache(self.tmp / "cold"), prefix="pre/",
                                  check=False)
         self.assertTrue(cold.delete(KEY), "the operator removed something, and is told so")
@@ -1795,6 +1797,17 @@ class TestLocalWriteFailuresAreMisses(_Hosts):
 
 
 class TestASlowFillIsNotReaped(_Hosts):
+    def test_a_dead_process_work_directory_goes_at_once(self):
+        """A reader killed mid-fill left its download for an hour, where `cache usage` and
+        `cache clean` cannot see it (configuration sweep, 2026-09-20)."""
+        import os
+        dead = self.b.local.root / f"{objectcache.WORK_PREFIX}999999-abcd"
+        dead.mkdir(parents=True)
+        (dead / "half-a-download").write_bytes(b"x" * 1000)
+        self.publish(self.a, b"one")
+        self.b.get(KEY)
+        self.assertFalse(dead.exists(), "its process is gone: no need to wait out an hour")
+
     def test_a_work_directory_belonging_to_a_live_process_survives(self):
         """Age is not liveness - this repo's own rule. A fill slower than the grace had
         its work deleted under it and reported the blob gone."""
@@ -1809,3 +1822,34 @@ class TestASlowFillIsNotReaped(_Hosts):
         self.b.get(KEY)
         self.assertTrue(live.exists(), "a live fill's work is not reaped by age")
         self.assertFalse(dead.exists(), "a dead one's is")
+
+
+class TestFillsHandOverRatherThanCopy(_Hosts):
+    """A fill downloaded into its work directory and then COPIED into place, so it needed
+    twice the result's size free and read every byte twice. Measured on a 12 MB disk image
+    with a 6 MB result: it failed with 11 MB free (configuration sweep, 2026-09-20)."""
+
+    def test_the_downloaded_file_is_moved_not_copied(self):
+        self.publish(self.a, b"a result")
+        moved = []
+        real = ResultCache.put
+
+        def watch(local, key, labels_path, *a, **kw):
+            moved.append(kw.get("move"))
+            return real(local, key, labels_path, *a, **kw)
+        with unittest.mock.patch.object(ResultCache, "put", watch):
+            self.b.get(KEY)
+        self.assertEqual([True], moved)
+
+    def test_the_work_directory_is_empty_afterwards(self):
+        self.publish(self.a, b"a result", preview=b"png")
+        self.b.get(KEY)
+        self.assertEqual([], sorted(self.b.local.root.glob(f"{objectcache.WORK_PREFIX}*")))
+
+    def test_a_publication_that_fails_leaves_no_empty_entry(self):
+        with unittest.mock.patch("shutil.copy2", side_effect=OSError(28, "No space")):
+            with self.assertRaises(OSError):
+                self.a.local.put(KEY, self.file("l", b"x"), {}, {})
+        self.assertFalse((self.a.local.root / KEY).exists(),
+                         "an empty entry directory counts against the cache's bound and "
+                         "resolves to nothing")

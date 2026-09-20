@@ -1492,7 +1492,8 @@ class ResultCache:
             return None
 
     def put(self, key: str, labels_path, result: dict, meta: dict,
-            preview_path=None, statistics_path=None, generation=None) -> str:
+            preview_path=None, statistics_path=None, generation=None,
+            move: bool = False) -> str:
         """Publish one generation of a result, returning its generation token.
 
         The generation is assembled COMPLETE in a directory of its own and becomes
@@ -1506,6 +1507,13 @@ class ResultCache:
         is still being written however quiet it has been, and what keeps the generation
         from being reclaimed in the instant between its rename and the pointer's. A
         publication that fails removes what it built itself - nobody else may.
+
+        ``move`` hands over the source files instead of copying them, for a caller whose
+        sources are temporary and on this same filesystem (``objectcache``'s fill, whose
+        work directory lives inside this root). Copying meant a fill needed TWICE the
+        result's size free - it failed on a disk with room for the result but not for two
+        of it, measured on a 12 MB image (configuration sweep, 2026-09-20) - and it read
+        and wrote every byte a second time.
 
         ``generation`` is for a copy of a publication made elsewhere (``objectcache``: the
         local copy keeps the store's token, which is how a hit is known to be current).
@@ -1533,6 +1541,9 @@ class ResultCache:
                 write(tmp)
                 os.replace(tmp, g / name)
 
+            def _take(src):                    # same filesystem: hand the file over
+                return lambda t: os.replace(src, t)
+
             _place("result.json", lambda t: t.write_text(json.dumps(result), encoding="utf-8"))
             _place("meta.json", lambda t: t.write_text(json.dumps(meta, indent=2),
                                                        encoding="utf-8"))
@@ -1540,8 +1551,10 @@ class ResultCache:
             for name in ARTIFACT_NAMES:
                 src = supplied.get(name)
                 if src and Path(src).exists():
-                    _place(name, lambda t, s=src: shutil.copy2(s, t))
-            _place(RESULT_NAME, lambda t: shutil.copy2(labels_path, t))
+                    _place(name, _take(src) if move
+                           else (lambda t, s=src: shutil.copy2(s, t)))
+            _place(RESULT_NAME, _take(labels_path) if move
+                   else (lambda t: shutil.copy2(labels_path, t)))
 
             # complete: the staging directory becomes a generation, and then one rename of
             # the pointer makes it the entry. Nothing between those two is observable.
@@ -1559,6 +1572,14 @@ class ResultCache:
             raise
         finally:
             self._release(d, gen, claim)
+            try:
+                # a publication that landed nothing leaves no entry: an empty directory
+                # counts against the cache's bound and resolves to nothing (configuration
+                # sweep, 2026-09-20 - a disk that ran out of space left one per attempt)
+                if not placed and not any(d.iterdir()):
+                    d.rmdir()
+            except OSError:
+                pass
         self._prune_generations(key, keep_gen=gen)
         self.evict()
         return gen
@@ -4438,7 +4459,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 jid = executor.find_inflight(key)
                 if jid is not None:
                     executor.cancel(jid)
-                deleted = executor.cache_delete(key)
+                try:
+                    deleted = executor.cache_delete(key)
+                except InputError as e:        # an entry a newer haversack wrote:
+                    # refusing is the honest answer, and 409 says what to do about it
+                    raise HTTPException(409, str(e)) from None
                 if not deleted and jid is None:
                     raise HTTPException(404, "not materialized")
                 out = {"deleted": deleted}
@@ -4463,7 +4488,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             jid = executor.find_inflight(key)
             if jid is not None:
                 executor.cancel(jid)
-            deleted = executor.cache_delete(key)
+            try:
+                deleted = executor.cache_delete(key)
+            except InputError as e:        # an entry a newer haversack wrote:
+                # refusing is the honest answer, and 409 says what to do about it
+                raise HTTPException(409, str(e)) from None
             if not deleted and jid is None:
                 raise HTTPException(404, "not materialized")
             out = {"deleted": deleted}

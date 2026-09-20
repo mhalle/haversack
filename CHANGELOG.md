@@ -24,6 +24,22 @@
   A hit costs one pointer read - about 85 ms median from this Mac, measured before
   history existed; a key republished four times carries ~5x the pointer, which has not
   been re-measured on a real bucket.
+- **Configuration sweep: six environments nobody had run, three defects.** The reviewers
+  could attack code but not environments. Two servers sharing one `--cache-dir` (the
+  per-GPU deployment) came through clean - 446 reads, no torn read, a coherent directory
+  afterwards - as did a store made slow rather than broken (`/v1/health` answered in 0.01 s
+  while a store-touching route waited 1.5 s) and, for the first time off APFS, a cache root
+  on exFAT with no hard links and case-insensitive names (9 checks: publish, read, pull,
+  republish, push, history, sweep, delete, no leavings). What broke: an older haversack
+  DELETED an entry written by a newer one, removing the index and leaving bytes it cannot
+  name - refused now, 409 on the wire; a reader killed mid-fill left its work directory for
+  an hour although its process was provably gone, where `cache usage` and `cache clean`
+  cannot see it - death is proved and reclaimed at once now; and a fill needed TWICE the
+  result's size in free space, because it downloaded into its work directory and then
+  copied into place - a 6 MB result failed with 11 MB free. Fills hand the files over
+  instead, which also stops reading and writing every byte twice, and a publication that
+  lands nothing no longer leaves an empty entry directory behind.
+
 - **Fourth review round (one reviewer, the whole branch): eight more, including the same
   window a third time.** Deduplication defeats BOTH earlier attempts at it - pre-listed
   candidates and a refreshed timestamp - because the blob is genuinely old while only the

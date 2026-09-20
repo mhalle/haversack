@@ -120,6 +120,24 @@ local tier's eviction measured against diskcache before writing a third LRU by h
 5. **A rollback exists at every step**: the old code stays until the new one has run a
    release cycle, and `cache push`/`pull` moves entries either way.
 
+## Configurations actually run (2026-09-20)
+
+Every row is a configuration nothing had run before - the reviewers could attack code but
+not environments. Three of the six found defects, which is the usual ratio for this
+subsystem.
+
+| configuration | result |
+|---|---|
+| Two servers sharing ONE `--cache-dir`, against one store (the per-GPU deployment) | **Sound.** 446 reads, no torn read, no error, and the shared directory coherent afterwards: every current generation complete, no dotfiles left behind. |
+| Two haversack versions against one bucket | **One defect.** The older host DELETED an entry it could not read - removing the index and leaving bytes it cannot name. It refuses now (409 on the wire). Publishing over it and sweeping its blobs were already refused. |
+| A reader killed mid-fill (SIGKILL, 24 MB result) | **One defect.** Its work directory survived an hour, invisible to `cache usage` and `cache clean`, although its process was provably gone. Death is proved and reclaimed at once now; age remains the fallback for a pid this host cannot judge. |
+| A store that is SLOW, not broken (1.5 s per read) | **Sound.** `/v1/health` answered in 0.01 s and `/v1/tasks` in 0.00 s while a store-touching route waited 1.52 s: the offload does what it claims. |
+| A cache disk that runs OUT OF SPACE (12 MB image) | **One defect.** A fill downloaded into its work directory and then copied into place, so it needed TWICE the result's size free - a 6 MB result failed with 11 MB free. The files are handed over (`ResultCache.put(move=True)`) now, which also stops reading and writing every byte twice; and a failed publication no longer leaves an empty entry directory. |
+| A cache root on exFAT: no hard links, case-INSENSITIVE | **Sound**, 9 checks: publish, read, pull to another host, republish, push, history, sweep, delete, and no leavings. This is the first time the shared-store protocol has run anywhere but APFS. |
+
+Still unrun: a cache root on a network filesystem; Modal; a store with object versioning;
+a bucket large enough to make `list` and `sweep` cost real money.
+
 ## Order of work
 
 1. ~~**Adversarial review + soak of `objectcache` as it stands.**~~ **DONE 2026-09-19.**

@@ -489,7 +489,11 @@ class SharedResultCache:
                                        ptr.get("meta") or {},
                                        preview_path=_present(work / "preview.png"),
                                        statistics_path=_present(work / "statistics.json"),
-                                       generation=gen)
+                                       generation=gen,
+                                       # the work directory is inside this cache root, so
+                                       # the files are handed over rather than copied: a
+                                       # fill needed twice the result's size free
+                                       move=True)
                     except FileExistsError as e:
                         if "being placed" in str(e):
                             # another PROCESS holds the claim (two servers over one
@@ -570,16 +574,20 @@ class SharedResultCache:
         mine = f"{WORK_PREFIX}{os.getpid()}-"
         for stale in root.glob(f"{WORK_PREFIX}*"):
             try:
-                if _time.time() - stale.stat().st_mtime <= WORK_GRACE_S:
-                    continue
-                # age is not liveness, and this repo says so everywhere else: a fill that
-                # is slow (a slow store is the case in scope) had its work deleted under it
-                # and reported the blob gone (review, 2026-09-20). A directory named by a
-                # live process on this host is left alone.
+                # Death is PROVED where it can be: a directory named by a process that is
+                # gone from this host is reclaimed at once, however new it is - a reader
+                # killed mid-fill otherwise left its download sitting for an hour, and a
+                # dotted directory is invisible to `cache usage` and `cache clean`
+                # (configuration sweep, 2026-09-20). Where death cannot be proved - a pid
+                # from another host sharing this directory, a name this code did not write
+                # - age is the fallback, and a live fill is never touched.
                 pid = stale.name[len(WORK_PREFIX):].split("-")[0]
-                if pid.isdigit() and _alive(int(pid)):
+                if pid.isdigit():
+                    if not _alive(int(pid)):
+                        shutil.rmtree(stale, ignore_errors=True)
                     continue
-                shutil.rmtree(stale, ignore_errors=True)
+                if _time.time() - stale.stat().st_mtime > WORK_GRACE_S:
+                    shutil.rmtree(stale, ignore_errors=True)
             except OSError:
                 pass
         return Path(tempfile.mkdtemp(prefix=mine, dir=root))
@@ -680,6 +688,10 @@ class SharedResultCache:
         pointer this version cannot read is still an entry, and answering False for it
         told an operator deleting a patient's result that there had been nothing there.
 
+        Refuses outright when the entry came from a NEWER haversack: half a deletion -
+        the index gone, bytes left that this version cannot name - is worse than none, and
+        it is the same rule the sweep and the purge follow.
+
         ``report`` receives ``{"key", "existed", "purged", "blobs"}``. **Whether the bytes
         went is not the return value**, and a caller that means "gone" has to look: the
         entry is removed even when the purge cannot run, and saying only that on stderr
@@ -687,6 +699,12 @@ class SharedResultCache:
         2026-09-20).
         """
         import obstore
+        if self._is_newer_format(key):
+            raise ObjectStoreUnsuitable(
+                f"result {key[:12]}...: this entry was written by a newer haversack, so "
+                "this one cannot tell which bytes belong to it. Deleting the entry here "
+                "would leave those bytes in the store with nothing naming them - upgrade "
+                "this host and delete it there")
         existed = False
         try:
             obstore.head(self.store, self._pointer_path(key))
