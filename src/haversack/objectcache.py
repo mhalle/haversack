@@ -81,11 +81,15 @@ HISTORY_MAX_AGE_S = 30 * 24 * 3600
 HISTORY_GC_MARGIN_S = 24 * 3600
 #: How much older than the listing a blob must be before `delete`'s purge will judge it.
 #: The purge spares a blob whose timestamp MOVED since it was listed, which is how a
-#: publication that deduplicated onto it survives - but S3 and R2 record last-modified to
-#: the SECOND, so a refresh inside the listing's own second moves nothing (review,
-#: 2026-09-20). One second plus a margin makes any later refresh land in a later second.
-#: Paid only on a store whose timestamps are that coarse, and only for blobs written just
-#: now: see ``_settled``.
+#: publication that deduplicated onto it survives - but a store that records
+#: last-modified only to the SECOND cannot show a refresh inside the listing's own second
+#: (review, 2026-09-20). One second plus a margin makes any later refresh land in a later
+#: second. Paid only on a store whose timestamps are that coarse, and only for blobs
+#: written just now: see ``_settled``. MEASURED 2026-09-20 (tools/config_sweep/cfg7): R2
+#: reports MILLISECONDS through obstore, so the wait stays dormant there and the re-check
+#: alone carried a 40 s delete-versus-deduplicating-publisher race - 454 reads, no torn
+#: read. AWS S3 documents second-resolution Last-Modified and is where this is expected to
+#: engage; nothing here has run against it.
 PURGE_FRESH_S = 1.5
 #: How many entries ``delete`` will read to establish that an entry's bytes are shared.
 #: Past this the purge does not run: it is one GET per entry, and this cost was removed

@@ -26,6 +26,7 @@ zsh tools/config_sweep/disks.sh                                    # cfg5 + cfg6
 | `cfg4_slow_store.py` | a store that is slow, not broken | nothing (health 0.01 s vs a 1.5 s store route) |
 | `cfg5_full_disk.py` | a cache disk with no room left (12 MB image) | a fill needed TWICE the result's size free |
 | `cfg6_exfat.py` | a cache root on exFAT: no hard links, case-insensitive | nothing |
+| `cfg7_purge_race.py` | a delete loop against a deduplicating publisher, one shared blob | nothing - and it measured R2's timestamps as sub-second, so the whole-second waiting path is dormant there |
 
 `disks.sh` builds and mounts the two disk images with `hdiutil`, the same recipe
 `AGENTS.md` uses for the no-hard-link tests, and detaches them on the way out.
