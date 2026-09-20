@@ -209,6 +209,19 @@ generation leaves when it falls off are reclaimed by `cache sweep`, which nothin
 schedule. Deduplication
 makes this nearly free when a recomputation produces identical bytes. The local copy keeps
 no history - it holds the current generation, as it does today. `delete` removes the entry
-AND its history: for anything near patient data, deletion means gone. History is read
-explicitly (`history()`, `fetch_generation()`); no ordinary read can be served a superseded
-result by accident.
+AND its history. History is read explicitly (`history()`, `fetch_generation()`); no
+ordinary read can be served a superseded result by accident.
+
+**Amended 2026-09-20.** The original decision added "for anything near patient data,
+deletion means gone", meaning the BYTES went the moment `delete` returned. That guarantee
+was withdrawn, by the user, after it proved to be the most expensive line in the design.
+Reclaiming bytes at delete time means deciding, against live publishers, whether a blob the
+entry named is also one that a publication happening right now has deduplicated onto. Four
+attempts went into that question - pre-listing the candidates, refreshing a deduplicated
+blob's timestamp, re-checking each candidate before deleting it, waiting out a coarse
+clock - and reviewers were still finding holes. `delete` now removes the entry; `haversack
+cache sweep` reclaims the bytes, deciding the same question with nothing else moving. An
+operator who needs the bytes gone runs the sweep, and a deployment that needs that promise
+should run it on a schedule and say so in its own documentation. The per-delete purge, its
+scan limit, its freshness margin and its coarse-clock wait are all deleted - about 120
+lines, and the hardest remaining reasoning in the module.

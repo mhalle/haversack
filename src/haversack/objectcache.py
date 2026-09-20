@@ -79,23 +79,6 @@ HISTORY_MAX_AGE_S = 30 * 24 * 3600
 #: still lists - the rollback data the history decision exists to provide (review,
 #: 2026-09-20). Listing is cheap to get wrong; deleting is not.
 HISTORY_GC_MARGIN_S = 24 * 3600
-#: How much older than the listing a blob must be before `delete`'s purge will judge it.
-#: The purge spares a blob whose timestamp MOVED since it was listed, which is how a
-#: publication that deduplicated onto it survives - but a store that records
-#: last-modified only to the SECOND cannot show a refresh inside the listing's own second
-#: (review, 2026-09-20). One second plus a margin makes any later refresh land in a later
-#: second. Paid only on a store whose timestamps are that coarse, and only for blobs
-#: written just now: see ``_settled``. MEASURED 2026-09-20 (tools/config_sweep/cfg7): R2
-#: reports MILLISECONDS through obstore, so the wait stays dormant there and the re-check
-#: alone carried a 40 s delete-versus-deduplicating-publisher race - 454 reads, no torn
-#: read. AWS S3 documents second-resolution Last-Modified and is where this is expected to
-#: engage; nothing here has run against it.
-PURGE_FRESH_S = 1.5
-#: How many entries ``delete`` will read to establish that an entry's bytes are shared.
-#: Past this the purge does not run: it is one GET per entry, and this cost was removed
-#: from `list` for exactly that reason (review, 2026-09-20). `cache sweep` does the same
-#: work once, deliberately, instead of on a route.
-PURGE_SCAN_LIMIT = 2000
 #: How often a store fault on a READ path may be reported. A store that is down faults on
 #: every request, and a line per request is a denial of service on the operator's terminal.
 WARN_INTERVAL_S = 60.0
@@ -150,26 +133,6 @@ def check_conditional_writes(store, prefix: str = "") -> None:
         raise ObjectStoreUnsuitable(
             f"{e}; use S3, GCS, Azure or R2, or drop --result-store for a local-only "
             "cache") from None
-
-
-def _settled(candidates) -> None:
-    """Wait until a refresh of these blobs would be VISIBLE, on a store that dates objects
-    to the whole second.
-
-    The purge spares a blob whose timestamp moved since it was listed; that is what keeps a
-    publication that deduplicated onto it. A store recording last-modified to the second
-    cannot show a move that happened inside the listing's own second, so this waits out the
-    remainder - at most ``PURGE_FRESH_S``, and only when the store's own timestamps say it
-    is needed. A store with sub-second times (obstore's in-memory one, most filesystems)
-    waits not at all, which is measured here rather than assumed.
-    """
-    times = [b["modified"] for b in candidates
-             if isinstance(b.get("modified"), (int, float)) and not isinstance(b, bool)]
-    if not times or any(t != int(t) for t in times):
-        return                                 # sub-second resolution: a move is visible
-    wait = PURGE_FRESH_S - (time.time() - max(times))
-    if wait > 0:
-        time.sleep(min(wait, PURGE_FRESH_S))
 
 
 def _warn_once(message: str) -> None:
@@ -759,41 +722,32 @@ class SharedResultCache:
         self.local.add_artifact(key, name, src_path, generation=written["generation"])
         return True
 
-    def delete(self, key: str, *, purge: bool = True, report=None) -> bool:
-        """Remove the entry everywhere this host can reach: the pointer, its BYTES, and
-        the local copy. Other hosts' local copies stop being served at their next read of
-        the pointer.
+    def delete(self, key: str) -> bool:
+        """Remove the entry: the pointer, and this host's copy. True if anything went.
 
-        ``purge`` (the default) deletes the blobs this entry held - current generation and
-        history - once no remaining pointer references them, without waiting for the
-        sweep's grace. The decision behind history says deletion means gone, and a `delete`
-        that left the bytes readable in the bucket for a day, or for ever if nothing runs a
-        sweep, does not mean that (review, 2026-09-20). Bytes another entry shares are
-        KEPT, and so are bytes whose fate cannot be established because some pointer here
-        cannot be read - that case is reported, because for a deletion "I could not tell"
-        must not look like "done".
+        **The BYTES are not reclaimed here** - `haversack cache sweep` does that, once
+        nothing references them (2026-09-20). Reclaiming them at delete time meant deciding,
+        against live publishers, whether a blob this entry named was also one that a
+        publication happening right now had deduplicated onto. Four attempts went into that
+        question - pre-listed candidates, a refreshed timestamp, a re-check before each
+        delete, a wait for coarse clocks - and the reviewers were still finding holes in it.
+        The guarantee it was buying, "a deletion removes the bytes the moment it returns",
+        is one the operator can have instead by running a sweep, which decides the same
+        question with nothing else moving.
 
-        Returns whether anything was removed. Asked of the OBJECT, not of a parse: a
-        pointer this version cannot read is still an entry, and answering False for it
-        told an operator deleting a patient's result that there had been nothing there.
-
-        Refuses outright when the entry came from a NEWER haversack: half a deletion -
-        the index gone, bytes left that this version cannot name - is worse than none, and
-        it is the same rule the sweep and the purge follow.
-
-        ``report`` receives ``{"key", "existed", "purged", "blobs"}``. **Whether the bytes
-        went is not the return value**, and a caller that means "gone" has to look: the
-        entry is removed even when the purge cannot run, and saying only that on stderr
-        put "deleted" on the wire while the bytes were still readable (review,
-        2026-09-20).
+        Asked of the OBJECT, not of a parse: a pointer this version cannot read is still an
+        entry, and answering False for it told an operator deleting a patient's result that
+        there had been nothing there. An entry a NEWER haversack wrote is refused outright:
+        removing it would leave its blobs with nothing naming them, and this version's own
+        sweep - which spares nothing it cannot account for only while that pointer is
+        THERE - would then collect another host's live data.
         """
         import obstore
         if self._is_newer_format(key):
             raise ObjectStoreUnsuitable(
-                f"result {key[:12]}...: this entry was written by a newer haversack, so "
-                "this one cannot tell which bytes belong to it. Deleting the entry here "
-                "would leave those bytes in the store with nothing naming them - upgrade "
-                "this host and delete it there")
+                f"result {key[:12]}...: this entry was written by a newer haversack. "
+                "Removing it here would leave its bytes with nothing naming them, and a "
+                "later sweep would collect them - upgrade this host and delete it there")
         existed = False
         try:
             obstore.head(self.store, self._pointer_path(key))
@@ -801,85 +755,12 @@ class SharedResultCache:
         except FileNotFoundError:
             pass                               # anything else the store raises comes out:
                                                # a delete must not report success on doubt
-        ptr, _ = self._read_pointer(key)
-        # every generation the pointer LISTS, not only those history still shows: the age
-        # bound decides what is offered for reading, and deleting must not leave bytes
-        # behind because a generation grew old (review, 2026-09-20)
-        mine = {b["digest"] for g in (_generations(ptr, now=0, keep_undated=True)
-                                      if ptr else []) for b in g["files"].values()}
         try:
             obstore.delete(self.store, self._pointer_path(key))
         except FileNotFoundError:
             pass
         local = self.local.delete(key)
-        # an unreadable pointer names blobs this version cannot see, so "nothing left to
-        # purge" is not something it knows
-        purged = (self._purge(key, mine) if (purge and mine)
-                  else (not existed or ptr is not None))
-        if report:
-            report({"key": key, "existed": existed or local, "purged": purged,
-                    "blobs": len(mine)})
         return existed or local
-
-    def _purge(self, key: str, digests: set) -> bool:
-        """Delete the blobs a removed entry held, except those another entry still needs;
-        whether they are now gone.
-
-        Refuses - loudly - when a pointer cannot be read, because then "no remaining entry
-        references these bytes" is not something this process knows. Refuses too when
-        there are more entries than ``PURGE_SCAN_LIMIT``: establishing "shared" is one GET
-        per entry, and a bucket several servers fill would make one DELETE cost thousands
-        of requests.
-
-        The scan and the deletes are not one step, and an entry published in between may
-        DEDUPLICATE onto these bytes - which is why the candidates are listed first and
-        each one re-checked against that listing before it goes: a deduplicated write
-        refreshes the blob, so it no longer matches what was listed and is kept. What
-        cannot be finished is REPORTED (``purged``) rather than assumed, because for a
-        deletion "I could not tell" must not look like "done"; `haversack cache sweep`
-        finishes it once the store is quiet. Measured on R2 (2026-09-20): two keys over
-        identical bytes, one deleted in a loop while the other was republished, 348 reads
-        of the survivor, no torn read, and it was readable at the end.
-        """
-        import obstore
-        # LISTED BEFORE the pointers are read, exactly as `sweep` does it: a publication
-        # landing after this listing cannot be in it, and one that deduplicated onto these
-        # bytes refreshed them, which the re-check before each delete then sees
-        listed = self.blobs.entries()
-        pointers, unreadable = self._scan_pointers(limit=PURGE_SCAN_LIMIT + 1)
-        if len(pointers) > PURGE_SCAN_LIMIT:
-            print(f"warning: {key[:12]}... was deleted, but this store holds more than "
-                  f"{PURGE_SCAN_LIMIT} entries, so its bytes were left in place rather "
-                  "than reading every one of them. Run `haversack cache sweep` to reclaim "
-                  "them.", file=sys.stderr, flush=True)
-            return False
-        if unreadable:
-            print(f"warning: {key[:12]}... was deleted, but {unreadable} object(s) under "
-                  "results/ could not be read, so its bytes were left in place. Remove or "
-                  "repair them and run `haversack cache sweep` to finish the deletion.",
-                  file=sys.stderr, flush=True)
-            return False
-        # every generation another entry LISTS, on the same rule as above: a blob that
-        # is only in another key's aged-out history is still that key's to lose
-        keep = {b["digest"] for ptr in pointers
-                for g in _generations(ptr, now=0, keep_undated=True)
-                for b in g["files"].values()}
-        # through provender's sweep, not a bare delete: it re-checks each object against
-        # the state it was listed in, which is the only thing that distinguishes a blob a
-        # publication just deduplicated onto from one that is really unreferenced
-        wanted = digests - keep
-        mine = [b for b in listed if b["digest"] in wanted]
-        _settled(mine)                         # see below: coarse timestamps only
-        deferred = 0
-        if not mine:
-            return True
-        got = self.blobs.sweep(keep=keep, candidates=mine, allow_empty=not keep)
-        if got.get("refreshed"):
-            print(f"warning: {key[:12]}... was deleted, but {got['refreshed']} of its "
-                  "blob(s) were written or refreshed while that was decided, so they were "
-                  "left in place. Run `haversack cache sweep` once the store is quiet.",
-                  file=sys.stderr, flush=True)
-        return not got.get("refreshed")
 
     def list(self, limit: int = 500) -> list:
         """The newest published entries, read from the pointers alone.
@@ -954,7 +835,7 @@ class SharedResultCache:
         return out, unreadable
 
     def sweep(self, *, max_age_s: float | None = None, grace_s: float = BLOB_GRACE_S,
-              now: float | None = None) -> dict:
+              now: float | None = None, allow_empty: bool = False) -> dict:
         """Delete what no pointer needs: pointers published more than ``max_age_s`` ago
         (when given), then blobs no remaining pointer - current OR kept history - refers
         to, through provender's sweep.
@@ -972,6 +853,11 @@ class SharedResultCache:
 
         Expiring a pointer is an unconditional delete, so a republication that lands
         between reading the pointer and deleting it is expired with it: a miss.
+
+        An index with NO entries is refused unless ``allow_empty`` says it was meant.
+        "Everything here was deleted" and "I am looking in the wrong place" arrive as the
+        same answer - no pointers - and only one of them means the bytes are garbage. After
+        deleting the last entry in a store, that is the flag to pass.
         """
         import obstore
         from provender import EmptyKeepSet
@@ -1016,13 +902,14 @@ class SharedResultCache:
         # index that was read
         try:
             got = self.blobs.sweep(keep=referenced, candidates=candidates, grace_s=0,
-                                   now=now, allow_empty=bool(pointers))
+                                   now=now, allow_empty=bool(pointers) or allow_empty)
         except EmptyKeepSet:
             if candidates:
-                print(f"warning: no readable entries under {self.prefix}results/, but "
-                      f"{len(candidates)} blob(s) are stored there; deleting none. If the "
-                      "entries really are gone, `haversack cache clean` the local copy and "
-                      "remove the prefix by hand.", file=sys.stderr, flush=True)
+                print(f"warning: no entries under {self.prefix}results/, but "
+                      f"{len(candidates)} blob(s) are stored there; deleting none. If they "
+                      "really were all deleted, sweep again with --empty-index-ok; if this "
+                      "is the wrong prefix, that flag would empty someone else's store.",
+                      file=sys.stderr, flush=True)
             return {"expired_pointers": expired, "deleted_blobs": 0, "already_gone": 0,
                     "unreadable_pointers": 0}
         return {"expired_pointers": expired, "deleted_blobs": got["deleted"],

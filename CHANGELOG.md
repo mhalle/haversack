@@ -24,6 +24,19 @@
   A hit costs one pointer read - about 85 ms median from this Mac, measured before
   history existed; a key republished four times carries ~5x the pointer, which has not
   been re-measured on a real bucket.
+- **`delete` stops reclaiming bytes; `haversack cache sweep` does it** (decided
+  2026-09-20, replacing the "deletion means gone" half of the history decision). Deciding at
+  delete time whether a blob belongs only to the entry being removed means deciding it
+  against live publishers, because deduplication lets a publication happening right now
+  reference those same bytes. Four attempts went into that - pre-listed candidates, a
+  refreshed timestamp on deduplicated writes, a re-check before each delete, a wait for
+  coarse clocks - and reviewers were still finding holes in it. The entry goes
+  immediately, everywhere; the bytes wait for a sweep, which answers the same question with
+  nothing else moving. About 120 lines and the hardest remaining reasoning in the module go
+  with it. A sweep of a store with NO entries left is refused unless `--empty-index-ok` says
+  it was meant, because "everything was deleted" and "wrong prefix" look identical from
+  there.
+
 - **Fifth review round (the same reviewer, on the fixes it asked for): nine more.** Two
   were serious and both were in the new code. A filler killed between its claim and its
   release left that claim behind, and every later fill on that host then read "someone is

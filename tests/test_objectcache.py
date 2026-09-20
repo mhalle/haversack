@@ -830,14 +830,10 @@ class TestBoundedHistory(_Hosts):
         dest.mkdir()
         self.assertEqual([], self.b.history(KEY))
         self.assertIsNone(self.b.fetch_generation(KEY, gen, dest))
-        # the BYTES too, and without waiting for a sweep that nothing may ever run: a
-        # delete that leaves them readable in the bucket does not mean "gone"
-        for labels in (b"one", b"two"):
-            self.assertFalse(self.b.blobs.has(
-                f"sha256:{hashlib.sha256(labels).hexdigest()}"), labels)
+        # the bytes of both generations are now unreferenced, and a sweep takes them
         later = objectcache.time.time() + objectcache.BLOB_GRACE_S + 60
-        self.assertEqual(0, self.a.sweep(now=later)["deleted_blobs"],
-                         "nothing left for the sweep to find")
+        self.assertEqual(2, self.a.sweep(now=later, grace_s=0,
+                                         allow_empty=True)["deleted_blobs"])
 
     def test_identical_bytes_make_history_nearly_free(self):
         self.publish(self.a, b"same")
@@ -1272,87 +1268,40 @@ class TestHistoryAgesOutWhenQuiet(_Hosts):
         self.assertNotIn("meta", self.pointer()["history"][0])
 
 
-class TestDeleteMeansGone(_Hosts):
-    def test_the_bytes_go_without_waiting_for_a_sweep(self):
-        self.publish(self.a, b"patient one")
-        self.publish(self.a, b"patient two")
-        self.a.delete(KEY)
-        for labels in (b"patient one", b"patient two"):
-            self.assertFalse(self.a.blobs.has(f"sha256:{hashlib.sha256(labels).hexdigest()}"))
+class TestDeleteRemovesTheEntry(_Hosts):
+    """`delete` removes the entry - the pointer and this host's copy. The BYTES are
+    reclaimed by `haversack cache sweep`, not here (decided 2026-09-20): deciding at delete
+    time whether a blob was one a live publication had just deduplicated onto took four
+    attempts and reviewers were still finding holes, and a sweep answers the same question
+    with nothing else moving."""
 
-    def test_bytes_another_entry_shares_are_kept(self):
+    def test_the_entry_goes_everywhere_at_once(self):
+        self.publish(self.a, b"one")
+        self.b.get(KEY)
+        self.assertTrue(self.a.delete(KEY))
+        self.assertIsNone(self.b.get(KEY))
+        self.assertIsNone(self.a.local.get(KEY), "and this host's own copy with it")
+
+    def test_the_bytes_are_reclaimed_by_a_sweep(self):
+        self.publish(self.a, b"one")
+        self.a.delete(KEY)
+        digest = f"sha256:{hashlib.sha256(b'one').hexdigest()}"
+        self.assertTrue(self.a.blobs.has(digest), "still there: a sweep decides, not this")
+        later = time.time() + objectcache.BLOB_GRACE_S + 60
+        self.assertEqual(1, self.a.sweep(now=later, grace_s=0,
+                                         allow_empty=True)["deleted_blobs"])
+        self.assertFalse(self.a.blobs.has(digest))
+
+    def test_a_sweep_after_a_delete_spares_what_another_entry_shares(self):
         self.publish(self.a, b"shared", key="cd" * 32)
         self.publish(self.a, b"shared")
         self.a.delete(KEY)
+        later = time.time() + objectcache.BLOB_GRACE_S + 60
+        self.a.sweep(now=later, grace_s=0)
         self.assertEqual(b"shared", Path(self.b.get("cd" * 32)[0]).read_bytes())
 
-    def test_bytes_another_entry_holds_only_in_HISTORY_are_kept(self):
-        """A blob that is another key's superseded generation is still that key's to
-        lose - and a keep set built from current generations alone took it."""
-        self.publish(self.a, b"shared", key="cd" * 32)
-        self.publish(self.a, b"newer", key="cd" * 32)     # "shared" is now history there
-        self.publish(self.a, b"shared")
-        self.a.delete(KEY)
-        digest = f"sha256:{hashlib.sha256(b'shared').hexdigest()}"
-        self.assertTrue(self.a.blobs.has(digest))
-        old_gen = self.a.history("cd" * 32)[1]["generation"]
-        dest = self.tmp / "hist-kept"
-        self.assertIsNotNone(self.b.fetch_generation("cd" * 32, old_gen, dest))
-
-    def test_an_aged_out_generations_bytes_go_too(self):
-        """The age bound decides what history LISTS; it must not decide what a deletion
-        leaves behind."""
-        self.publish(self.a, b"ancient")
-        ptr = self.pointer()
-        self.publish(self.a, b"current")
-        aged = self.pointer()
-        aged["history"][0]["published"] = time.time() - objectcache.HISTORY_MAX_AGE_S - 60
-        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(aged).encode())
-        self.assertEqual(1, len(self.a.history(KEY)), "no longer listed")
-        self.a.delete(KEY)
-        self.assertFalse(self.a.blobs.has(ptr["files"][RESULT_NAME]["digest"]),
-                         "but still deleted")
-
-    def test_a_huge_store_refuses_the_purge_and_says_what_to_run(self):
-        import contextlib
-        import io
-        self.publish(self.a, b"patient")
-        self.publish(self.a, b"another", key="cd" * 32)    # something left to scan
-        err = io.StringIO()
-        with unittest.mock.patch.object(objectcache, "PURGE_SCAN_LIMIT", 0), \
-                contextlib.redirect_stderr(err):
-            self.assertTrue(self.a.delete(KEY))
-        self.assertIn("cache sweep", err.getvalue())
-        self.assertTrue(self.a.blobs.has(
-            f"sha256:{hashlib.sha256(b'patient').hexdigest()}"))
-
-    def test_delete_reports_whether_the_bytes_went(self):
-        """The return value says an entry was removed; only the report says the bytes
-        were - and a caller that means "gone" has to look."""
-        self.publish(self.a, b"patient")
-        seen = []
-        self.a.delete(KEY, report=seen.append)
-        self.assertEqual(True, seen[0]["purged"])
-        self.publish(self.a, b"patient two")
-        self.publish(self.a, b"another", key="cd" * 32)
-        seen.clear()
-        with unittest.mock.patch.object(objectcache, "PURGE_SCAN_LIMIT", 0):
-            self.a.delete(KEY, report=seen.append)
-        self.assertEqual(False, seen[0]["purged"])
-        self.assertTrue(seen[0]["existed"])
-
-    def test_a_pointer_that_cannot_be_read_stops_the_purge_loudly(self):
-        """"I could not tell" must not look like "done" for a deletion."""
-        self.publish(self.a, b"patient")
-        obstore.put(self.store, "pre/results/.stray.json", b"{}")
-        self.assertTrue(self.a.delete(KEY))
-        self.assertTrue(self.a.blobs.has(f"sha256:{hashlib.sha256(b'patient').hexdigest()}"),
-                        "kept, because nothing could establish they were unreferenced")
-
     def test_deleting_an_entry_this_version_cannot_PARSE_still_says_it_deleted_it(self):
-        """Garbage under a key - a truncated write, a stray object - is nobody's data, so
-        an operator can still remove the entry. Something a NEWER haversack wrote is
-        different, and is refused: see TestVersionSkewOnOneBucket."""
+        """Garbage under a key - a truncated write, a stray object - is nobody's data."""
         self.publish(self.a, b"one")
         obstore.put(self.store, f"pre/results/{KEY}.json", b"{not a pointer")
         cold = SharedResultCache(self.store, ResultCache(self.tmp / "cold"), prefix="pre/",
@@ -1360,7 +1309,6 @@ class TestDeleteMeansGone(_Hosts):
         self.assertTrue(cold.delete(KEY), "the operator removed something, and is told so")
         self.assertEqual([], [o for b in obstore.list(self.store, f"pre/results/{KEY}")
                               for o in b])
-
 
 class TestFetchGenerationReportsWhatItWrote(_Hosts):
     def test_a_generation_whose_files_cannot_be_placed_is_not_success(self):
@@ -1502,7 +1450,7 @@ class TestSweepOrdering(_Hosts):
         loses a result that was just computed (review, 2026-09-20)."""
         self.publish(self.a, b"unrelated", key="ee" * 32)   # a live key, so the sweep runs
         self.publish(self.a, b"identical", key="cd" * 32)
-        self.a.delete("cd" * 32, purge=False)          # the blob is now an orphan
+        self.a.delete("cd" * 32)                       # its blob is now an orphan
         real = SharedResultCache._scan_pointers
         raced = []
 
@@ -1561,44 +1509,6 @@ class TestStoreUrlErrors(unittest.TestCase):
         self.assertNotIn("credential", str(cm.exception).lower())
 
 
-class TestPurgeWindow(_Hosts):
-    """`delete` purges the entry's bytes by scanning the other pointers and then deleting
-    what none of them names. Those are two steps, and this pins which way the gap falls."""
-
-    def test_an_entry_published_before_the_scan_keeps_its_shared_bytes(self):
-        self.publish(self.a, b"shared", key="cd" * 32)
-        self.publish(self.a, b"shared")
-        self.a.delete(KEY)
-        self.assertEqual(b"shared", Path(self.b.get("cd" * 32)[0]).read_bytes())
-
-    def test_one_published_inside_the_window_keeps_them(self):
-        """The window is closed, and by the same pair of mechanisms the sweep uses: the
-        candidates are listed before the entries are read, and a deduplicated write
-        refreshes the blob, which the re-check before each delete sees. It cost three
-        attempts to get here (reviews of 2026-09-20)."""
-        self.publish(self.a, b"shared")
-        real = SharedResultCache._scan_pointers
-        raced = []
-
-        def scan(cache, **kw):
-            got = real(cache, **kw)
-            if not raced:                      # lands after the scan, before the deletes
-                raced.append(True)
-                self.publish(self.b, b"shared", key="cd" * 32)
-            return got
-        seen = []
-        with unittest.mock.patch.object(SharedResultCache, "_scan_pointers", scan):
-            self.a.delete(KEY, report=seen.append)
-        self.assertTrue(raced)
-        # asked of a host that has to FETCH them: the publisher would serve from its own
-        # disk and hide the loss
-        cold = self.host("cold")
-        self.assertEqual(b"shared", Path(cold.get("cd" * 32)[0]).read_bytes())
-        self.assertFalse(seen[0]["purged"],
-                         "and the deletion says it could not finish, rather than claiming "
-                         "bytes are gone that are not")
-
-
 class TestGapsFromTheThirdMutationRun(_Hosts):
     def test_a_dated_history_entry_with_damaged_files_is_still_refused(self):
         """Every junk entry in the earlier tests was also undated, so the date rule alone
@@ -1631,7 +1541,9 @@ class TestGapsFromTheThirdMutationRun(_Hosts):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             self.a.sweep(grace_s=0)
-        self.assertIn("no readable entries under", err.getvalue())
+        self.assertIn("no entries under", err.getvalue())
+        self.assertIn("--empty-index-ok", err.getvalue(),
+                      "and names the flag that would mean it on purpose")
 
     def test_pull_names_the_key_that_failed(self):
         self.publish(self.a, b"one")
@@ -1651,45 +1563,6 @@ class TestGapsFromTheThirdMutationRun(_Hosts):
         got = self.b.pull()
         self.assertEqual(1, got["pulled"], "incomplete is not current")
         self.assertEqual({"outputs": ["one"]}, self.b.local.get(KEY)[1])
-
-
-class TestPurgeReChecksToo(_Hosts):
-    def test_a_publication_that_dedupes_during_a_purge_keeps_its_bytes(self):
-        """`delete` decides "unreferenced" by scanning the other entries; a publication
-        that lands after that scan and deduplicates onto these bytes refreshes them, and
-        the re-check before each delete is what tells the two apart."""
-        self.publish(self.a, b"shared")
-        real = SharedResultCache._scan_pointers
-        raced = []
-
-        def scan(cache, **kw):
-            got = real(cache, **kw)
-            if not raced:
-                raced.append(True)
-                self.publish(self.b, b"shared", key="cd" * 32)
-            return got
-        with unittest.mock.patch.object(SharedResultCache, "_scan_pointers", scan):
-            self.a.delete(KEY)
-        self.assertTrue(raced)
-        self.assertEqual(b"shared", Path(self.host("cold3").get("cd" * 32)[0]).read_bytes())
-
-    def test_and_says_it_could_not_finish(self):
-        self.publish(self.a, b"shared")
-        real = SharedResultCache._scan_pointers
-        raced, seen = [], []
-
-        def scan(cache, **kw):
-            got = real(cache, **kw)
-            if not raced:
-                raced.append(True)
-                self.publish(self.b, b"shared", key="cd" * 32)
-            return got
-        with unittest.mock.patch.object(SharedResultCache, "_scan_pointers", scan):
-            self.a.delete(KEY, report=seen.append)
-        self.assertFalse(seen[0]["purged"], "a deletion that left bytes says so")
-
-
-# -- the fourth review round (one reviewer, whole-branch, 2026-09-20) --------------------
 
 
 class TestAnOrphanedGenerationIsAdopted(_Hosts):

@@ -249,6 +249,11 @@ options is the same as the header.
   shared by every server run on the machine. `haversack cache list` shows its size and
   `haversack cache clean results` sweeps it - with `--result-store` in use, that clears only
   this machine's copy, never the shared store.
+- **Deleting from a shared store** (`DELETE` on a path-addressed result, or
+  `haversack cache delete`): removes the ENTRY - the pointer every server reads, and this
+  server's copy. The bytes stay until `haversack cache sweep <store>` reclaims what nothing
+  references any more. If your deployment needs "deleted" to mean the bytes are gone by a
+  deadline, run the sweep on that schedule; nothing runs it for you.
 - **Shared result store** (`--result-store s3://bucket/prefix`, or `gs://`, `az://`, or
   `HAVERSACK_RESULT_STORE`; credentials from the environment as obstore reads them): every
   server naming the same store serves every result any of them computed. The store is the

@@ -905,6 +905,10 @@ def _command_line() -> click.Group:
             click.Option(['--grace-hours'], type=float, default=24.0,
                          help=('spare bytes written within this window; they may belong to '
                                'a result being published right now')),
+            click.Option(['--empty-index-ok'], is_flag=True,
+                         help=('sweep even when the store holds no results at all. Without '
+                               'it an empty index stops the run, because "everything was '
+                               'deleted" and "wrong prefix" look identical from here')),
         ])))
     return root
 
@@ -1460,7 +1464,8 @@ def _cmd_cache_move(args) -> int:
               file=sys.stderr)
     else:
         max_age = (args.older_than_days * 86400) if args.older_than_days else None
-        got = shared.sweep(max_age_s=max_age, grace_s=args.grace_hours * 3600)
+        got = shared.sweep(max_age_s=max_age, grace_s=args.grace_hours * 3600,
+                           allow_empty=args.empty_index_ok)
         print(f"deleted {got['deleted_blobs']} unreferenced object(s), expired "
               f"{got['expired_pointers']} entr{'y' if got['expired_pointers'] == 1 else 'ies'}"
               + (f", left {got['unreadable_pointers']} unreadable object(s) alone"
