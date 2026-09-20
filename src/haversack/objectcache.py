@@ -606,6 +606,147 @@ class SharedResultCache:
                 "unreadable_pointers": 0}
 
 
+    # -- migration -----------------------------------------------------------------------
+
+    def push(self, *, conflict: str = "skip", limit: int | None = None,
+             report=None) -> dict:
+        """Publish this host's LOCAL cache into the store; counts by outcome.
+
+        The point of the transition (`docs/cache-consolidation.md`): a cache that has been
+        filling up for months is worth GPU-hours, and nothing else recovers it once the
+        local protocol goes.
+
+        Each entry keeps the generation token it already has, so the local copy is
+        instantly the store's own copy of that publication and the first read after the
+        switch downloads nothing. A legacy flat entry - from before generations - is given
+        one, and costs one download the first time it is read.
+
+        Idempotent by construction: blobs are create-if-absent and the pointer is written
+        conditionally, so a push interrupted halfway is rerun, and two hosts pushing
+        overlapping caches upload the shared bytes once.
+
+        ``conflict`` decides what happens when the store already has the key:
+        ``"skip"`` (the default: it may be newer than ours), ``"newer"`` (compare the
+        ``computed`` timestamps and replace only when ours is newer), or ``"force"``.
+        """
+        from .serve import ARTIFACT_NAMES, RESULT_NAME
+        if conflict not in ("skip", "newer", "force"):
+            raise InputError(f"conflict {conflict!r}: expected skip, newer or force")
+        out = {"pushed": 0, "skipped": 0, "replaced": 0, "failed": 0, "unreadable": 0}
+        for key in self._local_keys(limit=limit):
+            where = self.local._resolve(key)           # leases it: not swept mid-upload
+            if where is None:
+                out["unreadable"] += 1
+                continue
+            if conflict == "skip" and self._read_pointer(key)[0] is not None:
+                # asked BEFORE the bytes are touched: a rerun over a cache of thousands
+                # should cost one pointer read each, not a re-hash of every result. The
+                # swap below asks again, so a key published in between is still not lost
+                out["skipped"] += 1
+                if report:
+                    report(key, "skipped")
+                continue
+            gen = self.local.generation(key) or uuid.uuid4().hex
+            try:
+                result = json.loads((where / "result.json").read_text(encoding="utf-8"))
+                meta = json.loads((where / "meta.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                out["unreadable"] += 1                 # half an entry is not worth pushing
+                continue
+            sources = {n: where / n for n in (RESULT_NAME, *ARTIFACT_NAMES)
+                       if (where / n).exists()}
+            if RESULT_NAME not in sources:
+                out["unreadable"] += 1
+                continue
+            try:
+                files = {n: self.blobs.put_file(src) for n, src in sources.items()}
+                outcome = self._swap(key, _migrating(conflict, gen, files, result, meta))
+                self._verify(files, sources)
+            except Exception as e:                     # noqa: BLE001 - one bad entry is
+                out["failed"] += 1                     # not a reason to abandon the rest
+                if report:
+                    report(key, f"failed: {type(e).__name__}: {e}")
+                continue
+            if outcome is None:
+                out["skipped"] += 1
+            else:
+                out["replaced" if outcome.get("history") else "pushed"] += 1
+            if report:
+                report(key, "skipped" if outcome is None else "pushed")
+        return out
+
+    def pull(self, *, limit: int | None = None, report=None) -> dict:
+        """Materialize the store's entries into this host's local cache.
+
+        For a host that wants to be warm before it serves, and the way out of the store:
+        after a pull, the local cache answers on its own. Entries already current here cost
+        one pointer read and no bytes.
+        """
+        out = {"pulled": 0, "current": 0, "failed": 0, "unreadable": 0}
+        pointers, unreadable = self._scan_pointers(newest_first=True, limit=limit)
+        out["unreadable"] = unreadable
+        for ptr in pointers:
+            key = ptr["_key"]
+            if self.local.generation(key) == ptr["generation"]:
+                out["current"] += 1
+                if report:
+                    report(key, "current")
+                continue
+            try:
+                ok = self._fill(key, ptr)
+            except Exception as e:                     # noqa: BLE001
+                ok = False
+                if report:
+                    report(key, f"failed: {type(e).__name__}: {e}")
+            out["pulled" if ok else "failed"] += 1
+            if report and ok:
+                report(key, "pulled")
+        return out
+
+    def _local_keys(self, *, limit: int | None = None) -> list:
+        """Every entry in the local cache, newest first. Dotfiles are not entries - a
+        staging directory, a tomb mid-reclamation and a fill's work directory all live
+        there, and pushing one would publish an unfinished result."""
+        try:
+            dirs = [d for d in self.local.root.iterdir()
+                    if d.is_dir() and not d.name.startswith(".")]
+        except OSError:
+            return []
+
+        def _mtime(d):
+            try:
+                return d.stat().st_mtime
+            except OSError:
+                return 0.0
+        dirs.sort(key=_mtime, reverse=True)
+        return [d.name for d in dirs[:limit]]
+
+
+def _migrating(conflict: str, gen: str, files: dict, result: dict, meta: dict):
+    """The pointer a migration writes, or None to leave the store's entry alone.
+
+    A key already in the store may be NEWER than the copy being pushed - another host
+    computed it after this cache went cold - so the default refuses to replace it. Under
+    ``newer`` the two ``computed`` timestamps decide, and a store entry with no timestamp
+    is treated as unknown rather than old: a migration should not overwrite what it cannot
+    compare.
+    """
+    def update(current):
+        if current is not None and conflict != "force":
+            if conflict == "skip":
+                return None
+            theirs = (current.get("meta") or {}).get("computed")
+            ours = meta.get("computed")
+            if theirs is None or ours is None or theirs >= ours:
+                return None
+        now = time.time()
+        return {"format": POINTER_FORMAT, "generation": gen,
+                "published": meta.get("computed") or now, "files": files,
+                "result": result, "meta": meta,
+                "history": _kept_history(current, now)}
+    return update
+
+
 def _kept_history(current, now: float) -> list:
     """The history a publication replacing ``current`` should carry: what it replaces,
     then that pointer's own history, bounded by ``HISTORY_KEEP`` and ``HISTORY_MAX_AGE_S``.

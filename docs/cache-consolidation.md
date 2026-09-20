@@ -144,9 +144,13 @@ local tier's eviction measured against diskcache before writing a third LRU by h
    - **A blocking call changes what a route may do.** A lookup that was a stat became a
      network round trip, and the async routes had to move it off the event loop. Every
      backend the consolidation adds has to be re-examined for this, not assumed.
-2. **`haversack cache push/pull`** (design in the session of 2026-09-19): migrate an existing
-   local or Modal cache into the store, preserving each entry's generation token so the local
-   copy is instantly current. Idempotent by construction.
+2. ~~**`haversack cache push/pull`**~~ **DONE 2026-09-20.** `cache push [--conflict
+   skip|newer|force]` and `cache pull`, both `--limit`-able, on the local cache and any
+   store. Generation tokens are preserved, so a pushed entry is served locally without a
+   download. Verified against R2: 12 entries pushed in 16.0 s, a second push skipped all
+   12 in 1.7 s, and a pull onto an EMPTY machine took 4.7 s, after which that machine
+   served every entry from its local cache with no store involved. The Modal half is
+   the same call inside a container with the cache volume mounted, and is still to do.
 3. **The local blob store + index**, behind a flag, reading legacy entries. Measure against
    diskcache first. Retire lease/claim/tomb code ONLY once its tests are green on both.
 4. **Inputs onto the same store**, retiring `SeriesCache`'s claim protocol.

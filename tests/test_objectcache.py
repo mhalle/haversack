@@ -807,3 +807,194 @@ class TestBoundedHistory(_Hosts):
         self.assertEqual(b"two", Path(self.b.get(KEY)[0]).read_bytes())
         self.assertEqual([True], [h["current"] for h in self.b.history(KEY)])
         self.b.sweep(grace_s=0)                # must not raise
+
+
+# -- migration: cache push / cache pull -------------------------------------------------
+
+
+class TestPush(_Hosts):
+    """A cache that has been filling for months is worth GPU-hours, and nothing else
+    recovers it once the local protocol goes (docs/cache-consolidation.md, step 2)."""
+
+    def local_entry(self, cache, key, labels=b"local", *, computed=1.0, preview=None):
+        """Publish straight into a host's LOCAL cache, as a server would have."""
+        return cache.local.put(key, self.file(f"l-{key[:4]}-{labels.hex()}", labels),
+                               {"outputs": [labels.decode()]},
+                               {"task": "t", "computed": computed},
+                               preview_path=self.file("p.png", preview) if preview else None)
+
+    def test_a_local_entry_reaches_the_store_and_another_host(self):
+        gen = self.local_entry(self.a, KEY, b"months of work", preview=b"png")
+        got = self.a.push()
+        self.assertEqual(1, got["pushed"])
+        self.assertEqual(gen, self.b.generation(KEY), "the generation token is preserved")
+        hit = self.b.get(KEY)
+        self.assertEqual(b"months of work", Path(hit[0]).read_bytes())
+        self.assertEqual(b"png", (Path(hit[0]).parent / "preview.png").read_bytes())
+
+    def test_the_pushing_host_then_downloads_nothing(self):
+        """The point of keeping the token: the local copy IS the store's copy."""
+        self.local_entry(self.a, KEY, b"warm")
+        self.a.push()
+        with unittest.mock.patch.object(BlobStore, "fetch",
+                                        side_effect=AssertionError("downloaded")):
+            self.assertEqual(b"warm", Path(self.a.get(KEY)[0]).read_bytes())
+
+    def test_a_second_push_uploads_nothing_and_replaces_nothing(self):
+        self.local_entry(self.a, KEY, b"once")
+        self.a.push()
+        with unittest.mock.patch.object(BlobStore, "put_file",
+                                        side_effect=AssertionError("re-uploaded")):
+            got = self.a.push()
+        self.assertEqual({"pushed": 0, "skipped": 1, "replaced": 0, "failed": 0,
+                          "unreadable": 0}, got)
+
+    def test_an_interrupted_push_is_simply_rerun(self):
+        for i, key in enumerate(("aa" * 32, "bb" * 32, "cc" * 32)):
+            self.local_entry(self.a, key, f"v{i}".encode())
+        real, n = SharedResultCache._swap, []
+
+        def dying_swap(cache, key, update):
+            if len(n) >= 2:
+                raise OSError("connection reset")
+            n.append(key)
+            return real(cache, key, update)
+        with unittest.mock.patch.object(SharedResultCache, "_swap", dying_swap):
+            first = self.a.push()
+        self.assertEqual(2, first["pushed"])
+        self.assertEqual(1, first["failed"])
+        again = self.a.push()
+        self.assertEqual(1, again["pushed"])
+        self.assertEqual(2, again["skipped"])
+        self.assertEqual(3, len(self.b.list()))
+
+    def test_a_key_the_store_already_has_is_kept_by_default(self):
+        """It may be newer than ours: another host computed it after this cache went cold."""
+        self.publish(self.b, b"theirs")
+        self.local_entry(self.a, KEY, b"ours")
+        self.assertEqual(1, self.a.push()["skipped"])
+        self.assertEqual({"outputs": ["theirs"]}, self.b.published_result(KEY))
+
+    def test_conflict_newer_compares_the_timestamps(self):
+        self.publish(self.b, b"theirs")        # computed 1.0
+        self.local_entry(self.a, KEY, b"ours", computed=2.0)
+        self.assertEqual(1, self.a.push(conflict="newer")["replaced"])
+        self.assertEqual({"outputs": ["ours"]}, self.b.published_result(KEY))
+
+    def test_conflict_newer_keeps_theirs_when_ours_is_older(self):
+        self.publish(self.b, b"theirs")        # computed 1.0
+        self.local_entry(self.a, KEY, b"ours", computed=0.5)
+        self.assertEqual(1, self.a.push(conflict="newer")["skipped"])
+        self.assertEqual({"outputs": ["theirs"]}, self.b.published_result(KEY))
+
+    def test_conflict_force_takes_ours_and_keeps_theirs_in_history(self):
+        self.publish(self.b, b"theirs")
+        self.local_entry(self.a, KEY, b"ours", computed=0.5)
+        self.assertEqual(1, self.a.push(conflict="force")["replaced"])
+        self.assertEqual([{"outputs": ["ours"]}, {"outputs": ["theirs"]}],
+                         [h["result"] for h in self.b.history(KEY)])
+
+    def test_an_unknown_conflict_policy_is_refused(self):
+        from haversack.errors import InputError
+        with self.assertRaises(InputError):
+            self.a.push(conflict="clobber")
+
+    def test_a_half_written_entry_is_counted_not_pushed(self):
+        self.local_entry(self.a, KEY, b"fine")
+        (self.a.local._resolve(KEY, lease=False) / "meta.json").unlink()
+        got = self.a.push()
+        self.assertEqual(1, got["unreadable"])
+        self.assertEqual([], self.b.list())
+
+    def test_a_legacy_flat_entry_is_given_a_generation(self):
+        """An entry from before generations existed: still migratable, at the cost of one
+        download the first time it is read."""
+        d = self.a.local.root / KEY
+        d.mkdir(parents=True)
+        (d / RESULT_NAME).write_bytes(b"from the old protocol")
+        (d / "result.json").write_text(json.dumps({"outputs": ["old"]}))
+        (d / "meta.json").write_text(json.dumps({"task": "t", "computed": 1.0}))
+        self.assertEqual(1, self.a.push()["pushed"])
+        self.assertEqual(b"from the old protocol", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_dotted_directories_are_not_entries(self):
+        """A staging directory, a tomb mid-reclamation, a fill's work directory: pushing
+        one would publish an unfinished result."""
+        (self.a.local.root / ".fill-abcd").mkdir(parents=True)
+        (self.a.local.root / ".reclaim-1").mkdir(parents=True)
+        self.local_entry(self.a, KEY, b"real")
+        self.assertEqual(1, self.a.push()["pushed"])
+        self.assertEqual([KEY], [e["key"] for e in self.b.list()])
+
+    def test_limit_takes_the_newest(self):
+        for i, key in enumerate(("aa" * 32, "bb" * 32, "cc" * 32)):
+            self.local_entry(self.a, key, f"v{i}".encode())
+            os.utime(self.a.local.root / key, (1000 + i, 1000 + i))
+        self.assertEqual(1, self.a.push(limit=1)["pushed"])
+        self.assertEqual(["cc" * 32], [e["key"] for e in self.b.list()])
+
+
+class TestPull(_Hosts):
+    def test_pull_makes_a_cold_host_warm(self):
+        self.publish(self.a, b"one", preview=b"png")
+        got = self.b.pull()
+        self.assertEqual(1, got["pulled"])
+        with unittest.mock.patch.object(BlobStore, "fetch",
+                                        side_effect=AssertionError("downloaded")):
+            hit = self.b.get(KEY)
+        self.assertEqual(b"one", Path(hit[0]).read_bytes())
+        self.assertEqual(b"png", (Path(hit[0]).parent / "preview.png").read_bytes())
+
+    def test_a_pulled_cache_answers_without_the_store(self):
+        """The way out: after a pull the local cache stands on its own."""
+        self.publish(self.a, b"one")
+        self.b.pull()
+        self.assertEqual(b"one", Path(self.b.local.get(KEY)[0]).read_bytes())
+
+    def test_pull_is_idempotent_and_free_when_current(self):
+        self.publish(self.a, b"one")
+        self.b.pull()
+        with unittest.mock.patch.object(BlobStore, "fetch",
+                                        side_effect=AssertionError("downloaded")):
+            got = self.b.pull()
+        self.assertEqual({"pulled": 0, "current": 1, "failed": 0, "unreadable": 0}, got)
+
+    def test_a_swept_blob_makes_one_entry_fail_and_not_the_rest(self):
+        self.publish(self.a, b"one", key="aa" * 32)
+        self.publish(self.a, b"two", key="bb" * 32)
+        obstore.delete(self.store, f"pre/blobs/sha256/{hashlib.sha256(b'one').hexdigest()}")
+        got = self.b.pull()
+        self.assertEqual({"pulled": 1, "current": 0, "failed": 1, "unreadable": 0}, got)
+        self.assertEqual(b"two", Path(self.b.get("bb" * 32)[0]).read_bytes())
+
+    def test_pull_reports_pointers_it_cannot_read(self):
+        self.publish(self.a, b"one")
+        obstore.put(self.store, "pre/results/.junk.json", b"{}")
+        got = self.b.pull()
+        self.assertEqual(1, got["pulled"])
+        self.assertEqual(1, got["unreadable"])
+
+
+class TestMigrationCli(_Hosts):
+    """The command line, driven end to end against the in-memory store."""
+
+    def run_cli(self, *argv):
+        from haversack import cli
+        return cli.main(list(argv))
+
+    def test_push_then_pull_between_two_cache_dirs(self):
+        src = self.tmp / "cli-a"
+        dst = self.tmp / "cli-b"
+        ResultCache(src).put(KEY, self.file("l", b"by the cli"), {"outputs": ["cli"]},
+                             {"task": "t", "computed": 1.0})
+        url = "memory://cli"                   # one process: the store persists in it
+        with unittest.mock.patch.object(objectcache, "open_store",
+                                        lambda _u: (self.store, "cli/")):
+            self.assertEqual(0, self.run_cli("cache", "push", url, "--cache-dir", str(src)))
+            self.assertEqual(0, self.run_cli("cache", "pull", url, "--cache-dir", str(dst),
+                                             "--quiet"))
+        self.assertEqual(b"by the cli", Path(ResultCache(dst).get(KEY)[0]).read_bytes())
+
+    def test_a_store_must_be_named(self):
+        """cli.main turns an InputError into a status and one line, not a traceback."""
+        self.assertEqual(2, self.run_cli("cache", "push"))

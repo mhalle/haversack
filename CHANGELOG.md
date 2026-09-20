@@ -22,6 +22,19 @@
   bucket served each other's results - the second never ran its segmenter - and the soak
   saw no torn read and no error while a sweeper with no grace deleted blobs underneath it.
   A hit costs one pointer read, about 85 ms median from this Mac.
+- **`haversack cache push` and `cache pull` migrate a result cache to and from a shared
+  store.** The transition the consolidation plan needs: a cache that has been filling for
+  months is worth GPU-hours, and nothing else recovers it once the local protocol goes.
+  Each entry keeps the generation token it already has, so a pushed result is still served
+  from this machine afterwards without downloading anything, and an entry from before
+  generations existed is given one. Idempotent by construction - blobs are
+  create-if-absent, the pointer is written conditionally, and a rerun costs one pointer
+  read per key rather than a re-hash - so an interrupted push is simply rerun and two hosts
+  pushing overlapping caches upload the shared bytes once. `--conflict` decides what
+  happens when the store already holds a key: keep theirs (the default, because theirs may
+  be newer), take whichever was computed later, or take ours. `pull` makes a cold host warm
+  and is also the way out: afterwards the local cache answers on its own.
+
 - **The blob half is now `provender`, a package shared with feldglas.** A second project
   needed content-addressed blobs on the same kind of store, and two copies of one protocol
   is how this repo's defects have always started - so `BlobStore`, `open_store` and the

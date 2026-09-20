@@ -843,6 +843,32 @@ def _command_line() -> click.Group:
                          help='actually delete (without this, it is a dry run)'),
         ])
     cache.add_command(cache_clean)
+    for name, short in (('push', 'copy this machine\'s results INTO a shared store'),
+                        ('pull', 'copy a shared store\'s results ONTO this machine')):
+        cache.add_command(_Command(
+            name, callback=_dispatch(_cmd_cache, 'cache', 'ccmd'), short_help=short,
+            help=('Moves finished results between this machine\'s cache and an object '
+                  'store (s3://bucket/prefix, gs://..., az://...). Each result keeps the '
+                  'generation it already has, so a pushed entry is served from this '
+                  'machine afterwards without downloading anything. Safe to interrupt and '
+                  'rerun: nothing is uploaded twice and nothing is overwritten unless you '
+                  'say so.'),
+            params=[
+                click.Argument(['store'], required=False,
+                               help='the object store, e.g. s3://bucket/prefix'),
+                click.Option(['--result-store'], envvar='HAVERSACK_RESULT_STORE',
+                             help='the store, if not given as the argument'),
+                click.Option(['--cache-dir'],
+                             help='the local result cache (default: ~/.cache/haversack/results)'),
+                click.Option(['--limit'], type=int,
+                             help='at most this many entries, newest first'),
+                click.Option(['--conflict'],
+                             type=click.Choice(['skip', 'newer', 'force']), default='skip',
+                             help=('push only: what to do when the store already has a '
+                                   'key - keep theirs (default), take whichever was '
+                                   'computed later, or take ours')),
+                click.Option(['--quiet'], is_flag=True, help='counts only, no per-entry lines'),
+            ]))
     return root
 
 
@@ -1356,7 +1382,44 @@ def _cmd_cache(args) -> int:
         if not args.yes and r["removed"]:
             print("  (dry run - pass --yes to delete)", file=sys.stderr)
         return 0
+    if args.ccmd in ("push", "pull"):
+        return _cmd_cache_move(args)
     return 0
+
+
+def _cmd_cache_move(args) -> int:
+    """`haversack cache push` / `cache pull`: migrate results to or from a shared store."""
+    from .cache_admin import results_dir
+    from .errors import InputError
+    from .objectcache import SharedResultCache
+    from .serve import ResultCache
+    url = args.store or getattr(args, "result_store", None)
+    if not url:
+        raise InputError(
+            f"cache {args.ccmd}: name the store, e.g. `haversack cache {args.ccmd} "
+            "s3://bucket/prefix` (or set HAVERSACK_RESULT_STORE)")
+    local = ResultCache(getattr(args, "cache_dir", None) or results_dir())
+    try:
+        shared = SharedResultCache.open(url, local)
+    except InputError:
+        raise
+    except Exception as e:                     # noqa: BLE001
+        raise InputError(f"cache {args.ccmd} {url}: {type(e).__name__}: {e}; check the "
+                         "bucket name and that credentials are in the environment") from None
+
+    def say(key, what):
+        print(f"  {key[:12]}... {what}", file=sys.stderr, flush=True)
+    report = None if args.quiet else say
+    if args.ccmd == "push":
+        got = shared.push(conflict=args.conflict, limit=args.limit, report=report)
+        print(f"pushed {got['pushed']}, replaced {got['replaced']}, "
+              f"skipped {got['skipped']} (already there), failed {got['failed']}, "
+              f"unreadable {got['unreadable']}", file=sys.stderr)
+    else:
+        got = shared.pull(limit=args.limit, report=report)
+        print(f"pulled {got['pulled']}, already current {got['current']}, "
+              f"failed {got['failed']}, unreadable {got['unreadable']}", file=sys.stderr)
+    return 1 if got["failed"] else 0
 
 
 def _cmd_segment(args) -> int:
