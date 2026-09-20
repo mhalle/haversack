@@ -2112,7 +2112,7 @@ class LocalExecutor:
                  cache_dir=None, keep_cached: int = 500,
                  input_cache_bytes: int = 8 << 30, read_fn=None, sources=None,
                  artifacts=("preview", "statistics"), jobs_ttl_h: float = 24.0,
-                 result_store=None):
+                 result_store=None, sweep_interval_h: float = 24.0):
         self.segmenter = segmenter
         self.workdir = Path(workdir)
         self.workdir.mkdir(parents=True, exist_ok=True)
@@ -2139,6 +2139,7 @@ class LocalExecutor:
                 raise InputError("--result-store needs a local result cache in front of it; "
                                  "drop --no-result-cache")
             from .objectcache import SharedResultCache
+            self._sweep_every = float(sweep_interval_h) * 3600
             try:
                 self.cache = (SharedResultCache.open(result_store, self.cache)
                               if isinstance(result_store, str)
@@ -2153,6 +2154,7 @@ class LocalExecutor:
                     "bucket name and that credentials are in the environment "
                     "(AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_ENDPOINT / "
                     "AWS_REGION for S3-compatible stores)") from None
+        self._sweeper = None
         self._inflight: dict[str, str] = {}      # cache key -> active job id
         self._joiners: dict[str, int] = {}       # job id -> clients riding it besides the first
         self._cv = threading.Condition()
@@ -2172,6 +2174,9 @@ class LocalExecutor:
         self._restore()
         self._thread = threading.Thread(target=self._dispatch, name="haversack-serve", daemon=True)
         self._thread.start()
+        # last, because it waits on `_cv` and sweeps `cache`: both have to exist first
+        if result_store is not None and getattr(self, "_sweep_every", 0) > 0:
+            self._start_sweeper()
 
     # -- durability ---------------------------------------------------------
     def _persisted(self, rec: JobRecord) -> dict:
@@ -2450,6 +2455,39 @@ class LocalExecutor:
             self._emit(rec)
             self._requeue_positions()
         return state, False
+
+    def _start_sweeper(self) -> None:
+        """Reclaim the shared store's unreferenced bytes on a timer.
+
+        `delete` removes an entry and leaves its bytes for a sweep (2026-09-20), and a
+        republication leaves its predecessor's the same way - so a store that is never
+        swept only grows. Nothing else runs it, and an operator who has to remember a cron
+        line will not, so the server that writes to a store also tidies it.
+
+        Deliberately dull: it sweeps with the shipped grace (a day) and expires nothing by
+        age, so it can only remove bytes no entry refers to. A failure is reported and the
+        loop continues - cleanup is not worth a server. The first sweep is one interval
+        away, not at startup, because a fleet restarting together should not all sweep at
+        once, and the interval is jittered for the same reason.
+        """
+        import random
+
+        def loop():
+            while True:
+                with self._cv:                 # wakes at once when the server closes
+                    self._cv.wait(self._sweep_every * random.uniform(0.9, 1.1))
+                    if self._stop:
+                        return
+                try:
+                    got = self.cache.sweep()
+                    if got["deleted_blobs"] or got["expired_pointers"]:
+                        print(f"[sweep] reclaimed {got['deleted_blobs']} object(s) from the "
+                              "result store", file=sys.stderr, flush=True)
+                except Exception as e:         # noqa: BLE001 - never worth the server
+                    print(f"warning: the scheduled sweep of the result store failed: "
+                          f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        self._sweeper = threading.Thread(target=loop, name="haversack-sweep", daemon=True)
+        self._sweeper.start()
 
     def close(self) -> None:
         with self._cv:
@@ -4920,7 +4958,8 @@ def main_serve(args) -> int:
     ex = LocalExecutor(seg, workdir=workdir, max_pending=args.max_pending,
                        keep_finished=args.keep_finished, cache_dir=cache_dir,
                        jobs_ttl_h=getattr(args, "jobs_ttl_hours", 24.0),
-                       result_store=getattr(args, "result_store", None) or None)
+                       result_store=getattr(args, "result_store", None) or None,
+                       sweep_interval_h=getattr(args, "sweep_interval_hours", 24.0))
     # The token: given, generated, or - only when asked for in so many words - none.
     # A generated token goes to a file only this user can read, and the bundled client
     # on this machine reads it back, so personal use needs no ceremony while a proxy or

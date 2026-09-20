@@ -24,6 +24,16 @@
   A hit costs one pointer read - about 85 ms median from this Mac, measured before
   history existed; a key republished four times carries ~5x the pointer, which has not
   been re-measured on a real bucket.
+- **A server with `--result-store` sweeps it, every `--sweep-interval-hours` (24 by
+  default, 0 to disable).** Now that `delete` leaves bytes for a sweep and a republication
+  leaves its predecessor's the same way, a store nothing sweeps only grows - and a
+  reclamation that depends on an operator remembering a cron line is one that does not
+  happen. The loop is deliberately dull: the shipped grace, no expiry by age, so it can
+  only remove bytes no entry refers to; it waits on the server's own condition so a
+  shutdown stops it at once; the first sweep is one interval away and the interval is
+  jittered, so a fleet restarting together does not all sweep in the same second; and a
+  failure is reported and retried rather than taken seriously enough to end the thread.
+
 - **`delete` stops reclaiming bytes; `haversack cache sweep` does it** (decided
   2026-09-20, replacing the "deletion means gone" half of the history decision). Deciding at
   delete time whether a blob belongs only to the entry being removed means deciding it

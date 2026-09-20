@@ -1871,3 +1871,72 @@ class TestADeleteRefusalCancelsNothing(_Hosts):
             tail = chunk[-600:]
             self.assertNotIn("executor.cancel(", tail,
                              "the cancel must follow the delete, not precede it")
+
+
+class TestTheServerSweepsItsStore(_Hosts):
+    """`delete` leaves bytes for a sweep and a republication leaves its predecessor's, so a
+    store nothing sweeps only grows - and an operator who has to remember a cron line will
+    not. The server that writes to a store tidies it (2026-09-20)."""
+
+    def executor(self, **kw):
+        from haversack.serve import LocalExecutor
+        from test_job_result_cache import _Segmenter
+        return LocalExecutor(_Segmenter(steps=1), workdir=self.tmp / f"w{len(kw)}",
+                             cache_dir=self.tmp / f"c{len(kw)}", result_store=self.store,
+                             **kw)
+
+    def test_it_sweeps_on_its_timer(self):
+        import threading
+        swept = threading.Event()
+        with unittest.mock.patch.object(
+                SharedResultCache, "sweep",
+                side_effect=lambda **kw: swept.set() or {"deleted_blobs": 0,
+                                                         "expired_pointers": 0,
+                                                         "already_gone": 0,
+                                                         "unreadable_pointers": 0}):
+            ex = self.executor(sweep_interval_h=0.0004)          # ~1.4 s
+            try:
+                self.assertTrue(swept.wait(20), "the scheduled sweep never ran")
+            finally:
+                ex.close()
+
+    def test_a_failing_sweep_does_not_take_the_server_with_it(self):
+        import threading
+        tries = []
+        done = threading.Event()
+
+        def boom(**kw):
+            tries.append(1)
+            if len(tries) >= 2:
+                done.set()
+            raise RuntimeError("the store is unreachable")
+        with unittest.mock.patch.object(SharedResultCache, "sweep", side_effect=boom):
+            ex = self.executor(sweep_interval_h=0.0004)
+            try:
+                self.assertTrue(done.wait(20), "it stopped after the first failure")
+                self.assertTrue(ex._sweeper.is_alive())
+            finally:
+                ex.close()
+
+    def test_it_is_off_without_a_store_and_when_asked_for_zero(self):
+        from haversack.serve import LocalExecutor
+        from test_job_result_cache import _Segmenter
+        plain = LocalExecutor(_Segmenter(steps=1), workdir=self.tmp / "wp",
+                              cache_dir=self.tmp / "cp")
+        try:
+            self.assertIsNone(getattr(plain, "_sweeper", None))
+        finally:
+            plain.close()
+        off = self.executor(sweep_interval_h=0)
+        try:
+            self.assertIsNone(off._sweeper)
+        finally:
+            off.close()
+
+    def test_closing_the_server_stops_it_promptly(self):
+        ex = self.executor(sweep_interval_h=24)
+        sweeper = ex._sweeper
+        self.assertTrue(sweeper.is_alive())
+        ex.close()
+        sweeper.join(10)
+        self.assertFalse(sweeper.is_alive(), "it waits on the server's own condition")

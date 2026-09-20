@@ -689,6 +689,10 @@ def _command_line() -> click.Group:
                          help=('share the result cache through an object store '
                                '(s3://bucket/prefix, gs://..., az://...; credentials from '
                                'the environment); --cache-dir becomes its local copy')),
+            click.Option(['--sweep-interval-hours'], type=float, default=24.0,
+                         help=('how often this server reclaims bytes in the shared store '
+                               'that no result refers to any more (0 turns it off). Only '
+                               'with --result-store; a store nothing sweeps only grows')),
             click.Option(['--token'],
                          help=('the bearer token that gates computation (reads stay open); '
                                'generated when omitted')),

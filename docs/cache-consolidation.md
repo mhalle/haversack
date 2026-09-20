@@ -219,9 +219,10 @@ Reclaiming bytes at delete time means deciding, against live publishers, whether
 entry named is also one that a publication happening right now has deduplicated onto. Four
 attempts went into that question - pre-listing the candidates, refreshing a deduplicated
 blob's timestamp, re-checking each candidate before deleting it, waiting out a coarse
-clock - and reviewers were still finding holes. `delete` now removes the entry; `haversack
-cache sweep` reclaims the bytes, deciding the same question with nothing else moving. An
-operator who needs the bytes gone runs the sweep, and a deployment that needs that promise
-should run it on a schedule and say so in its own documentation. The per-delete purge, its
+clock - and reviewers were still finding holes. `delete` now removes the entry; a sweep reclaims the
+bytes, deciding the same question with nothing else moving. A server with `--result-store`
+sweeps its own store every `--sweep-interval-hours` (a day by default), so the reclamation
+is not left to an operator remembering a cron line; `haversack cache sweep` does it on
+demand, and a deployment that needs the bytes gone by a deadline sets the interval to it. The per-delete purge, its
 scan limit, its freshness margin and its coarse-clock wait are all deleted - about 120
 lines, and the hardest remaining reasoning in the module.
