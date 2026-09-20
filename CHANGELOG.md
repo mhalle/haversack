@@ -21,7 +21,27 @@
   Cloudflare R2 (2026-09-19): both conditional writes honored, two servers sharing one
   bucket served each other's results - the second never ran its segmenter - and the soak
   saw no torn read and no error while a sweeper with no grace deleted blobs underneath it.
-  A hit costs one pointer read, about 85 ms median from this Mac.
+  A hit costs one pointer read - about 85 ms median from this Mac, measured before
+  history existed; a key republished four times carries ~5x the pointer, which has not
+  been re-measured on a real bucket.
+- **Third review round (four agents, same day): sixteen more, and `haversack cache sweep`.**
+  The one that mattered: deduplication defeats the sweep's candidate listing, because a
+  recomputation producing identical bytes uploads nothing - so the blob is old while the
+  pointer naming it is new, and both the sweep and `delete` could take it out from under a
+  result that had just been computed. provender 0.1.3 refreshes a deduplicated blob's
+  timestamp with a server-side copy (one request at any size, verified at 32 MB on R2), so
+  a blob is again as young as the reference to it. Also: `delete` no longer reads every
+  entry in the store on an HTTP route (bounded, and it says to run the sweep instead),
+  reclaims the bytes of generations the age bound has stopped listing, and REPORTS whether
+  the bytes actually went rather than only saying so on stderr; a repaired local copy gets
+  its result and meta documents back, not just its files, and "already complete here" is
+  now one definition instead of two that disagreed; blobs outlive the history listing by a
+  day so a host with a fast clock cannot collect what other hosts still list; `pull` names
+  the key that failed. `cache sweep` exists because an error message already told operators
+  to run it - and because a bound nothing can run is not a bound. Its help, and `cache
+  pull`'s, are now their own rather than `push`'s text. Several claims in this entry and in
+  the design doc were overstated and have been corrected against what the code does.
+
 - **Second review round (four agents, 2026-09-20): twenty defects, all fixed.** The worst
   three: `push` read the entry's directory and its generation token separately, so a server
   publishing that key in between bound one generation's bytes to another's token and the
@@ -61,9 +81,9 @@
 
 - **The blob half is now `provender`, a package shared with feldglas.** A second project
   needed content-addressed blobs on the same kind of store, and two copies of one protocol
-  is how this repo's defects have always started - so `BlobStore`, `open_store` and the
-  conditional-write probe moved out to https://github.com/mhalle/provender (pinned by tag,
-  as rankfield and duckn are) and haversack keeps the pointer, the policy, and the live set
+  is how this repo's defects have always started - so the blob store moved out to
+  https://github.com/mhalle/provender (pinned by tag, as rankfield and duckn are), leaving
+  thin wrappers here that turn its errors into haversack's and haversack keeps the pointer, the policy, and the live set
   the sweep needs, which is the only part that knows what a result is. Reviewing the
   extraction from the other side found two more: a sweep with no grace by default deletes a
   blob uploaded a second ago (every client writes the blob before the index entry naming
@@ -76,11 +96,16 @@
   `HISTORY_MAX_AGE_S` (30 days), whichever runs out first - and the sweep treats their
   blobs as referenced, so storage per key is bounded by both. Deduplication makes it nearly
   free: a recomputation that produced identical bytes adds one small pointer entry and no
-  blob. It answers what this server published in August, lets a weights upgrade be compared
-  against what it replaced, and makes a bad one rollable. The local copy keeps NO history,
-  no ordinary read can be served a superseded result, and history is read deliberately
-  (`history()`, `fetch_generation()`, which materializes into a directory the caller owns).
-  `delete` removes the entry AND its history: near patient data, deletion means gone.
+  blob. It answers what this server published over the last 30 days, up to four
+  republications back; a weights upgrade can be compared against what it replaced, and a
+  bad one recovered - `fetch_generation()` writes it to a directory you own, and
+  republishing it is manual. The local copy offers no history API and never serves a
+  predecessor, though its own superseded directories linger until that key is published
+  again; history in the store is read deliberately (`history()`, `fetch_generation()`,
+  which materializes into a directory the caller owns). `delete` removes the entry, its
+  local copy and the bytes of every generation its pointer lists, keeping what another
+  entry shares - near patient data, deletion means gone - and says in its report when it
+  could not establish that, which `haversack cache sweep` then finishes.
 
 - **Review round on the above, same day: three agents, thirteen defects, all fixed.** The
   one that mattered: obstore's errors do not subclass OSError, so a store fault - expired

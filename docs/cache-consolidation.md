@@ -1,6 +1,6 @@
 # One cache, three deployments — the consolidation, and how to get there safely
 
-**Status (2026-09-19): design, nothing built beyond the shared result store on this branch.**
+**Status (2026-09-20): the shared result store, its bounded history, `cache push`/`pull`/`sweep` and the provender extraction are built and reviewed three times; steps 3-6 below are still design.**
 This document is the handoff: what exists, what is proposed, what must not break, and the
 order to do it in. Read it with `AGENTS.md` ("Result-cache lifetimes", "The 2026-09-10 review
 round — lifetimes") — the defects listed there are the evidence this design is answering.
@@ -185,7 +185,9 @@ design step that would make a bucket necessary is out of bounds.
 
 **3. Bounded history, in the shared store only.** A republication keeps its predecessors:
 the pointer carries a bounded list of previous generations, and the sweep treats their blobs
-as referenced. Bounded by count and by age, so storage is bounded per key. Deduplication
+as referenced. Bounded by count and by age, so the POINTER is bounded per key; the blobs a
+generation leaves when it falls off are reclaimed by `cache sweep`, which nothing runs on a
+schedule. Deduplication
 makes this nearly free when a recomputation produces identical bytes. The local copy keeps
 no history - it holds the current generation, as it does today. `delete` removes the entry
 AND its history: for anything near patient data, deletion means gone. History is read

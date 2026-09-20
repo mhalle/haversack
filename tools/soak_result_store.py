@@ -57,7 +57,10 @@ def publisher(url: str, seconds: float, marker: str) -> dict:
         n = 0
         while time.time() < end:
             n += 1
-            body = f"labels {marker} {n} ".encode() + os.urandom(16)
+            # every third publication repeats bytes another publisher may also write, so
+            # `delete`'s purge has to decide about a blob that is genuinely shared
+            body = (b"shared labels for the dedup case" if n % 3 == 0
+                    else f"labels {marker} {n} ".encode() + os.urandom(16))
             labels.write_bytes(body)
             preview.write_bytes(f"preview {marker} {n}".encode())
             result = {"marker": marker, "n": n,
@@ -123,7 +126,30 @@ def sweeper(url: str, seconds: float, grace: float = 0.0) -> dict:
         return stats
 
 
-ROLES = {"publisher": publisher, "reader": reader, "sweeper": sweeper}
+def deleter(url: str, seconds: float, every: float = 4.0) -> dict:
+    """Delete the key outright, over and over, while everything else runs.
+
+    `delete` purges the entry's BYTES now rather than leaving them to a sweep (the PHI
+    rule), and it computes "unreferenced" by scanning the other pointers. That scan and
+    those deletes are not one step, so a publication landing in between - especially one
+    that DEDUPLICATED onto the same bytes - is the interleaving to watch. A reader may see
+    a miss; it must never see a torn result or an error.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        c = cache(url, Path(d) / "local")
+        stats = {"deleted": 0, "absent": 0, "errors": []}
+        end = time.time() + seconds
+        while time.time() < end:
+            time.sleep(every)
+            try:
+                stats["deleted" if c.delete(KEY) else "absent"] += 1
+            except Exception as e:             # noqa: BLE001 - the point of the soak
+                stats["errors"].append(f"{type(e).__name__}: {e}")
+        return stats
+
+
+ROLES = {"publisher": publisher, "reader": reader, "sweeper": sweeper,
+         "deleter": deleter}
 
 
 def child(argv) -> int:
@@ -137,6 +163,8 @@ def child(argv) -> int:
         stats = publisher(a.url, a.seconds, a.marker)
     elif a.role == "sweeper":
         stats = sweeper(a.url, a.seconds, a.grace)
+    elif a.role == "deleter":
+        stats = deleter(a.url, a.seconds)
     else:
         stats = reader(a.url, a.seconds)
     print("RESULT " + json.dumps(stats))
@@ -149,6 +177,8 @@ def main() -> int:
     ap.add_argument("--seconds", type=float, default=45.0)
     ap.add_argument("--publishers", type=int, default=3)
     ap.add_argument("--readers", type=int, default=3)
+    ap.add_argument("--deleters", type=int, default=0,
+                    help="processes deleting the key outright while the rest run")
     ap.add_argument("--sweep-grace", type=float, default=0.0,
                     help="the sweeper's grace in seconds (0, the default here, is hostile)")
     a = ap.parse_args()
@@ -159,7 +189,8 @@ def main() -> int:
     url = f"{a.url.rstrip('/')}/run-{uuid.uuid4().hex[:8]}"
     store, prefix = open_store(url)
     print(f"soak {prefix} for {a.seconds:.0f}s: {a.publishers} publishers, {a.readers} "
-          f"readers, 1 sweeper (grace {a.sweep_grace:g}s), 1 publisher killed mid-flight")
+          f"readers, 1 sweeper (grace {a.sweep_grace:g}s), {a.deleters} deleter(s), "
+          "1 publisher killed mid-flight")
     procs, killed = [], None
     try:
         def spawn(role, *extra):
@@ -172,6 +203,9 @@ def main() -> int:
         for _ in range(a.readers):
             procs.append(("reader", spawn("reader")))
         procs.append(("sweeper", spawn("sweeper", "--grace", str(a.sweep_grace))))
+        if a.deleters:
+            for _ in range(a.deleters):
+                procs.append(("deleter", spawn("deleter")))
         killed = spawn("publisher", "--marker", "doomed")
         time.sleep(min(8.0, a.seconds / 3))
         killed.send_signal(signal.SIGKILL)        # a publisher that never comes back

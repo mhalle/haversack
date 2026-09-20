@@ -73,6 +73,16 @@ SWAP_ATTEMPTS = 16
 #: dedupe) and one result when it did not. The local copy keeps NO history.
 HISTORY_KEEP = 4
 HISTORY_MAX_AGE_S = 30 * 24 * 3600
+#: Extra age a generation's BLOBS keep past the point history stops listing it. Hosts do
+#: not share a clock, and one running fast would otherwise collect what every other host
+#: still lists - the rollback data the history decision exists to provide (review,
+#: 2026-09-20). Listing is cheap to get wrong; deleting is not.
+HISTORY_GC_MARGIN_S = 24 * 3600
+#: How many entries ``delete`` will read to establish that an entry's bytes are shared.
+#: Past this the purge does not run: it is one GET per entry, and this cost was removed
+#: from `list` for exactly that reason (review, 2026-09-20). `cache sweep` does the same
+#: work once, deliberately, instead of on a route.
+PURGE_SCAN_LIMIT = 2000
 #: How often a store fault on a READ path may be reported. A store that is down faults on
 #: every request, and a line per request is a denial of service on the operator's terminal.
 WARN_INTERVAL_S = 60.0
@@ -209,7 +219,7 @@ def _usable(past, *, now: float, keep_undated: bool = False) -> bool:
     return when > now - HISTORY_MAX_AGE_S
 
 
-def _generations(ptr, *, now: float | None = None) -> list:
+def _generations(ptr, *, now: float | None = None, keep_undated: bool = False) -> list:
     """The current publication and every kept predecessor, newest first.
 
     The age bound is applied HERE as well as at write time. It used to be applied only
@@ -222,7 +232,7 @@ def _generations(ptr, *, now: float | None = None) -> list:
             "files": ptr.get("files") or {}, "result": ptr.get("result"),
             "meta": ptr.get("meta"), "current": True}]
     for past in _history_of(ptr):
-        if _usable(past, now=now):
+        if _usable(past, now=now, keep_undated=keep_undated):
             out.append({**past, "current": False})
     return out
 
@@ -390,7 +400,7 @@ class SharedResultCache:
             return False
         with self._fill_lock(key):
             local_dir = self.local._generation_dir(key, gen)
-            have_gen = self.local.generation(key) == gen and (local_dir / RESULT_NAME).exists()
+            have_gen = self._holds(key, ptr)
             # ONLY these names, and they are spelled out here rather than taken from the
             # pointer: a pointer is written by another host, and a name of its choosing
             # ("../..", an absolute path) would decide where these bytes land.
@@ -431,6 +441,15 @@ class SharedResultCache:
                         # it has to actually repair (review, 2026-09-20).
                         for name in got:
                             _place(local_dir, name, work / name)
+                        # the DOCUMENTS too: `local.put` writes them and it just raised, so
+                        # a repair that placed only files left a hit whose result.json was
+                        # missing - served as `{}`, a 200 with no outputs (review,
+                        # 2026-09-20)
+                        for name, doc in (("result.json", ptr.get("result") or {}),
+                                          ("meta.json", ptr.get("meta") or {})):
+                            doc_tmp = work / name
+                            doc_tmp.write_text(json.dumps(doc), encoding="utf-8")
+                            _place(local_dir, name, doc_tmp)
                         return (self.local.generation(key) == gen
                                 and (local_dir / RESULT_NAME).exists())
                 else:
@@ -439,6 +458,19 @@ class SharedResultCache:
                 return True
             finally:
                 shutil.rmtree(work, ignore_errors=True)
+
+    def _holds(self, key: str, ptr) -> bool:
+        """Does this host already hold that publication COMPLETE - its files and both
+        documents? One definition, because two disagreed: `pull` asked only about the
+        pointer's files, so a copy whose `result.json` had gone was reported current and
+        served as an empty result document (review, 2026-09-20)."""
+        from .serve import ARTIFACT_NAMES, RESULT_NAME
+        gen = ptr["generation"]
+        if self.local.generation(key) != gen:
+            return False
+        where = self.local._generation_dir(key, gen)
+        wanted = [n for n in (RESULT_NAME, *ARTIFACT_NAMES) if n in (ptr.get("files") or {})]
+        return all((where / n).exists() for n in (*wanted, "result.json", "meta.json"))
 
     def _fill_lock(self, key: str) -> threading.Lock:
         with self._fill_guard:
@@ -540,7 +572,7 @@ class SharedResultCache:
         self.local.add_artifact(key, name, src_path, generation=written["generation"])
         return True
 
-    def delete(self, key: str, *, purge: bool = True) -> bool:
+    def delete(self, key: str, *, purge: bool = True, report=None) -> bool:
         """Remove the entry everywhere this host can reach: the pointer, its BYTES, and
         the local copy. Other hosts' local copies stop being served at their next read of
         the pointer.
@@ -557,6 +589,12 @@ class SharedResultCache:
         Returns whether anything was removed. Asked of the OBJECT, not of a parse: a
         pointer this version cannot read is still an entry, and answering False for it
         told an operator deleting a patient's result that there had been nothing there.
+
+        ``report`` receives ``{"key", "existed", "purged", "blobs"}``. **Whether the bytes
+        went is not the return value**, and a caller that means "gone" has to look: the
+        entry is removed even when the purge cannot run, and saying only that on stderr
+        put "deleted" on the wire while the bytes were still readable (review,
+        2026-09-20).
         """
         import obstore
         existed = False
@@ -567,39 +605,66 @@ class SharedResultCache:
             pass                               # anything else the store raises comes out:
                                                # a delete must not report success on doubt
         ptr, _ = self._read_pointer(key)
-        mine = {b["digest"] for g in (_generations(ptr) if ptr else [])
-                for b in g["files"].values()}
+        # every generation the pointer LISTS, not only those history still shows: the age
+        # bound decides what is offered for reading, and deleting must not leave bytes
+        # behind because a generation grew old (review, 2026-09-20)
+        mine = {b["digest"] for g in (_generations(ptr, now=0, keep_undated=True)
+                                      if ptr else []) for b in g["files"].values()}
         try:
             obstore.delete(self.store, self._pointer_path(key))
         except FileNotFoundError:
             pass
         local = self.local.delete(key)
-        if purge and mine:
-            self._purge(key, mine)
+        purged = self._purge(key, mine) if (purge and mine) else not mine
+        if report:
+            report({"key": key, "existed": existed or local, "purged": purged,
+                    "blobs": len(mine)})
         return existed or local
 
-    def _purge(self, key: str, digests: set) -> None:
-        """Delete the blobs a removed entry held, except those another entry still needs.
+    def _purge(self, key: str, digests: set) -> bool:
+        """Delete the blobs a removed entry held, except those another entry still needs;
+        whether they are now gone.
 
         Refuses - loudly - when a pointer cannot be read, because then "no remaining entry
-        references these bytes" is not something this process knows.
+        references these bytes" is not something this process knows. Refuses too when
+        there are more entries than ``PURGE_SCAN_LIMIT``: establishing "shared" is one GET
+        per entry, and a bucket several servers fill would make one DELETE cost thousands
+        of requests.
+
+        The scan and the deletes are not one step, so an entry published in between that
+        DEDUPLICATED onto these bytes loses them: its next read is a miss and its next
+        publication puts them back (`put` re-checks its blobs after writing the pointer).
+        That window is accepted deliberately - between "a deletion might not delete" and "a
+        concurrent publication might have to be recomputed", this errs toward deleting.
+        Measured on R2 (2026-09-20): two keys over identical bytes, one deleted in a loop
+        while the other was republished, 348 reads of the survivor, no torn read, and it
+        was readable at the end.
         """
         import obstore
-        pointers, unreadable = self._scan_pointers()
+        pointers, unreadable = self._scan_pointers(limit=PURGE_SCAN_LIMIT + 1)
+        if len(pointers) > PURGE_SCAN_LIMIT:
+            print(f"warning: {key[:12]}... was deleted, but this store holds more than "
+                  f"{PURGE_SCAN_LIMIT} entries, so its bytes were left in place rather "
+                  "than reading every one of them. Run `haversack cache sweep` to reclaim "
+                  "them.", file=sys.stderr, flush=True)
+            return False
         if unreadable:
             print(f"warning: {key[:12]}... was deleted, but {unreadable} object(s) under "
                   "results/ could not be read, so its bytes were left in place. Remove or "
                   "repair them and run `haversack cache sweep` to finish the deletion.",
                   file=sys.stderr, flush=True)
-            return
-        now = time.time()
-        keep = {b["digest"] for ptr in pointers for g in _generations(ptr, now=now)
+            return False
+        # every generation another entry LISTS, on the same rule as above: a blob that
+        # is only in another key's aged-out history is still that key's to lose
+        keep = {b["digest"] for ptr in pointers
+                for g in _generations(ptr, now=0, keep_undated=True)
                 for b in g["files"].values()}
         for digest in digests - keep:
             try:
                 obstore.delete(self.store, self.blobs.path(digest))
             except FileNotFoundError:
                 pass
+        return True
 
     def list(self, limit: int = 500) -> list:
         """The newest published entries, read from the pointers alone.
@@ -711,7 +776,9 @@ class SharedResultCache:
                     pass
                 expired += 1
                 continue
-            for gen in _generations(ptr, now=now):   # current AND its kept history
+            # a margin past the listing bound: hosts do not share a clock, and one
+            # running fast must not collect what the others still list
+            for gen in _generations(ptr, now=now - HISTORY_GC_MARGIN_S):
                 for blob in gen["files"].values():
                     referenced.add(blob["digest"])
         if unreadable:
@@ -864,11 +931,8 @@ class SharedResultCache:
         pointers, unreadable = self._scan_pointers(newest_first=True, limit=limit)
         out["unreadable"] = unreadable
         for ptr in reversed(pointers):                 # oldest first: see above
-            key, gen = ptr["_key"], ptr["generation"]
-            local_dir = self.local._generation_dir(key, gen)
-            wanted = [n for n in (RESULT_NAME, *ARTIFACT_NAMES) if n in (ptr["files"] or {})]
-            if (self.local.generation(key) == gen
-                    and all((local_dir / n).exists() for n in wanted)):
+            key = ptr["_key"]
+            if self._holds(key, ptr):
                 out["current"] += 1
                 if report:
                     report(key, "current")
@@ -882,12 +946,13 @@ class SharedResultCache:
             out["pulled" if ok else "failed"] += 1
             if ok:
                 placed.append(key)
-            if report and ok:
-                report(key, "pulled")
+            if report:
+                report(key, "pulled" if ok else "failed")   # a failure names its key too
         # the local cache is count-bounded, and a pull of more entries than it keeps cannot
         # leave them all servable. Asked only of what THIS pull placed - an entry that
         # failed was never there to evict - and reported rather than counted as pulled.
-        gone = sum(1 for key in placed if self.local.generation(key) is None)
+        gone = (sum(1 for key in placed if self.local.generation(key) is None)
+                if len(placed) > self.local.keep else 0)
         if gone:
             out["evicted"] = gone
             out["pulled"] = max(0, out["pulled"] - gone)

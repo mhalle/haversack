@@ -843,32 +843,69 @@ def _command_line() -> click.Group:
                          help='actually delete (without this, it is a dry run)'),
         ])
     cache.add_command(cache_clean)
-    for name, short in (('push', 'copy this machine\'s results INTO a shared store'),
-                        ('pull', 'copy a shared store\'s results ONTO this machine')):
-        cache.add_command(_Command(
-            name, callback=_dispatch(_cmd_cache, 'cache', 'ccmd'), short_help=short,
-            help=('Moves finished results between this machine\'s cache and an object '
-                  'store (s3://bucket/prefix, gs://..., az://...). Each result keeps the '
-                  'generation it already has, so a pushed entry is served from this '
-                  'machine afterwards without downloading anything. Safe to interrupt and '
-                  'rerun: nothing is uploaded twice and nothing is overwritten unless you '
-                  'say so.'),
-            params=[
-                click.Argument(['store'], required=False,
-                               help='the object store, e.g. s3://bucket/prefix'),
-                click.Option(['--result-store'], envvar='HAVERSACK_RESULT_STORE',
-                             help='the store, if not given as the argument'),
-                click.Option(['--cache-dir'],
-                             help='the local result cache (default: ~/.cache/haversack/results)'),
-                click.Option(['--limit'], type=int,
-                             help='at most this many entries, newest first'),
-                click.Option(['--conflict'],
-                             type=click.Choice(['skip', 'newer', 'force']), default='skip',
-                             help=('push only: what to do when the store already has a '
-                                   'key - keep theirs (default), take whichever was '
-                                   'computed later, or take ours')),
-                click.Option(['--quiet'], is_flag=True, help='counts only, no per-entry lines'),
-            ]))
+    def _store_params(extra=()):
+        return [
+            click.Argument(['store'], required=False,
+                           help='the object store, e.g. s3://bucket/prefix'),
+            click.Option(['--result-store'], envvar='HAVERSACK_RESULT_STORE',
+                         help='the store, if not given as the argument'),
+            click.Option(['--cache-dir'],
+                         help='the local result cache (default: ~/.cache/haversack/results)'),
+            *extra,
+            click.Option(['--quiet'], is_flag=True, help='counts only, no per-entry lines'),
+        ]
+
+    cache.add_command(_Command(
+        'push', callback=_dispatch(_cmd_cache, 'cache', 'ccmd'),
+        short_help="copy this machine's results INTO a shared store",
+        help=('Publishes the results cached on this machine to an object store, so other '
+              'servers can serve them. Each result keeps the generation it already has, '
+              'so a pushed entry is still served from this machine without downloading '
+              'anything - except an entry cached before generations existed, which is '
+              'given a fresh one and costs one download the first time it is read. Safe '
+              'to interrupt and rerun: nothing is uploaded twice and nothing in the store '
+              'is overwritten unless you ask for it.'),
+        params=_store_params([
+            click.Option(['--limit'], type=int,
+                         help=('stop after this many results are transferred; a key the '
+                               'store already has does not use up a slot, so a rerun '
+                               'makes progress')),
+            click.Option(['--conflict'],
+                         type=click.Choice(['skip', 'newer', 'force']), default='skip',
+                         help=('what to do when the store already has a key - keep theirs '
+                               '(the default, since theirs may be newer), take whichever '
+                               'was computed later, or take ours')),
+        ])))
+    cache.add_command(_Command(
+        'pull', callback=_dispatch(_cmd_cache, 'cache', 'ccmd'),
+        short_help="copy a shared store's results ONTO this machine",
+        help=('Downloads results from an object store into this machine\'s cache, so it '
+              'can serve them without asking the store again - to warm a new server, or '
+              'to stop depending on the store at all. Entries already complete here cost '
+              'one small read and no bytes. The local cache keeps a bounded number of '
+              'entries, so pulling more than it holds evicts the oldest as it goes; use '
+              '--limit to take the newest few.'),
+        params=_store_params([
+            click.Option(['--limit'], type=int,
+                         help='at most this many entries, newest first'),
+        ])))
+    cache.add_command(_Command(
+        'sweep', callback=_dispatch(_cmd_cache, 'cache', 'ccmd'),
+        short_help='reclaim storage in a shared store',
+        help=('Deletes bytes in an object store that no cached result refers to any more - '
+              'what a republication replaced, and what a deleted entry left behind when it '
+              'could not be reclaimed at the time. Refuses to delete anything it cannot '
+              'account for: an object it cannot read as an entry, or an index it cannot '
+              'find, stops the run rather than emptying the store. Nothing runs this on a '
+              'schedule.'),
+        params=_store_params([
+            click.Option(['--older-than-days'], type=float,
+                         help=('also remove ENTRIES last published longer ago than this. '
+                               'Without it, only unreferenced bytes go')),
+            click.Option(['--grace-hours'], type=float, default=24.0,
+                         help=('spare bytes written within this window; they may belong to '
+                               'a result being published right now')),
+        ])))
     return root
 
 
@@ -1382,7 +1419,7 @@ def _cmd_cache(args) -> int:
         if not args.yes and r["removed"]:
             print("  (dry run - pass --yes to delete)", file=sys.stderr)
         return 0
-    if args.ccmd in ("push", "pull"):
+    if args.ccmd in ("push", "pull", "sweep"):
         return _cmd_cache_move(args)
     return 0
 
@@ -1415,10 +1452,20 @@ def _cmd_cache_move(args) -> int:
         print(f"pushed {got['pushed']}, replaced {got['replaced']}, "
               f"skipped {got['skipped']} (already there), failed {got['failed']}, "
               f"unreadable {got['unreadable']}", file=sys.stderr)
-    else:
+    elif args.ccmd == "pull":
         got = shared.pull(limit=args.limit, report=report)
         print(f"pulled {got['pulled']}, already current {got['current']}, "
-              f"failed {got['failed']}, unreadable {got['unreadable']}", file=sys.stderr)
+              f"failed {got['failed']}, unreadable {got['unreadable']}"
+              + (f", evicted again {got['evicted']}" if got.get("evicted") else ""),
+              file=sys.stderr)
+    else:
+        max_age = (args.older_than_days * 86400) if args.older_than_days else None
+        got = shared.sweep(max_age_s=max_age, grace_s=args.grace_hours * 3600)
+        print(f"deleted {got['deleted_blobs']} unreferenced object(s), expired "
+              f"{got['expired_pointers']} entr{'y' if got['expired_pointers'] == 1 else 'ies'}"
+              + (f", left {got['unreadable_pointers']} unreadable object(s) alone"
+                 if got["unreadable_pointers"] else ""), file=sys.stderr)
+        return 1 if got["unreadable_pointers"] else 0
     return 1 if got["failed"] else 0
 
 
