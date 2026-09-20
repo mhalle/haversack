@@ -177,6 +177,53 @@
   the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
   be written no longer fails a publication that already succeeded; and `list` reads at most
   `limit` pointers rather than one per entry in the bucket.
+## [0.12.4] - 2026-09-19
+
+- **A finished Modal job no longer answers 410 "purged" while its result is there.** On
+  2026-09-19 (300 ts.v2:total jobs on IDC, 16 concurrent clients) `GET
+  /v1/jobs/{id}/result` said 410 for 191 jobs whose results the workers had committed, and
+  200 minutes later. Reproduced on a throwaway deployment, the cause was in the api
+  container itself: while a Modal volume reloads, every path on it is missing to the
+  container's other threads (measured: 734,714 of 735,326 listings, and none with no
+  reload running), and the api reloaded the result volume on every request's thread - so
+  a lookup racing another request's reload missed, and the miss was believed. The api's
+  whole view of the volume emptied and refilled every 0.5-3 s under that load. Lookups
+  and reloads now exclude each other within the container, and the api serves a
+  container-local copy of each result rather than streaming the volume's file - which
+  also ends the second cause, reloads that Modal refused (silently, until now) while
+  streamed files were open. A miss is an answer only when read from a view newer than
+  the request; when no reload takes, the answer is 503 with `Retry-After` - never 410,
+  which now means a purge the server has verified. The by-path routes (labels GET and
+  HEAD, `meta.json`, preview, statistics) and the anonymous twin take the same rule: a
+  miss there was a 404, and with `Prefer: wait` a second compute of a result that
+  already existed. A refused reload is logged, once a minute per volume. The api
+  container's copies are capped by `HAVERSACK_API_MIRROR_GB` (default 2).
+- **A Modal worker's job no longer reads its own files from a volume another thread may
+  be reloading.** While one thread reloads a volume, every path on it is ENOENT to the
+  container's other threads (measured on Modal 2026-09-19), and a worker runs the job beside
+  the prefetcher, which reloads the scratch volume whenever an upload is queued behind it.
+  The job dropped its volume lock and then read its upload from scratch through the whole
+  compute, and read its saved labels back from there for the digest, the artifact pair and
+  the cache put, so a prefetcher reload in between failed the job with FileNotFoundError.
+  The job's open upload also made the prefetcher's reload raise, which ended the prefetcher.
+  The job now copies its uploads, and saves its labels, to container-local disk under the
+  lock and works from those copies. The cache put and its commit take the lock too: Modal
+  reloads after a commit whenever its server asks, although in 61 measured commits it never
+  hid a file. A refused scratch reload no longer fails a job whose upload is already visible.
+  On Modal (two throwaway deploys, 24 distinct uploads submitted at once to one L40S
+  worker), the code before this change failed 14 of 24 jobs with FileNotFoundError on
+  their own `labels.seg.nrrd`, raised in the cache put. With the change, all 24 finished,
+  and every published generation (40 over both rounds) held its preview and statistics.
+  Probes on Modal also settled what the lock must cover: a reload hides only its own volume,
+  so the weights and inputs volumes, which only the job thread touches in a worker, need
+  nothing.
+
+- **A multi-input Modal job no longer takes one role's upload for another's.** The worker
+  found each role's file by the prefix `input_{role}_`, and a role is the model's own
+  spelling, so for roles `t1` and `t1_ce` the `t1` channel could be given the `t1_ce`
+  scan; a role containing `/` would have named a subdirectory. The role is now
+  hex-encoded in the file name and matched exactly. A job queued before a redeploy, or
+  run by a warm worker from before it, fails with a message naming the role instead.
 
 ## [0.12.3] - 2026-09-19
 

@@ -63,6 +63,10 @@ ARTIFACTS = set(filter(None, os.environ.get("HAVERSACK_ARTIFACTS",
 RESULTS_KEEP = int(os.environ.get("HAVERSACK_RESULTS_KEEP", "500"))
 WEIGHTS_ROOT, SCRATCH_ROOT, CACHE_ROOT = "/weights", "/scratch", "/cache"
 INPUTS_ROOT = "/inputs"
+#: container-local copies of a running job's own files - its uploads and its labels -
+#: so that nothing reads them from the scratch volume outside ``_vol_lock`` (see
+#: ``_stage_uploads``)
+JOB_LOCAL_ROOT = "/tmp/haversack-jobs"
 # Inputs get a bigger floor than fetched series: a re-fetchable IDC series
 # costs a download when evicted, an uploaded volume is simply gone.
 INPUTS_GB = float(os.environ.get("HAVERSACK_INPUTS_GB", "50"))
@@ -127,7 +131,7 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   # the_container keeps this list and the reads below in step.
                   "HAVERSACK_APP_NAME", "HAVERSACK_GPU", "HAVERSACK_PROXY_AUTH",
                   "HAVERSACK_SCALEDOWN", "HAVERSACK_GPU_SNAPSHOT", "HAVERSACK_SNAPSHOT",
-                  "HAVERSACK_MAX_CONTAINERS", "HAVERSACK_INPUTS_GB",
+                  "HAVERSACK_MAX_CONTAINERS", "HAVERSACK_INPUTS_GB", "HAVERSACK_API_MIRROR_GB",
                   *_engines.engine_env_vars())
 
 # Base image (the ASGI api container + the nnU-Net GPU Worker). uv-NATIVE: the nnU-Net
@@ -190,6 +194,284 @@ scratch_vol = modal.Volume.from_name(f"{APP_NAME}-scratch", create_if_missing=Tr
 inputs_vol = modal.Volume.from_name(f"{APP_NAME}-inputs", create_if_missing=True)
 jobs_dict = modal.Dict.from_name(f"{APP_NAME}-jobs", create_if_missing=True)
 cache_vol = modal.Volume.from_name(f"{APP_NAME}-cache", create_if_missing=True)
+
+# -- the api container's view of the cache volume ---------------------------------
+#
+# Two ways a result the workers had committed read as absent here, both found on
+# 2026-09-19 (haversack-radar-val: 191 of 300 finished ts.v2:total jobs answered 410
+# "purged", and 200 for the same URLs minutes later; reproduced on haversack-visible-smoke):
+#
+# 1. A reload IN ANOTHER THREAD hides the whole volume from this one. While a reload runs,
+#    every path on the volume is ENOENT to the container's other threads - measured on
+#    Modal: a thread listing a 260-entry directory while another thread reloaded got
+#    ENOENT 734,714 times in 735,326, and never with no reload running; the api's own
+#    /cache listing emptied and refilled every 0.5-3 s under load (6,201 disappearances in
+#    9 minutes). The api reloaded on every request's thread, so a lookup racing any other
+#    request's reload missed - and was believed. Hence ``_cache_view``: lookups hold it
+#    shared, a reload holds it exclusive, and nothing is read from the volume outside it.
+# 2. Modal REFUSES a reload while a file on the volume is open in the container, and every
+#    streamed result held its file open for the transfer - so under concurrent downloads
+#    reloads failed, silently, and the view went stale. Hence the local copies: the api
+#    serves a container-local copy of the generation (``_mirror``), taken under the shared
+#    lock, and holds no volume file open past the lookup.
+#
+# And a miss is an answer only when read from a view newer than the question
+# (``_confirm_cache_absent``); when no reload takes, the answer is 503, not 410.
+
+
+class _ViewLock:
+    """Readers-writer lock over the cache volume's view within this container. Writer
+    preferring: under a hundred concurrent requests a reload would otherwise never find
+    a moment with no reader. Reads are short - a pointer, a lease, a copy of a few MB -
+    so a reload waits milliseconds; ``acquire_exclusive`` is bounded all the same."""
+
+    def __init__(self):
+        self._cv = threading.Condition()
+        self._readers = 0
+        self._writer = False
+        self._waiting = 0
+
+    def shared(self):
+        import contextlib
+
+        @contextlib.contextmanager
+        def held():
+            with self._cv:
+                while self._writer or self._waiting:
+                    self._cv.wait()
+                self._readers += 1
+            try:
+                yield
+            finally:
+                with self._cv:
+                    self._readers -= 1
+                    if not self._readers:
+                        self._cv.notify_all()
+        return held()
+
+    def acquire_exclusive(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._cv:
+            self._waiting += 1
+            try:
+                while self._writer or self._readers:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        return False
+                    self._cv.wait(left)
+                self._writer = True
+                return True
+            finally:
+                self._waiting -= 1
+                self._cv.notify_all()          # readers held back by a waiter that left
+
+    def release_exclusive(self) -> None:
+        with self._cv:
+            self._writer = False
+            self._cv.notify_all()
+
+    def exclusive(self, timeout: float = 60.0):
+        import contextlib
+
+        @contextlib.contextmanager
+        def held():
+            if not self.acquire_exclusive(timeout):
+                raise TimeoutError("the cache volume stayed busy")
+            try:
+                yield
+            finally:
+                self.release_exclusive()
+        return held()
+
+
+_cache_view = _ViewLock()
+#: how long a reload waits for in-flight lookups to finish before it counts as refused
+CACHE_RELOAD_WAIT_S = 2.0
+#: monotonic START of the newest reload that succeeded here: the view holds everything
+#: committed before it
+_cache_view_as_of = float("-inf")
+_cache_view_stamp = threading.Lock()
+#: one reload at a time; a thread that queued behind another's takes its outcome when that
+#: reload STARTED after this thread asked - the question it would have asked itself
+_cache_reload_mutex = threading.Lock()
+#: monotonic START of the newest reload that FAILED here
+_cache_view_failed_at = float("-inf")
+#: a plain lookup reuses a view reloaded this recently: every request reloading was a queue
+#: of writers that starved the readers (adversarial review, 2026-09-19: a lookup waited 6 s
+#: behind four threads). A MISS is still confirmed against a view newer than the request.
+CACHE_FRESH_S = 1.0
+#: serializes the confirming reloads, so a thread queued behind another's success
+#: re-checks instead of reloading again
+_cache_confirm_lock = threading.Lock()
+#: waits between the confirming reload attempts - bounded: a request is not held longer
+#: than about this plus the reloads, and then answers 503 with Retry-After
+CACHE_CONFIRM_DELAYS_S = (0.0, 0.25, 0.5, 1.0)
+_reload_failure_logged = {}
+
+#: container-local copies of result generations, served in place of the volume's files
+MIRROR_ROOT = "/tmp/haversack-results"
+MIRROR_MAX_BYTES = int(float(os.environ.get("HAVERSACK_API_MIRROR_GB", "2")) * 2**30)
+#: a copy younger than this is never removed: a response may still be about to open it
+MIRROR_MIN_AGE_S = 600.0
+_mirror_placed = [0]
+#: held while a copy is made or refreshed, and by the trim per copy it removes: a copy
+#: handed out cannot be taken between the trim's age check and its delete
+_mirror_lock = threading.Lock()
+
+
+def _reload_logged(vol, name: str) -> bool:
+    """``vol.reload()``, True when it took. A refusal is logged at most once a minute
+    per volume - it was swallowed without a word before, which is how the 410s above
+    went unexplained."""
+    try:
+        vol.reload()
+        return True
+    except Exception as e:                  # noqa: BLE001 - the view is simply not refreshed
+        _log_refusal(name, f"{type(e).__name__}: {e}")
+        return False
+
+
+def _log_refusal(name: str, why: str) -> None:
+    now = time.monotonic()
+    if now - _reload_failure_logged.get(name, float("-inf")) >= 60.0:
+        _reload_failure_logged[name] = now
+        print(f"[volume] {name} reload refused: {why}", flush=True)
+
+
+def _reload_cache_view(max_age: float = 0.0) -> bool:
+    """Make the view at least as new as this call, less ``max_age`` seconds: True when
+    it is. Reloads once no lookup is mid-read (see ``_cache_view``), one reload at a time,
+    and a caller that waited behind another's reload takes that one's outcome when it
+    started after the caller asked - so N concurrent askers cost one reload, not a queue
+    of N writers. Never called with ``_cache_view`` held by this thread."""
+    global _cache_view_as_of, _cache_view_failed_at
+    asked = time.monotonic()
+    with _cache_reload_mutex:
+        if _cache_view_as_of >= asked - max_age:
+            return True
+        if _cache_view_failed_at >= asked:
+            return False                       # one that started after we asked failed
+        t = time.monotonic()
+        if not _cache_view.acquire_exclusive(CACHE_RELOAD_WAIT_S):
+            _log_refusal("cache", f"lookups kept it busy for {CACHE_RELOAD_WAIT_S} s")
+            ok = False
+        else:
+            try:
+                ok = _reload_logged(cache_vol, "cache")
+            finally:
+                _cache_view.release_exclusive()
+        with _cache_view_stamp:
+            if ok:
+                _cache_view_as_of = max(_cache_view_as_of, t)
+            else:
+                _cache_view_failed_at = max(_cache_view_failed_at, t)
+        return ok
+
+
+def _mirror(src: Path, dst: Path) -> Path:
+    """``dst``, a container-local copy of the directory ``src`` (a result generation):
+    every file ``src`` holds now that ``dst`` lacks is copied in, atomically per file.
+    A generation's files never change once placed - artifacts only arrive - so a copy
+    is refreshed by adding, never by rewriting. Called under ``_cache_view`` shared."""
+    import shutil
+    import uuid
+    with _mirror_lock:
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in os.scandir(src):
+            if f.name.startswith(".") or f.name.endswith(".tmp") or not f.is_file():
+                continue
+            out = dst / f.name
+            if not out.exists():
+                tmp = dst / f".{f.name}.{uuid.uuid4().hex[:8]}"
+                shutil.copyfile(f.path, tmp)
+                os.replace(tmp, out)
+                _mirror_placed[0] += 1
+        os.utime(dst)                          # in use: the trim's age is this
+        due = _mirror_placed[0] >= 64
+        if due:
+            _mirror_placed[0] = 0
+    if due:
+        # outside the volume lock - it reads no volume - and outside _mirror_lock but
+        # per copy: a trim of GBs must hold neither reloads nor lookups
+        threading.Thread(target=_trim_mirror, name="haversack-mirror-trim",
+                         daemon=True).start()
+    return dst
+
+
+def _copy_local(src: Path, out: Path) -> Path:
+    """``src`` copied to ``out`` atomically (temp + rename, never rewritten in place: a
+    response may be streaming the previous copy - adversarial review, 2026-09-19, a
+    200 MB stream came out 2 MB), under ``_mirror_lock``, its directory touched."""
+    import shutil
+    import uuid
+    with _mirror_lock:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.parent / f".{out.name}.{uuid.uuid4().hex[:8]}"
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, out)
+        os.utime(out.parent)
+    return out
+
+
+def _trim_mirror() -> None:
+    """Keep the copies under ``MIRROR_MAX_BYTES``, oldest-used first, never one used in
+    the last ``MIRROR_MIN_AGE_S`` (a response may be about to open it; one already open
+    keeps its bytes through an unlink)."""
+    import shutil
+    root = Path(MIRROR_ROOT)
+    gens = []
+    for d in root.glob("*/*"):
+        try:
+            gens.append((d.stat().st_mtime, sum(f.stat().st_size for f in d.iterdir()), d))
+        except OSError:
+            continue
+    total = sum(g[1] for g in gens)
+    for _, size, d in sorted(gens, key=lambda g: g[0]):
+        if total <= MIRROR_MAX_BYTES:
+            break
+        with _mirror_lock:                     # asked again, and removed, under the lock
+            try:
+                if d.stat().st_mtime > time.time() - MIRROR_MIN_AGE_S:
+                    continue                   # handed out since the listing
+            except OSError:
+                continue
+            gone = d.parent / f".trim-{d.name}"
+            try:
+                os.replace(d, gone)            # out of reach at once; deleted after
+            except OSError:
+                continue
+        shutil.rmtree(gone, ignore_errors=True)
+        total -= size
+
+
+def _read_cache(key: str):
+    """The entry under ``key`` from the view as it stands - ``(local labels path,
+    result)`` or None - read under ``_cache_view`` shared, and handed out as a local
+    copy: the volume's own files are never open outside the lock."""
+    from haversack.serve import RESULT_NAME, ResultCache
+    with _cache_view.shared():
+        hit = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).get(key)   # leased, as before
+        if hit is None:
+            return None
+        g = Path(hit[0]).parent
+        return _mirror(g, Path(MIRROR_ROOT) / key / g.name) / RESULT_NAME, hit[1]
+
+
+def _confirm_cache_absent(key: str, since: float):
+    """The entry under ``key`` as seen from a view newer than ``since`` (a monotonic
+    time), or None when that view has no such entry - a VERIFIED miss. Reloads, a
+    bounded number of times, only when no reload since ``since`` has taken; raises
+    ``ResultsNotVisible`` when none does, so the caller answers "not visible here yet"
+    rather than "gone" or "never computed"."""
+    from haversack.serve import ResultsNotVisible
+    for delay in CACHE_CONFIRM_DELAYS_S:
+        if delay:
+            time.sleep(delay)
+        with _cache_confirm_lock:
+            if _cache_view_as_of >= since or _reload_cache_view():
+                return _read_cache(key)
+    raise ResultsNotVisible("this server cannot see the result cache's latest state yet "
+                            "(a volume reload was refused); retry shortly")
 
 
 def _check_volumes_attached() -> None:
@@ -823,6 +1105,63 @@ def _refresh_series(ctx, meta: dict, key: str, rep, already: set | None = None,
                          already=already)
 
 
+# -- one worker container, several threads, four volumes ---------------------------
+#
+# While a thread runs ``Volume.reload()``, every path on THAT volume is ENOENT to the
+# container's other threads, and the reload is refused while any of them holds a file on
+# it open. Measured on Modal 2026-09-19 (modal 1.5.5, a thread listing 260 entries while
+# another looped): a reload of the same volume, 63,412 ENOENT in 72,989 listings; a
+# reload or commit of ANOTHER volume, none; a commit of the same volume, none in 61
+# commits - alone, with another container committing, and with files open for reading
+# or writing, none refused either. Modal's source reloads after a commit whenever the
+# server's reply asks it to (``skip_reload``), which it never did here; commits are
+# locked like reloads all the same, because that is the server's choice, not ours.
+#
+# A worker runs up to four threads at once: the job, the prefetcher (reloads scratch
+# for a queued upload), the previous job's artifact overlap (places into the cache,
+# commits it) and the retention sweep (removes job directories, commits scratch). So
+# every access to the scratch or cache volume in a worker holds ``ctx._vol_lock``, as
+# does every reload or commit of either. Held only for file operations - a copy, a
+# save, a put, a commit - never across a compute or a Dict scan (a sweep holding it once
+# logged as a 127 s preview).
+#
+# Before 2026-09-19 the job itself broke this: it dropped the lock, then ran on its
+# upload from the volume and read its saved labels back from it (digest, artifact pair,
+# the cache put) - a prefetcher reload in between was a FileNotFoundError failing the
+# job, and the job's open upload made the prefetcher's reload raise, ending the
+# prefetcher. It now works on container-local copies taken under the lock. ``_put``
+# held no lock either; it does now, for the commit (above) and because it touches the
+# cache volume the artifact thread commits.
+#
+# The weights and inputs volumes are touched only by the job thread in a worker, and a
+# reload or commit of one volume hides no other, so their commits (``_ensure``,
+# VoxTell's HF cache, the content store) race nothing here.
+
+
+def _stage_uploads(ctx, jdir: Path, local: Path) -> list:
+    """Copy the job's uploaded inputs (``input_*``) off the scratch volume into the
+    container-local ``local``, under ``ctx._vol_lock`` with the reload that makes them
+    visible; returns the local copies. The job reads only these: a reload or commit in
+    another thread hides the volume's files for its duration, and the compute that
+    reads an upload lasts far longer than any lock may be held."""
+    import shutil
+    local.mkdir(parents=True, exist_ok=True)
+    out = []
+    with ctx._vol_lock:
+        try:
+            scratch_vol.reload()
+        except Exception as e:             # noqa: BLE001 - refused; what is visible may do
+            print(f"[stage] {jdir.name}: scratch reload refused: {e}", flush=True)
+        for f in sorted(jdir.glob("input_*")):
+            dst = local / f.name
+            shutil.copyfile(f, dst)
+            out.append(dst)
+    if not out:
+        raise FileNotFoundError(f"job {jdir.name}: no uploaded input is visible on the "
+                                f"scratch volume")
+    return out
+
+
 def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None:
     """The engine-agnostic job body shared by every worker: fetch/stage/
     read, then ctx._ensure + ctx._compute (the engine), then save +
@@ -842,6 +1181,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         # A signal landing in these few lines raises through run_job and retires there.
         return None
     jdir = Path(SCRATCH_ROOT) / jid
+    local = Path(JOB_LOCAL_ROOT) / jid          # this job's files, off the volume
     last = {"t": 0.0}
 
     def on_progress(p):
@@ -886,15 +1226,22 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             # written to the job dir under that role, and remote siblings fetch
             # exactly like a single-input job through the same pinned cache.
             rep = Reporter.of(on_progress, cancel=token)
-            with ctx._vol_lock:
-                scratch_vol.reload()
+            uploads = (_stage_uploads(ctx, jdir, local)
+                       if any(e.get("kind", "upload") == "upload" for e in entries) else [])
             staged = {}
             refreshed: set = set()     # one refresh per identifier, not per role
             for entry in entries:
                 role = entry.get("role") or "image"
                 kind = entry.get("kind", "upload")
                 if kind == "upload":
-                    staged[role] = next(jdir.glob(f"input_{role}_*"))
+                    # exact, by the name serve saved it under - never a prefix match
+                    from haversack.serve import upload_role
+                    found = [u for u in uploads if upload_role(u.name) == role]
+                    if len(found) != 1:
+                        raise FileNotFoundError(
+                            f"job {jid}: {len(found)} uploads for role {role!r} on the "
+                            f"scratch volume, expected one")
+                    staged[role] = found[0]
                     continue
                 if kind == "input":
                     # pinned like any other input: the content store is LRU, and
@@ -965,9 +1312,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
                 print(f"[read] upload {jid} preread", flush=True)
                 input_path = preread
             else:
-                with ctx._vol_lock:
-                    scratch_vol.reload()
-                input_path = next(jdir.glob("input_*"))
+                input_path = _stage_uploads(ctx, jdir, local)[0]
         from haversack.serve import RESULT_NAME, ResultCache, reference_input
         s = ctx._compute(input_path, meta, on_progress, token)
         # Asked once more before anything is saved or published, as the local server
@@ -978,11 +1323,19 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         if token.cancelled or _cancel_requested(jid):
             raise Cancelled("cancelled before publication")
         record_inputs(s, entries, meta.get("input_identity") or [], ctx.series_cache)
+        # Saved locally and copied to the volume under the lock: everything after this
+        # reads the labels - their digest, the artifact pair, the cache put - and reads
+        # the local file, which no reload in another thread can hide.
+        import shutil
+        local.mkdir(parents=True, exist_ok=True)
+        labels = local / RESULT_NAME
+        s.save(labels)
         with ctx._vol_lock:
-            s.save(jdir / RESULT_NAME)
+            jdir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(labels, jdir / RESULT_NAME)   # the api's fallback reads it
             scratch_vol.commit()
         from haversack.serve import result_payload
-        result = result_payload(s, jdir / RESULT_NAME)
+        result = result_payload(s, labels)
         # The publication order (re-key, pair load, pending marker,
         # cache put, done, overlap start) lives in one place -
         # haversack.serve.publish_completion; this side supplies the Dict
@@ -1005,12 +1358,17 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             _clear_pending_marker(key, jid)
 
         def _put(key: str) -> str:
-            gen = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).put(
-                key, jdir / RESULT_NAME, result,
-                {"identity": meta.get("input_identity"), "task": meta["task"],
-                 "options": meta.get("options"), "job": jid,
-                 "computed": started})
-            cache_vol.commit()
+            # Under the lock (see the block above _stage_uploads): the previous job's
+            # artifact thread places into and commits this volume, and a commit that
+            # ends in a reload would hide the generation add_artifact checks for - which
+            # then drops the artifact without a word - or fail this put mid-way.
+            with ctx._vol_lock:
+                gen = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).put(
+                    key, labels, result,
+                    {"identity": meta.get("input_identity"), "task": meta["task"],
+                     "options": meta.get("options"), "job": jid,
+                     "computed": started})
+                cache_vol.commit()
             return gen
 
         def _mark_done() -> None:
@@ -1027,7 +1385,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             identity=tuple(meta.get("input_identity") or ()),
             options=meta.get("options") or {},
             cache_key=meta.get("cache_key"),
-            labels_path=jdir / RESULT_NAME, input_image=reference_input(input_path),
+            labels_path=labels, input_image=reference_input(input_path),
             artifacts=ARTIFACTS, cache_enabled=True,
             migrate_key=_migrate, set_pending=_set_pending,
             clear_pending=_clear_pending, put=_put,
@@ -1049,6 +1407,8 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         for digest in content_pinned:
             ctx.content.unpin(digest)
         prefetch_stop.set()            # end the scan loop with the run
+        import shutil
+        shutil.rmtree(local, ignore_errors=True)
         _bound_jobs_store(jid, ctx._vol_lock)
         if meta.get("cache_key"):
             _release_inflight(meta["cache_key"], jid)
@@ -1116,10 +1476,12 @@ class _WorkerBase:
         is vol-locked add_artifact + tmpfs cleanup, and finish commits once,
         logs, and always deletes the pending marker."""
         from haversack.serve import ResultCache, artifact_overlap
-        cache = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP)
 
         def _place(name: str, path) -> bool:
             with self._vol_lock:
+                # constructed under the lock too: ResultCache() mkdirs its root, which a
+                # scratch-or-cache reload in another thread hides (review, 2026-09-19)
+                cache = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP)
                 ok = cache.add_artifact(cache_key, name, path, generation=generation)
             Path(path).unlink(missing_ok=True)
             return ok
@@ -1446,11 +1808,9 @@ class ModalExecutor:
 
     def cache_list(self):
         from haversack.serve import ResultCache
-        try:
-            cache_vol.reload()
-        except Exception:
-            pass
-        return ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).list()
+        _reload_cache_view()
+        with _cache_view.shared():
+            return ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).list()
 
     supports_push = False                    # SSE uses the server's poll branch
     accepting = True                         # Modal's backlog is the queue
@@ -1538,7 +1898,7 @@ class ModalExecutor:
         # `source` - each entry carries its canonical role, and uploads were
         # written into the job dir under that role. Sending server-local paths
         # through a Dict to another container would be sending it a lie.
-        from haversack.serve import result_key
+        from haversack.serve import RESULT_NAME, result_key
         with self.volume_guard:
             # Make any upload visible to the worker - and only then: a commit was
             # 0.67 s of every submit's 1.48 (2026-09-19), paid by idc:/input: jobs
@@ -1561,7 +1921,11 @@ class ModalExecutor:
                             "input_identity": list(identity), "state": "done",
                             "cached": True, "created": time.time(),
                             "started": time.time(), "finished": time.time(),
-                            "result": hit[1], "cache_path": str(hit[0]),
+                            # the VOLUME's path: hit[0] is this container's own copy,
+                            # which no other container (nor this one restarted) has
+                            "result": hit[1],
+                            "cache_path": str(Path(CACHE_ROOT) / key
+                                              / Path(hit[0]).parent.name / RESULT_NAME),
                             # the handle the job result route resolves - and leases -
                             # the entry by; cache_path names one generation, which a
                             # later publication of the key lets pruning reclaim
@@ -1590,11 +1954,14 @@ class ModalExecutor:
 
     def cache_get(self, key):
         from haversack.serve import ResultCache
-        try:
-            cache_vol.reload()
-        except Exception:
-            pass
-        return ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).get(key)
+        _reload_cache_view(max_age=CACHE_FRESH_S)
+        return _read_cache(key)
+
+    def confirm_absent(self, key, since):
+        """A miss ``cache_get`` returned, re-asked of a view newer than ``since``: the
+        entry, None when it is verifiably absent, or ResultsNotVisible (a 503) when no
+        reload takes. See :func:`_confirm_cache_absent`."""
+        return _confirm_cache_absent(key, since)
 
     #: jid -> monotonic time its call was last seen live, so a key asked about
     #: repeatedly costs one call probe per FLIGHT_LIVE_TTL_S, not one per request
@@ -1640,13 +2007,13 @@ class ModalExecutor:
 
     def cache_delete(self, key):
         from haversack.serve import ResultCache
-        try:
-            cache_vol.reload()
-        except Exception:
-            pass
-        deleted = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).delete(key)
-        if deleted:
-            cache_vol.commit()
+        _reload_cache_view()
+        # exclusive, like a reload: Modal reloads after a commit when its server asks
+        # (it never hid a file in 61 measured commits, but nothing promises that)
+        with _cache_view.exclusive():
+            deleted = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).delete(key)
+            if deleted:
+                cache_vol.commit()
         return deleted
 
     def status_of(self, jid):
@@ -1722,18 +2089,32 @@ class ModalExecutor:
             return None, None
         if meta.get("cache_path"):
             p = Path(meta["cache_path"])
-            try:
-                cache_vol.reload()
-            except Exception:
-                pass
-            return meta["state"], (p if p.exists() else None)
-        try:
-            with self.volume_guard:
-                scratch_vol.reload()
-        except Exception:                    # e.g. open files; judge by what is visible
-            pass
+            _reload_cache_view()
+            with _cache_view.shared():         # read, and copied out, clear of reloads
+                if not p.exists():
+                    return meta["state"], None
+                g = _mirror(p.parent, Path(MIRROR_ROOT) / "_gen" / p.parent.name)
+            return meta["state"], g / p.name
+        # The worker's scratch file, read and copied out under the guard every scratch
+        # reload takes: a reload in another thread hides the volume from this one (see
+        # _cache_view), which is likely what the 162 missing files above were. A refused
+        # reload (open files) leaves a view that may predate the worker's save: judge by
+        # what is visible only once a reload has taken, and say "not visible yet" rather
+        # than "gone" if none does.
         p = Path(SCRATCH_ROOT) / jid / RESULT_NAME
-        return meta["state"], (p if p.exists() else None)
+        local = Path(MIRROR_ROOT) / "_jobs" / jid / RESULT_NAME
+        for delay in CACHE_CONFIRM_DELAYS_S:
+            if delay:
+                time.sleep(delay)
+            with self.volume_guard:
+                fresh = _reload_logged(scratch_vol, "scratch")
+                if p.exists():
+                    return meta["state"], _copy_local(p, local)
+                if fresh:
+                    return meta["state"], None
+        from haversack.serve import ResultsNotVisible
+        raise ResultsNotVisible("this server cannot see the job's own result yet (a "
+                                "volume reload was refused); retry shortly")
 
 
 @app.function(cpu=2.0, memory=2048, scaledown_window=300, image=api_image,
@@ -1768,18 +2149,14 @@ if PUBLIC:
         from haversack.serve import (ResultCache, create_public_app, installed_versions,
                                  result_key, weights_versions_of)
         seg = Segmenter(device="cpu", weights=WEIGHTS_ROOT)
-        cache = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP)
 
         def key_fn(identity, task, opts=None):
             return result_key((identity,), task, opts or {},
                               weights_versions_of(seg, task))
 
         def get(key):
-            try:
-                cache_vol.reload()
-            except Exception:
-                pass
-            return cache.get(key)
+            _reload_cache_view(max_age=CACHE_FRESH_S)
+            return _read_cache(key)
 
         def inflight(key):
             jid = jobs_dict.get(f"inflight:{key}")
@@ -1791,13 +2168,14 @@ if PUBLIC:
             return {"progress": meta.get("progress")}
 
         def list_fn():
-            try:
-                cache_vol.reload()
-            except Exception:
-                pass
-            return ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).list()
+            _reload_cache_view()
+            with _cache_view.shared():
+                return ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).list()
 
         return create_public_app(key_fn, get, seg.tasks, inflight=inflight,
                                  list_fn=list_fn, resolve_fn=seg.resolve_task,
+                                 # a miss read from a view a refused reload left stale
+                                 # is a 503, not a 404 (see _confirm_cache_absent)
+                                 confirm_absent=_confirm_cache_absent,
                                  # so a pinned read can be answered, not refused outright
                                  versions_fn=lambda t: installed_versions(seg, t))
