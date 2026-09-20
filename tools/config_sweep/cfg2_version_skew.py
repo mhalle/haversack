@@ -19,6 +19,23 @@ NEW_KEY = "ab" * 32
 OLD_KEY = "cd" * 32
 
 
+def store_url(suffix: str) -> str:
+    """The store to run against: $HAVERSACK_TEST_STORE, plus a fresh prefix per run.
+
+    Named by the environment rather than written down here: this script goes to a public
+    repository, and where one person's bucket lives is neither a secret nor anyone else's
+    default. Everything is written under the returned prefix and deleted afterwards.
+    """
+    import os
+    import sys
+    import uuid
+    base = os.environ.get("HAVERSACK_TEST_STORE")
+    if not base:
+        sys.exit("set HAVERSACK_TEST_STORE, e.g. s3://your-bucket/haversack-sweep "
+                 "(with AWS_* credentials in the environment)")
+    return f"{base.rstrip('/')}/{suffix}/run-{uuid.uuid4().hex[:8]}"
+
+
 def cache(url, tag, *, newer=False):
     from haversack import objectcache
     from haversack.objectcache import SharedResultCache, open_store
@@ -68,7 +85,7 @@ def older_host(url, out):
 
 
 if __name__ == "__main__":
-    url = f"s3://haversack-backing/cfg2/run-{uuid.uuid4().hex[:8]}"
+    url = store_url("cfg2")
     import obstore
 
     from haversack.objectcache import open_store

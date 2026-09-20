@@ -15,8 +15,25 @@ from haversack.serve import ResultCache
 KEY = "ab" * 32
 root = Path(sys.argv[1]) / "cache"
 root.mkdir(parents=True, exist_ok=True)
-url = f"s3://haversack-backing/cfg5/run-{uuid.uuid4().hex[:8]}"
+url = store_url("cfg5")
 store, prefix = open_store(url)
+
+
+def store_url(suffix: str) -> str:
+    """The store to run against: $HAVERSACK_TEST_STORE, plus a fresh prefix per run.
+
+    Named by the environment rather than written down here: this script goes to a public
+    repository, and where one person's bucket lives is neither a secret nor anyone else's
+    default. Everything is written under the returned prefix and deleted afterwards.
+    """
+    import os
+    import sys
+    import uuid
+    base = os.environ.get("HAVERSACK_TEST_STORE")
+    if not base:
+        sys.exit("set HAVERSACK_TEST_STORE, e.g. s3://your-bucket/haversack-sweep "
+                 "(with AWS_* credentials in the environment)")
+    return f"{base.rstrip('/')}/{suffix}/run-{uuid.uuid4().hex[:8]}"
 
 
 def host(dirname):

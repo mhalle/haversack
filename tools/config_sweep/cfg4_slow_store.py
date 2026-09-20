@@ -6,13 +6,13 @@ blocking calls are handed to the threadpool - that is the whole point of `_offlo
 """
 import sys
 import tempfile
+from pathlib import Path
 import threading
 import time
-from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, "/Users/halazar/Dropbox/development/haversack/.claude/worktrees/"
-                   "object-store-cache/tests")
+# the suite's fakes stand in for a segmenter: no weights, no GPU, no bucket
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests"))
 
 import obstore
 from fastapi.testclient import TestClient

@@ -18,6 +18,23 @@ import time
 import uuid
 from pathlib import Path
 
+def store_url(suffix: str) -> str:
+    """The store to run against: $HAVERSACK_TEST_STORE, plus a fresh prefix per run.
+
+    Named by the environment rather than written down here: this script goes to a public
+    repository, and where one person's bucket lives is neither a secret nor anyone else's
+    default. Everything is written under the returned prefix and deleted afterwards.
+    """
+    import os
+    import sys
+    import uuid
+    base = os.environ.get("HAVERSACK_TEST_STORE")
+    if not base:
+        sys.exit("set HAVERSACK_TEST_STORE, e.g. s3://your-bucket/haversack-sweep "
+                 "(with AWS_* credentials in the environment)")
+    return f"{base.rstrip('/')}/{suffix}/run-{uuid.uuid4().hex[:8]}"
+
+
 SHARED = b"identical output from two different requests " + b"x" * 4096
 A, B = "aa" * 32, "bb" * 32
 
@@ -75,7 +92,7 @@ def reader(url, seconds, out):
 
 if __name__ == "__main__":
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 40.0
-    url = f"s3://haversack-backing/cfg7/run-{uuid.uuid4().hex[:8]}"
+    url = store_url("cfg7")
     import obstore
 
     from haversack.objectcache import open_store

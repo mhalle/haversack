@@ -11,6 +11,7 @@ Run them against a bucket you do not mind writing to; each cleans up its own pre
 ```bash
 export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
 export AWS_ENDPOINT=https://<account>.r2.cloudflarestorage.com AWS_REGION=auto
+export HAVERSACK_TEST_STORE=s3://your-bucket/haversack-sweep
 uv run --no-sync python tools/config_sweep/cfg1_shared_cachedir.py 30
 uv run --no-sync python tools/config_sweep/cfg2_version_skew.py
 uv run --no-sync python tools/config_sweep/cfg3_kill_reader.py

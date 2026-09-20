@@ -16,6 +16,23 @@ from pathlib import Path
 KEYS = [f"{i:02x}" * 32 for i in range(6)]
 
 
+def store_url(suffix: str) -> str:
+    """The store to run against: $HAVERSACK_TEST_STORE, plus a fresh prefix per run.
+
+    Named by the environment rather than written down here: this script goes to a public
+    repository, and where one person's bucket lives is neither a secret nor anyone else's
+    default. Everything is written under the returned prefix and deleted afterwards.
+    """
+    import os
+    import sys
+    import uuid
+    base = os.environ.get("HAVERSACK_TEST_STORE")
+    if not base:
+        sys.exit("set HAVERSACK_TEST_STORE, e.g. s3://your-bucket/haversack-sweep "
+                 "(with AWS_* credentials in the environment)")
+    return f"{base.rstrip('/')}/{suffix}/run-{uuid.uuid4().hex[:8]}"
+
+
 def cache(url, cache_dir):
     from haversack.objectcache import SharedResultCache, open_store
     from haversack.serve import ResultCache
@@ -58,7 +75,7 @@ def worker(role, url, cache_dir, seconds, out):
 
 if __name__ == "__main__":
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 30.0
-    url = f"s3://haversack-backing/cfg1/run-{uuid.uuid4().hex[:8]}"
+    url = store_url("cfg1")
     shared = tempfile.mkdtemp(prefix="cfg1-shared-")
     print(f"one cache dir: {shared}")
     import obstore
