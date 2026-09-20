@@ -48,8 +48,9 @@ import uuid
 import weakref
 from pathlib import Path
 
-from provender import Blobs, GRACE_S, check_store, open_store, update_mode
+from provender import Blobs, GRACE_S, check_store, update_mode
 from provender import StoreUnsuitable as _StoreUnsuitable
+from provender import open_store as _open_store
 
 from .errors import InputError
 
@@ -88,6 +89,22 @@ class ObjectStoreUnsuitable(InputError):
     an ``InputError``, which is what `serve` turns into one line naming the fix instead of
     a traceback from inside a dependency.
     """
+
+
+def open_store(url: str):
+    """provender's, with its ValueError turned into an ``InputError``.
+
+    The house rule is that an error names the fix in one line. A malformed URL used to say
+    exactly what the forms are; after the extraction it reached the caller as a bare
+    ValueError, which `serve` and the CLI then wrapped in advice about CREDENTIALS - for a
+    URL that never got as far as using any (review, 2026-09-20).
+    """
+    try:
+        return _open_store(url)
+    except _StoreUnsuitable:
+        raise
+    except ValueError as e:
+        raise InputError(str(e)) from None
 
 
 def check_conditional_writes(store, prefix: str = "") -> None:
@@ -130,7 +147,7 @@ def _well_formed(ptr) -> bool:
     here: the first version checked only that it was a dict with a known format, and then
     indexed ``generation``, ``files[...]["digest"]`` and ``["size"]`` blind - a truncated or
     hand-edited pointer raised KeyError/TypeError out of a read that had promised a miss
-    (review, 2026-09-19). A digest is checked here too, where it is DATA; ``BlobStore.path``
+    (review, 2026-09-19). A digest is checked here too, where it is DATA; ``provender.Blobs.path``
     keeps its own check for the bytes this process supplies.
     """
     if not isinstance(ptr, dict) or ptr.get("format") != POINTER_FORMAT:
@@ -139,9 +156,12 @@ def _well_formed(ptr) -> bool:
         return False
     if not _well_formed_files(ptr.get("files")):
         return False
-    # history is optional and its ENTRIES are checked leniently by the readers that use
-    # them (`_referenced`, `history`): a damaged past must not make the present unreadable
-    return isinstance(ptr.get("history", []), list)
+    # History is OPTIONAL and never load-bearing for the present. Requiring it to be a
+    # list made `"history": null` - what another language emits for "none" - lose the
+    # current result and, because the pointer then counted as unreadable, freeze blob
+    # deletion for the whole store (review, 2026-09-20). A past this code cannot read is
+    # simply no past: `_generations` takes the entries one at a time.
+    return True
 
 
 def _well_formed_files(files) -> bool:
@@ -160,15 +180,49 @@ def _well_formed_files(files) -> bool:
     return True
 
 
-def _generations(ptr) -> list:
-    """The current publication and every kept predecessor, newest first, as
-    ``{"generation", "published", "files"}`` - skipping any entry too damaged to use."""
+def _history_of(ptr) -> list:
+    """A pointer's history entries, or none. The shape is checked HERE so that no caller
+    has to: `"history": 7` iterated as an int and raised out of a read that had promised a
+    miss - the same lesson as every other field in this document (review, 2026-09-20)."""
+    hist = ptr.get("history")
+    return hist if isinstance(hist, list) else []
+
+
+def _usable(past, *, now: float, keep_undated: bool = False) -> bool:
+    """Is this history entry one every reader AND the writer will honor?
+
+    ONE rule, asked in one place. The writer used a looser test than the readers, so an
+    entry with damaged ``files`` was invisible to ``history`` and to the sweep while still
+    occupying one of ``HISTORY_KEEP`` slots - immortal, because it also had no date, and
+    it pushed real predecessors off the end (review, 2026-09-20).
+
+    An entry that cannot be DATED is not kept: an undatable or future-dated generation was
+    immune to ``HISTORY_MAX_AGE_S`` forever, which is the opposite of a bounded history.
+    """
+    if not isinstance(past, dict) or not isinstance(past.get("generation"), str):
+        return False
+    if not past["generation"] or not _well_formed_files(past.get("files")):
+        return False
+    when = past.get("published")
+    if not isinstance(when, (int, float)) or isinstance(when, bool):
+        return keep_undated
+    return when > now - HISTORY_MAX_AGE_S
+
+
+def _generations(ptr, *, now: float | None = None) -> list:
+    """The current publication and every kept predecessor, newest first.
+
+    The age bound is applied HERE as well as at write time. It used to be applied only
+    when a key was republished, so a key published three times and then left alone kept
+    all three for ever and the sweep kept their blobs with them - the bound did nothing
+    for exactly the quiescent keys where it matters (review, 2026-09-20).
+    """
+    now = time.time() if now is None else now
     out = [{"generation": ptr["generation"], "published": ptr.get("published"),
             "files": ptr.get("files") or {}, "result": ptr.get("result"),
             "meta": ptr.get("meta"), "current": True}]
-    for past in ptr.get("history") or []:
-        if (isinstance(past, dict) and isinstance(past.get("generation"), str)
-                and _well_formed_files(past.get("files"))):
+    for past in _history_of(ptr):
+        if _usable(past, now=now):
             out.append({**past, "current": False})
     return out
 
@@ -296,6 +350,8 @@ class SharedResultCache:
             if g["generation"] != generation:
                 continue
             dest = Path(dest)
+            dest.mkdir(parents=True, exist_ok=True)
+            written = []
             for name, blob in g["files"].items():
                 if name not in (RESULT_NAME, *ARTIFACT_NAMES):
                     continue                   # a foreign name may not decide a path
@@ -305,7 +361,11 @@ class SharedResultCache:
                 except Exception as e:         # noqa: BLE001
                     _miss(f"fetching {name} of {key[:12]}@{generation[:8]}", e)
                     return None
-            return g
+                written.append(name)
+            # nothing written is not success: a generation whose files are all named
+            # something this code will not place left the caller an empty directory and a
+            # non-None answer (review, 2026-09-20)
+            return {**g, "written": written} if RESULT_NAME in written else None
         return None
 
     def get(self, key: str):
@@ -347,6 +407,8 @@ class SharedResultCache:
                     except Exception as e:     # noqa: BLE001 - a read degrades, see _miss
                         _miss(f"fetching {name} of {key[:12]}", e)
                         here = False
+                    if not here:
+                        _warn_if_corrupt(self.blobs, files[name]["digest"])
                     if here:
                         got.append(name)
                     elif name == RESULT_NAME:
@@ -362,10 +424,15 @@ class SharedResultCache:
                                        statistics_path=_present(work / "statistics.json"),
                                        generation=gen)
                     except FileExistsError:
-                        # another process placed this generation; it is only usable if that
-                        # process also made it current - otherwise this read is a miss
-                        # rather than a different generation served as if it were current
-                        return self.local.generation(key) == gen
+                        # The generation directory is already here and INCOMPLETE - a file
+                        # deleted under it, or another process mid-copy. Put back what is
+                        # missing, atomically, rather than declaring the copy current
+                        # while its labels are gone: a re-pull is the obvious repair and
+                        # it has to actually repair (review, 2026-09-20).
+                        for name in got:
+                            _place(local_dir, name, work / name)
+                        return (self.local.generation(key) == gen
+                                and (local_dir / RESULT_NAME).exists())
                 else:
                     for name in got:
                         self.local.add_artifact(key, name, work / name, generation=gen)
@@ -415,7 +482,7 @@ class SharedResultCache:
             # what is being replaced joins the history, and the oldest falls off it
             return {"format": POINTER_FORMAT, "generation": gen, "published": now,
                     "files": files, "result": result, "meta": meta,
-                    "history": _kept_history(current, now)}
+                    "history": _kept_history(current, now, gen)}
         pointer = self._swap(key, publish)
         self._verify(pointer["files"], sources)
         try:
@@ -473,17 +540,66 @@ class SharedResultCache:
         self.local.add_artifact(key, name, src_path, generation=written["generation"])
         return True
 
-    def delete(self, key: str) -> bool:
-        """Remove the entry everywhere this host can reach: the pointer and the local copy.
-        Other hosts' local copies stop being served at their next read of the pointer."""
+    def delete(self, key: str, *, purge: bool = True) -> bool:
+        """Remove the entry everywhere this host can reach: the pointer, its BYTES, and
+        the local copy. Other hosts' local copies stop being served at their next read of
+        the pointer.
+
+        ``purge`` (the default) deletes the blobs this entry held - current generation and
+        history - once no remaining pointer references them, without waiting for the
+        sweep's grace. The decision behind history says deletion means gone, and a `delete`
+        that left the bytes readable in the bucket for a day, or for ever if nothing runs a
+        sweep, does not mean that (review, 2026-09-20). Bytes another entry shares are
+        KEPT, and so are bytes whose fate cannot be established because some pointer here
+        cannot be read - that case is reported, because for a deletion "I could not tell"
+        must not look like "done".
+
+        Returns whether anything was removed. Asked of the OBJECT, not of a parse: a
+        pointer this version cannot read is still an entry, and answering False for it
+        told an operator deleting a patient's result that there had been nothing there.
+        """
         import obstore
+        existed = False
+        try:
+            obstore.head(self.store, self._pointer_path(key))
+            existed = True
+        except FileNotFoundError:
+            pass                               # anything else the store raises comes out:
+                                               # a delete must not report success on doubt
         ptr, _ = self._read_pointer(key)
+        mine = {b["digest"] for g in (_generations(ptr) if ptr else [])
+                for b in g["files"].values()}
         try:
             obstore.delete(self.store, self._pointer_path(key))
         except FileNotFoundError:
             pass
         local = self.local.delete(key)
-        return ptr is not None or local
+        if purge and mine:
+            self._purge(key, mine)
+        return existed or local
+
+    def _purge(self, key: str, digests: set) -> None:
+        """Delete the blobs a removed entry held, except those another entry still needs.
+
+        Refuses - loudly - when a pointer cannot be read, because then "no remaining entry
+        references these bytes" is not something this process knows.
+        """
+        import obstore
+        pointers, unreadable = self._scan_pointers()
+        if unreadable:
+            print(f"warning: {key[:12]}... was deleted, but {unreadable} object(s) under "
+                  "results/ could not be read, so its bytes were left in place. Remove or "
+                  "repair them and run `haversack cache sweep` to finish the deletion.",
+                  file=sys.stderr, flush=True)
+            return
+        now = time.time()
+        keep = {b["digest"] for ptr in pointers for g in _generations(ptr, now=now)
+                for b in g["files"].values()}
+        for digest in digests - keep:
+            try:
+                obstore.delete(self.store, self.blobs.path(digest))
+            except FileNotFoundError:
+                pass
 
     def list(self, limit: int = 500) -> list:
         """The newest published entries, read from the pointers alone.
@@ -564,28 +680,38 @@ class SharedResultCache:
         to, through provender's sweep.
 
         What is haversack's here is the LIVE SET, which is the only part that knows what a
-        result is. The grace belongs to provender and is the same idea it always was: a
-        blob is unreferenced for the moments between its upload and its pointer's write,
-        and ``put`` re-checks its blobs afterwards for exactly that window. At the default
-        grace nothing young is a candidate at all; at ``grace_s=0`` what slips through is
-        a miss the next computation repairs.
+        result is.
+
+        Blobs are LISTED BEFORE the pointers are read, and that list is what provender is
+        asked to delete from. A publication landing after the listing uploaded its blobs
+        after it too, so they are not candidates whatever the clocks say; one landing
+        before the pointers are read is seen referencing them. Letting the sweep list for
+        itself inverted that order and left only an age comparison between this host's
+        clock and the store's - which loses a live blob at ``grace_s=0``, reproduced by
+        review (2026-09-20).
 
         Expiring a pointer is an unconditional delete, so a republication that lands
         between reading the pointer and deleting it is expired with it: a miss.
         """
         import obstore
+        from provender import EmptyKeepSet
         now = time.time() if now is None else now
+        candidates = self.blobs.entries(older_than=now - grace_s)   # BEFORE the pointers
         referenced, expired = set(), 0
         pointers, unreadable = self._scan_pointers()
         for ptr in pointers:
-            if max_age_s is not None and (ptr.get("published") or 0) < now - max_age_s:
+            published = ptr.get("published")
+            datable = isinstance(published, (int, float)) and not isinstance(published, bool)
+            # an entry nothing can date is never expired: the one field cleanup judges by
+            # must be one it can read, or it is not evidence (review, 2026-09-20)
+            if max_age_s is not None and datable and published < now - max_age_s:
                 try:
                     obstore.delete(self.store, self._pointer_path(ptr["_key"]))
                 except FileNotFoundError:
                     pass
                 expired += 1
                 continue
-            for gen in _generations(ptr):      # the current publication AND its history
+            for gen in _generations(ptr, now=now):   # current AND its kept history
                 for blob in gen["files"].values():
                     referenced.add(blob["digest"])
         if unreadable:
@@ -596,14 +722,29 @@ class SharedResultCache:
             # not, so it waits until whatever is unreadable has been explained.
             print(f"warning: {unreadable} object(s) under results/ could not be read as "
                   "pointers; deleting no blobs this sweep", file=sys.stderr, flush=True)
-            return {"expired_pointers": expired, "deleted_blobs": 0,
+            return {"expired_pointers": expired, "deleted_blobs": 0, "already_gone": 0,
                     "unreadable_pointers": unreadable}
-        # an empty live set is a refusal in provender unless it is meant - and here it IS
-        # meant, because every pointer was read and none of them referenced anything
-        got = self.blobs.sweep(keep=referenced, grace_s=grace_s, now=now,
-                               allow_empty=not referenced)
+        # provender refuses an empty live set unless told it was meant, and passing
+        # `allow_empty=not referenced` disarmed that guard on every call - which is exactly
+        # the case it exists for: no pointers FOUND is not evidence that nothing is live.
+        # A prefix that drifted, a layout change, a listing that returned nothing: the
+        # answer is to refuse and say so, not to empty the bucket (review, 2026-09-20).
+        # "the index is empty" and "the index is not where I looked" are the two cases,
+        # and only the first may sweep: pointers that were FOUND and then expired are an
+        # index that was read
+        try:
+            got = self.blobs.sweep(keep=referenced, candidates=candidates, grace_s=0,
+                                   now=now, allow_empty=bool(pointers))
+        except EmptyKeepSet:
+            if candidates:
+                print(f"warning: no readable entries under {self.prefix}results/, but "
+                      f"{len(candidates)} blob(s) are stored there; deleting none. If the "
+                      "entries really are gone, `haversack cache clean` the local copy and "
+                      "remove the prefix by hand.", file=sys.stderr, flush=True)
+            return {"expired_pointers": expired, "deleted_blobs": 0, "already_gone": 0,
+                    "unreadable_pointers": 0}
         return {"expired_pointers": expired, "deleted_blobs": got["deleted"],
-                "unreadable_pointers": 0}
+                "already_gone": got["already_gone"], "unreadable_pointers": 0}
 
 
     # -- migration -----------------------------------------------------------------------
@@ -618,12 +759,18 @@ class SharedResultCache:
 
         Each entry keeps the generation token it already has, so the local copy is
         instantly the store's own copy of that publication and the first read after the
-        switch downloads nothing. A legacy flat entry - from before generations - is given
-        one, and costs one download the first time it is read.
+        switch downloads nothing. The token comes from the DIRECTORY that was resolved and
+        leased, never from a second read of the pointer: a server publishing this key in
+        between would otherwise bind one generation's bytes to another generation's token,
+        and the pushing host would then believe its copy current forever (review,
+        2026-09-20). A legacy flat entry - from before generations - is given a fresh
+        token, and costs one download the first time it is read.
 
         Idempotent by construction: blobs are create-if-absent and the pointer is written
         conditionally, so a push interrupted halfway is rerun, and two hosts pushing
-        overlapping caches upload the shared bytes once.
+        overlapping caches upload the shared bytes once. ``limit`` bounds the WORK, not the
+        entries examined - a skipped key does not use up a slot, or a rerun with the same
+        limit would keep migrating the same few and never finish.
 
         ``conflict`` decides what happens when the store already has the key:
         ``"skip"`` (the default: it may be newer than ours), ``"newer"`` (compare the
@@ -633,61 +780,95 @@ class SharedResultCache:
         if conflict not in ("skip", "newer", "force"):
             raise InputError(f"conflict {conflict!r}: expected skip, newer or force")
         out = {"pushed": 0, "skipped": 0, "replaced": 0, "failed": 0, "unreadable": 0}
-        for key in self._local_keys(limit=limit):
+        keys, listed = self._local_keys()
+        if not listed:
+            out["failed"] += 1                         # a cache root nobody can read is
+            if report:                                 # not "nothing to do"
+                report(str(self.local.root), "failed: the local cache cannot be listed")
+            return out
+        for key in keys:
+            if limit is not None and out["pushed"] + out["replaced"] >= limit:
+                break
             where = self.local._resolve(key)           # leases it: not swept mid-upload
             if where is None:
                 out["unreadable"] += 1
                 continue
-            if conflict == "skip" and self._read_pointer(key)[0] is not None:
-                # asked BEFORE the bytes are touched: a rerun over a cache of thousands
-                # should cost one pointer read each, not a re-hash of every result. The
-                # swap below asks again, so a key published in between is still not lost
-                out["skipped"] += 1
-                if report:
-                    report(key, "skipped")
-                continue
-            gen = self.local.generation(key) or uuid.uuid4().hex
+            # the token of the directory in hand, not whatever the pointer says NOW
+            gen = where.name[2:] if where.name.startswith("g-") else uuid.uuid4().hex
             try:
                 result = json.loads((where / "result.json").read_text(encoding="utf-8"))
                 meta = json.loads((where / "meta.json").read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 out["unreadable"] += 1                 # half an entry is not worth pushing
                 continue
+            if not isinstance(result, dict) or not isinstance(meta, dict):
+                out["unreadable"] += 1                 # a pointer carries documents, and
+                continue                               # every reader indexes them
             sources = {n: where / n for n in (RESULT_NAME, *ARTIFACT_NAMES)
                        if (where / n).exists()}
             if RESULT_NAME not in sources:
                 out["unreadable"] += 1
                 continue
+            # Asked BEFORE the bytes are touched, for every policy that can refuse: a rerun
+            # over a cache of thousands should cost one pointer read each, not a re-hash
+            # and re-upload of every result. `_swap` asks again under the conditional
+            # write, so a key published in between is still not lost.
+            try:
+                current, _mode = self._read_pointer(key, for_write=True)
+            except Exception as e:                     # noqa: BLE001
+                out["failed"] += 1
+                if report:
+                    report(key, f"failed: {type(e).__name__}: {e}")
+                continue
+            if current is not None and _refuses(conflict, current, meta):
+                out["skipped"] += 1
+                if report:
+                    report(key, "skipped (the store has it)")
+                continue
             try:
                 files = {n: self.blobs.put_file(src) for n, src in sources.items()}
                 outcome = self._swap(key, _migrating(conflict, gen, files, result, meta))
-                self._verify(files, sources)
+                if outcome is not None:
+                    self._verify(files, sources)
             except Exception as e:                     # noqa: BLE001 - one bad entry is
                 out["failed"] += 1                     # not a reason to abandon the rest
                 if report:
                     report(key, f"failed: {type(e).__name__}: {e}")
                 continue
-            if outcome is None:
+            if outcome is None:                        # it changed under us after all
                 out["skipped"] += 1
             else:
-                out["replaced" if outcome.get("history") else "pushed"] += 1
+                out["replaced" if current is not None else "pushed"] += 1
             if report:
-                report(key, "skipped" if outcome is None else "pushed")
+                report(key, "skipped" if outcome is None
+                       else ("replaced" if current is not None else "pushed"))
         return out
 
     def pull(self, *, limit: int | None = None, report=None) -> dict:
         """Materialize the store's entries into this host's local cache.
 
         For a host that wants to be warm before it serves, and the way out of the store:
-        after a pull, the local cache answers on its own. Entries already current here cost
-        one pointer read and no bytes.
+        after a pull, the local cache answers on its own. Entries already complete here
+        cost one pointer read and no bytes - "already current" is asked of the FILES, not
+        only of the generation token, so a pull repairs a local copy whose labels went
+        missing instead of reporting it current (review, 2026-09-20).
+
+        Oldest first, because the local cache evicts least-recently-used: pulling newest
+        first made each new entry evict the one before it. Even so a store with more
+        entries than the local bound cannot fit, and what would not fit is REPORTED rather
+        than counted as pulled.
         """
-        out = {"pulled": 0, "current": 0, "failed": 0, "unreadable": 0}
+        from .serve import ARTIFACT_NAMES, RESULT_NAME
+        out = {"pulled": 0, "current": 0, "failed": 0, "unreadable": 0, "evicted": 0}
+        placed: list = []
         pointers, unreadable = self._scan_pointers(newest_first=True, limit=limit)
         out["unreadable"] = unreadable
-        for ptr in pointers:
-            key = ptr["_key"]
-            if self.local.generation(key) == ptr["generation"]:
+        for ptr in reversed(pointers):                 # oldest first: see above
+            key, gen = ptr["_key"], ptr["generation"]
+            local_dir = self.local._generation_dir(key, gen)
+            wanted = [n for n in (RESULT_NAME, *ARTIFACT_NAMES) if n in (ptr["files"] or {})]
+            if (self.local.generation(key) == gen
+                    and all((local_dir / n).exists() for n in wanted)):
                 out["current"] += 1
                 if report:
                     report(key, "current")
@@ -699,19 +880,31 @@ class SharedResultCache:
                 if report:
                     report(key, f"failed: {type(e).__name__}: {e}")
             out["pulled" if ok else "failed"] += 1
+            if ok:
+                placed.append(key)
             if report and ok:
                 report(key, "pulled")
+        # the local cache is count-bounded, and a pull of more entries than it keeps cannot
+        # leave them all servable. Asked only of what THIS pull placed - an entry that
+        # failed was never there to evict - and reported rather than counted as pulled.
+        gone = sum(1 for key in placed if self.local.generation(key) is None)
+        if gone:
+            out["evicted"] = gone
+            out["pulled"] = max(0, out["pulled"] - gone)
+            print(f"warning: {gone} pulled entr{'y' if gone == 1 else 'ies'} did not fit "
+                  f"in the local cache (it keeps {self.local.keep}); they were evicted "
+                  "again. Raise the bound or pull fewer.", file=sys.stderr, flush=True)
         return out
 
-    def _local_keys(self, *, limit: int | None = None) -> list:
-        """Every entry in the local cache, newest first. Dotfiles are not entries - a
+    def _local_keys(self, *, limit: int | None = None):
+        """``(entries newest first, could the root be listed)``. Dotfiles are not entries - a
         staging directory, a tomb mid-reclamation and a fill's work directory all live
         there, and pushing one would publish an unfinished result."""
         try:
             dirs = [d for d in self.local.root.iterdir()
                     if d.is_dir() and not d.name.startswith(".")]
         except OSError:
-            return []
+            return [], False                   # unreadable is not "nothing to do"
 
         def _mtime(d):
             try:
@@ -719,7 +912,7 @@ class SharedResultCache:
             except OSError:
                 return 0.0
         dirs.sort(key=_mtime, reverse=True)
-        return [d.name for d in dirs[:limit]]
+        return [d.name for d in dirs[:limit]], True
 
 
 def _migrating(conflict: str, gen: str, files: dict, result: dict, meta: dict):
@@ -732,22 +925,36 @@ def _migrating(conflict: str, gen: str, files: dict, result: dict, meta: dict):
     compare.
     """
     def update(current):
-        if current is not None and conflict != "force":
-            if conflict == "skip":
-                return None
-            theirs = (current.get("meta") or {}).get("computed")
-            ours = meta.get("computed")
-            if theirs is None or ours is None or theirs >= ours:
-                return None
+        if current is not None and _refuses(conflict, current, meta):
+            return None
         now = time.time()
-        return {"format": POINTER_FORMAT, "generation": gen,
-                "published": meta.get("computed") or now, "files": files,
-                "result": result, "meta": meta,
-                "history": _kept_history(current, now)}
+        # `published` is when this pointer was written, NOT when the result was computed
+        # (which lives in meta). Taking the compute time put a migrated entry's own
+        # history instantly past HISTORY_MAX_AGE_S - so pushing a months-old cache over an
+        # existing key discarded what it replaced - and let a non-numeric `computed` from
+        # a local meta.json reach `sweep`, where it raised for every host (review,
+        # 2026-09-20).
+        return {"format": POINTER_FORMAT, "generation": gen, "published": now,
+                "files": files, "result": result, "meta": meta,
+                "history": _kept_history(current, now, gen)}
     return update
 
 
-def _kept_history(current, now: float) -> list:
+def _refuses(conflict: str, current, meta) -> bool:
+    """Would this conflict policy leave the store's entry alone? Asked before any bytes
+    are hashed, and again inside the conditional write, which is the authority."""
+    if conflict == "force":
+        return False
+    if conflict == "skip":
+        return True
+    theirs = (current.get("meta") or {}).get("computed")
+    ours = meta.get("computed")
+    if not isinstance(theirs, (int, float)) or not isinstance(ours, (int, float)):
+        return True                            # not comparable: do not overwrite
+    return theirs >= ours
+
+
+def _kept_history(current, now: float, gen: str | None = None) -> list:
     """The history a publication replacing ``current`` should carry: what it replaces,
     then that pointer's own history, bounded by ``HISTORY_KEEP`` and ``HISTORY_MAX_AGE_S``.
 
@@ -757,15 +964,43 @@ def _kept_history(current, now: float) -> list:
     """
     if current is None:
         return []
-    older = [p for p in (current.get("history") or [])
-             if isinstance(p, dict) and isinstance(p.get("generation"), str)]
+    if current.get("generation") == gen:
+        # a re-push of the same generation (`cache push --conflict force` over an entry
+        # this host already published): it is not its own predecessor
+        return [p for p in _history_of(current) if _usable(p, now=now)][:HISTORY_KEEP]
+    older = [p for p in _history_of(current) if _usable(p, now=now)]
     kept = [{"generation": current["generation"], "published": current.get("published"),
              "files": current.get("files") or {},
-             "result": current.get("result"), "meta": current.get("meta")}, *older]
-    fresh = [p for p in kept
-             if not isinstance(p.get("published"), (int, float))
-             or p["published"] > now - HISTORY_MAX_AGE_S]
-    return fresh[:HISTORY_KEEP]
+             # `meta` is deliberately NOT carried: no reader has ever looked at a history
+             # entry's meta, and each copy cost a full document in every pointer read
+             "result": current.get("result")}, *older]
+    return [p for p in kept if _usable(p, now=now)][:HISTORY_KEEP]
+
+
+def _warn_if_corrupt(blobs, digest: str) -> None:
+    """Say so when a blob was there but did not hash to its name.
+
+    provender suspects such a blob and answers False, which otherwise looks exactly like a
+    cold cache - and the two could not be more different. The message was in the blob code
+    before it moved out and was lost at the seam (review, 2026-09-20). Not throttled:
+    unlike a store being down, this should not happen.
+    """
+    if digest in getattr(blobs, "suspect", ()):
+        print(f"warning: blob {digest} does not hash to its name; serving as a cache miss "
+              "and replacing it on the next publication", file=sys.stderr, flush=True)
+
+
+def _place(where: Path, name: str, src: Path) -> None:
+    """Put ``src`` into ``where`` as ``name``, atomically: a reader sees the old file or
+    the new one, never a partial copy."""
+    import os
+    import shutil
+    tmp = where / f".{name}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, where / name)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
 
 
 def _present(p: Path):

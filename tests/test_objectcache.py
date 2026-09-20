@@ -46,6 +46,11 @@ class _Hosts(unittest.TestCase):
         self.b = self.host("b")
 
     def tearDown(self):
+        import shutil
+        # not TemporaryDirectory.cleanup(): a test that leaves a staging directory behind
+        # (a publication interrupted on purpose) made cleanup raise ENOTEMPTY and failed a
+        # test whose body had passed - measured flaky 1 run in 6 (review, 2026-09-20)
+        shutil.rmtree(self.tmp, ignore_errors=True)
         self._tmp.cleanup()
 
     def host(self, name, prefix="pre/"):
@@ -304,7 +309,7 @@ class TestSweep(_Hosts):
         self.publish(self.a, b"one")
         later = objectcache.time.time() + objectcache.BLOB_GRACE_S + 60
         got = self.a.sweep(now=later, max_age_s=3600)
-        self.assertEqual({"expired_pointers": 1, "deleted_blobs": 1,
+        self.assertEqual({"expired_pointers": 1, "deleted_blobs": 1, "already_gone": 0,
                           "unreadable_pointers": 0}, got)
         self.assertIsNone(self.b.get(KEY))
 
@@ -602,15 +607,36 @@ class TestGapsFromMutation(_Hosts):
         self.assertIsNone(self.a.get(KEY))
 
     def test_a_publication_storm_raises_rather_than_losing_the_pointer(self):
+        """Every conditional write is refused: the publication must give up loudly, after
+        exactly SWAP_ATTEMPTS tries, rather than return a generation it never wrote.
+
+        The first version drove this with a mock that republished inside `_read_pointer`,
+        which recursed and passed on the RecursionError - a RuntimeError subclass - without
+        ever reaching the guard. Mutation testing caught it: raising ValueError instead,
+        and multiplying SWAP_ATTEMPTS by 1000, both survived (2026-09-20).
+        """
+        from obstore.exceptions import PreconditionError
+        self.publish(self.a, b"first")         # so the write is a replace, not a create
+        reads = []
         real = SharedResultCache._read_pointer
 
-        def read(cache, key, **kw):
-            got = real(cache, key, **kw)
-            self.publish(self.b, b"racing")    # always lose the race
-            return got
-        with unittest.mock.patch.object(SharedResultCache, "_read_pointer", read):
-            with self.assertRaises(RuntimeError):
+        def counting_read(cache, key, **kw):
+            reads.append(key)
+            return real(cache, key, **kw)
+        real_put = obstore.put
+
+        def refuse_pointer_writes(store, path, *a, **kw):
+            if "results/" in str(path):        # the blobs still upload: only the pointer
+                raise PreconditionError("etag moved")
+            return real_put(store, path, *a, **kw)
+        with unittest.mock.patch.object(obstore, "put", refuse_pointer_writes), \
+                unittest.mock.patch.object(SharedResultCache, "_read_pointer",
+                                           counting_read), \
+                unittest.mock.patch.object(objectcache, "SWAP_ATTEMPTS", 3):
+            with self.assertRaises(RuntimeError) as cm:
                 self.publish(self.a, b"one")
+        self.assertIn("publications raced this one", str(cm.exception))
+        self.assertEqual(3, len(reads), "it tried exactly SWAP_ATTEMPTS times")
 
     def test_two_threads_filling_one_key_download_once(self):
         import threading
@@ -787,9 +813,14 @@ class TestBoundedHistory(_Hosts):
         dest.mkdir()
         self.assertEqual([], self.b.history(KEY))
         self.assertIsNone(self.b.fetch_generation(KEY, gen, dest))
+        # the BYTES too, and without waiting for a sweep that nothing may ever run: a
+        # delete that leaves them readable in the bucket does not mean "gone"
+        for labels in (b"one", b"two"):
+            self.assertFalse(self.b.blobs.has(
+                f"sha256:{hashlib.sha256(labels).hexdigest()}"), labels)
         later = objectcache.time.time() + objectcache.BLOB_GRACE_S + 60
-        self.assertEqual(2, self.a.sweep(now=later)["deleted_blobs"],
-                         "and its bytes are collectable, not pinned by a kept generation")
+        self.assertEqual(0, self.a.sweep(now=later)["deleted_blobs"],
+                         "nothing left for the sweep to find")
 
     def test_identical_bytes_make_history_nearly_free(self):
         self.publish(self.a, b"same")
@@ -957,14 +988,16 @@ class TestPull(_Hosts):
         with unittest.mock.patch.object(BlobStore, "fetch",
                                         side_effect=AssertionError("downloaded")):
             got = self.b.pull()
-        self.assertEqual({"pulled": 0, "current": 1, "failed": 0, "unreadable": 0}, got)
+        self.assertEqual({"pulled": 0, "current": 1, "failed": 0, "unreadable": 0,
+                          "evicted": 0}, got)
 
     def test_a_swept_blob_makes_one_entry_fail_and_not_the_rest(self):
         self.publish(self.a, b"one", key="aa" * 32)
         self.publish(self.a, b"two", key="bb" * 32)
         obstore.delete(self.store, f"pre/blobs/sha256/{hashlib.sha256(b'one').hexdigest()}")
         got = self.b.pull()
-        self.assertEqual({"pulled": 1, "current": 0, "failed": 1, "unreadable": 0}, got)
+        self.assertEqual({"pulled": 1, "current": 0, "failed": 1, "unreadable": 0,
+                          "evicted": 0}, got)
         self.assertEqual(b"two", Path(self.b.get("bb" * 32)[0]).read_bytes())
 
     def test_pull_reports_pointers_it_cannot_read(self):
@@ -998,3 +1031,414 @@ class TestMigrationCli(_Hosts):
     def test_a_store_must_be_named(self):
         """cli.main turns an InputError into a status and one line, not a traceback."""
         self.assertEqual(2, self.run_cli("cache", "push"))
+
+
+# -- the 2026-09-20 review round: push/pull, history, deletion ---------------------------
+
+
+class TestPushBindsBytesToTheirOwnToken(_Hosts):
+    """The severe one: `push` read the directory and the generation token SEPARATELY, so a
+    server publishing the same key in between put one generation's bytes into the store
+    under another generation's token - and the pushing host then believed its local copy
+    current for ever."""
+
+    def test_a_publication_during_a_push_cannot_mix_the_two(self):
+        self.a.local.put(KEY, self.file("old", b"OLD"), {"v": 1}, {"task": "t",
+                                                                   "computed": 1.0})
+        real = ResultCache._resolve
+        raced = []
+
+        def resolve(local, key, *, lease=True):
+            where = real(local, key, lease=lease)
+            if not raced:                      # the window: between the resolve and the
+                raced.append(key)              # generation the old code read separately
+                local.put(KEY, self.file("new", b"NEW"), {"v": 2},
+                          {"task": "t", "computed": 2.0})
+            return where
+        with unittest.mock.patch.object(ResultCache, "_resolve", resolve):
+            self.a.push()
+        self.assertTrue(raced)
+        stored = self.pointer()
+        gen, published = stored["generation"], bytes(
+            obstore.get(self.store,
+                        f"pre/blobs/sha256/{stored['files'][RESULT_NAME]['digest'][7:]}"
+                        ).bytes())
+        served = Path(self.b.get(KEY)[0]).read_bytes()
+        self.assertEqual(published, served, "every host reads what the pointer names")
+        # whichever generation was pushed, its OWN bytes and its OWN result went with it
+        expected = {b"OLD": {"v": 1}, b"NEW": {"v": 2}}[published]
+        self.assertEqual(expected, stored["result"])
+        self.assertEqual(expected, self.b.get(KEY)[1])
+        local_dir = self.a.local._generation_dir(KEY, gen)
+        if local_dir.exists():
+            self.assertEqual(published, (local_dir / RESULT_NAME).read_bytes(),
+                             "the local copy under that token holds those same bytes")
+
+
+class TestPushRerunsMakeProgress(_Hosts):
+    def entries(self, cache, n):
+        for i in range(n):
+            cache.local.put(f"{i:02d}" * 32, self.file(f"l{i}", f"v{i}".encode()),
+                            {"outputs": [f"v{i}"]}, {"task": "t", "computed": float(i)})
+
+    def test_limit_bounds_the_work_not_the_entries_examined(self):
+        """`--limit 2` three times over six entries used to migrate two and then keep
+        re-skipping the same two for ever."""
+        self.entries(self.a, 6)
+        for _ in range(3):
+            self.a.push(limit=2)
+        self.assertEqual(6, len(self.b.list()))
+
+    def test_a_skipped_key_does_not_use_up_a_slot(self):
+        self.entries(self.a, 3)
+        self.a.push(limit=1)
+        got = self.a.push(limit=1)
+        self.assertEqual(1, got["pushed"])
+        self.assertEqual(2, len(self.b.list()))
+
+
+class TestPushReportsHonestly(_Hosts):
+    def test_an_unreadable_cache_root_is_a_failure_not_silence(self):
+        import os
+        root = self.a.local.root
+        os.chmod(root, 0o000)
+        try:
+            got = self.a.push()
+        finally:
+            os.chmod(root, 0o755)
+        self.assertEqual(1, got["failed"], "every entry was dropped without being counted")
+
+    def test_a_result_document_that_is_not_a_document_is_refused(self):
+        self.a.local.put(KEY, self.file("l", b"x"), {}, {"task": "t", "computed": 1.0})
+        where = self.a.local._resolve(KEY, lease=False)
+        (where / "result.json").write_text(json.dumps(["not", "a", "document"]))
+        self.assertEqual(1, self.a.push()["unreadable"])
+        self.assertEqual([], self.b.list())
+
+    def test_replaced_is_counted_when_the_store_had_the_key(self):
+        self.publish(self.b, b"theirs")
+        self.a.local.put(KEY, self.file("l", b"ours"), {"outputs": ["ours"]},
+                         {"task": "t", "computed": 9.0})
+        said = []
+        got = self.a.push(conflict="newer", report=lambda k, w: said.append(w))
+        self.assertEqual(1, got["replaced"])
+        self.assertEqual(0, got["pushed"])
+        self.assertEqual(["replaced"], said)
+
+    def test_a_refused_key_uploads_nothing_under_any_policy(self):
+        self.publish(self.b, b"theirs", key=KEY)
+        self.a.local.put(KEY, self.file("l", b"older"), {"outputs": ["older"]},
+                         {"task": "t", "computed": 0.5})
+        before = len(self.b.blobs.entries())
+        with unittest.mock.patch.object(BlobStore, "put_file",
+                                        side_effect=AssertionError("hashed and uploaded")):
+            self.assertEqual(1, self.a.push(conflict="newer")["skipped"])
+        self.assertEqual(before, len(self.b.blobs.entries()))
+
+
+class TestPullRepairsAndFits(_Hosts):
+    def test_a_local_copy_missing_its_files_is_repaired_not_called_current(self):
+        self.publish(self.a, b"one")
+        self.b.pull()
+        (Path(self.b.local.get(KEY)[0])).unlink()
+        got = self.b.pull()
+        self.assertEqual(1, got["pulled"], "a re-pull is the obvious repair")
+        self.assertEqual(b"one", Path(self.b.local.get(KEY)[0]).read_bytes())
+
+    def test_more_entries_than_the_local_bound_is_reported_not_claimed(self):
+        small = SharedResultCache(self.store, ResultCache(self.tmp / "small", keep=3),
+                                  prefix="pre/", check=False)
+        for i in range(6):
+            self.publish(self.a, f"v{i}".encode(), key=f"{i:02d}" * 32)
+        got = small.pull()
+        self.assertEqual(6, got["pulled"] + got["evicted"])
+        self.assertGreater(got["evicted"], 0, "a cache that keeps 3 cannot hold 6")
+        servable = sum(1 for i in range(6) if small.local.get(f"{i:02d}" * 32))
+        self.assertEqual(got["pulled"], servable, "the count is what is actually servable")
+
+
+class TestDamagedHistoryIsNotLoadBearing(_Hosts):
+    def test_a_history_that_is_not_a_list_loses_nothing(self):
+        """`"history": null` is what another language emits for "no history". It used to
+        lose the current result AND freeze blob deletion for the whole store."""
+        for junk in (None, "a string", 7, {"not": "a list"}):
+            with self.subTest(history=junk):
+                self.publish(self.a, b"one")
+                ptr = self.pointer()
+                ptr["history"] = junk
+                obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(ptr).encode())
+                self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+                self.assertEqual(0, self.b.sweep(grace_s=0)["unreadable_pointers"])
+                self.assertEqual(0, self.b.sweep(grace_s=0)["deleted_blobs"])
+
+    def test_a_junk_history_entry_never_occupies_a_slot(self):
+        """The writer used a looser rule than the readers, so an entry nothing could read
+        rode forward for ever and pushed real predecessors off the end."""
+        self.publish(self.a, b"one")
+        ptr = self.pointer()
+        ptr["history"] = [{"generation": "junk", "files": "not a map", "result": {}}] * 3
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(ptr).encode())
+        self.publish(self.a, b"two")
+        raw = self.pointer()
+        self.assertEqual([h["generation"] for h in raw["history"]],
+                         [ptr["generation"]], "only the real predecessor survives")
+
+    def test_an_undatable_generation_is_not_kept_for_ever(self):
+        self.publish(self.a, b"one")
+        ptr = self.pointer()
+        ptr["published"] = "2026-01-01"        # not a time this code can compare
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(ptr).encode())
+        self.publish(self.a, b"two")
+        self.assertEqual([True], [h["current"] for h in self.a.history(KEY)])
+
+    def test_a_pointer_nothing_can_date_is_never_expired(self):
+        """The other direction: cleanup refuses what it cannot account for."""
+        self.publish(self.a, b"one")
+        ptr = self.pointer()
+        ptr["published"] = "2026-01-01"
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(ptr).encode())
+        got = self.a.sweep(now=time.time() + 10 ** 9, max_age_s=1)
+        self.assertEqual(0, got["expired_pointers"])
+        self.assertEqual(b"one", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_a_string_published_does_not_stop_every_sweep(self):
+        self.publish(self.a, b"one")
+        ptr = self.pointer()
+        ptr["published"] = "2026-09-01T00:00:00"
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(ptr).encode())
+        self.a.sweep(max_age_s=3600)           # must not raise for any host, ever again
+
+
+class TestHistoryAgesOutWhenQuiet(_Hosts):
+    def test_a_key_left_alone_still_loses_its_old_generations(self):
+        """The bound used to be applied only when a key was republished - useless for the
+        quiescent keys where a 30-day limit is the point."""
+        self.publish(self.a, b"one")
+        self.publish(self.a, b"two")
+        self.assertEqual(2, len(self.a.history(KEY)))
+        later = time.time() + objectcache.HISTORY_MAX_AGE_S + 60
+        with unittest.mock.patch.object(objectcache.time, "time", lambda: later):
+            self.assertEqual([True], [h["current"] for h in self.a.history(KEY)])
+        got = self.a.sweep(now=later, grace_s=0)
+        self.assertEqual(1, got["deleted_blobs"], "and its bytes stop being referenced")
+        self.assertEqual(b"two", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_a_re_push_of_the_same_generation_is_not_its_own_predecessor(self):
+        self.a.local.put(KEY, self.file("l", b"same"), {"outputs": ["same"]},
+                         {"task": "t", "computed": 1.0})
+        self.a.push()
+        self.a.push(conflict="force")
+        self.a.push(conflict="force")
+        got = self.a.history(KEY)
+        self.assertEqual(1, len(got), got)
+        self.assertEqual(1, len({h["generation"] for h in got}))
+
+    def test_history_entries_do_not_carry_meta(self):
+        """No reader ever looked at a history entry's meta, and every copy was paid for on
+        every pointer read."""
+        self.publish(self.a, b"one")
+        self.publish(self.a, b"two")
+        self.assertNotIn("meta", self.pointer()["history"][0])
+
+
+class TestDeleteMeansGone(_Hosts):
+    def test_the_bytes_go_without_waiting_for_a_sweep(self):
+        self.publish(self.a, b"patient one")
+        self.publish(self.a, b"patient two")
+        self.a.delete(KEY)
+        for labels in (b"patient one", b"patient two"):
+            self.assertFalse(self.a.blobs.has(f"sha256:{hashlib.sha256(labels).hexdigest()}"))
+
+    def test_bytes_another_entry_shares_are_kept(self):
+        self.publish(self.a, b"shared", key="cd" * 32)
+        self.publish(self.a, b"shared")
+        self.a.delete(KEY)
+        self.assertEqual(b"shared", Path(self.b.get("cd" * 32)[0]).read_bytes())
+
+    def test_a_pointer_that_cannot_be_read_stops_the_purge_loudly(self):
+        """"I could not tell" must not look like "done" for a deletion."""
+        self.publish(self.a, b"patient")
+        obstore.put(self.store, "pre/results/.stray.json", b"{}")
+        self.assertTrue(self.a.delete(KEY))
+        self.assertTrue(self.a.blobs.has(f"sha256:{hashlib.sha256(b'patient').hexdigest()}"),
+                        "kept, because nothing could establish they were unreferenced")
+
+    def test_deleting_an_entry_this_version_cannot_read_still_says_it_deleted_it(self):
+        self.publish(self.a, b"one")
+        obstore.put(self.store, f"pre/results/{KEY}.json",
+                    json.dumps({"format": 999}).encode())
+        cold = SharedResultCache(self.store, ResultCache(self.tmp / "cold"), prefix="pre/",
+                                 check=False)
+        self.assertTrue(cold.delete(KEY), "the operator removed something, and is told so")
+        self.assertEqual([], [o for b in obstore.list(self.store, f"pre/results/{KEY}")
+                              for o in b])
+
+
+class TestFetchGenerationReportsWhatItWrote(_Hosts):
+    def test_a_generation_whose_files_cannot_be_placed_is_not_success(self):
+        gen = self.publish(self.a, b"one")
+        ptr = self.pointer()
+        ptr["files"] = {"labels.other.nrrd": ptr["files"][RESULT_NAME]}
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(ptr).encode())
+        dest = self.tmp / "out-empty"
+        self.assertIsNone(self.b.fetch_generation(KEY, gen, dest))
+
+    def test_it_says_which_files_it_wrote(self):
+        gen = self.publish(self.a, b"one", preview=b"png")
+        dest = self.tmp / "out-written"
+        got = self.b.fetch_generation(KEY, gen, dest)
+        self.assertEqual(sorted([RESULT_NAME, "preview.png"]), sorted(got["written"]))
+        self.assertTrue((dest / RESULT_NAME).exists())
+
+
+class TestGapsFromTheSecondMutationRun(_Hosts):
+    """Facts the push/pull and history tests left unpinned (mutation run, 2026-09-20)."""
+
+    def local_entry(self, cache, key=KEY, labels=b"ours", **meta):
+        return cache.local.put(key, self.file(f"m-{labels.hex()}", labels),
+                               {"outputs": [labels.decode()]}, {"task": "t", **meta})
+
+    def test_a_tie_on_computed_keeps_the_store_copy(self):
+        self.publish(self.b, b"theirs")        # computed 1.0
+        self.local_entry(self.a, computed=1.0)
+        self.assertEqual(1, self.a.push(conflict="newer")["skipped"])
+        self.assertEqual({"outputs": ["theirs"]}, self.b.published_result(KEY))
+
+    def test_a_missing_timestamp_on_either_side_keeps_the_store_copy(self):
+        for theirs, ours in (({"task": "t"}, {"computed": 5.0}),
+                             ({"computed": 5.0}, {"task": "t"}),
+                             ({"task": "t"}, {"task": "t"})):
+            with self.subTest(theirs=theirs, ours=ours):
+                self.a.delete(KEY)
+                self.b.put(KEY, self.file("t", b"theirs"), {"outputs": ["theirs"]}, theirs)
+                self.local_entry(self.a, **ours)
+                self.assertEqual(1, self.a.push(conflict="newer")["skipped"],
+                                 "unknown is not old")
+
+    def test_a_pushed_pointer_is_published_now_and_keeps_the_compute_time_in_meta(self):
+        """`published` is when the pointer was written. Taking the compute time made a
+        migrated entry's own history instantly older than the age bound."""
+        old = time.time() - 40 * 24 * 3600
+        self.local_entry(self.a, computed=old)
+        before = time.time()
+        self.a.push()
+        ptr = self.pointer()
+        self.assertGreaterEqual(ptr["published"], before)
+        self.assertEqual(old, ptr["meta"]["computed"])
+
+    def test_a_months_old_cache_pushed_over_a_key_keeps_what_it_replaced(self):
+        self.publish(self.b, b"theirs")
+        self.local_entry(self.a, labels=b"ours", computed=time.time())
+        self.assertEqual(1, self.a.push(conflict="force")["replaced"])
+        self.assertEqual([{"outputs": ["ours"]}, {"outputs": ["theirs"]}],
+                         [h["result"] for h in self.b.history(KEY)])
+
+    def test_an_entry_whose_labels_are_gone_is_unreadable(self):
+        self.local_entry(self.a)
+        (self.a.local._resolve(KEY, lease=False) / RESULT_NAME).unlink()
+        self.assertEqual(1, self.a.push()["unreadable"])
+        self.assertIsNone(self.b.get(KEY))
+
+    def test_dotted_directories_are_not_even_examined(self):
+        (self.a.local.root / ".fill-abcd").mkdir(parents=True)
+        (self.a.local.root / ".reclaim-1").mkdir(parents=True)
+        self.local_entry(self.a)
+        self.assertEqual({"pushed": 1, "skipped": 0, "replaced": 0, "failed": 0,
+                          "unreadable": 0}, self.a.push())
+
+    def test_history_reports_sizes_and_file_names(self):
+        self.publish(self.a, b"one", preview=b"png")
+        got = self.a.history(KEY)[0]
+        self.assertEqual(len(b"one") + len(b"png"), got["bytes"])
+        self.assertEqual(sorted([RESULT_NAME, "preview.png"]), got["files"])
+
+    def test_fetch_generation_honors_the_allowlist(self):
+        gen = self.publish(self.a, b"one")
+        escape = str(self.tmp / "escaped-by-fetch")
+        ptr = self.pointer()
+        ptr["files"] = {**ptr["files"], f"../../{escape}": ptr["files"][RESULT_NAME]}
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(ptr).encode())
+        self.b.fetch_generation(KEY, gen, self.tmp / "dest-allow")
+        self.assertFalse(Path(escape).exists())
+
+    def test_fetch_generation_of_a_swept_generation_is_none(self):
+        gen = self.publish(self.a, b"one")
+        self.publish(self.a, b"two")
+        obstore.delete(self.store, f"pre/blobs/sha256/{hashlib.sha256(b'one').hexdigest()}")
+        dest = self.tmp / "dest-swept"
+        dest.mkdir()
+        self.assertIsNone(self.b.fetch_generation(KEY, gen, dest))
+
+    def test_fetch_generation_leaves_the_local_cache_untouched(self):
+        gen = self.publish(self.a, b"one")
+        self.b.get(KEY)
+        before = sorted(str(p.relative_to(self.b.local.root))
+                        for p in self.b.local.root.rglob("*"))
+        self.b.fetch_generation(KEY, gen, self.tmp / "dest-untouched")
+        after = sorted(str(p.relative_to(self.b.local.root))
+                       for p in self.b.local.root.rglob("*"))
+        self.assertEqual([p for p in before if ".lease" not in p],
+                         [p for p in after if ".lease" not in p])
+
+
+class TestSweepOrdering(_Hosts):
+    def test_a_publication_during_a_sweep_keeps_its_blobs(self):
+        """Blobs are listed BEFORE the pointers are read, so a publication landing after
+        that listing was never a candidate - whatever the two clocks say. Letting the
+        sweep list for itself lost exactly this blob at grace_s=0 (review, 2026-09-20)."""
+        self.publish(self.a, b"already here")
+        real = SharedResultCache._scan_pointers
+        raced = []
+
+        def scan(cache, **kw):
+            got = real(cache, **kw)
+            if not raced:                      # a second host publishes mid-sweep
+                raced.append(True)
+                self.publish(self.b, b"mid-sweep", key="cd" * 32)
+            return got
+        with unittest.mock.patch.object(SharedResultCache, "_scan_pointers", scan):
+            self.a.sweep(grace_s=0)
+        self.assertTrue(raced)
+        self.assertEqual(b"mid-sweep", Path(self.b.get("cd" * 32)[0]).read_bytes())
+
+    def test_an_index_that_is_not_where_we_looked_sweeps_nothing(self):
+        """No pointers FOUND is not evidence that nothing is live - a drifted prefix, a
+        layout change. provender refuses; haversack used to switch that refusal off."""
+        self.publish(self.a, b"precious")
+        for batch in obstore.list(self.store, "pre/results/"):
+            for obj in batch:
+                body = bytes(obstore.get(self.store, obj["path"]).bytes())
+                obstore.put(self.store, obj["path"].replace("results/", "entries/"), body)
+                obstore.delete(self.store, obj["path"])
+        got = self.a.sweep(grace_s=0)
+        self.assertEqual(0, got["deleted_blobs"])
+        self.assertTrue(self.a.blobs.has(
+            f"sha256:{hashlib.sha256(b'precious').hexdigest()}"))
+
+    def test_an_empty_store_is_not_an_error(self):
+        self.assertEqual({"expired_pointers": 0, "deleted_blobs": 0, "already_gone": 0,
+                          "unreadable_pointers": 0}, self.a.sweep(grace_s=0))
+
+
+class TestCorruptBlobIsReported(_Hosts):
+    def test_a_blob_that_does_not_hash_to_its_name_says_so(self):
+        """A corrupt blob reads exactly like a cold cache unless someone says otherwise;
+        the message lived in the blob code and was lost when it moved to provender."""
+        import contextlib
+        import io
+        self.publish(self.a, b"one")
+        obstore.put(self.store, f"pre/blobs/sha256/{hashlib.sha256(b'one').hexdigest()}",
+                    b"tampered")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(self.b.get(KEY))
+        self.assertIn("does not hash to its name", err.getvalue())
+
+
+class TestStoreUrlErrors(unittest.TestCase):
+    def test_a_malformed_url_names_the_forms_it_accepts(self):
+        from haversack.errors import InputError
+        with self.assertRaises(InputError) as cm:
+            open_store("https://example.org/x")
+        self.assertIn("s3://bucket", str(cm.exception))
+        self.assertNotIn("credential", str(cm.exception).lower())

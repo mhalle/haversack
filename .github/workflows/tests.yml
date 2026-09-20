@@ -41,7 +41,7 @@ jobs:
             fastapi httpx python-multipart matplotlib modal pydicom 'zarr>=3' \
             'duckn @ git+https://github.com/mhalle/duckn.git@v0.3.2' \
             'rankfield @ git+https://github.com/mhalle/rankfield.git@v0.3.2' \
-            'provender @ git+https://github.com/mhalle/provender.git@v0.1.1'
+            'provender @ git+https://github.com/mhalle/provender.git@v0.1.2'
       - name: Run tests
         env:
           PYTHONPATH: src

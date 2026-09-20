@@ -238,6 +238,78 @@ class TestLayering(unittest.TestCase):
                                       "is CI, add them to the install list in "
                                       ".github/workflows/tests.yml")
 
+    def test_a_git_sourced_dependency_is_not_pinned_below_the_tag_it_sources(self):
+        """A THIRD place holds a version, and the guard above never read it.
+
+        `[project] dependencies` carries a specifier (`provender>=0.1.1`) while
+        `[tool.uv.sources]` carries the tag actually installed. A tag bump that leaves the
+        floor behind is invisible: every check passes, and an installed 0.1.1 satisfies a
+        project that needs what 0.1.2 fixed. Found by review of the provender extraction,
+        2026-09-20 - the same defect class the guard above exists for, one field over.
+
+        Only sources that are TAGS of the form vX.Y.Z are checked; a branch or a sha says
+        nothing about a version.
+        """
+        import re
+        import tomllib
+
+        root = SRC.parents[1]
+        pyproject = root / "pyproject.toml"
+        if not pyproject.exists():
+            self.skipTest("running against an installed copy, not the repository")
+        conf = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        sources = conf["tool"]["uv"]["sources"]
+        wanted = {}
+        for group in [conf["project"].get("dependencies", [])] + list(
+                conf["project"].get("optional-dependencies", {}).values()):
+            for spec in group:
+                m = re.fullmatch(r"([A-Za-z0-9_.-]+)\s*>=\s*([0-9][0-9.]*)", spec.strip())
+                if m:
+                    wanted[m.group(1).lower()] = m.group(2)
+        problems = []
+        for name, src in sources.items():
+            tag = (src or {}).get("tag") if isinstance(src, dict) else None
+            if not tag or not re.fullmatch(r"v[0-9]+(\.[0-9]+)*", tag):
+                continue
+            floor = wanted.get(name.lower())
+            if floor is None:
+                continue
+            as_tuple = lambda v: tuple(int(x) for x in v.split("."))    # noqa: E731
+            if as_tuple(floor) < as_tuple(tag[1:]):
+                problems.append(f"{name}: sourced at {tag} but the dependency floor is "
+                                f">={floor}; an older install satisfies it")
+        self.assertEqual([], problems, "\n  ".join(problems))
+
+    def test_the_installed_provender_is_the_one_the_project_asks_for(self):
+        """The consumer is `src/`, not `tools/`, so a drifted package is not a static
+        question. A semantic change (GRACE_S dropping to 0) raises nothing at all."""
+        import re
+        import tomllib
+
+        provender = pytest.importorskip("provender")
+        root = SRC.parents[1]
+        pyproject = root / "pyproject.toml"
+        if not pyproject.exists():
+            self.skipTest("running against an installed copy, not the repository")
+        conf = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        floor = next((m.group(1) for spec in conf["project"]["dependencies"]
+                      if (m := re.fullmatch(r"provender\s*>=\s*([0-9][0-9.]*)",
+                                            spec.strip()))), None)
+        self.assertIsNotNone(floor, "provender is a core dependency; keep its floor stated")
+        as_tuple = lambda v: tuple(int(x) for x in v.split("."))        # noqa: E731
+        self.assertGreaterEqual(as_tuple(provender.__version__), as_tuple(floor),
+                                f"installed provender {provender.__version__} is older "
+                                f"than the >={floor} this code needs")
+        # the names and defaults objectcache leans on, checked against the INSTALLED package
+        self.assertTrue(callable(getattr(provender.Blobs, "sweep", None)))
+        import inspect
+        sweep = inspect.signature(provender.Blobs.sweep).parameters
+        for arg in ("keep", "candidates", "grace_s", "now", "allow_empty"):
+            self.assertIn(arg, sweep, f"provender.Blobs.sweep lost {arg}")
+        self.assertGreaterEqual(provender.GRACE_S, 3600,
+                                "a sweep grace this short stops covering the window "
+                                "between a blob and the entry that names it")
+
     def test_ci_pins_the_same_git_refs_as_pyproject(self):
         """The git-sourced dependencies are pinned in TWO files and nothing made them agree.
 

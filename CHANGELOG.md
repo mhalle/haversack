@@ -22,6 +22,30 @@
   bucket served each other's results - the second never ran its segmenter - and the soak
   saw no torn read and no error while a sweeper with no grace deleted blobs underneath it.
   A hit costs one pointer read, about 85 ms median from this Mac.
+- **Second review round (four agents, 2026-09-20): twenty defects, all fixed.** The worst
+  three: `push` read the entry's directory and its generation token separately, so a server
+  publishing that key in between bound one generation's bytes to another's token and the
+  pushing host believed its copy current for ever (the token now comes from the directory
+  in hand); `"history": null` - what another language emits for "no history" - made the
+  CURRENT result unreadable and, because the pointer then counted as unreadable, froze blob
+  deletion for the whole store; and the extraction had inverted the sweep's listing order,
+  so a blob written mid-sweep could be deleted at `grace_s=0` where the old order made it
+  structurally safe (provender 0.1.2 takes pre-listed candidates, and haversack lists
+  before it reads pointers again). Also: `delete` now removes the bytes, not just the
+  pointer, keeping what another entry shares and refusing loudly when a pointer it cannot
+  read makes "unreferenced" unknowable - near patient data, deletion means gone; the
+  history age bound applies on READ as well as on write, so a key published and then left
+  alone stops keeping its old generations; one rule now decides what a history entry is, so
+  an entry the readers rejected can no longer occupy a slot for ever; history entries no
+  longer carry `meta`, which no reader ever read; `--limit` bounds the work rather than the
+  entries examined, so a rerun makes progress; `pull` goes oldest-first, repairs a local
+  copy whose files went missing instead of calling it current, and reports what did not fit
+  in the local cache instead of counting it pulled; a store URL that is malformed says what
+  forms are accepted rather than advising about credentials it never used; a corrupt blob
+  is reported again (that warning was lost at the extraction seam); and a new guard
+  reconciles the dependency floor with the sourced tag and with the installed package,
+  which is the same drift the CI pin test exists for, one field over.
+
 - **`haversack cache push` and `cache pull` migrate a result cache to and from a shared
   store.** The transition the consolidation plan needs: a cache that has been filling for
   months is worth GPU-hours, and nothing else recovers it once the local protocol goes.

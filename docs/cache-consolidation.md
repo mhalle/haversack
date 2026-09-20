@@ -57,8 +57,9 @@ local   <root>/index/<key>.json  (temp+rename)       <root>/blobs/sha256/<hex>
 remote  results/<key>.json       (If-Match)          blobs/sha256/<hex>
 ```
 
-- **One `BlobStore` interface**, two implementations (local directory, object store). The
-  object-store one is written and tested (`objectcache.BlobStore`).
+- **One blob-store interface**, two implementations (local directory, object store). The
+  object-store one is `provender.Blobs` (extracted 2026-09-20, shared with feldglas); the
+  local one is step 3.
 - **One `Index` interface**: read a pointer with a version token, write it only if unchanged.
   Locally that is a file and `os.replace` under one lock; remotely a conditional PUT.
 - **A pointer is the same document in both**: format, generation, files (name → digest,
