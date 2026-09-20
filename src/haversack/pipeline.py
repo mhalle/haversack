@@ -75,10 +75,29 @@ def canonical_orientation_for(spec, store, *, configuration: str | None = None) 
     return nio.CANONICAL
 
 
-def _attribution(spec) -> dict:
+def _attribution(spec, catalog=None) -> dict:
+    """The license and citations a result carries, from the catalog's own record of the task.
+
+    Until 2026-09-20 this was handed only the ecosystem's name and the modality, so a license
+    the MANIFEST states for one task never reached the result: `describe()` named it, and the
+    seg.nrrd header fell back to the ecosystem's. Every shipped manifest agreed with its
+    ecosystem, so nothing was misstated - but a catalog whose tasks differ in license would
+    have been, in the one copy that travels with a download. The engine path
+    (`Segmenter._run_engine`) always passed the catalog's record; this is the same rule.
+    `info()` never downloads. A TaskSpec or a model folder is in no catalog, and keeps the
+    grammar's answer."""
     from . import attribution
+    info = None
+    if hasattr(catalog, "info"):
+        try:
+            info = catalog.info(spec.name)
+        except Exception:                        # noqa: BLE001 - a spec or a name it does not know
+            info = None
     return attribution.provenance_block(
-        spec.name, {"ecosystem": spec.name.partition(":")[0] if ":" in spec.name else "",
+        spec.name, {**(info or {}),
+                    "ecosystem": (info or {}).get("ecosystem")
+                                 or (spec.name.partition(":")[0] if ":" in spec.name else ""),
+                    # the spec's, as describe() does: it decides which papers apply
                     "modality": spec.modality})
 
 
@@ -199,7 +218,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             "haversack": _version(),
             # which license governs this output and what to cite for it - the
             # identifiers only; `describe()` has the full record
-            "attribution": _attribution(spec)}
+            "attribution": _attribution(spec, catalog)}
 
     t0 = time.perf_counter()                              # the read, and nothing before it
     report.stage("read", Path(image).name if isinstance(image, (str, Path)) else "in-memory image")

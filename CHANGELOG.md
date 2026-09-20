@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+- **A license a catalog states for one task now reaches the result, not only `describe`.**
+  `segment` wrote a result's attribution from the catalog's name and the modality alone, so
+  a license a manifest states per task never reached the `.seg.nrrd` header: it fell back to
+  the catalog's. The engine path always handed over the catalog's own record of the task;
+  the nnU-Net path now does too. Nothing shipped was misstated - every manifest that names a
+  per-task license repeats its catalog's - but a catalog whose tasks differ in license would
+  have been, in the one copy of the terms that travels with a download. A per-task license
+  that only repeats its catalog's keeps the catalog's fuller record (it names the code's
+  license as well), so no shipped task's header changes: without that, 17 would have lost
+  `code` or changed case for the same facts, and a result's ETag is the digest of that file.
+
 ## [0.12.4] - 2026-09-19
 
 - **A finished Modal job no longer answers 410 "purged" while its result is there.** On
