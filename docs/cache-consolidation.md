@@ -155,11 +155,34 @@ local tier's eviction measured against diskcache before writing a third LRU by h
 6. **Delete the old protocol** and the tests that pin it, in one commit, with the CHANGELOG
    saying what is no longer possible.
 
-## Open questions for the user
+## Decided (2026-09-19, by the user)
 
-- Is the local tier meant to become content-addressed (steps 3–4), or is the object store
-  only for sharing between servers? Everything above assumes the former.
-- Does a single-server, no-network install have to keep working with no object store at all?
-  (Assumed yes: `segment` and a laptop server must not need a bucket.)
-- How much history matters: should a republication keep the previous result (the store can,
-  cheaply), or is last-writer-wins enough (today's behaviour)?
+**1. One protocol, with a TIME-LIMITED transition.** The local tier becomes
+content-addressed (steps 3–4) and the lease/claim/tomb/ceiling apparatus is deleted, not
+ported. The transition is bounded on purpose: reading a legacy generation directory is a
+migration shim with an expiry, not a second supported protocol. Concretely:
+
+- The new local store reads legacy entries from its first release, and `cache push`/`pull`
+  migrate them in bulk.
+- The shim is removed **two minor releases after the release that introduces the new store,
+  or 90 days, whichever is later**, and the CHANGELOG says so in the release that adds it.
+- After removal, a legacy entry is not read - it is ignored and evicted, and `cache clean`
+  removes it. Nothing is silently reinterpreted.
+- Deliberately NOT enforced by a dated test: a check that turns CI red on a calendar day
+  fails the wrong person on the wrong morning. The deadline lives in the CHANGELOG, in this
+  document, and in the shim's own docstring, and removing it is a scheduled task.
+
+**2. Working with no network and no object store is a REQUIREMENT, not a default.** The
+local store stands alone: no configuration, no bucket, no credentials, offline, in the lean
+install, and on a filesystem without hard links (a cache root on exFAT is supported and
+tested). The object store is an option that servers may share, never the substrate. Any
+design step that would make a bucket necessary is out of bounds.
+
+**3. Bounded history, in the shared store only.** A republication keeps its predecessors:
+the pointer carries a bounded list of previous generations, and the sweep treats their blobs
+as referenced. Bounded by count and by age, so storage is bounded per key. Deduplication
+makes this nearly free when a recomputation produces identical bytes. The local copy keeps
+no history - it holds the current generation, as it does today. `delete` removes the entry
+AND its history: for anything near patient data, deletion means gone. History is read
+explicitly (`history()`, `fetch_generation()`); no ordinary read can be served a superseded
+result by accident.

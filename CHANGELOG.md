@@ -22,6 +22,17 @@
   bucket served each other's results - the second never ran its segmenter - and the soak
   saw no torn read and no error while a sweeper with no grace deleted blobs underneath it.
   A hit costs one pointer read, about 85 ms median from this Mac.
+- **A republication keeps its predecessors: bounded history in the shared store.** The
+  pointer carries the generations it replaced - up to `HISTORY_KEEP` (4) and
+  `HISTORY_MAX_AGE_S` (30 days), whichever runs out first - and the sweep treats their
+  blobs as referenced, so storage per key is bounded by both. Deduplication makes it nearly
+  free: a recomputation that produced identical bytes adds one small pointer entry and no
+  blob. It answers what this server published in August, lets a weights upgrade be compared
+  against what it replaced, and makes a bad one rollable. The local copy keeps NO history,
+  no ordinary read can be served a superseded result, and history is read deliberately
+  (`history()`, `fetch_generation()`, which materializes into a directory the caller owns).
+  `delete` removes the entry AND its history: near patient data, deletion means gone.
+
 - **Review round on the above, same day: three agents, thirteen defects, all fixed.** The
   one that mattered: obstore's errors do not subclass OSError, so a store fault - expired
   credentials, DNS, a 503 - left `cache_get` as a bare 500 on routes SERVER.md promises

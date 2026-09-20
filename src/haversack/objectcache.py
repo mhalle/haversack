@@ -57,6 +57,14 @@ BLOB_GRACE_S = 24 * 3600
 #: Conditional-write attempts before a publication gives up. Each retry means another
 #: writer published this key in between, so this many in a row is a storm, not a race.
 SWAP_ATTEMPTS = 16
+#: How many superseded generations a key keeps, and for how long (2026-09-19, by decision).
+#: A republication - `Cache-Control: no-cache`, a weights upgrade, a changed epoch - used to
+#: erase what it replaced, which left "what did this server answer in August?" unanswerable
+#: and a bad upgrade unrollable. Bounded by BOTH, so a key's storage is bounded: history
+#: costs one small pointer entry when the recomputation produced identical bytes (the blobs
+#: dedupe) and one result when it did not. The local copy keeps NO history.
+HISTORY_KEEP = 4
+HISTORY_MAX_AGE_S = 30 * 24 * 3600
 #: How often a store fault on a READ path may be reported. A store that is down faults on
 #: every request, and a line per request is a denial of service on the operator's terminal.
 WARN_INTERVAL_S = 60.0
@@ -190,7 +198,14 @@ def _well_formed(ptr) -> bool:
         return False
     if not isinstance(ptr.get("generation"), str) or not ptr["generation"]:
         return False
-    files = ptr.get("files")
+    if not _well_formed_files(ptr.get("files")):
+        return False
+    # history is optional and its ENTRIES are checked leniently by the readers that use
+    # them (`_referenced`, `history`): a damaged past must not make the present unreadable
+    return isinstance(ptr.get("history", []), list)
+
+
+def _well_formed_files(files) -> bool:
     if not isinstance(files, dict):
         return False
     for name, blob in files.items():
@@ -204,6 +219,19 @@ def _well_formed(ptr) -> bool:
                 or any(c not in "0123456789abcdef" for c in digest[len("sha256:"):])):
             return False
     return True
+
+
+def _generations(ptr) -> list:
+    """The current publication and every kept predecessor, newest first, as
+    ``{"generation", "published", "files"}`` - skipping any entry too damaged to use."""
+    out = [{"generation": ptr["generation"], "published": ptr.get("published"),
+            "files": ptr.get("files") or {}, "result": ptr.get("result"),
+            "meta": ptr.get("meta"), "current": True}]
+    for past in ptr.get("history") or []:
+        if (isinstance(past, dict) and isinstance(past.get("generation"), str)
+                and _well_formed_files(past.get("files"))):
+            out.append({**past, "current": False})
+    return out
 
 
 def _update_mode(meta) -> dict:
@@ -399,6 +427,50 @@ class SharedResultCache:
         ptr, _ = self._read_pointer(key)
         return ptr.get("result") if ptr else None
 
+    def history(self, key: str) -> list:
+        """What this key has published, newest first and current first: one entry per kept
+        generation with its token, publication time, result document and file sizes.
+
+        Explicit on purpose. A superseded result is never served by an ordinary read - it
+        is here to answer "what did this server answer in August?", to compare a result
+        before and after a weights upgrade, and to roll one back deliberately.
+        """
+        ptr, _ = self._read_pointer(key)
+        if ptr is None:
+            return []
+        return [{"generation": g["generation"], "published": g.get("published"),
+                 "current": g["current"], "result": g.get("result"),
+                 "bytes": sum(b["size"] for b in g["files"].values()),
+                 "files": sorted(g["files"])}
+                for g in _generations(ptr)]
+
+    def fetch_generation(self, key: str, generation: str, dest) -> dict | None:
+        """Materialize one kept generation into ``dest`` (which must exist); its entry, or
+        None when that generation is not kept or its bytes have been swept.
+
+        Into a directory the CALLER owns, never into the local cache: a historical read
+        must not become what this host serves.
+        """
+        from .serve import ARTIFACT_NAMES, RESULT_NAME
+        ptr, _ = self._read_pointer(key)
+        if ptr is None:
+            return None
+        for g in _generations(ptr):
+            if g["generation"] != generation:
+                continue
+            dest = Path(dest)
+            for name, blob in g["files"].items():
+                if name not in (RESULT_NAME, *ARTIFACT_NAMES):
+                    continue                   # a foreign name may not decide a path
+                try:
+                    if not self.blobs.fetch(blob["digest"], dest / name):
+                        return None
+                except Exception as e:         # noqa: BLE001
+                    _miss(f"fetching {name} of {key[:12]}@{generation[:8]}", e)
+                    return None
+            return g
+        return None
+
     def get(self, key: str):
         """``(labels path, result)`` from the local copy of the CURRENT generation, filling
         it from the store first when the local copy is older or missing; None on a miss -
@@ -500,11 +572,15 @@ class SharedResultCache:
                    "statistics.json": statistics_path}
         files = {name: self.blobs.put_file(src) for name, src in sources.items()
                  if src and Path(src).exists()}
-        gen = uuid.uuid4().hex
-        pointer = {"format": POINTER_FORMAT, "generation": gen, "published": time.time(),
-                   "files": files, "result": result, "meta": meta}
-        self._swap(key, lambda _current: pointer)
-        self._verify(files, sources)
+        gen, now = uuid.uuid4().hex, time.time()
+
+        def publish(current):
+            # what is being replaced joins the history, and the oldest falls off it
+            return {"format": POINTER_FORMAT, "generation": gen, "published": now,
+                    "files": files, "result": result, "meta": meta,
+                    "history": _kept_history(current, now)}
+        pointer = self._swap(key, publish)
+        self._verify(pointer["files"], sources)
         try:
             self.local.put(key, labels_path, result, meta, preview_path=preview_path,
                            statistics_path=statistics_path, generation=gen)
@@ -683,8 +759,9 @@ class SharedResultCache:
                     pass
                 expired += 1
                 continue
-            for blob in (ptr.get("files") or {}).values():
-                referenced.add(self.blobs.path(blob["digest"]))
+            for gen in _generations(ptr):      # the current publication AND its history
+                for blob in gen["files"].values():
+                    referenced.add(self.blobs.path(blob["digest"]))
         if unreadable:
             # A pointer this version cannot read may still name live blobs - a writer on a
             # newer POINTER_FORMAT is the case that matters. Its blobs would look
@@ -706,6 +783,27 @@ class SharedResultCache:
             deleted += 1
         return {"expired_pointers": expired, "deleted_blobs": deleted,
                 "unreadable_pointers": 0}
+
+
+def _kept_history(current, now: float) -> list:
+    """The history a publication replacing ``current`` should carry: what it replaces,
+    then that pointer's own history, bounded by ``HISTORY_KEEP`` and ``HISTORY_MAX_AGE_S``.
+
+    Bounded by both on purpose. Count alone lets a key that is republished constantly hold
+    four copies of a large result forever; age alone lets a key republished hourly for a
+    month hold seven hundred.
+    """
+    if current is None:
+        return []
+    older = [p for p in (current.get("history") or [])
+             if isinstance(p, dict) and isinstance(p.get("generation"), str)]
+    kept = [{"generation": current["generation"], "published": current.get("published"),
+             "files": current.get("files") or {},
+             "result": current.get("result"), "meta": current.get("meta")}, *older]
+    fresh = [p for p in kept
+             if not isinstance(p.get("published"), (int, float))
+             or p["published"] > now - HISTORY_MAX_AGE_S]
+    return fresh[:HISTORY_KEEP]
 
 
 def _present(p: Path):

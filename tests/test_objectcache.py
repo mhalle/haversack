@@ -282,15 +282,22 @@ class TestMisses(_Hosts):
 
 class TestSweep(_Hosts):
     def test_only_old_unreferenced_blobs_go(self):
+        """A superseded generation is KEPT (bounded history), so its blobs stay referenced
+        until it falls off the end - then, and only then, the sweep may take them."""
         self.publish(self.a, b"one")
-        self.publish(self.a, b"two")               # "one" is now unreferenced
+        self.publish(self.a, b"two")
         later = objectcache.time.time() + objectcache.BLOB_GRACE_S + 60
-        young = self.a.sweep()
-        self.assertEqual(0, young["deleted_blobs"], "unreferenced but inside the grace")
-        old = self.a.sweep(now=later)
-        self.assertEqual(1, old["deleted_blobs"])
-        self.assertFalse(self.a.blobs.has(f"sha256:{hashlib.sha256(b'one').hexdigest()}"))
-        self.assertEqual(b"two", Path(self.b.get(KEY)[0]).read_bytes())
+        self.assertEqual(0, self.a.sweep()["deleted_blobs"], "inside the grace")
+        self.assertEqual(0, self.a.sweep(now=later)["deleted_blobs"], "still in history")
+        self.assertTrue(self.a.blobs.has(f"sha256:{hashlib.sha256(b'one').hexdigest()}"))
+        for i in range(objectcache.HISTORY_KEEP + 1):   # push "one" and "two" off the end
+            self.publish(self.a, f"more-{i}".encode())
+        self.assertEqual(2, self.a.sweep(now=later)["deleted_blobs"])
+        for gone in (b"one", b"two"):
+            self.assertFalse(self.a.blobs.has(f"sha256:{hashlib.sha256(gone).hexdigest()}"))
+        self.assertEqual(objectcache.HISTORY_KEEP + 1, len(self.a.history(KEY)),
+                         "what the sweep spared is exactly what history keeps")
+        self.assertEqual(b"more-4", Path(self.b.get(KEY)[0]).read_bytes())
 
     def test_max_age_expires_pointers_and_then_their_blobs(self):
         self.publish(self.a, b"one")
@@ -707,3 +714,95 @@ def test_no_async_route_blocks_the_event_loop_on_the_cache():
                 problems.append(f"{node.name} (line {call.lineno}) calls executor."
                                 f"{fn.attr} directly; use `await _offload(...)`")
     assert not problems, "\n  ".join(problems)
+
+
+class TestBoundedHistory(_Hosts):
+    """A republication keeps its predecessors, bounded by count and age (decided
+    2026-09-19). The local copy keeps none, no ordinary read is ever served a superseded
+    result, and `delete` takes the history with it."""
+
+    def test_history_is_newest_first_with_the_current_publication_at_its_head(self):
+        self.publish(self.a, b"one")
+        self.publish(self.b, b"two")
+        got = self.a.history(KEY)
+        self.assertEqual([True, False], [h["current"] for h in got])
+        self.assertEqual([{"outputs": ["two"]}, {"outputs": ["one"]}],
+                         [h["result"] for h in got])
+
+    def test_history_is_bounded_by_count(self):
+        for i in range(objectcache.HISTORY_KEEP + 4):
+            self.publish(self.a, f"v{i}".encode())
+        self.assertEqual(objectcache.HISTORY_KEEP + 1, len(self.a.history(KEY)))
+
+    def test_history_is_bounded_by_age(self):
+        self.publish(self.a, b"one")
+        stale = self.pointer()
+        stale["published"] = time.time() - objectcache.HISTORY_MAX_AGE_S - 60
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(stale).encode())
+        self.publish(self.a, b"two")
+        self.assertEqual([True], [h["current"] for h in self.a.history(KEY)])
+
+    def test_an_ordinary_read_is_never_served_a_superseded_result(self):
+        self.publish(self.a, b"one")
+        self.publish(self.a, b"two")
+        self.assertEqual(b"two", Path(self.b.get(KEY)[0]).read_bytes())
+        self.assertEqual(b"two", Path(self.a.get(KEY)[0]).read_bytes())
+
+    def test_a_superseded_generation_can_be_fetched_deliberately(self):
+        gen = self.publish(self.a, b"one")
+        self.publish(self.a, b"two")
+        dest = self.tmp / "out"
+        dest.mkdir()
+        entry = self.b.fetch_generation(KEY, gen, dest)
+        self.assertEqual({"outputs": ["one"]}, entry["result"])
+        self.assertEqual(b"one", (dest / RESULT_NAME).read_bytes())
+        self.assertEqual(b"two", Path(self.b.get(KEY)[0]).read_bytes(),
+                         "fetching history must not change what this host serves")
+
+    def test_a_generation_that_is_not_kept_is_not_fetchable(self):
+        dest = self.tmp / "out2"
+        dest.mkdir()
+        self.publish(self.a, b"one")
+        self.assertIsNone(self.b.fetch_generation(KEY, "nosuchgeneration", dest))
+
+    def test_the_local_copy_keeps_no_history_of_its_own(self):
+        """History lives in the store. The local copy holds the current generation and
+        whatever its OWN rules still protect - a superseded generation survives only while
+        a reader may hold it (`GENERATION_GRACE_S`), and goes after that."""
+        with unittest.mock.patch.object(ResultCache, "GENERATION_GRACE_S", 0):
+            self.publish(self.a, b"one")
+            gen2 = self.publish(self.a, b"two")
+            gens = [p.name for p in (self.a.local.root / KEY).iterdir()
+                    if p.name.startswith("g-")]
+        self.assertEqual([f"g-{gen2}"], gens)
+        self.assertEqual(2, len(self.a.history(KEY)), "the store still has both")
+
+    def test_delete_takes_the_history_with_it(self):
+        """For anything near patient data, deletion means gone."""
+        gen = self.publish(self.a, b"one")
+        self.publish(self.a, b"two")
+        self.a.delete(KEY)
+        dest = self.tmp / "out3"
+        dest.mkdir()
+        self.assertEqual([], self.b.history(KEY))
+        self.assertIsNone(self.b.fetch_generation(KEY, gen, dest))
+        later = objectcache.time.time() + objectcache.BLOB_GRACE_S + 60
+        self.assertEqual(2, self.a.sweep(now=later)["deleted_blobs"],
+                         "and its bytes are collectable, not pinned by a kept generation")
+
+    def test_identical_bytes_make_history_nearly_free(self):
+        self.publish(self.a, b"same")
+        self.publish(self.a, b"same")          # a recompute that changed nothing
+        blobs = [o for batch in obstore.list(self.store, "pre/blobs/") for o in batch]
+        self.assertEqual(1, len(blobs))
+        self.assertEqual(2, len(self.a.history(KEY)))
+
+    def test_a_damaged_past_does_not_make_the_present_unreadable(self):
+        self.publish(self.a, b"one")
+        self.publish(self.a, b"two")
+        ptr = self.pointer()
+        ptr["history"] = [{"generation": 7}, "rubbish", {"generation": "g", "files": []}]
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(ptr).encode())
+        self.assertEqual(b"two", Path(self.b.get(KEY)[0]).read_bytes())
+        self.assertEqual([True], [h["current"] for h in self.b.history(KEY)])
+        self.b.sweep(grace_s=0)                # must not raise
