@@ -373,8 +373,13 @@ the original input, the worker's retry over refused reloads and its sleeping out
 and the generic output-kind check step 2 relies on. Each has a test; 67 mutants are killed on
 the final tree, and two that survived were equivalent mutants that exposed a redundant
 condition in the leaf dedupe, since simplified. NOT reached by the review: concurrent fetches
-of one pinned reference from real threads, a `/v1/segmentations` listing holding digest
-identities, and restart recovery of a persisted queued job with a `result:` source.
+of one pinned reference from real threads, and a `/v1/segmentations` listing holding digest
+identities. Its third open item - restart recovery of a persisted queued job with a `result:`
+source - was closed the same day: what `jobs.db` persists is the PINNED identifier (the digest
+rides in `source[].id`), so a job restored by a new process runs from the bytes its key was
+built from, and one whose upstream was recomputed while the server was down still fails with
+"the referenced result changed". Both tests die when a restart forgets a job's sources, or
+persists them without the pin, and passed 12 runs in 12.
 
 ## What steps 2 and 3 should know
 

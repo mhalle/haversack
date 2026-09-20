@@ -1100,3 +1100,61 @@ def test_a_copy_that_never_matches_says_what_to_do_about_it(tmp_path):
     (tmp_path / "entry").mkdir()
     with pytest.raises(InputError, match="if it repeats.*no-cache"):
         _source((path, result)).fetch(f"{KEY}!labels@sha256:{'5' * 64}", tmp_path / "entry")
+
+
+# -- a restart between submit and dispatch (the review's open item, 2026-09-20) -----------
+
+def _restart(seg, ex, tmp_path):
+    """The process going away with a job still queued, and a new one on the same workdir
+    and result cache - as test_serve's restart tests do it. The new server's catalog is a
+    fresh object: nothing in memory crosses over, only jobs.db and the two caches."""
+    ex._stop = True
+    seg.gate.set()
+    ex._thread.join(timeout=10)
+    seg2 = Tasks()
+    ex2 = LocalExecutor(seg2, workdir=tmp_path / "w", cache_dir=tmp_path / "rc",
+                        sources=[ToyCT(tmp_path)], artifacts=())
+    return seg2, ex2, TestClient(create_app(ex2))
+
+
+def test_a_queued_job_with_a_reference_survives_a_restart_and_runs_from_the_pinned_bytes(
+        server, tmp_path):
+    """What is persisted is the PINNED identifier - the digest the key was built from rides
+    in `source[].id` - so the restored job needs no second look at submit time's answer:
+    the new process's own `result` source resolves it again and compares, as any worker does."""
+    seg, ex, client = server
+    up = _upstream(client)
+    jid = _queue_behind_a_running_job(seg, client, up["key"])
+    stored = ex.jobs_db.get(jid)
+    assert [e["id"] for e in stored["source"] if e["kind"] == "result"] == \
+        [f"{up['key']}!labels@{_digest_of(up)}"]
+    seg2, ex2, client2 = _restart(seg, ex, tmp_path)
+    try:
+        s = wait_state(client2, jid)
+        assert s["state"] == "done", s.get("error")
+        ct, lab = _ct(), _labels()
+        assert s["result"]["provenance"]["mean_intensity"]["liver"] == float(ct[lab == 1].mean())
+        assert s["input_identity"] == sorted(["image=toy:sp042", f"mask={_digest_of(up)}"])
+        assert _mask_record(s)["origin"]["result"] == up["key"]
+        assert seg2.seen and seg2.seen[0].task == "total_fast"      # run by the NEW process
+    finally:
+        ex2.close()
+
+
+def test_a_reference_that_changed_while_the_server_was_down_still_fails_by_name(
+        server, tmp_path):
+    seg, ex, client = server
+    up = _upstream(client)
+    jid = _queue_behind_a_running_job(seg, client, up["key"])
+    ex._stop = True                                 # down first, THEN the upstream moves on
+    seg.gate.set()
+    ex._thread.join(timeout=10)
+    now = _republish(ex, up["key"], tmp_path, _labels(1))
+    seg2, ex2, client2 = _restart(seg, ex, tmp_path)
+    try:
+        s = wait_state(client2, jid)
+        assert s["state"] == "failed", s
+        assert "the referenced result changed" in s["error"] and now in s["error"]
+        assert "organ_means" not in [c[1] for c in seg2.calls]
+    finally:
+        ex2.close()
