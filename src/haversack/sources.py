@@ -1486,8 +1486,12 @@ def _stated_weights(prov: dict) -> list:
     models = [m for m in (prov.get("models") or []) if isinstance(m, dict)]
     if models:
         return [f"{m.get('weights')}={m.get('version') or 'unknown'}" for m in models]
+    # a NAME and a plain string, and not this package's own version: `_version`,
+    # `haversack_version` and a nested value each read as weights until a review fed
+    # them in (2026-09-20)
     return [f"{k[:-len('_version')]}={v}" for k, v in sorted(prov.items())
-            if k.endswith("_version") and v]
+            if isinstance(k, str) and k.endswith("_version") and k != "_version"
+            and not k.startswith("haversack") and isinstance(v, str) and v]
 
 
 def _carried_forward(upstream_inputs) -> dict:
@@ -1505,29 +1509,36 @@ def _carried_forward(upstream_inputs) -> dict:
     hops, leaves, seen_hops, seen_leaves = [], [], set(), set()
 
     def hop(h):
-        k = (h.get("result"), h.get("digest"))
+        if not isinstance(h, dict):
+            return
+        k = (str(h.get("result")), str(h.get("digest")))
         if k not in seen_hops:
             seen_hops.add(k)
             hops.append(h)
 
     def leaf(rec):
+        if not isinstance(rec, dict):
+            return
         k = rec.get("identity")
-        if k not in seen_leaves:
-            seen_leaves.add(k)
-            leaves.append({f: v for f, v in rec.items() if f != "role"})   # a role means
-                                                                           # something only
-                                                                           # to its own task
+        # merged only on an identity it HAS: two records that state none are two inputs,
+        # and folding them into one dropped the second one's license (review, 2026-09-20)
+        if k is not None:
+            if str(k) in seen_leaves:
+                return
+            seen_leaves.add(str(k))
+        leaves.append({f: v for f, v in rec.items() if f != "role"})   # a role means something
+                                                                       # only to its own task
     for rec in upstream_inputs or []:
         if not isinstance(rec, dict):
             continue
         if rec.get("kind") != ResultSource.prefix:
             leaf(rec)
             continue
-        o = rec.get("origin") or {}
+        o = rec.get("origin") if isinstance(rec.get("origin"), dict) else {}
         hop({"result": o.get("result"), "output": o.get("output"),
              "digest": rec.get("identity"), "task": o.get("task"),
              "weights": o.get("weights")})
-        above = rec.get("derived_from") or {}
+        above = rec.get("derived_from") if isinstance(rec.get("derived_from"), dict) else {}
         for h in above.get("results") or []:
             hop(h)
         for r in above.get("inputs") or []:
@@ -1647,7 +1658,9 @@ class ResultSource(DataSource):
                 f" - write {self.prefix}:{ref.key}!{names[0]}, or drop the !name for the "
                 "first", key=ref.key, output=ref.output, outputs=names)
         digest, name = str(out.get("sha256") or ""), str(out.get("name") or "")
-        if not content.is_digest(digest) or not name:
+        # RESULT_PIN_RE, not content.is_digest: that accepts a tree digest and uppercase
+        # hex, so pin() could mint an identifier its own grammar - and identity() - refuse
+        if not re.fullmatch(RESULT_PIN_RE, digest) or not re.fullmatch(OUTPUT_NAME_RE, name):
             return UnresolvedReference(
                 "result_unreadable",
                 f"result {short}... states no digest for its output {name!r}: recompute "
@@ -1738,7 +1751,9 @@ class ResultSource(DataSource):
             if actual != ref.digest:
                 raise InputError(f"fetch of {self.prefix}:{ref.key[:12]}... failed: the bytes "
                                  f"read are {actual}, not {ref.digest} - the entry was being "
-                                 "replaced while it was copied; submit again")
+                                 "replaced while it was copied, so submit again; if it "
+                                 "repeats, the entry's labels are not what its result.json "
+                                 "states: recompute it with Cache-Control: no-cache")
             os.replace(tmp, out)
         finally:
             # a copy cut short by a volume that vanished mid-read is left nowhere: the entry
@@ -1762,8 +1777,12 @@ class ResultSource(DataSource):
                                    "own meta.json and result.json)"}
         if got.meta.get("computed") is not None:
             origin["computed"] = got.meta["computed"]
-        said = {"origin": origin, "license": None, "cite": [],
-                "derived_from": _carried_forward(prov.get("inputs"))}
+        try:
+            above = _carried_forward(prov.get("inputs"))
+        except Exception as e:             # noqa: BLE001 - a record is a courtesy: an upstream
+            # provenance no build of ours wrote must not fail a fetch whose bytes verified
+            above = {"results": [], "inputs": [], "error": f"{type(e).__name__}: {e}"}
+        said = {"origin": origin, "license": None, "cite": [], "derived_from": above}
         if prov.get("attribution"):
             said["attribution"] = prov["attribution"]
         return said

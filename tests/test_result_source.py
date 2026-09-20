@@ -823,13 +823,45 @@ def test_the_server_record_names_the_task_when_the_header_does_not(tmp_path):
     d.mkdir(parents=True)
     Tasks._seg(_labels(), NAMES, {"engine": "fastsurfer"}).save(d / "labels.seg.nrrd")
     assert read_label_map(d).task is None
+    about = {"digest": content.digest_file(d / "labels.seg.nrrd")}
     (tmp_path / "entry" / ".input.json").write_text(json.dumps(
-        {"kind": "result", "origin": {"task": "fastsurfer:asegdkt"}}), encoding="utf-8")
+        {"kind": "result", "content": about, "origin": {"task": "fastsurfer:asegdkt"}}),
+        encoding="utf-8")
     assert read_label_map(d).task == "fastsurfer:asegdkt"
     assert read_label_map(d / "labels.seg.nrrd").task == "fastsurfer:asegdkt"
     (tmp_path / "entry" / ".input.json").write_text(json.dumps(
-        {"kind": "idc", "origin": {"task": "not a result's record"}}), encoding="utf-8")
+        {"kind": "idc", "content": about, "origin": {"task": "not a result's record"}}),
+        encoding="utf-8")
     assert read_label_map(d).task is None
+
+
+def test_somebody_elses_record_two_levels_up_names_nothing(tmp_path):
+    """A user's own label map in `mine/sub/`, and an unrelated `.input.json` in `mine/`: the
+    reader believed it and named a task that never made this file - the false provenance
+    claim `sources._dicom_facts` was rewritten to stop making (review, 2026-09-20). A record
+    counts only beside a `series/` directory AND when it is about these very bytes."""
+    header = {"task": "my_own_task"}
+    for folder in ("sub", "series"):
+        d = tmp_path / "mine" / folder
+        d.mkdir(parents=True)
+        Tasks._seg(_labels(), NAMES, header).save(d / "mine.seg.nrrd")
+    (tmp_path / "mine" / ".input.json").write_text(json.dumps(
+        {"kind": "result", "content": {"digest": "sha256:" + "0" * 64},
+         "origin": {"task": "ts.v2:total"}}), encoding="utf-8")
+    assert read_label_map(tmp_path / "mine" / "sub" / "mine.seg.nrrd").task == "my_own_task"
+    assert read_label_map(tmp_path / "mine" / "series").task == "my_own_task"   # other bytes
+
+
+def test_a_users_own_label_map_is_never_hashed_to_look_for_a_record(tmp_path, monkeypatch):
+    """The digest is what decides whose record it is; the `series/` test before it is what
+    keeps a user's own file - any size, anywhere - from being read twice to find that out."""
+    d = tmp_path / "mine" / "sub"
+    d.mkdir(parents=True)
+    Tasks._seg(_labels(), NAMES, {"task": "my_own_task"}).save(d / "mine.seg.nrrd")
+    (tmp_path / "mine" / ".input.json").write_text(json.dumps(
+        {"kind": "result", "origin": {"task": "ts.v2:total"}}), encoding="utf-8")
+    monkeypatch.setattr(content, "digest_file", lambda p: pytest.fail(f"hashed {p}"))
+    assert read_label_map(d / "mine.seg.nrrd").task == "my_own_task"
 
 
 def test_the_name_the_server_keyed_on_outranks_what_the_header_claims(tmp_path):
@@ -840,7 +872,8 @@ def test_the_name_the_server_keyed_on_outranks_what_the_header_claims(tmp_path):
     d.mkdir(parents=True)
     Tasks._seg(_labels(), NAMES, {"task": "what the header says"}).save(d / "labels.seg.nrrd")
     (tmp_path / "entry" / ".input.json").write_text(json.dumps(
-        {"kind": "result", "origin": {"task": "ts.v2:total"}}), encoding="utf-8")
+        {"kind": "result", "content": {"digest": content.digest_file(d / "labels.seg.nrrd")},
+         "origin": {"task": "ts.v2:total"}}), encoding="utf-8")
     assert read_label_map(d).task == "ts.v2:total"
 
 
@@ -875,3 +908,195 @@ def test_reading_a_label_map_needs_none_of_the_heavy_stack():
             "if m in sys.modules]\nassert not bad, bad\n")
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr[-800:]
+
+
+# -- adversarial review, 2026-09-20: each finding pinned, each surviving mutant given a test --
+
+def test_a_label_map_role_is_required_because_the_binder_says_so():
+    """`label_input(required=False)` declared an optional role that `bind_sources` then
+    refused: one fact in two places, and only one of them was read."""
+    import inspect
+
+    from haversack.schemas import bind_sources, input_specs, label_input
+    assert "required" not in inspect.signature(label_input).parameters
+    inputs = input_specs(["image"]) + [label_input("mask")]
+    assert all(i["required"] is True for i in inputs)
+    with pytest.raises(RequestError) as e:
+        bind_sources([{"kind": "toy", "id": "sp042", "role": "image"}], inputs,
+                     multi_input=True, task="t")
+    assert e.value.code == "missing_role"
+
+
+def test_a_hit_on_an_answer_first_computed_from_an_upload_says_so_and_no_cache_mends_it(server):
+    """The documented cost of a reference and an upload being one request (SERVER.md,
+    "Results as inputs"): provenance describes the computation that produced the answer."""
+    _, _, client = server
+    up = _upstream(client)
+    labels = client.get(f"/v1/jobs/{up['id']}/result").content
+    _done(client, _post(client, "relabel", [{"kind": "upload"}],
+                        files={"file": ("labels.seg.nrrd", labels)}))
+    hit = _done(client, _post(client, "relabel", [{"kind": "result", "id": up["key"]}]))
+    assert hit.get("cached") is True
+    assert [r["kind"] for r in hit["result"]["provenance"]["inputs"]] == ["upload"]
+    again = _done(client, _post(client, "relabel", [{"kind": "result", "id": up["key"]}],
+                                headers={"Cache-Control": "no-cache"}))
+    (rec,) = again["result"]["provenance"]["inputs"]
+    assert rec["kind"] == "result" and rec["derived_from"]["inputs"][0]["license"] == ToyCT.LICENSE
+
+
+@pytest.mark.parametrize("stated, name", [
+    ("sha256-tree:" + "a" * 64, "labels"), ("sha256:" + "A" * 64, "labels"),
+    ("", "labels"), ("sha256:" + "a" * 64, ""), ("sha256:" + "a" * 64, "Not A Name"),
+])
+def test_pin_never_mints_an_identifier_its_own_grammar_refuses(tmp_path, stated, name):
+    """`_judge` checked the stated digest with content.is_digest, which takes a tree digest
+    and uppercase hex; the grammar takes neither, so pin() returned a string identity()
+    then refused. Both halves - the digest and the name - are held to the fragments."""
+    path, result = _entry(tmp_path)
+    result["outputs"][0].update(sha256=stated, name=name)
+    with pytest.raises(UnresolvedReference) as e:
+        _source((path, result)).pin(KEY)
+    assert e.value.code == "result_unreadable"
+
+
+def test_a_malformed_upstream_provenance_thins_the_record_and_never_fails_the_fetch(tmp_path):
+    from haversack.sources import _carried_forward
+    odd = [{"kind": "result", "identity": ["unhashable"], "origin": "a string",
+            "derived_from": ["a list"]}, "not a record", {"kind": "upload", "identity": None,
+            "license": {"name": "L1"}}, {"kind": "upload", "identity": None,
+                                         "license": {"name": "L2"}}]
+    got = _carried_forward(odd)
+    # two records that state NO identity are two inputs: folding them lost a license
+    assert [r["license"]["name"] for r in got["inputs"]] == ["L1", "L2"]
+    path, result = _entry(tmp_path, b"the labels")
+    result["provenance"] = {"inputs": odd}
+    src = _source((path, result))
+    (tmp_path / "entry").mkdir()
+    fetched = src.fetch(src.pin(KEY), tmp_path / "entry")
+    assert (fetched / serve.RESULT_NAME).read_bytes() == b"the labels"
+
+
+def test_only_an_engines_own_statement_reads_as_a_weights_version():
+    from haversack.sources import _stated_weights
+    assert _stated_weights({"fastsurfer_version": "2.5.4", "device": "cuda"}) == ["fastsurfer=2.5.4"]
+    assert _stated_weights({"bundle_version": "0.6.1", "engine": "monai"}) == ["bundle=0.6.1"]
+    assert _stated_weights({"x_version": {"a": 1}, "_version": "1", "haversack_version": "0.12",
+                            "y_version": ""}) == []
+
+
+def test_terms_travel_a_chain_whose_middle_never_touches_the_original(server):
+    """relabel of relabel of total_fast: the CT reaches the last record ONLY through
+    `derived_from.inputs`, and the first hop only through `derived_from.results`. The chain
+    test above binds the CT again in the middle, so it could not see either being dropped."""
+    _, _, client = server
+    a = _upstream(client)
+    b = _done(client, _post(client, "relabel", [{"kind": "result", "id": a["key"]}]))
+    c = _done(client, _post(client, "relabel", [{"kind": "result", "id": b["key"]}]))
+    rec = _mask_record(c)
+    assert [(h["result"], h["task"]) for h in rec["derived_from"]["results"]] == [(a["key"], "total_fast")]
+    assert [(r["identity"], r["license"]) for r in rec["derived_from"]["inputs"]] == \
+        [("toy:sp042", ToyCT.LICENSE)]
+    assert isinstance(rec["origin"]["computed"], float)
+
+
+def test_a_hop_reached_by_two_paths_is_listed_once():
+    from haversack.sources import _carried_forward
+    hop = {"result": "k1", "output": "labels", "digest": "sha256:1", "task": "t", "weights": []}
+    via = {"kind": "result", "identity": "sha256:2", "origin": {"result": "k2"},
+           "derived_from": {"results": [hop], "inputs": []}}
+    got = _carried_forward([via, dict(via, identity="sha256:3", origin={"result": "k3"})])
+    assert [h["result"] for h in got["results"]] == ["k2", "k1", "k3"]
+
+
+def test_an_outputs_own_kind_is_what_the_role_is_checked_against(tmp_path):
+    """Generic on purpose (step 2 adds kinds): the entry says what its output is, and an
+    entry that says nothing is a label map, as every one published so far is."""
+    path, result = _entry(tmp_path)
+    result["outputs"][0]["kind"] = "field"
+    src = _source((path, result))
+    assert src.pin(KEY, "field").startswith(KEY)
+    with pytest.raises(RequestError) as e:
+        src.pin(KEY, LABELS_KIND)
+    assert e.value.code == "wrong_input_kind" and e.value.detail["output_kind"] == "field"
+
+
+def test_the_source_refuses_by_itself_what_the_wire_refuses(tmp_path):
+    """Every door calls check(): the hints must not depend on check_identifier running first."""
+    src = _source(_entry(tmp_path))
+    with pytest.raises(InputError, match="looks like a job id"):
+        src.check("0123456789ab")
+    said = src.describe_input(f"{KEY}!labels")           # nothing fetched: the reference alone
+    assert said["origin"] == {"result": KEY, "output": "labels",
+                              "determined_by": "the reference itself; the entry was not read"}
+
+
+def test_the_lookup_never_runs_on_the_event_loop(server):
+    """On Modal `pin` waits out a volume reload; on the loop that froze the api container
+    (2026-09-19). A thread started by to_thread has no running loop; the loop's own does."""
+    import asyncio
+    _, ex, client = server
+    up = _upstream(client)
+    src, on_loop = ex.sources["result"], []
+    real = src.pin
+
+    def pin(identifier, kind=None):
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(identifier, kind)
+    src.pin = pin
+    _done(client, _post(client, "relabel", [{"kind": "result", "id": up["key"]}]))
+    assert on_loop == [False]
+
+
+def test_a_lookup_that_refuses_as_an_input_error_is_a_422_not_a_500(server, tmp_path):
+    _, ex, client = server
+    up = _upstream(client)
+    dirs = set((tmp_path / "w").iterdir())
+
+    def pin(identifier, kind=None):
+        raise InputError("this lookup cannot be made")
+    ex.sources["result"].pin = pin
+    r = _post(client, "relabel", [{"kind": "result", "id": up["key"]}])
+    assert r.status_code == 422 and "this lookup cannot be made" in str(r.json()["detail"])
+    assert set((tmp_path / "w").iterdir()) == dirs          # and no job directory is left
+
+
+def _seg_file(path, fields, array=None, pixel=None):
+    img = _image(_labels() if array is None else array)
+    if pixel is not None:
+        img = sitk.Cast(img, pixel)
+    for k, v in fields.items():
+        img.SetMetaData(k, v)
+    sitk.WriteImage(img, str(path), True)
+    return path
+
+
+def test_the_reader_refuses_to_choose_between_colliding_segments(tmp_path):
+    two_on_one = {"Segment0_Name": "liver", "Segment0_LabelValue": "1",
+                  "Segment1_Name": "spleen", "Segment1_LabelValue": "1"}
+    with pytest.raises(InputError, match="'liver' and 'spleen' share label value 1"):
+        read_label_map(_seg_file(tmp_path / "a.seg.nrrd", two_on_one))
+    one_on_two = {"Segment0_Name": "kidney", "Segment0_LabelValue": "1",
+                  "Segment1_Name": "kidney", "Segment1_LabelValue": "2"}
+    with pytest.raises(InputError, match="two segments are named 'kidney'"):
+        read_label_map(_seg_file(tmp_path / "b.seg.nrrd", one_on_two))
+
+
+def test_names_without_label_values_and_an_image_are_each_called_what_they_are(tmp_path):
+    unvalued = {"Segment0_Name": "liver", "Segment1_Name": "spleen", "Segment1_LabelValue": "x"}
+    with pytest.raises(InputError, match="names 2 segment.s. and gives none a LabelValue"):
+        read_label_map(_seg_file(tmp_path / "a.seg.nrrd", unvalued))
+    ok = {"Segment0_Name": "liver", "Segment0_LabelValue": "1", "Segment1_Name": "loose"}
+    assert read_label_map(_seg_file(tmp_path / "b.seg.nrrd", ok)).names == {1: "liver"}
+    with pytest.raises(InputError, match="a label map is integers"):
+        read_label_map(_seg_file(tmp_path / "c.seg.nrrd", ok, pixel=sitk.sitkFloat32))
+
+
+def test_a_copy_that_never_matches_says_what_to_do_about_it(tmp_path):
+    path, result = _entry(tmp_path, b"what is really there", stated="sha256:" + "5" * 64)
+    (tmp_path / "entry").mkdir()
+    with pytest.raises(InputError, match="if it repeats.*no-cache"):
+        _source((path, result)).fetch(f"{KEY}!labels@sha256:{'5' * 64}", tmp_path / "entry")

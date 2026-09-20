@@ -115,11 +115,21 @@ def _staged_task(file: Path) -> str | None:
     engine wrote it (the nnU-Net pipeline does; FastSurfer, SynthStrip, VoxTell and MONAI
     bundles do not), so the record is asked first.
     """
+    from .content import digest_file
     from .sources import ResultSource, read_input_record
+    if file.parent.name != "series":       # not a staged input at all: ask nothing
+        return None
     rec = read_input_record(file.parent.parent)
-    if rec and rec.get("kind") == ResultSource.prefix:
-        return (rec.get("origin") or {}).get("task") or None
-    return None
+    if not rec or rec.get("kind") != ResultSource.prefix:
+        return None
+    # ...and the record has to be about THESE bytes. A `.input.json` two levels above a
+    # user's own file is somebody else's record, and believing it names a task that never
+    # made this label map - the false claim `sources._dicom_facts` was rewritten to stop
+    # making about DICOM series (review, 2026-09-20). Only asked of a file that already
+    # looks staged, so a user's own label map is never hashed for this.
+    if (rec.get("content") or {}).get("digest") != digest_file(file):
+        return None
+    return (rec.get("origin") or {}).get("task") or None
 
 
 def read_label_map(path, *, require_names: bool = True) -> LabelMap:
@@ -136,6 +146,11 @@ def read_label_map(path, *, require_names: bool = True) -> LabelMap:
     except RuntimeError as e:
         from .io import _sitk_reason
         raise InputError(f"cannot read {file} as a label map: {_sitk_reason(e)}") from None
+    integer = {sitk.sitkUInt8, sitk.sitkInt8, sitk.sitkUInt16, sitk.sitkInt16,
+               sitk.sitkUInt32, sitk.sitkInt32, sitk.sitkUInt64, sitk.sitkInt64}
+    if image.GetNumberOfComponentsPerPixel() == 1 and image.GetPixelID() not in integer:
+        raise InputError(f"{file} holds {image.GetPixelIDTypeAsString()} voxels, and a label "
+                         "map is integers: this looks like an image, not a segmentation")
     if image.GetDimension() != 3 or image.GetNumberOfComponentsPerPixel() != 1:
         # Slicer writes overlapping segments as a 4-D (layered) seg.nrrd; haversack writes
         # one layer. Reading layer 0 and dropping the rest would be choosing silently.
@@ -147,7 +162,7 @@ def read_label_map(path, *, require_names: bool = True) -> LabelMap:
         m = _SEGMENT_FIELD.match(key)
         if m:
             fields.setdefault(int(m.group(1)), {})[m.group(2)] = image.GetMetaData(key)
-    names = {}
+    names, unvalued = {}, []
     for index in sorted(fields):
         seg = fields[index]
         if str(seg.get("Layer", "0")).strip() not in ("", "0"):
@@ -156,9 +171,21 @@ def read_label_map(path, *, require_names: bool = True) -> LabelMap:
         try:
             value = int(str(seg.get("LabelValue", "")).strip())
         except ValueError:
-            continue                       # a segment with no label value names no voxels
-        if seg.get("Name"):
-            names[value] = seg["Name"]
+            unvalued.append(seg.get("Name"))   # a segment with no label value names no voxels
+            continue
+        if not seg.get("Name"):
+            continue
+        # Two segments on one value, or two values under one name, and a lookup BY NAME
+        # would have to pick: `names` kept the last of the first kind without a word, and
+        # `mask("kidney")` covered one kidney of two (review, 2026-09-20). Refused, like a
+        # layered file: choosing silently is how a plausible, wrong number gets reported.
+        if value in names:
+            raise InputError(f"{file}: segments {names[value]!r} and {seg['Name']!r} share label "
+                             f"value {value}; a label map names each value once")
+        if seg["Name"] in names.values():
+            raise InputError(f"{file}: two segments are named {seg['Name']!r}; structures are "
+                             "selected by name, so each name has to be one segment")
+        names[value] = seg["Name"]
     prov = {}
     if image.HasMetaDataKey(PROVENANCE_KEY):
         try:
@@ -166,6 +193,9 @@ def read_label_map(path, *, require_names: bool = True) -> LabelMap:
         except ValueError:
             prov = {}
     prov = prov if isinstance(prov, dict) else {}
+    if require_names and not names and unvalued:
+        raise InputError(f"{file} names {len(unvalued)} segment(s) and gives none a "
+                         "LabelValue, so no name can be matched to voxels")
     if require_names and not names:
         raise InputError(f"{file} names no segments, and a label map is read by structure "
                          "name: give a .seg.nrrd (haversack's results are), or a result: "

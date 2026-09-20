@@ -44,7 +44,11 @@
   versions, and that task's attribution; `derived_from` carries what is above that hop flat
   - earlier hops by reference, each original input once by value with its origin, license
   and citation - so a long chain does not copy its whole ancestry at every step, and the
-  terms outlive the upstream entries' eviction.
+  terms outlive the upstream entries' eviction. They are recorded by the computation, so
+  the one exception is a cache hit on an answer first computed from an UPLOAD of the same
+  label bytes: that answer says "uploaded by the caller", whoever asks for it next, as an
+  upload and a stored input already shared theirs. `no-cache` recomputes it from the
+  reference.
 - **No content digest is path-addressable.** A job status linked
   `/v1/sha256-tree/<hex>/<task>/...` for an uploaded DICOM series referred to by digest - a
   path no route has ever served - because the rule was written against the `sha256:`

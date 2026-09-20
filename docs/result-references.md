@@ -335,6 +335,47 @@ job was refused `wrong_input_kind`. The local tests had only ever put a hosted s
 reference first. Renamed `role_specs`; `test_an_uploaded_image_and_a_referenced_mask` pins
 both source orders and is the only test that fails with the collision put back.
 
+## Adversarial review (2026-09-20, one agent in its own worktree, time-boxed)
+
+It could not make a job compute from bytes other than the digest in its key - through any
+ordering of sources, a client-sent pin, two roles on one reference, the grammar (uppercase,
+Unicode digits, trailing newline, a 400 KB identifier), or the volume doubles - and found no
+re-entry of the worker's non-reentrant `_vol_lock`. What it did find, each reproduced, fixed
+and pinned by a test that fails without the fix:
+
+- **`label_input(required=False)` declared an optional role `bind_sources` refuses** - one fact
+  in two places, only one of them read. The knob is gone: an optional role is a change to the
+  binder, not a flag on a declaration.
+- **SERVER.md and the CHANGELOG promised more than item 4 above admits.** A reference and an
+  upload of the same bytes share an answer, and provenance describes the computation that
+  produced it: a hit on an answer first computed from an UPLOAD says "uploaded by the caller"
+  and carries no `derived_from`, though the upstream CT was CC BY-NC. Both documents say so
+  now, and that `no-cache` recomputes it from the reference.
+- **The reader believed somebody else's record.** `_staged_task` trusted any `.input.json` two
+  levels above the file with `kind: result` - the false provenance claim `_dicom_facts` was
+  rewritten to stop making. It asks only beside a `series/` directory, and only a record whose
+  `content.digest` is this file's.
+- **`pin()` could mint an identifier its own grammar refuses**: `_judge` checked the stated
+  digest with `content.is_digest` (tree digests, uppercase hex), not with the grammar's
+  fragment. It is held to `RESULT_PIN_RE` and `OUTPUT_NAME_RE` - the one home.
+- **A malformed upstream provenance failed a fetch whose bytes had verified**, and two input
+  records stating no identity were folded into one, dropping a license.
+- **The reader chose silently** between two segments on one label value (the last won) and
+  two values under one name (`mask("kidney")` covered one kidney). Both are refused, as are
+  non-integer voxels; names with no `LabelValue` say so.
+- **`_stated_weights` read any `*_version` key as weights** - `haversack_version`, a nested
+  value. Plain strings under a real name only.
+- The hash-mismatch message now says what to do when it repeats (recompute the upstream).
+
+Sixteen mutants survived the first guards - above all that nothing tested `pin` runs OFF the
+event loop (the 2026-09-19 freeze class), that terms travel a chain whose middle never touches
+the original input, the worker's retry over refused reloads and its sleeping outside the lock,
+and the generic output-kind check step 2 relies on. Each has a test; 67 mutants are killed on
+the final tree, and two that survived were equivalent mutants that exposed a redundant
+condition in the leaf dedupe, since simplified. NOT reached by the review: concurrent fetches
+of one pinned reference from real threads, a `/v1/segmentations` listing holding digest
+identities, and restart recovery of a persisted queued job with a `result:` source.
+
 ## What steps 2 and 3 should know
 
 - **`cache_get` hands back ONE path: the primary output's file.** `result:<key>!<name>` parses

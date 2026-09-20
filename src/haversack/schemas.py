@@ -114,7 +114,7 @@ def input_kind(spec: dict) -> str:
     return str((spec or {}).get("kind") or IMAGE_KIND)
 
 
-def label_input(name: str = "mask", *, required: bool = True) -> dict:
+def label_input(name: str = "mask") -> dict:
     """The ``inputs`` entry for a role that takes a label map.
 
     No ``channel``: a label map is not a channel of the network, and a client that lays
@@ -122,8 +122,13 @@ def label_input(name: str = "mask", *, required: bool = True) -> dict:
     Bound by name like every other role, and listed wherever the task wants it among its
     images - the FIRST declared input stays the one previews and statistics render
     against, so a consumer declares its image first.
+
+    Always required, like every image role: ``bind_sources`` refuses a request that leaves
+    any declared role unbound and never reads ``required``. This took a ``required=False``
+    for a day that declared an optional role the binder then refused (review, 2026-09-20);
+    an optional role is a change to the binder, not a flag here.
     """
-    return {"name": str(name), "kind": LABELS_KIND, "required": bool(required)}
+    return {"name": str(name), "kind": LABELS_KIND, "required": True}
 
 
 def input_specs(names, *, modality=None, kind: str = IMAGE_KIND) -> list[dict]:

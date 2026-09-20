@@ -377,3 +377,50 @@ def test_setup_wires_the_worker_through_the_helpers_these_tests_drive():
     assert order == ["self._vol_lock", "self._sources", "self.series_cache"], order
     assert calls["self._sources"] == "_worker_sources"
     assert calls["self.series_cache"] == "_worker_series_cache"
+
+
+# -- adversarial review, 2026-09-20: what the doubles above left unguarded ---------------
+
+def test_the_apis_first_look_is_a_refreshed_view_not_whatever_it_last_saw(monkeypatch, tmp_path):
+    """`fresh=False` is cache_get's lookup: a view no older than CACHE_FRESH_S, so an entry
+    committed elsewhere resolves on the stale look and costs no confirming reload."""
+    m, jobs, vol, client, spawned = _api(monkeypatch, tmp_path, refusals=0)
+    _commit_elsewhere(m, vol, tmp_path, KEY)
+    with m._api_result_entry(KEY, fresh=False) as hit:
+        assert hit is not None
+    assert vol.reloads == 1
+
+
+def test_a_worker_retries_a_refused_reload_and_sleeps_outside_the_lock(monkeypatch, tmp_path):
+    """Two refusals, then the reload takes and the entry committed elsewhere is there. The
+    waits between attempts are never taken with `_vol_lock` held: the job, the artifact
+    overlap and the sweep all need it."""
+    m, jobs, scratch, cache = _worker(monkeypatch, tmp_path, lambda root: _LaggingVolume(root, 2))
+    wait = 0.0123                                  # told apart from every other sleep
+    monkeypatch.setattr(m, "CACHE_CONFIRM_DELAYS_S", (0.0, wait, wait, wait))
+    (tmp_path / "elsewhere").mkdir()
+    digest = _publish(tmp_path / "elsewhere", KEY, b"committed by another container", tmp_path)
+    shutil.copytree(tmp_path / "elsewhere", cache.hidden)
+    ctx = _Ctx(m, tmp_path)
+    slept_locked = []
+    real_sleep = time.sleep
+    monkeypatch.setattr(m.time, "sleep", lambda s: (
+        slept_locked.append(ctx._vol_lock.locked()) if s == wait else None, real_sleep(s)))
+    _job(jobs, "jr", KEY, digest)
+    m._execute_job(ctx, "jr")
+    assert jobs["jr"]["state"] == "done", jobs["jr"].get("error")
+    assert cache.reloads == 3 and slept_locked == [False, False]
+
+
+def test_what_is_visible_after_the_last_refusal_may_still_do(monkeypatch, tmp_path):
+    """Every reload refused, and the entry is in view all the same. Asked fresh - as any
+    refusal makes the source ask - the LAST attempt still reads what is visible, and the
+    digest decides whether it will do; only an entry that is not in view at all is
+    "cannot see it yet"."""
+    m, jobs, scratch, cache = _worker(monkeypatch, tmp_path,
+                                      lambda root: _LaggingVolume(root, 10 ** 6))
+    digest = _publish(m.CACHE_ROOT, KEY, b"visible already", tmp_path)
+    reader = m._worker_result_entry(threading.Lock())
+    with reader(KEY, fresh=True) as hit:
+        assert hit is not None and hit[1]["outputs"][0]["sha256"] == digest
+    assert cache.reloads == len(m.CACHE_CONFIRM_DELAYS_S)

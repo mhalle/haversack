@@ -236,14 +236,20 @@ the `weights` versions its provenance states, with the upstream task's `attribut
 `derived_from` carries what is above that hop, flat: `results` lists every earlier hop by
 reference (key, digest, task, weights), and `inputs` holds each ORIGINAL input once, by
 value, with its origin, license and citation - so the terms of the data a chain started from
-survive every hop, and survive the upstream entries being evicted. Results of references are
-not path-addressable; fetch them through the job's `result` link.
+survive every hop, and survive the upstream entries being evicted. One thing follows from a
+reference and an upload of the same bytes being one request: they share a cached answer, and
+provenance describes the computation that PRODUCED it. If the same label bytes were first sent
+as an upload, a later job that refers to the result is a cache hit whose `provenance.inputs`
+says "uploaded by the caller" and carries no `derived_from` - the terms of the original data
+are then on the upstream result, not on this one. `Cache-Control: no-cache` recomputes it from
+the reference. Results of references are not path-addressable; fetch them through the job's
+`result` link.
 
 ## Tasks and options
 
 `GET /v1/tasks` lists catalog names; `GET /v1/tasks/{task}` describes one: its `engine`,
 `lineage`, `modality`, the `structures`, the `weights` and whether they are installed, the
-`inputs` it takes (each with a role name, a kind - `image` or `labels` - and whether it is required), its
+`inputs` it takes (each with a role name and a kind - `image` or `labels`; every declared role is required), its
 `parameters` as two JSON Schemas, and its `behavior`. Task names cross the wire as qualified catalog
 names only (a bare `total_fast` is a 404 that names `ts.v2:total_fast`); the in-process API's ability to run a model folder by path stops at this
 boundary. The grammar `eco:name@version` names an ecosystem, a task, and a weights version;
