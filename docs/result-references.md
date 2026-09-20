@@ -108,6 +108,55 @@ first customer.
    design it, mutation-test it, keep generations and leases exactly as they are.
    *(not built.)*
 
+## Beside it: a per-request list of light deliverables (decided 2026-09-20)
+
+Previews and statistics are already "eventually-consistent artifacts, rendered after done is
+served" *(read: `serve.py`, `artifact_overlap`)*, written into the result's own generation and
+advertised in `links` - but WHICH are rendered is a deployment setting (`artifacts=("preview",
+"statistics")` on the executor; `HAVERSACK_ARTIFACTS` on Modal). Making that a per-request list
+(the deployment's set as default and ceiling) is the better FRONT DOOR for light postprocessing:
+the postprocessor runs where the image and the labels are already local, so none of the hazards
+below apply, lifetimes are untouched, and the client never handles a key. "Preview off" alone is
+worth it. Two rules: a deliverable must NEVER enter the labels' result key (asking for a preview
+must not recompute a segmentation), and each deliverable gets its own small identity (result digest
+x name x its options x its own epoch) so a change to the statistics code recomputes statistics only.
+
+The split, as decided: **light** deliverables (numpy-only: preview, statistics, conversions, meshes,
+distance fields) run in the segmentation's worker from that list; **heavy** ones - a GPU model with
+its own image, weights and worker, which is what RADAR is - are separate jobs that take `result:`
+references. A "heavy deliverable" named on a segmentation request would only be the server
+dispatching that second job for the caller; `result:` is the mechanism either way. RADAR's FIELD
+hangs off the INPUT (the encode does not depend on any mask), so it is a job of its own
+(`radar:encode`), never a deliverable of a segmentation.
+
+*(step 1 and this, 2026-09-20: nothing here was built, and `result:` is a plain source entry
+with a plain role binding - `{"kind": "result", "id": ..., "role": ...}` beside `upload`, `input`
+and the hosted kinds - so nothing in its wire shape assumes it is the only way a consumer reaches
+a result. What WOULD get in the way of the server itself submitting a follow-on job with a
+`result:` input, as built:*
+
+- *The door is in the ROUTE. `pin()`, the role-kind check and the identity tuple are assembled
+  in `serve._accept`, interleaved with multipart parsing; `executor.submit` takes an identity
+  already built and entries already pinned. A server-side dispatch that called
+  `executor.submit` directly would skip all three. It needs that part of `_accept` lifted into
+  a function of (task, source entries) -> (pinned entries, identity), raising `RequestError`
+  rather than `HTTPException` - `ResultSource.pin` already does.*
+- *The server can skip the lookup race entirely: at publication it holds the key AND
+  `outputs[].sha256`, so it can write the pinned form `<key>!labels@<digest>` itself; `pin()`
+  then only verifies.*
+- *WHERE it dispatches matters on Modal: the worker publishes, but only the api container has
+  `ModalExecutor.submit` (spawn, inflight markers). Either the worker gains a submit, or the api
+  dispatches on observing `done` - and the api's view of the cache volume may trail the
+  worker's commit, which `pin` answers with 503, not a refusal: the dispatcher has to retry.*
+- *The follow-on's IMAGE input has to be re-nameable by the server. A hosted source entry and a
+  stored `input` are (an upload is adopted into the content store under its digest, though the
+  store is LRU); per-request source credentials are not - they are never persisted, so a
+  follow-on that must re-fetch a credentialed input cannot.*
+- *A reference's result is not path-addressable, so the caller reaches a server-dispatched
+  job only if the first job's status names it (its id or key). On the local server the bounded
+  queue can also refuse it (`QueueFull`), which a caller-submitted job sees as a 429 and a
+  server-dispatched one has nowhere to report.)*
+
 ## Order of work
 
 1. **The `result:` source and a label-map role** - small, general, no engine. Testable with two
