@@ -1308,7 +1308,10 @@ def test_custom_source_end_to_end(tmp_path):
     client = TestClient(create_app(ex))
 
     srcs = client.get("/v1/sources").json()["sources"]
-    assert [x["prefix"] for x in srcs] == ["idc", "toy"]
+    # the operator's registry, in its order - and `result`, which the executor adds itself
+    # whenever it has a result cache (2026-09-20): it names no repository an operator could
+    # have chosen, only results this server computed
+    assert [x["prefix"] for x in srcs] == ["idc", "toy", "result"]
 
     r = client.post("/v1/jobs", data={"task": "total_fast",
                                       "source": json.dumps([{"kind": "toy", "id": "sp042"}])})

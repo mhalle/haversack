@@ -43,6 +43,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 
 from .errors import RequestError
+from .labelmap import LABELS_KIND
 
 # --------------------------------------------------------------------------
 # the role vocabulary
@@ -97,7 +98,35 @@ def roles_match(a, b) -> bool:
     return ca is not None and ca == cb
 
 
-def input_specs(names, *, modality=None, kind: str = "image") -> list[dict]:
+#: What an input role can take. ``image`` is an intensity volume - a channel of the
+#: network, which is all a role was until 2026-09-20. ``labels`` is a label map read WITH
+#: its segment names (:func:`haversack.labelmap.read_label_map`): the mask of an (image,
+#: mask) consumer. The second name is the label-map module's own, imported rather than
+#: restated, because :class:`haversack.sources.ResultSource` checks a result's output kind
+#: against it and must not import pydantic to do so.
+IMAGE_KIND = "image"
+INPUT_KINDS = (IMAGE_KIND, LABELS_KIND)
+
+
+def input_kind(spec: dict) -> str:
+    """The kind one declared input takes. An entry that says nothing is an image: every
+    task declared before kinds meant anything is."""
+    return str((spec or {}).get("kind") or IMAGE_KIND)
+
+
+def label_input(name: str = "mask", *, required: bool = True) -> dict:
+    """The ``inputs`` entry for a role that takes a label map.
+
+    No ``channel``: a label map is not a channel of the network, and a client that lays
+    its uploads out by channel index must not be told it has one. No ``modality`` either.
+    Bound by name like every other role, and listed wherever the task wants it among its
+    images - the FIRST declared input stays the one previews and statistics render
+    against, so a consumer declares its image first.
+    """
+    return {"name": str(name), "kind": LABELS_KIND, "required": bool(required)}
+
+
+def input_specs(names, *, modality=None, kind: str = IMAGE_KIND) -> list[dict]:
     """The ``inputs`` block: one entry per channel the task consumes, in the
     model's own channel order.
 

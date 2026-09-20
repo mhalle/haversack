@@ -88,8 +88,9 @@ unbounded.
 `POST /v1/jobs` (multipart) takes `task`, an optional `options` JSON object, and the input:
 either a `file` part - shorthand that stays valid - or a `source` JSON list, one entry per
 declared input role: `{"kind": "upload"}`, `{"kind": "input", "sha256": ...}` for content the
-server already holds, or a hosted identifier such as `{"kind": "idc", "crdc_series_uuid":
-...}`. Options are validated at submit against the task's published parameter schema, and
+server already holds, a hosted identifier such as `{"kind": "idc", "crdc_series_uuid":
+...}`, or `{"kind": "result", "id": "<key>"}` for a result this server computed (see
+"Results as inputs"). Options are validated at submit against the task's published parameter schema, and
 sources are bound to the task's declared inputs by role name, never by position, so a wrong
 request is refused with a 422 naming the problem rather than failing minutes later in a
 worker. On the local server the queue is a bounded FIFO (`--max-pending`, default 16) and
@@ -140,7 +141,8 @@ A result of a hosted input is addressable without its job:
 /v1/<source>/<identifier>/<task>/statistics.json     (also .tsv)
 ```
 
-`<source>` is a prefix from `/v1/sources`, `<identifier>` that source's own id (an IDC
+`<source>` is a prefix from `/v1/sources` whose entry says `path_addressable` (every hosted
+source; not `result`), `<identifier>` that source's own id (an IDC
 series UUID, a TCIA SeriesInstanceUID, an OpenNeuro path, ...), `<task>` a catalog name in
 either its canonical `eco:name` form or its bare alias. A grid variant is a token in the
 filename: `labels_res-1mm.seg.nrrd` is the same result restored at 1 mm isotropic, and every
@@ -152,7 +154,8 @@ because the listing reveals the identities of uploaded content.
 
 Uploads are not path-addressable - their identity is a digest nobody else can guess - so an
 uploaded input's result is fetched through its job's `result` link, which is where the ETag
-revalidation earns its keep.
+revalidation earns its keep. No content digest is: not a stored input's, and not a `result`
+reference's, whose identity is the digest of the output it names.
 
 ## Sources and the input store
 
@@ -175,11 +178,72 @@ series zipped twice is the same identity. `POST /v1/inputs` with a `from_job=<id
 field promotes a job's result into the store, so one job's output becomes another's input
 without the bytes passing through the client. No route ever hands input bytes back. All of it is authorized only.
 
+## Results as inputs
+
+A job's input can be a result this server computed: `{"kind": "result", "id": "<key>"}`,
+where `<key>` is the `key` a finished job reports. That makes jobs composable - CT to
+segmentation, then something computed from (CT, segmentation) - with each step cached under
+the rules above, so a cheap step run again never repeats the expensive one before it.
+`GET /v1/sources` lists `result` on a server that has a result cache; one started with
+`--no-result-cache` does not offer the kind.
+
+```
+result:<key>                       the result's primary output (labels)
+result:<key>!<name>                a named output; only `labels` exists today
+result:<key>@sha256:<digest>       pinned: refused unless the output is still those bytes
+```
+
+The key is 64 hex characters and nothing else, so a reference can only name a result of
+THIS server: there is no way to spell a host, and a result on another server cannot be
+referenced.
+
+**The identity of a reference is the content digest of the output it names, not the key.**
+`Cache-Control: no-cache` republishes other bytes under the same key, and a downstream result
+keyed on the key would outlive the mask it was computed from. So the server resolves the
+reference at submit - key, current generation, the named output's `sha256` - and that digest
+is what the job's `input_identity` and its own `key` are built from. It is the same digest
+an upload of those bytes has, so referring to a result and sending its bytes are one request
+and share one cached answer. After a recompute of the upstream result, the same reference is
+a new downstream request; a reference pinned with `@sha256:` to the old bytes is refused
+instead (409 `result_changed`).
+
+**A reference that does not resolve is refused at submit**, never queued to fail in a
+worker: 409 `result_missing` when the server holds no such result (never computed here, or
+evicted - run the job that produces it first, then submit again), 422 `unknown_output`
+naming the outputs the result has, 422 `wrong_input_kind` when a label map is bound to a
+role that takes an image. On Modal a miss is believed only from a view of the result volume
+newer than the request; when none can be had the answer is 503 with `Retry-After`, as it is
+for a read. The worker that fetches a reference resolves it AGAIN and hashes what it copied,
+so a job computes only ever from the bytes it was keyed on. If the result was recomputed or
+evicted between the submit and the fetch, the job fails with "the referenced result changed"
+(or "no result ...") rather than compute from other bytes - unless that worker can still read
+the pinned bytes themselves, which on Modal a worker whose view of the result volume predates
+the change can: then it computes from them, and the result is exactly what its key says.
+`Cache-Control: no-cache` on the downstream job resolves the reference again and recomputes
+the downstream result; it never recomputes the upstream one, which is that job's own
+`no-cache`.
+
+**A role says what it takes.** Each entry of a task's `inputs` has a `kind`: `image`, an
+intensity volume, or `labels`, a label map read with its segment names
+(`haversack.labelmap.read_label_map`: the names, the geometry, and the task that made it). A
+consumer selects structures by NAME - `liver` is a different label value in every catalog -
+so a label map without names (a NIfTI) is refused by default. A `.seg.nrrd` uploaded or
+stored by digest binds to a `labels` role as a reference does.
+
+A result computed from a reference says so in `provenance.inputs`: the record has `kind:
+result`, the digest, and an `origin` naming the upstream `result` key, `output`, `task` and
+the `weights` versions its provenance states, with the upstream task's `attribution`.
+`derived_from` carries what is above that hop, flat: `results` lists every earlier hop by
+reference (key, digest, task, weights), and `inputs` holds each ORIGINAL input once, by
+value, with its origin, license and citation - so the terms of the data a chain started from
+survive every hop, and survive the upstream entries being evicted. Results of references are
+not path-addressable; fetch them through the job's `result` link.
+
 ## Tasks and options
 
 `GET /v1/tasks` lists catalog names; `GET /v1/tasks/{task}` describes one: its `engine`,
 `lineage`, `modality`, the `structures`, the `weights` and whether they are installed, the
-`inputs` it takes (each with a role name, a kind, and whether it is required), its
+`inputs` it takes (each with a role name, a kind - `image` or `labels` - and whether it is required), its
 `parameters` as two JSON Schemas, and its `behavior`. Task names cross the wire as qualified catalog
 names only (a bare `total_fast` is a 404 that names `ts.v2:total_fast`); the in-process API's ability to run a model folder by path stops at this
 boundary. The grammar `eco:name@version` names an ecosystem, a task, and a weights version;
