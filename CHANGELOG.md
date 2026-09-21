@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **Fixed: a 304 for a result by path dropped the caching fields its 200 carries.** A
+  conditional `GET` of `/v1/<source>/<identifier>/<task>/labels.seg.nrrd` answered 304 with
+  the `ETag` alone, while the 200 for the same request says `Cache-Control: public,
+  max-age=3600` and `Vary: Prefer`. RFC 9110 (15.4.5) has a 304 repeat the 200's
+  `Cache-Control`, `Content-Location`, `Expires` and `Vary`, and these are the responses the
+  server invites shared caches to store. Nothing was seen to break - a cache keeps the stored
+  fields a 304 omits (RFC 9111, 4.3.4) - so this is the server saying what the standard has
+  it say. `Preference-Applied` deliberately does not cross: a cache writes a 304's fields
+  onto every stored response holding that validator, whatever `Prefer` it was stored under,
+  so a `wait=30` echo would land on the variant kept for a plain `GET`. The job result
+  route's 200 carries none of the four, and its 304 is what it was.
 - **A job's input can be a result the server itself computed: `result:<key>`.** Every
   source until now named data that came from outside. `<key>` is the `key` a finished job
   already reports, so jobs compose - CT to segmentation, then something computed from (CT,

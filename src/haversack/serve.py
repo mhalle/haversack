@@ -1862,12 +1862,27 @@ def same_output(own, published) -> bool:
     return a is not None and a == digest(published)
 
 
-def not_modified(request, etag: str):
+#: what a 304 repeats from its 200, beside the ETag (RFC 9110 15.4.5; Date is the server's)
+_NOT_MODIFIED_KEEPS = ("cache-control", "content-location", "expires", "vary")
+
+
+def not_modified(request, etag: str, headers=None):
     """A 304 when the client already holds this exact content, else None.
 
     RFC 9110 conditional GET - the other half of an ETag we have been sending
     but never acting on. A label volume is megabytes and a Slicer client asks
     for the same one repeatedly.
+
+    ``headers`` is what the 200 would have carried. RFC 9110 15.4.5: a 304 MUST repeat
+    the 200's Cache-Control, Content-Location, Expires and Vary, and until 2026-09-21
+    this sent the ETag alone, so the path surface's 304 dropped ``Cache-Control: public,
+    max-age=3600`` and ``Vary: Prefer``. Nothing else crosses, and ``Preference-Applied``
+    deliberately: the same section says SHOULD NOT for the rest, and a cache writes a
+    304's fields onto EVERY stored response holding that validator (RFC 9111 4.3.4) -
+    chosen by the ETag, not by the request's Prefer - so one ``wait=30`` echo would land
+    on the variant stored for a plain GET. The echo is optional on any response (RFC
+    7240 3). A 200 with none of the four (the job result route's) gets the 304 it
+    always got.
     """
     from fastapi.responses import Response
     raw = ""
@@ -1879,7 +1894,9 @@ def not_modified(request, etag: str):
         return None
     tags = {t.strip() for t in raw.split(",")}
     if etag in tags or "*" in tags:
-        return Response(status_code=304, headers={"ETag": etag})
+        kept = {k: v for k, v in (headers or {}).items()
+                if k.lower() in _NOT_MODIFIED_KEEPS}
+        return Response(status_code=304, headers={**kept, "ETag": etag})
     return None
 
 
@@ -4367,7 +4384,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 def serve_hit(hit):
                     headers = _pref_headers(request, key, hit[1])
                     # the client may already hold these exact bytes
-                    fresh = not_modified(request, headers["ETag"])
+                    fresh = not_modified(request, headers["ETag"], headers)
                     if fresh is not None:
                         return fresh
                     return FileResponse(hit[0], media_type="application/octet-stream",
@@ -4477,7 +4494,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                         raise unseen
                     if src_path is None:       # evicted between done and read
                         raise HTTPException(404, "not materialized")
-                    fresh = not_modified(request, headers["ETag"])
+                    fresh = not_modified(request, headers["ETag"], headers)
                     if fresh is not None:
                         return fresh
                     return FileResponse(src_path, media_type="application/octet-stream",
