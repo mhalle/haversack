@@ -4368,7 +4368,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
                 def found(hit):
                     headers = _resource_headers(key, hit[1])
-                    fresh = not_modified(request, headers["ETag"])
+                    # WITH the headers, as GET's two sites hand them: a HEAD's 304 repeats its
+                    # 200's Cache-Control and Vary too (RFC 9110 15.4.5). The seam between two
+                    # branches of 2026-09-21 - the conditional HEAD and the 304's headers -
+                    # that `test_whatever_a_conditional_head_answers_says_what_its_200_says`
+                    # was written to catch when they met.
+                    fresh = not_modified(request, headers["ETag"], headers)
                     if fresh is not None:
                         return fresh
                     resp = Response(status_code=200, headers=headers)
