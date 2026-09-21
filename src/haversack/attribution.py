@@ -169,6 +169,17 @@ def provenance_block(canonical: str, info: dict | None = None) -> dict:
     bibliography."""
     rec = for_task(canonical, info)
     lic = rec["task"].get("license")
+    eco_weights = (rec["ecosystem_info"].get("license") or {}).get("weights") \
+        if isinstance(rec["ecosystem_info"].get("license"), dict) else None
+    if (isinstance(lic, dict) and set(lic) == {"weights"} and eco_weights
+            and str(lic["weights"]).casefold() == str(eco_weights).casefold()):
+        # A manifest that repeats its ecosystem's weights license adds nothing, and the
+        # ecosystem's record is the fuller one (it names the code's license too). Since
+        # 2026-09-20 the nnU-Net path hands the manifest's record over, as the engine path
+        # always did; without this, 17 shipped tasks' headers (cads, totalvibe,
+        # dentalsegmentator) would have lost `code` or changed case for the same facts - and
+        # a result's ETag is the digest of that file. A task licensed UNLIKE its catalog wins.
+        lic = None
     if not lic:
         # the ecosystem's names only: its note about OTHER models' terms
         # belongs in describe(), not in the header of this result
