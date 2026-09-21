@@ -23,6 +23,13 @@ contract is deliberately small:
                                    referenced output's content digest, resolved here at
                                    submit; a result that is not there is refused with a
                                    409 naming what to compute first.
+                                   `deliverables` (a form field of its own, a JSON list)
+                                   names what is rendered beside the labels - "preview",
+                                   "statistics"; [] for none; absent, this deployment's
+                                   set, which is also the most one may name. Never part
+                                   of the result's key: declining a preview recomputes
+                                   nothing, and a cache hit renders what its list names
+                                   and the stored result lacks.
     GET    /v1/jobs                brief status of every known job
     GET    /v1/inputs/{digest}     whether this server already holds that content
     POST   /v1/inputs             store a multi-file input (a DICOM series) as
@@ -111,8 +118,10 @@ from . import content
 from .content import ContentStore, is_digest
 from .jobstore import JobStore
 from .errors import Cancelled, InputError, HaversackError, ResourceError
-from .jobpolicy import (fill_read_ahead, prefetchable, record_inputs, take_pre_read, refresh_cached_input,
-                        source_cache_key)
+from .jobpolicy import (DELIVERABLES, INPUT_NOT_ON_HAND, RENDER_BUSY, fill_read_ahead,
+                        missing_deliverables, pending_covers, prefetchable, record_inputs,
+                        take_pre_read, refresh_cached_input, source_cache_key,
+                        wanted_deliverables)
 from .progress import CancelToken, Reporter
 
 ACTIVE = ("queued", "running")
@@ -123,7 +132,9 @@ from .jobpolicy import TERMINAL  # noqa: E402
 RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default artifact
 #: The eventually-consistent artifacts, rendered after "done" is already served.
 #: Named once: `put` has to know which files belong to the generation it replaces.
-ARTIFACT_NAMES = ("preview.png", "statistics.json")
+#: They are the files of `jobpolicy.DELIVERABLES` - the names a request asks for them
+#: under (2026-09-20) - read from that table rather than written a second time.
+ARTIFACT_NAMES = tuple(DELIVERABLES.values())
 #: Which publication an entry holds. Written by `put` before the labels file, so an
 #: entry that is visible at all has one, and checked by `add_artifact` so a worker
 #: from an earlier publication cannot write into a later one.
@@ -1948,7 +1959,13 @@ def artifact_overlap(pair, task, artifacts, *, preview_out, statistics_out,
     when the entry was evicted meanwhile - dropped, never recreated), and
     ALWAYS run ``finish(placed)`` - the pending-marker clear, plus any
     commit/logging the environment wants. ``placed`` is [(name, seconds)]
-    for what actually landed."""
+    for what actually landed.
+
+    ``artifacts`` is what THIS job renders - its request's list held to the
+    deployment's set (``jobpolicy.wanted_deliverables``) - and nothing outside it is
+    rendered: a declined preview costs no render. The renderers live here, so the two
+    names are spelled here too; the files they land as are ``jobpolicy.DELIVERABLES``'s,
+    and a test drives each name of that table through this function."""
     placed = []
     try:
         from .preview import render_preview
@@ -1960,13 +1977,13 @@ def artifact_overlap(pair, task, artifacts, *, preview_out, statistics_out,
             t0 = time.time()
             png = render_preview(None, None, preview_out, title=task, pair=pair)
             dt = time.time() - t0
-            if png and place("preview.png", png):
+            if png and place(DELIVERABLES["preview"], png):
                 placed.append(("preview", dt))
         if "statistics" in artifacts:
             t0 = time.time()
             sj = compute_statistics(None, None, statistics_out, pair=pair)
             dt = time.time() - t0
-            if sj and place("statistics.json", sj):
+            if sj and place(DELIVERABLES["statistics"], sj):
                 placed.append(("statistics", dt))
     except Exception:
         pass
@@ -2020,6 +2037,19 @@ class JobRecord:
     #: canonical - it is what keys and routes - and the worker runs
     #: ``run_name(task, version)``, so the catalog installs that version or refuses it.
     version: str | None = None
+    #: What this job renders beside its labels, in ``jobpolicy.DELIVERABLES`` order: the
+    #: request's list, or the deployment's set when it named none (2026-09-20). On the
+    #: record and NOT in ``options``, which are hashed into ``cache_key``: asking for a
+    #: preview, or declining one, must never move a result's key.
+    deliverables: tuple = ()
+    #: ``{name: why}`` for what a cache hit's list named, the stored generation lacks,
+    #: and this server could not render then - said on the job rather than left out of
+    #: ``links`` without a word.
+    deliverables_unavailable: dict | None = None
+    #: Set, under the executor's condition variable, when publication has read the list:
+    #: a submit that joins this flight may add to ``deliverables`` only before that.
+    #: Runtime only - a restored job has not reached publication.
+    deliverables_sealed: bool = False
 
 
 class _PrepareDone(Exception):
@@ -2057,8 +2087,14 @@ class LocalExecutor:
         # it or the server fetched it.
         self.content = ContentStore(self.series_cache,
                                     decode=decode_for_fast_read)
+        #: The deliverables this deployment renders: the default for a request that names
+        #: none, and the ceiling for one that does (the submit door refuses a name
+        #: outside it).
         self.artifacts = set(artifacts or ())
-        self._artifacts_pending: dict = {}   # cache_key -> (owner jid, set at)
+        # cache_key -> (owner jid, set at, names being rendered). The single flight of
+        # the artifact path: one render per result at a time, whether it follows a
+        # compute or a cache hit whose list the stored generation does not satisfy.
+        self._artifacts_pending: dict = {}
         self.cache = ResultCache(cache_dir, keep=keep_cached) if cache_dir else None
         # `result:<key>` - a result this server computed, as an input - resolves against
         # THIS executor's cache, so the executor builds that source; it is in nobody's
@@ -2109,6 +2145,10 @@ class LocalExecutor:
                 "refresh_input": bool(rec.refresh_input),
                 "input_refresh_skipped": bool(rec.input_refresh_skipped),
                 "version": rec.version,
+                # a list, so a job re-queued by a restart still declines what its
+                # caller declined (an absent key is a record from before the list)
+                "deliverables": list(rec.deliverables),
+                "deliverables_unavailable": rec.deliverables_unavailable,
                 "needed_credentials": bool(rec.source_tokens)}
 
     def _persist(self, rec: JobRecord) -> None:
@@ -2152,7 +2192,11 @@ class LocalExecutor:
                             cache_key=r.get("cache_key"), created=r.get("created") or time.time(),
                             refresh_input=bool(r.get("refresh_input")),
                             input_refresh_skipped=bool(r.get("input_refresh_skipped")),
-                            version=r.get("version"))
+                            version=r.get("version"),
+                            # held to what THIS process renders; a record from before
+                            # the list has none and gets the deployment's set
+                            deliverables=wanted_deliverables(r.get("deliverables"),
+                                                             self.artifacts))
             self._jobs[rec.id] = rec
             self._pending.append(rec.id)
             # the single-flight marker, oldest first: without it a re-ask for the same
@@ -2197,11 +2241,16 @@ class LocalExecutor:
     def submit(self, jid: str, jdir: Path, input_path, task: str, options: dict,
                *, source=None, identity: tuple = (), no_cache: bool = False,
                source_tokens: dict | None = None, inputs: tuple = (),
-               refresh_input: bool = False, version: str | None = None) -> JobRecord:
+               refresh_input: bool = False, version: str | None = None,
+               deliverables=None) -> JobRecord:
+        # `deliverables`: the request's list (None: it named none). It goes on the
+        # record and is never seen by `result_key` below - rendering a preview, or
+        # declining one, is not a different result (2026-09-20).
         rec = JobRecord(id=jid, task=task, options=options, dir=jdir, input_path=input_path,
                         source=list(source or [{"kind": "upload"}]), input_identity=tuple(identity),
                         input_paths=tuple(inputs), source_tokens=source_tokens or None,
-                        refresh_input=bool(refresh_input), version=version)
+                        refresh_input=bool(refresh_input), version=version,
+                        deliverables=wanted_deliverables(deliverables, self.artifacts))
         if self.cache is not None and identity:
             rec.cache_key = result_key(identity, task, options,
                                        weights_versions_of(self.segmenter, task))
@@ -2211,6 +2260,9 @@ class LocalExecutor:
                     rec.labels_path, rec.result = Path(hit[0]), hit[1]
                     rec.state, rec.cached = "done", True
                     rec.started = rec.finished = time.time()
+                    # a hit still honors the list: before the record is written or
+                    # seen, so its first status already says what it could not deliver
+                    self._render_on_hit(rec)
                     self._persist(rec)
                     with self._cv:
                         self._jobs[jid] = rec
@@ -2231,6 +2283,15 @@ class LocalExecutor:
                     import shutil
                     shutil.rmtree(jdir, ignore_errors=True)
                     self._joiners[other.id] = self._joiners.get(other.id, 0) + 1
+                    # One flight, one render: what this caller asked for joins that
+                    # job's list, never narrows it, and only while publication has not
+                    # read it - after that the job's own `deliverables` says what it
+                    # delivers, and a later ask is a cache hit, which renders the rest.
+                    if not other.deliverables_sealed:
+                        both = set(other.deliverables) | set(rec.deliverables)
+                        if both != set(other.deliverables):
+                            other.deliverables = wanted_deliverables(both, self.artifacts)
+                            self._persist(other)
                     return other
             if len(self._pending) >= self.max_pending:
                 raise QueueFull(f"queue is full ({self.max_pending} pending)")
@@ -2290,20 +2351,158 @@ class LocalExecutor:
     def cache_list(self) -> list:
         return self.cache.list() if self.cache is not None else []
 
-    def artifact_state(self, key: str) -> str:
+    def artifact_state(self, key: str, name: str | None = None) -> str:
         """"pending" while the overlap thread is still placing this entry's
         artifacts; "absent" once it finished (or never ran) - at which point a
-        missing artifact file is definitive."""
-        cur = self._artifacts_pending.get(key)
+        missing artifact file is definitive.
+
+        ``name`` asks about ONE deliverable: a render that was not asked for it will
+        never place it, so its absence is definitive at once - a GET of a declined
+        preview answers 404, not 202 until the statistics land (2026-09-20)."""
+        with self._cv:
+            cur = self._live_pending(key)
         if cur is None:
             return "absent"
-        if time.time() - cur[1] > ARTIFACT_PENDING_TTL:
-            # a killed/hung overlap thread left its marker; without this the
-            # refuse-if-present set makes it immortal and every artifact GET
-            # 202s forever (Modal has the same rule as a 900s Dict sweep)
+        names = cur[2] if len(cur) > 2 else None
+        return "pending" if name is None or pending_covers(names, name) else "absent"
+
+    def _live_pending(self, key: str):
+        """The pending marker for ``key`` - ``(owner, set at, names)`` - or None. Asked
+        under ``_cv``. One older than ARTIFACT_PENDING_TTL is dropped here:
+        a killed/hung overlap thread left its marker; without this the
+        refuse-if-present set makes it immortal and every artifact GET
+        202s forever (Modal has the same rule as a 900s Dict sweep)."""
+        cur = self._artifacts_pending.get(key)
+        if cur is not None and time.time() - cur[1] > ARTIFACT_PENDING_TTL:
             self._artifacts_pending.pop(key, None)
-            return "absent"
-        return "pending"
+            return None
+        return cur
+
+    def _claim_pending(self, key: str, owner: str, names) -> bool:
+        """Take the artifact path's single flight for ``key``; False when a live render
+        holds it. Refuse-if-present, in one step under ``_cv``: since a cache hit renders
+        too (2026-09-20) the claim is asked for from submit threads as well as the one
+        dispatcher, and two asks of one key must not both start a render."""
+        with self._cv:
+            if self._live_pending(key) is not None:
+                return False
+            self._artifacts_pending[key] = (owner, time.time(), tuple(names))
+            return True
+
+    def _reference_on_hand(self, rec: JobRecord):
+        """``(image, release)`` for the image a cache hit's deliverables render against -
+        the task's first declared input, as ``reference_input`` has it - if this server
+        holds it NOW; ``(None, release)`` when it does not. ``release`` lets go of the pin.
+
+        Never a fetch. The labels are cached and a deliverable is light; a download to
+        draw a preview of a result nobody is computing is a cost the caller did not ask
+        for, under a queue slot no job holds - so an input that is gone is SAID to be
+        gone (``deliverables_unavailable``), and `no-cache` is the caller's lever.
+        """
+        def nothing():
+            pass
+        entry = (rec.source or [{"kind": "upload"}])[0]
+        kind = entry.get("kind", "upload")
+        if kind == "upload":
+            p = rec.input_paths[0][1] if rec.input_paths else rec.input_path
+            return (Path(p) if p is not None and Path(p).exists() else None), nothing
+        if kind == "input":
+            digest = str(entry.get("id") or entry.get("sha256") or "")
+            self.content.pin(digest)           # BEFORE the look: the store is LRU
+            try:
+                if self.content.has(digest):
+                    return self.content.fast_path(digest), lambda: self.content.unpin(digest)
+            except Exception:                  # noqa: BLE001 - unreadable is not on hand
+                pass
+            self.content.unpin(digest)
+            return None, nothing
+        sk = source_cache_key(entry)
+        if sk is None or not sk.ident:
+            return None, nothing
+        self.series_cache.pin(sk.key)          # BEFORE the look: eviction skips a pin
+        if self.series_cache.has(sk.key):
+            return self.series_cache.path(sk.key), lambda: self.series_cache.unpin(sk.key)
+        self.series_cache.unpin(sk.key)
+        return None, nothing
+
+    def _render_on_hit(self, rec: JobRecord) -> None:
+        """A cache hit honors its request's list (2026-09-20).
+
+        The labels are served as they are - same key, same generation, same ETag. What
+        the list names and that generation lacks (the request that computed it declined
+        it, or it never rendered) is rendered NOW, into that generation, through the
+        path every artifact takes: the pending marker as the single flight, the overlap
+        body, the cache's atomic ``add_artifact``. No second mechanism, so the routes
+        that wait on a pending artifact, and the rule that an artifact never lands
+        beside another publication's labels, hold for it unchanged.
+
+        What cannot be rendered is recorded on the job with the reason: the input is no
+        longer on this server, or a render of this result that does not include it is
+        still running. ``links`` then leaves it out - said, never silently omitted.
+        """
+        if self.cache is None or not rec.cache_key or rec.labels_path is None:
+            return
+        labels = Path(rec.labels_path)
+        missing = missing_deliverables(rec.deliverables, labels.parent)
+        if not missing:
+            return
+
+        def ride(cur) -> None:
+            # a render of this result is running: what it will place is on its way,
+            # and what it will not cannot be started beside it (one flight per result)
+            names = cur[2] if len(cur) > 2 else None
+            rec.deliverables_unavailable = {
+                d: RENDER_BUSY for d in missing if not pending_covers(names, d)} or None
+
+        with self._cv:
+            cur = self._live_pending(rec.cache_key)
+        if cur is not None:
+            return ride(cur)
+        image, release = self._reference_on_hand(rec)
+        if image is None:
+            rec.deliverables_unavailable = {d: INPUT_NOT_ON_HAND for d in missing}
+            return
+        if not self._claim_pending(rec.cache_key, rec.id, missing):
+            release()                          # another ask of this key claimed it first
+            with self._cv:
+                cur = self._live_pending(rec.cache_key)
+            return ride(cur) if cur is not None else None
+        # the generation the labels were read from: the render lands there or nowhere
+        gen = labels.parent.name
+        try:
+            threading.Thread(target=self._hit_worker,
+                             args=(rec, image, labels, gen[2:] if gen.startswith("g-") else None,
+                                   missing, release),
+                             name="haversack-artifacts", daemon=True).start()
+        except Exception:                      # noqa: BLE001 - a hit is never failed by this
+            release()
+            self._release_pending(rec.cache_key, rec.id)
+
+    def _release_pending(self, key: str, owner: str) -> None:
+        """Only the owner clears: a duplicate flight's finish must not turn a sibling's
+        still-pending artifacts into definitive 404s."""
+        with self._cv:
+            if self._artifacts_pending.get(key, (None,))[0] == owner:
+                self._artifacts_pending.pop(key, None)
+
+    def _hit_worker(self, rec: JobRecord, image, labels: Path, generation, names,
+                    release) -> None:
+        """A cache hit's render. The pair is loaded here rather than in ``submit`` - a
+        read of two volumes has no place on a request's thread - and from then on it is
+        ``_artifact_worker``, the same as after a compute."""
+        try:
+            try:
+                from .preview import load_oriented_pair
+                pair = load_oriented_pair(image, labels)
+            except Exception:                  # noqa: BLE001 - best effort, as every artifact
+                pair = None
+            if pair is None:
+                self._release_pending(rec.cache_key, rec.id)
+                return
+            self._artifact_worker(pair, rec.cache_key, rec.dir, rec.task, rec.id,
+                                  generation, names)
+        finally:
+            release()
 
     # -- introspection -------------------------------------------------------
     def get(self, jid: str) -> JobRecord | None:
@@ -2579,6 +2778,13 @@ class LocalExecutor:
                     rec.state = "done"
                     self._persist(rec)
 
+                with self._cv:
+                    # What THIS job renders: read once, held again to what this process
+                    # renders, and sealed - a submit that joined the flight may have
+                    # added to the list up to here, and must not believe it did after.
+                    wanted = wanted_deliverables(rec.deliverables, self.artifacts)
+                    rec.deliverables, rec.deliverables_sealed = wanted, True
+
                 def _set_pending(key: str) -> None:
                     # refuse-if-present: a duplicate flight must not ACQUIRE
                     # ownership by stomping - it would then legally clear the
@@ -2586,19 +2792,15 @@ class LocalExecutor:
                     # probes would read a definitive 404 for artifacts that
                     # land seconds later. The owner's finish clears; then a
                     # later flight may set again.
-                    cur = self._artifacts_pending.get(key)
-                    if cur is None or time.time() - cur[1] > ARTIFACT_PENDING_TTL:
-                        self._artifacts_pending[key] = (rec.id, time.time())
+                    self._claim_pending(key, rec.id, wanted)
 
                 def _clear_pending(key: str) -> None:
-                    # only the owner clears: a duplicate flight's finish must
-                    # not turn our still-pending artifacts into definitive 404s
-                    if self._artifacts_pending.get(key, (None,))[0] == rec.id:
-                        self._artifacts_pending.pop(key, None)
+                    self._release_pending(key, rec.id)
 
                 def _start(pair, key: str, generation=None) -> None:
                     threading.Thread(target=self._artifact_worker,
-                                     args=(pair, key, rec.dir, rec.task, rec.id, generation),
+                                     args=(pair, key, rec.dir, rec.task, rec.id, generation,
+                                           wanted),
                                      name="haversack-artifacts", daemon=True).start()
 
                 if rec.cancel_token.cancelled:
@@ -2610,7 +2812,9 @@ class LocalExecutor:
                     segmenter=self.segmenter, task=rec.task,
                     identity=rec.input_identity, options=rec.options,
                     cache_key=rec.cache_key, labels_path=rec.labels_path,
-                    input_image=reference_input(inp), artifacts=self.artifacts,
+                    # the request's list, not the deployment's set: nothing it declined
+                    # is rendered, and an empty list skips the pair load as well
+                    input_image=reference_input(inp), artifacts=wanted,
                     cache_enabled=self.cache is not None,
                     migrate_key=_migrate,
                     set_pending=_set_pending,
@@ -2625,15 +2829,13 @@ class LocalExecutor:
                 pass
             except Cancelled:
                 rec.state = "cancelled"
-                if (rec.cache_key and self._artifacts_pending.get(
-                        rec.cache_key, (None,))[0] == rec.id):
-                    self._artifacts_pending.pop(rec.cache_key, None)
+                if rec.cache_key:
+                    self._release_pending(rec.cache_key, rec.id)
             except Exception as e:             # noqa: BLE001 - reported to the client
                 rec.state = "failed"
                 rec.error = f"{type(e).__name__}: {e}"
-                if (rec.cache_key and self._artifacts_pending.get(
-                        rec.cache_key, (None,))[0] == rec.id):
-                    self._artifacts_pending.pop(rec.cache_key, None)   # failed after pending add
+                if rec.cache_key:
+                    self._release_pending(rec.cache_key, rec.id)   # failed after pending add
             finally:
                 for key in pinned:
                     self.series_cache.unpin(key)
@@ -2654,17 +2856,18 @@ class LocalExecutor:
                 self._evict()
 
     def _artifact_worker(self, pair, cache_key: str, jdir: Path, task: str,
-                         owner: str, generation=None) -> None:
+                         owner: str, generation=None, names=None) -> None:
         """Post-completion artifacts via the shared overlap body; placement
         is the cache's atomic add_artifact, finish clears the pending marker
-        only when this job still owns it."""
+        only when this job still owns it. ``names`` is what this job renders - its
+        request's list, or what a cache hit found missing; None is the deployment's
+        set, which is all there was to render before requests could say."""
 
         def _finish(placed) -> None:
-            if self._artifacts_pending.get(cache_key, (None,))[0] == owner:
-                self._artifacts_pending.pop(cache_key, None)
+            self._release_pending(cache_key, owner)
 
         artifact_overlap(
-            pair, task, self.artifacts,
+            pair, task, self.artifacts if names is None else names,
             preview_out=jdir / "preview.png",
             statistics_out=jdir / "statistics.json",
             place=lambda name, path: self.cache.add_artifact(
@@ -2810,6 +3013,10 @@ class LocalExecutor:
             d["result"] = r["result"]
         if r.get("cache_key"):
             d["key"] = r["cache_key"]
+        if r.get("deliverables") is not None:  # absent: a record from before the list
+            d["deliverables"] = list(r["deliverables"])
+        if r.get("deliverables_unavailable"):
+            d["deliverables_unavailable"] = dict(r["deliverables_unavailable"])
         return d
 
     def statuses(self) -> list[dict]:
@@ -2866,6 +3073,13 @@ class LocalExecutor:
                 d["key"] = rec.cache_key
             if rec.options:
                 d["options"] = dict(rec.options)
+            if rec.kind != "prepare":
+                # what this job renders beside its labels - beside `options`, never in
+                # them - and what a cache hit could not, with the reason; `links` is
+                # built from the two
+                d["deliverables"] = list(rec.deliverables)
+                if rec.deliverables_unavailable:
+                    d["deliverables_unavailable"] = dict(rec.deliverables_unavailable)
         if rec.cached:
             d["cached"] = True
         if not brief and rec.state == "done" and rec.result is not None:
@@ -3479,7 +3693,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 "device": str(policy.get("device", "?")),
                 "n_tasks": len(seg.tasks()), "accepting": executor.accepting,
                 "sources": ["upload"] + [k for k, v in sources.items()
-                                         if _source_enabled(v)]}
+                                         if _source_enabled(v)],
+                # what a job here can be asked to render beside its labels - the
+                # default of a request that names none, and the most one may name
+                "deliverables": list(wanted_deliverables(
+                    None, getattr(executor, "artifacts", ()) or ()))}
 
     @app.get("/v1/version", tags=["service"])
     def version():
@@ -3710,7 +3928,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
     @app.post("/v1/jobs", status_code=202, tags=["jobs"])
     async def submit(request: Request, file: UploadFile | None = File(None),
                      task: str = Form(...), options: str = Form("{}"),
-                     source: str = Form(None)):
+                     source: str = Form(None), deliverables: str = Form(None)):
         require_auth(request)
         try:
             opts = json.loads(options)
@@ -3721,8 +3939,26 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             src = json.loads(source) if source else [{"kind": "upload"}]
             if not (isinstance(src, list) and all(isinstance(x, dict) for x in src)):
                 raise ValueError("source must be a JSON list of objects")
+            asked = json.loads(deliverables) if deliverables is not None else None
         except ValueError as e:
             raise HTTPException(422, f"bad request: {e}") from e
+        # Which deliverables THIS request wants rendered beside its labels: a field of its
+        # own, and refused inside `options` - every option is hashed into the result key,
+        # and asking for a preview, or declining one, must never recompute or re-key a
+        # segmentation (2026-09-20). Checked against what this deployment renders, which
+        # is the default when the field is absent and the ceiling when it is not.
+        from .errors import RequestError
+        from .schemas import DELIVERABLES_FIELD, requested_deliverables
+        if DELIVERABLES_FIELD in opts:
+            raise HTTPException(422, {
+                "code": "misplaced_deliverables",
+                "message": f"`{DELIVERABLES_FIELD}` is a form field of its own, beside "
+                           "`options`, not an option: options are part of a result's key "
+                           "and what is rendered beside it is not"})
+        try:
+            wanted = requested_deliverables(asked, getattr(executor, "artifacts", ()))
+        except RequestError as e:
+            raise HTTPException(e.status, e.detail) from None
         # RFC 9111 semantics, deliberately: `no-cache` means "do not SERVE a stored
         # result", not "do not store one" - that is `no-store`, which we do not offer.
         # So this skips the lookup and still publishes (see the overwriting put in
@@ -3806,7 +4042,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             return await _accept(request, jid, jdir, binding, task, opts, src,
                                  file, no_cache, executor, seg,
                                  caller_asked_no_cache, version=version,
-                                 handed=handed, role_specs=declared)
+                                 handed=handed, role_specs=declared, wanted=wanted)
         except QueueFull as e:
             _discard(jdir)
             raise HTTPException(429, str(e), headers={"Retry-After": "30"}) from e
@@ -3826,7 +4062,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
     async def _accept(request, jid, jdir, binding, task, opts, src, file,
                       no_cache, executor, seg, caller_asked_no_cache=False,
-                      version=None, handed=None, role_specs=None):
+                      version=None, handed=None, role_specs=None, wanted=None):
+        # `wanted`: the request's deliverables, already checked (None: it named none).
+        # It rides beside `opts` to the executor and never into them - `opts` is keyed.
         # `role_specs`: role -> what the task declares it takes (_validate_request's
         # `declared`). NOT named `declared` here: the upload branch below has a local of
         # that name, and an upload bound before a reference - upload a CT, refer to its
@@ -4019,6 +4257,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                 # passed only when set, so an executor that predates
                                 # pins keeps its signature
                                 **({"version": version} if version else {}),
+                                # likewise: a request that named no list is the
+                                # executor's own default
+                                **({"deliverables": wanted} if wanted is not None else {}),
                                 refresh_input=caller_asked_no_cache,
                                 source_tokens=tokens,
                                 inputs=tuple(staged) if multi else ())
@@ -4069,11 +4310,16 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         if out.get("state") == "done":
             if out.get("result_available", True):   # an evicted record says when it is gone
                 links["result"] = f"/v1/jobs/{jid}/result"
-            kinds = set(getattr(executor, "artifacts", ()) or ())
+            # What THIS job was asked to deliver, less what it said it could not - so a
+            # link is there only for what is, or will be, there (2026-09-20). The
+            # artifact overlap runs after done, so this reads the job's own list rather
+            # than probing the cache per request; a record from before the list (none on
+            # it) advertises what this deployment renders, as every job then did.
+            asked = out.get("deliverables")
+            kinds = set(getattr(executor, "artifacts", ()) or ()) if asked is None else set(asked)
+            kinds -= set(out.get("deliverables_unavailable") or ())
             links.update(resource_links(
                 out.get("task"), out.get("input_identity"), out.get("options"),
-                # the artifact overlap runs after done, so advertise what this
-                # deployment renders rather than probing the cache per request
                 preview="preview" in kinds, statistics="statistics" in kinds))
         out["links"] = links
         return out
@@ -4704,8 +4950,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
             if (found := await look()) is not None:
                 return found
-            state_fn = getattr(executor, "artifact_state", None)
-            pending = state_fn is not None and state_fn(key) == "pending"
+            _state = getattr(executor, "artifact_state", None)
+
+            def state_fn(k: str) -> str:
+                # asked about THIS deliverable: a render that was not asked for it
+                # will never place it, so its absence is definitive at once
+                return _state(k, what)
+            pending = _state is not None and state_fn(key) == "pending"
             if pending:
                 if deadline is None:
                     deadline = time.time()
@@ -4731,7 +4982,16 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 p = Path(again[0]).parent / filename if again is not None else None
                 if p is not None and p.exists():
                     return p
-            raise HTTPException(404, f"no {what} for this result")
+            # A read never renders (decided 2026-09-20): a deliverable is asked for where
+            # the input is named and can be held - POST /v1/jobs - and this URL serves
+            # what exists, to anyone. Anonymous never computes; an authorized GET of a
+            # stored result's missing artifact does not either, Prefer or not: it has no
+            # job to stage an input under. So the answer is a definitive 404 that names
+            # the door which does.
+            raise HTTPException(404, f"no {what} for this result: it was not asked for when "
+                                     "the result was computed, or could not be rendered; an "
+                                     "authorized POST /v1/jobs of the same input and task "
+                                     f'with deliverables ["{what}"] renders it')
 
         def _register_statistics(tok: str, gopts: dict):
             async def _stats_key(request, ident, task, opts):

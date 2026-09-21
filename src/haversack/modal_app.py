@@ -58,8 +58,19 @@ WARM_TASK = os.environ.get("HAVERSACK_WARM_TASK", "ts.v2:total_fast")   # qualif
 MAX_CONTAINERS = int(os.environ.get("HAVERSACK_MAX_CONTAINERS", "1"))
 SHM_CACHE_GB = float(os.environ.get("HAVERSACK_SHM_CACHE_GB", "8"))
 JOBS_TTL_H = float(os.environ.get("HAVERSACK_JOBS_TTL_H", "72"))
+#: The deliverables this deployment renders: the default of a request that names none and
+#: the ceiling of one that does (``jobpolicy.wanted_deliverables``), read in the api
+#: container (the submit door, ``links``) and in every worker (what is rendered).
 ARTIFACTS = set(filter(None, os.environ.get("HAVERSACK_ARTIFACTS",
                                             "preview,statistics").split(",")))
+#: Why a cache hit here could not deliver what its list named (``_unrendered_on_hit``).
+DELIVERABLE_NEEDS_A_COMPUTE = (
+    "not rendered for this stored result, and this deployment renders deliverables only in "
+    "the worker that computes a result; Cache-Control: no-cache recomputes it with its "
+    "deliverables")
+DELIVERABLE_NOT_VISIBLE = (
+    "this server cannot see the result store's latest state yet (a volume reload was "
+    "refused), so it cannot tell whether this was rendered; ask again shortly")
 RESULTS_KEEP = int(os.environ.get("HAVERSACK_RESULTS_KEEP", "500"))
 WEIGHTS_ROOT, SCRATCH_ROOT, CACHE_ROOT = "/weights", "/scratch", "/cache"
 INPUTS_ROOT = "/inputs"
@@ -611,14 +622,19 @@ def _release_inflight(key: str, jid: str) -> None:
             pass
 
 
-def _set_pending_marker(key: str, jid: str) -> None:
+def _set_pending_marker(key: str, jid: str, names=None) -> None:
     """Refuse-if-present: a duplicate flight must not ACQUIRE ownership by
     stomping - it would then legally clear the marker while the sibling's
     overlap still renders, and probes would read a definitive 404 for
-    artifacts that land seconds later."""
+    artifacts that land seconds later.
+
+    ``names`` is what this render will place - the job's own deliverables (2026-09-20) -
+    so a GET of one it declined reads a definitive absence at once, and a cache hit that
+    wants it knows this render will not bring it. A marker with no ``names`` is a
+    previous deploy's, which rendered its whole set."""
     if jobs_dict.get(f"artifacts:{key}") is None:
-        jobs_dict[f"artifacts:{key}"] = {"state": "pending",
-                                         "t": time.time(), "job": jid}
+        jobs_dict[f"artifacts:{key}"] = {"state": "pending", "t": time.time(), "job": jid,
+                                         **({} if names is None else {"names": list(names)})}
 
 
 def _clear_pending_marker(key: str, jid: str) -> None:
@@ -1439,8 +1455,16 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             meta["cache_key"] = new_key
             _emit(jid, {"cache_key": new_key})
 
+        # What THIS job renders beside its labels: the request's list, off the record
+        # this job read once at its start (no second Dict read, and never a scan), held
+        # to what this container renders - the api checked it against ITS setting, and a
+        # worker still warm from the previous deploy may have another. A record with no
+        # list is a previous deploy's, or a path-surface ask: the deployment's set.
+        from haversack.jobpolicy import wanted_deliverables
+        wanted = wanted_deliverables(meta.get("deliverables"), ARTIFACTS)
+
         def _set_pending(key: str) -> None:
-            _set_pending_marker(key, jid)
+            _set_pending_marker(key, jid, wanted)
 
         def _clear_pending(key: str) -> None:
             _clear_pending_marker(key, jid)
@@ -1465,7 +1489,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
 
         def _start(pair, key: str, generation=None) -> None:
             threading.Thread(target=ctx._artifact_worker,
-                             args=(pair, key, jid, meta["task"], generation),
+                             args=(pair, key, jid, meta["task"], generation, wanted),
                              name="haversack-artifacts", daemon=True).start()
 
         meta["cache_key"], _ = publish_completion(
@@ -1474,7 +1498,9 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             options=meta.get("options") or {},
             cache_key=meta.get("cache_key"),
             labels_path=labels, input_image=reference_input(input_path),
-            artifacts=ARTIFACTS, cache_enabled=True,
+            # the request's list, not ARTIFACTS: nothing it declined is rendered, and an
+            # empty list starts no thread and loads no pair
+            artifacts=wanted, cache_enabled=True,
             migrate_key=_migrate, set_pending=_set_pending,
             clear_pending=_clear_pending, put=_put,
             mark_done=_mark_done, start_worker=_start)
@@ -1554,10 +1580,14 @@ class _WorkerBase:
             print(f"[reconcile] skipped: {e}", flush=True)
 
     def _artifact_worker(self, pair, cache_key: str, jid: str, task: str,
-                         generation=None) -> None:
+                         generation=None, names=None) -> None:
         """Post-done artifacts via the shared overlap body; this side's place
         is vol-locked add_artifact + tmpfs cleanup, and finish commits once,
-        logs, and always deletes the pending marker."""
+        logs, and always deletes the pending marker. ``names`` is what this job
+        renders - its request's deliverables; None is the deployment's set. It changes
+        WHAT is rendered and nothing about where the volume is touched: every place and
+        the one commit still hold ``_vol_lock``, and a job that renders nothing never
+        starts this thread."""
         from haversack.serve import ResultCache, artifact_overlap
 
         def _place(name: str, path) -> bool:
@@ -1582,7 +1612,7 @@ class _WorkerBase:
             finally:
                 _clear_pending_marker(cache_key, jid)
 
-        artifact_overlap(pair, task, ARTIFACTS,
+        artifact_overlap(pair, task, ARTIFACTS if names is None else names,
                          preview_out=Path("/dev/shm") / f"preview_{jid}.png",
                          statistics_out=Path("/dev/shm") / f"stats_{jid}.json",
                          place=_place, finish=_finish)
@@ -1874,12 +1904,15 @@ class ModalExecutor:
         _emit(jid, {"call_id": call.object_id})
         return meta
 
-    artifacts = ARTIFACTS                  # advertised in job links, like the local executor
+    #: What this deployment renders: the default of a request that names no deliverables,
+    #: and the most one may name (the submit door refuses the rest), as on the local server
+    artifacts = ARTIFACTS
 
-    def artifact_state(self, key: str) -> str:
+    def _pending_marker(self, key: str):
+        """The live ``artifacts:`` marker for ``key`` - one Dict get - or None."""
         m = jobs_dict.get(f"artifacts:{key}")
         if not (isinstance(m, dict) and m.get("state") == "pending"):
-            return "absent"
+            return None
         # the same 900 s rule the local executor applies on read: a marker a killed
         # overlap thread left behind must not answer 202 forever
         if time.time() - float(m.get("t") or 0) > 900:
@@ -1889,8 +1922,55 @@ class ModalExecutor:
                 jobs_dict.pop(f"artifacts:{key}", None)
             except Exception:                  # noqa: BLE001 - a read path must not fail on it
                 pass
+            return None
+        return m
+
+    def artifact_state(self, key: str, name: str | None = None) -> str:
+        """As the local executor's: "pending" while a worker's overlap is still placing
+        this entry's artifacts - and, asked about ONE deliverable, only when that render
+        was asked for it (the marker's ``names``; a marker without them is a previous
+        deploy's, which rendered its whole set)."""
+        from haversack.jobpolicy import pending_covers
+        m = self._pending_marker(key)
+        if m is None:
             return "absent"
-        return "pending"
+        return ("pending" if name is None or pending_covers(m.get("names"), name)
+                else "absent")
+
+    def _unrendered_on_hit(self, key: str, wanted, hit) -> dict:
+        """``{name: why}`` for what a cache hit's list names and its stored generation
+        will not have (2026-09-20). Empty when the generation holds everything asked
+        for, or a render still running will bring the rest.
+
+        Here a hit cannot render what is missing, as the local server does, and says
+        so: artifacts are rendered by the worker that computes a result, from the input
+        it staged and under its ``_vol_lock``; a hit reaches no worker, this container
+        cannot see a worker's staged inputs, and a volume read in 2 GB of api memory is
+        not where a whole CT belongs. A render-only job is the follow-up, not a second
+        mechanism slipped in here.
+
+        Costs one Dict get (never a scan), and only when something is missing. A miss
+        is believed only from a view newer than the marker's read: the worker places,
+        COMMITS, and only then clears its marker, so once no render is pending a fresh
+        view holds whatever one placed - the rule every miss here follows (2026-09-19).
+        """
+        from haversack.jobpolicy import RENDER_BUSY, missing_deliverables, pending_covers
+        from haversack.serve import ResultsNotVisible
+        missing = missing_deliverables(wanted, Path(hit[0]).parent)
+        if not missing:
+            return {}
+        m = self._pending_marker(key)
+        since = time.monotonic()               # AFTER the marker's read
+        if m is not None:
+            return {d: RENDER_BUSY for d in missing
+                    if not pending_covers(m.get("names"), d)}
+        try:
+            again = _confirm_cache_absent(key, since)
+        except ResultsNotVisible:
+            return {d: DELIVERABLE_NOT_VISIBLE for d in missing}
+        if again is not None:
+            missing = missing_deliverables(missing, Path(again[0]).parent)
+        return {d: DELIVERABLE_NEEDS_A_COMPUTE for d in missing}
 
     def cache_list(self):
         from haversack.serve import ResultCache
@@ -1975,7 +2055,11 @@ class ModalExecutor:
     def submit(self, jid, jdir, input_path, task, options, *, source=None,
                identity=(), no_cache: bool = False, source_tokens=None,
                inputs: tuple = (), refresh_input: bool = False,
-               version: str | None = None):
+               version: str | None = None, deliverables=None):
+        # `deliverables` is the request's list (None: it named none). It is written on
+        # the job's record - which the worker reads ONCE, when the job starts, so the
+        # list reaches it with no Dict read of its own - and it never reaches
+        # `result_key`: what is rendered beside a result is not part of what it is.
         # `refresh_input` is recorded on the job meta and read by the worker's
         # fetch (`_refresh_series`), the way the local executor's dispatcher does.
         # `inputs` (the role -> local path binding) is accepted for signature
@@ -1984,7 +2068,9 @@ class ModalExecutor:
         # `source` - each entry carries its canonical role, and uploads were
         # written into the job dir under that role. Sending server-local paths
         # through a Dict to another container would be sending it a lie.
+        from haversack.jobpolicy import wanted_deliverables
         from haversack.serve import RESULT_NAME, result_key
+        wanted = wanted_deliverables(deliverables, ARTIFACTS)
         with self.volume_guard:
             # Make any upload visible to the worker - and only then: a commit was
             # 0.67 s of every submit's 1.48 (2026-09-19), paid by idc:/input: jobs
@@ -2016,14 +2102,19 @@ class ModalExecutor:
                             # the entry by; cache_path names one generation, which a
                             # later publication of the key lets pruning reclaim
                             "cache_key": key,
+                            "deliverables": list(wanted),
                             # a pinned ask answered from the cache still reports its pin,
                             # as the local executor does (seen missing on Modal, 2026-09-12)
                             **({"version": version} if version else {})}
+                    unavailable = self._unrendered_on_hit(key, wanted, hit)
+                    if unavailable:
+                        meta["deliverables_unavailable"] = unavailable
                     jobs_dict[jid] = meta
                     return meta
         meta = {"id": jid, "task": task, "options": options,
                 "source": list(source or [{"kind": "upload"}]),
                 "input_identity": list(identity), "cache_key": key,
+                "deliverables": list(wanted),
                 "refresh_input": bool(refresh_input),
                 # the caller's pin: the worker runs run_name(task, version), so its
                 # catalog installs that version or refuses it (see serve.run_name)
@@ -2116,7 +2207,12 @@ class ModalExecutor:
                 "input_refresh_skipped",
                 # the caller's pin beside the canonical task - the local executor reports
                 # it, and a whitelist without it dropped it here (review 2026-09-12)
-                "version")
+                "version",
+                # what the job renders beside its labels, and what a cache hit could
+                # not: serve's job route builds `links` from the two, and a whitelist
+                # without them would advertise this deployment's whole set for a job
+                # that declined it
+                "deliverables", "deliverables_unavailable")
         d = {k: meta.get(k) for k in keys if meta.get(k) is not None}
         if meta.get("state") == "done" and meta.get("result") is not None:
             d["result"] = meta["result"]
