@@ -32,7 +32,9 @@ haversack remote submit idc:<crdc_series_uuid> --task ts.v2:total_fast -o labels
 ```
 
 `submit` uploads (or names a hosted series), streams progress, and downloads the labels;
-`--no-wait` returns a job id for `status`, `fetch`, and `cancel`. `GET /v1/health` answers
+`--no-wait` returns a job id for `status`, `fetch`, and `cancel`. `haversack remote results`
+lists what the server has computed, newest first (`--identity idc:<crdc_series_uuid>`,
+`--task`, `--limit`, `--json`; see "Listing results"). `GET /v1/health` answers
 when the server is ready. That is the personal setup: the server generated a token, printed
 it, and left it in `~/.cache/haversack/serve/<port>.token`, readable by you alone and
 stamped with the server's process id, and `haversack remote` on the same machine read it
@@ -72,8 +74,10 @@ caller who wants it computed says so with RFC 7240: `Prefer: wait=N` holds the c
 up to N seconds (default 30, at most 110) and returns the bytes if they arrive in time, else
 202 with progress in the headers; `Prefer: wait=0` or `Prefer: respond-async` starts the
 computation and returns 202 at once. A `HEAD` on the same path probes without computing:
-200 cached, 202 in flight (with the same progress headers), 404 absent. The header never
-goes in the URL, so the URL stays the pure cache key.
+200 cached, 202 in flight (with the same progress headers), 404 absent. Its 200 carries
+the `ETag` and `Content-Length` the `GET` would, and like the `GET` it answers a matching
+`If-None-Match` with 304. The header never goes in the URL, so the URL stays the pure
+cache key.
 
 **`Cache-Control: no-cache` recomputes.** On a submit or an authorized result GET (with
 `Prefer`) it means
@@ -93,7 +97,8 @@ server already holds, a hosted identifier such as `{"kind": "idc", "crdc_series_
 "Results as inputs"). Options are validated at submit against the task's published parameter schema, and
 sources are bound to the task's declared inputs by role name, never by position, so a wrong
 request is refused with a 422 naming the problem rather than failing minutes later in a
-worker. On the local server the queue is a bounded FIFO (`--max-pending`, default 16) and
+worker. An optional `deliverables` JSON list says what is rendered beside the labels (see
+"Deliverables"). On the local server the queue is a bounded FIFO (`--max-pending`, default 16) and
 past it the answer is 429 with `Retry-After`; on Modal the platform queues without bound. A
 submit whose key is already in flight joins that job rather than starting a second one.
 The response is 202 with the job id.
@@ -102,9 +107,9 @@ A job's status (`GET /v1/jobs/{id}`) carries its `state` (`queued`, `running`, `
 `failed`, `cancelled`), timestamps, a `progress` snapshot (stage, detail, part, fraction,
 elapsed), the `input_identity`, the result `key`, and once done a `result` block with the
 structure names, volumes in ml, provenance, timings, and the content digest of the output,
-plus a `links` object: `self`, `events`, `result`, and for a path-addressable result the
-labels and the artifacts this deployment produces. Follow the links rather than building
-URLs.
+plus `deliverables` - what this job renders beside its labels - and a `links` object: `self`,
+`events`, `result`, and for a path-addressable result the labels, the metadata and the
+deliverables this job was asked for. Follow the links rather than building URLs.
 
 `GET /v1/jobs/{id}/events` is Server-Sent Events: each event is the same status snapshot,
 so a dropped stream needs no replay - resubscribe, or poll the status URL. `GET
@@ -148,14 +153,104 @@ either its canonical `eco:name` form or its bare alias. A grid variant is a toke
 filename: `labels_res-1mm.seg.nrrd` is the same result restored at 1 mm isotropic, and every
 artifact takes the same token. Reads obey the rules above: a cache hit is served with
 `Cache-Control: public` and an `ETag`; a miss is 404 unless the caller is authorized and
-sends `Prefer`. `GET /v1/segmentations` lists every cached result this server can still
-resolve (its mounted sources, its current weights) with its links, for authorized callers,
-because the listing reveals the identities of uploaded content.
+sends `Prefer`. `GET /v1/segmentations` lists the cached results (next section).
 
 Uploads are not path-addressable - their identity is a digest nobody else can guess - so an
 uploaded input's result is fetched through its job's `result` link, which is where the ETag
 revalidation earns its keep. No content digest is: not a stored input's, and not a `result`
 reference's, whose identity is the digest of the output it names.
+
+## Listing results
+
+`GET /v1/segmentations` lists the cached results this server can still resolve - its mounted
+sources, its tasks, its CURRENT weights: an entry whose key this server would no longer
+derive is left out, because its link would 404 and suggest a recompute. It is for authorized
+callers, because the listing reveals the identities of uploaded content, and a filter by
+digest would confirm one. Newest published first, a page at a time:
+
+```
+GET /v1/segmentations?identity=idc:<crdc_series_uuid>&task=ts.v2:total&limit=100&cursor=<token>
+
+{"segmentations": [{"key": ..., "task": ..., "identity": [...], "options": {...},
+                    "computed": ..., "published": ..., "bytes": ..., "links": {...}}, ...],
+ "next_cursor": "<token>" | null}
+```
+
+`links` is there when the result has a path (one hosted input, default options or a grid
+token); an upload's result, a `result:` reference's and a multi-input one are listed without.
+`published` is what the order is by: the time of the publication the entry holds now, so a
+result recomputed with `no-cache` moves to the head, and nothing a READ does moves anything.
+
+- **`limit`** is 1-1000, default 100. There is no other cap: before 2026-09-20 the listing
+  returned the newest 500 and said nothing of the rest.
+- **`cursor`** is the previous answer's `next_cursor`, handed back as given; it is null on the
+  last page. It is a position, not an offset, so pages stay put while results are published:
+  what is published (or republished) after your first page sorts ahead of it and is at the
+  head of your next listing - never a repeated row, never a shifted one. A cursor the server
+  did not issue is a 422.
+- **`identity`** keeps the results computed from one input: `<source>:<identifier>` for a
+  source from `/v1/sources` with a path surface, or a content digest (`sha256:<hex>`, what an
+  upload's job reports as its `input_identity`). Repeat it, up to 100 times, for several
+  inputs at once - the answer is the union, which is how a cohort asks "which of these series
+  are done". It is COMPUTED, not searched: the server derives the key of every task it serves,
+  under the default options and each grid token, and looks those names up - what a `HEAD` on
+  each path would tell you, in one request, and as fast on a cache of thousands as on an
+  empty one. So it finds exactly the results that have a path, plus an upload's under those
+  same options. A result computed with other options (`interp`, `folds`, ...) or from several
+  inputs is not found this way; the plain listing and the `task` filter show it.
+- **`task`** keeps one task's results (any spelling the task routes take). With `identity`
+  it is one key per option set. Alone it is the one filter that has to read every entry's
+  metadata, which the server does in parallel and remembers in memory for as long as it
+  runs - there is no index on disk to fall out of step with the cache.
+
+A 422 names what was refused (an identity that is neither form, an unknown task, a `limit`
+out of range, a foreign cursor). On Modal the listing is read from a view of the result
+volume newer than the request, like every other statement that something is absent; when no
+such view can be had the answer is 503 with `Retry-After`, never a shorter list.
+## Deliverables
+
+Beside the labels a server renders light deliverables: `preview`, a three-plane overlay
+(`preview.png`), and `statistics`, per-structure volumes and intensities (`statistics.json`,
+also as `.tsv`). They are rendered after the job already reports `done`, into the result's
+own cache entry, so they are eventually consistent: a GET of one that is still rendering
+answers 202 with `Retry-After`.
+
+**Which are rendered is the request's to say.** `POST /v1/jobs` takes a `deliverables` form
+field, a JSON list of names: `["statistics"]`, or `[]` for none. Absent, the job gets the
+deployment's set - `GET /v1/health` lists it as `deliverables` - and that set is also the
+ceiling: a name this server does not render (`deliverable_not_offered`) or has never heard
+of (`unknown_deliverable`) is refused at submit, with a 422 that says what the server
+offers. The list is a field of its own, beside `options`; inside them it is refused
+(`misplaced_deliverables`).
+
+**A deliverable is never part of the result.** Options are part of a result's key; the list
+is not. Declining the preview computes the same labels under the same `key`, with the same
+`ETag`, and a later request for that input and task is a cache hit whatever either list
+said.
+
+**A cache hit still honors the list.** When the labels are cached and the stored result
+lacks a deliverable the request names - an earlier request declined it, or it never
+rendered - the local server renders it then, from the input it still holds (the upload
+just sent, a stored input, a fetched series still in its cache), into the same cache entry:
+no recompute, no new generation, and one render per result at a time. It never fetches an
+input again to do so. What it cannot deliver it says: the job's `deliverables_unavailable`
+maps each such name to the reason - the input is no longer staged on the server, or a
+render of this result that does not include it is still running - and `links` leaves it
+out. `Cache-Control: no-cache` recomputes the result with its deliverables. A Modal
+deployment renders only in the worker that computes a result, so there a cache hit never
+renders: it reports what the stored result lacks in the same field (or, when the api
+container cannot see the result volume's latest state, that it cannot tell yet).
+
+A job's status carries `deliverables`, the list it renders, and its `links` name only what
+was asked for and is, or will be, there. A submit that joins a job already in flight adds
+its names to that job's list, until the job publishes.
+
+**A read never renders.** `preview.png` and `statistics.json` by path serve what exists, to
+anyone. When the result is cached and the artifact is not, the answer is 404 - to an
+anonymous caller and to an authorized one, with `Prefer` or without - and it names the door
+that renders it: an authorized `POST /v1/jobs` of the same input and task with the
+deliverable in its list. (A result that is not cached at all is still computed by an
+authorized GET with `Prefer`, with the deployment's set.)
 
 ## Sources and the input store
 
@@ -374,7 +469,7 @@ reports which engines are enabled, and `GET /v1/tasks/{task}` names each task's 
 ## Deploying to Modal
 
 ```bash
-haversack modal deploy [--gpu L40S] [--app-name haversack-serve] [--scaledown 120] [--no-proxy-auth]
+haversack modal deploy [--gpu L40S] [--app-name haversack-serve] [--cache-volume NAME] [--scaledown 120] [--no-proxy-auth]
 modal app stop haversack-serve --yes
 ```
 
@@ -393,12 +488,37 @@ Deploy-time knobs, all environment variables because Modal resolves decorators a
 default on), `HAVERSACK_WARM_TASK` (the task loaded at startup, default `ts.v2:total_fast`),
 `HAVERSACK_JOBS_TTL_H` (default 72), `HAVERSACK_RESULTS_KEEP` (default 500),
 `HAVERSACK_INPUTS_GB` (default 50), `HAVERSACK_API_MIRROR_GB` (default 2: the api container's
-local copies of the results it serves), `HAVERSACK_ARTIFACTS` (default `preview,statistics`),
+local copies of the results it serves), `HAVERSACK_ARTIFACTS` (default `preview,statistics`:
+the deliverables this deployment renders - the default of a request that names none, and the
+most one may name),
 `HAVERSACK_IDC_CLOUD` (`aws`, or `gcp` to read IDC's Google Cloud mirror first - for a
-deployment that lives there),
+deployment that lives there), `HAVERSACK_CACHE_VOLUME` (the result cache's volume, below),
 and `HAVERSACK_PUBLIC=1`, which adds an anonymous read-only twin that serves cache hits and
 nothing else. A redeploy does not preempt warm containers running the old code; stop the
 app first. Costs run while a worker is warm.
+
+A deployment's stores are named after the app - `<app>-scratch`, `<app>-inputs`, the
+`<app>-jobs` job store, `<app>-cache` - except the weights volume, `haversack-weights`, which
+every deployment shares. `--cache-volume` / `HAVERSACK_CACHE_VOLUME` names the result cache
+instead, so a deployment under a new name can start with an earlier one's results: a result
+key holds no app name (input identity, task, options, weights versions, cache epoch), so a
+cache answers the same requests whichever app mounts it. Only the cache can be named;
+scratch, inputs and the job store hold one deployment's job ids, uploads and flights. Nothing
+is renamed or migrated, and unset means `<app>-cache` as before. Two cases:
+
+- **The cache's first deployment is gone** (stopped, or redeployed under another name):
+  completely safe. It is the same volume, read and written by the same code.
+- **Two live deployments share one cache**: they behave like more worker containers of one
+  app, which is a case the cache is built for - a result is published as a whole generation
+  behind one pointer. The one difference is single flight: "a submit whose key is already in
+  flight joins that job" is decided in the per-app job store, so the two apps can each
+  compute the same key at the same time. That is duplicate GPU work, not corruption: both
+  publish, one pointer wins, the other generation is pruned.
+
+In both, mind `HAVERSACK_RESULTS_KEEP`: every publication evicts down to the PUBLISHING app's
+bound (default 500), least recently used first. A deployment that adopts a cache of 2,000
+results with the default evicts 1,500 of them at its first job - deploy it with a bound at
+least the size of the cache it adopts. With two live apps the smaller bound is the real one.
 
 ## Operating it
 
@@ -430,7 +550,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/segments` | read | which tasks produce a segment, and with what label value |
 | POST | `/v1/tasks/<task>/prepare` | token | install a task's weights now |
 | GET | `/v1/sources` | read | the hosted sources (and `result`), their identifier grammar, and which have a path surface |
-| GET | `/v1/segmentations` | token | every cached result, with links |
+| GET | `/v1/segmentations` | token | cached results, newest first: `identity`, `task`, `limit`, `cursor` |
 | POST | `/v1/jobs` | token | submit |
 | GET | `/v1/jobs` | token | brief status of every known job |
 | GET | `/v1/jobs/<id>` | token | full status, result metadata, links |

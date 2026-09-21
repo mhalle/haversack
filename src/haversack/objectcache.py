@@ -788,32 +788,173 @@ class SharedResultCache:
         local = self.local.delete(key)
         return existed or local
 
-    def list(self, limit: int = 500) -> list:
-        """The newest published entries, read from the pointers alone.
+    def list(self, *, keys=None, limit: int | None = None, after=None, accept=None,
+             match=None, memo=None, hold=None, workers: int | None = None) -> tuple:
+        """``(rows, position)``, newest published first - ``ResultCache.list``'s contract,
+        answered from the store (main's listing, 2026-09-21).
 
-        At most ``limit`` pointers are READ: they are ordered by the listing's own
-        last-modified first. Reading every pointer in the bucket and then slicing was one
-        request per entry - fine for a local directory, minutes and tens of thousands of
-        requests on a bucket several servers share (review, 2026-09-19). The order within
-        the answer is still the publication time each pointer records.
+        The three mechanisms it rests on carry over, and two of them get cheaper here:
+
+        1. ``keys`` - an identity filter COMPUTES the names it wants, so this reads exactly
+           those pointers and never lists the bucket. A miss is one 404, not a search.
+        2. Order and paging come from names and times the LISTING itself returns: an object
+           store gives last-modified with every name, so what costs a stat per entry on a
+           filesystem costs nothing extra here. ``after`` is the same ``(stamp, key)``
+           position, in nanoseconds, so a cursor issued by either cache means the same
+           thing.
+        3. Content is read only for the page. The pointer IS the content - meta, sizes and
+           which artifacts exist are all in the one document - so a row costs ONE request
+           where the local cache pays a read plus three stats. ``workers`` reads a chunk in
+           parallel, ``memo`` spares a long-lived server the re-read.
+
+        ``hold`` is accepted and honored for symmetry with the local cache, where it is the
+        Modal view lock; a bucket has no view to hold still, so it guards nothing here.
         """
-        from .serve import RESULT_NAME, resource_links
-        out = []
-        for ptr in self._scan_pointers(newest_first=True, limit=limit)[0]:
-            meta, files = ptr.get("meta") or {}, ptr.get("files") or {}
+        from concurrent.futures import ThreadPoolExecutor, wait
+
+        from .serve import LIST_CHUNK, LIST_WORKERS, RESULT_NAME, resource_links
+        import contextlib
+        hold = hold or contextlib.nullcontext
+        workers = LIST_WORKERS if workers is None else int(workers)
+        pool = []
+
+        def order(position):                   # newest first; the key makes it total
+            return -position[0], position[1]
+
+        def each(fn, items) -> list:
+            with hold():
+                if len(items) < 4 or workers < 2:
+                    return [fn(x) for x in items]
+                if not pool:
+                    pool.append(ThreadPoolExecutor(max_workers=workers,
+                                                   thread_name_prefix="haversack-list"))
+                futures = []
+                try:
+                    for x in items:
+                        futures.append(pool[0].submit(fn, x))
+                finally:
+                    wait(futures)
+                return [f.result() for f in futures]
+
+        def row_of(key: str, stamp: int, ptr) -> dict | None:
+            files = ptr.get("files") or {}
             if RESULT_NAME not in files:
-                continue
-            entry = {"key": ptr["_key"], "task": meta.get("task"),
-                     "identity": meta.get("identity"), "options": meta.get("options"),
-                     "computed": meta.get("computed"), "bytes": files[RESULT_NAME]["size"]}
-            links = resource_links(meta.get("task"), meta.get("identity"),
-                                   meta.get("options"), preview="preview.png" in files,
-                                   statistics="statistics.json" in files)
-            if links:
-                entry["links"] = links
-            out.append(entry)
-        out.sort(key=lambda e: e.get("computed") or 0, reverse=True)
-        return out[:limit]
+                return None
+            meta = ptr.get("meta") if isinstance(ptr.get("meta"), dict) else {}
+            task, identity = meta.get("task"), meta.get("identity")
+            options = meta.get("options")
+            row = {"key": key, "task": task, "identity": identity, "options": options,
+                   "computed": meta.get("computed"), "published": stamp / 1e9,
+                   "bytes": files[RESULT_NAME]["size"]}
+            if resource_links(task, identity, options):
+                row["links"] = resource_links(task, identity, options,
+                                              preview="preview.png" in files,
+                                              statistics="statistics.json" in files)
+            return row
+
+        def fetch(candidate):
+            """The pointer for one candidate, remembered under the stamp the caller saw."""
+            stamp, key = candidate
+            if memo is not None:
+                hit = memo.get(key, stamp)
+                if hit is not None:
+                    return hit[1]
+            try:
+                ptr, _ = self._read_pointer(key)
+            except ValueError:                 # not a key this code would ever write
+                return None
+            if ptr is None:
+                return None
+            fields = {"_ptr": ptr}
+            if memo is not None:
+                memo.put(key, stamp, "", fields)
+            return fields
+
+        try:
+            if keys is None:
+                with hold():
+                    found = sorted(self._stamps(), key=order)
+            else:
+                names = [k for k in dict.fromkeys(map(str, keys)) if self._listable(k)]
+                stamped = each(self._stamp, names)
+                found = sorted(((t, k) for k, t in zip(names, stamped) if t is not None),
+                               key=order)
+            if after is not None:
+                found = [c for c in found if order(c) > order(after)]
+            rows, i, clean = [], 0, True
+            while i < len(found) and (limit is None or len(rows) < limit):
+                need = len(found) - i if limit is None else limit - len(rows)
+                chunk = found[i:i + (min(need, LIST_CHUNK) if clean else LIST_CHUNK)]
+                said = each(fetch, chunk)
+                built = {}
+                for c, fields in zip(chunk, said):
+                    if fields is None:
+                        continue
+                    ptr = fields["_ptr"]
+                    meta = ptr.get("meta") if isinstance(ptr.get("meta"), dict) else {}
+                    if match is not None and not match(
+                            {k: meta.get(k) for k in ("task", "identity", "options",
+                                                      "computed")}):
+                        continue
+                    built[c] = row_of(c[1], c[0], ptr)
+                for c in chunk:
+                    if limit is not None and len(rows) >= limit:
+                        break                  # read ahead of the page: remembered, not sent
+                    i += 1
+                    row = built.get(c)
+                    if row is not None and (accept is None or accept(row)):
+                        rows.append(row)
+                    else:
+                        clean = False
+            return rows, (found[i - 1] if 0 < i < len(found) else None)
+        finally:
+            for pl in pool:
+                pl.shutdown(wait=True)
+
+    def _listable(self, key: str) -> bool:
+        try:
+            self._pointer_path(key)
+        except ValueError:
+            return False
+        return True
+
+    def _stamps(self) -> list:
+        """``(stamp, key)`` for every entry, from the bucket listing alone - the store
+        hands out last-modified with each name, so this is one request per thousand
+        entries and no read at all."""
+        import datetime as _dt
+
+        import obstore
+        base = f"{self.prefix}results/"
+        out = []
+        for batch in obstore.list(self.store, base):
+            for obj in batch:
+                name = obj["path"][len(base):]
+                if "/" in name or not name.endswith(".json"):
+                    continue
+                when = obj.get("last_modified")
+                if isinstance(when, _dt.datetime):
+                    when = when.timestamp()
+                if isinstance(when, (int, float)):
+                    out.append((int(when * 1e9), name[:-len(".json")]))
+        return out
+
+    def _stamp(self, key: str) -> int | None:
+        """When this key was published, in ns, or None - one HEAD of its pointer."""
+        import datetime as _dt
+
+        import obstore
+        try:
+            meta = obstore.head(self.store, self._pointer_path(key))
+        except FileNotFoundError:
+            return None
+        except Exception as e:                 # noqa: BLE001 - a read degrades, see _miss
+            _miss(f"stat of {key[:12]}", e)
+            return None
+        when = meta.get("last_modified")
+        if isinstance(when, _dt.datetime):
+            when = when.timestamp()
+        return int(when * 1e9) if isinstance(when, (int, float)) else None
 
     def evict(self) -> None:
         """Bounds the LOCAL copy only. The store is bounded by ``sweep``: it keeps no

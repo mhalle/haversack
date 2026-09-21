@@ -24,6 +24,19 @@
   A hit costs one pointer read - about 85 ms median from this Mac, measured before
   history existed; a key republished four times carries ~5x the pointer, which has not
   been re-measured on a real bucket.
+- **The shared store answers the new listing contract** (main's `ResultCache.list` with
+  `keys` / `after` / `match` / `accept` / `memo` / `hold` / `workers`, 2026-09-21). Its three
+  mechanisms carry over, and two get cheaper against a bucket: a listing returns names AND
+  last-modified, so ordering and paging cost no stats at all, and the pointer IS the content
+  - meta, sizes and which artifacts exist are one document - so a row is ONE request where
+  the local cache pays a read plus three stats. `keys` reads only the names it was given and
+  never lists the bucket, a miss being one HEAD; the cursor is the same `(stamp, key)` in
+  nanoseconds, so a position issued by either cache means the same thing. Per-request
+  deliverables land as they were designed to: a hit renders what is missing into the SAME
+  generation, which is what `add_artifact` has always been - a conditional write that cannot
+  land beside another publication's labels, and a render for a generation that has moved on
+  is refused.
+
 - **`SharedResultCache.find_generation(key, digest)`**, for `result:` references across
   machines. A `result:<key>` pins the referenced output's sha256 at submit and resolves
   again in the worker, refusing other bytes; on one machine the submit's lease keeps that
@@ -210,6 +223,36 @@
   the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
   be written no longer fails a publication that already succeeded; and `list` reads at most
   `limit` pointers rather than one per entry in the bucket.
+- **Fixed: a 304 for a result by path dropped the caching fields its 200 carries.** A
+  conditional `GET` of `/v1/<source>/<identifier>/<task>/labels.seg.nrrd` answered 304 with
+  the `ETag` alone, while the 200 for the same request says `Cache-Control: public,
+  max-age=3600` and `Vary: Prefer`. RFC 9110 (15.4.5) has a 304 repeat the 200's
+  `Cache-Control`, `Content-Location`, `Expires` and `Vary`, and these are the responses the
+  server invites shared caches to store. Nothing was seen to break - a cache keeps the stored
+  fields a 304 omits (RFC 9111, 4.3.4) - so this is the server saying what the standard has
+  it say. `Preference-Applied` deliberately does not cross: a cache writes a 304's fields
+  onto every stored response holding that validator, whatever `Prefer` it was stored under,
+  so a `wait=30` echo would land on the variant kept for a plain `GET`. The job result
+  route's 200 carries none of the four, and its 304 is what it was.
+- **Fixed: `HEAD` on a result path named a validator no `GET` issues.** `GET
+  /v1/<source>/<identifier>/<task>/labels.seg.nrrd` answers with the content digest as its
+  `ETag`; `HEAD` on the same path answered with the first 32 hex characters of the result
+  key, because the probe built its headers without the entry's result - which both of its
+  lookups hand back. A client asking "has this result changed?" with `HEAD` compared a tag
+  it had never been given, and the digest became the validator precisely so that a weights
+  bump which leaves the bytes alone forces no re-download. The same 200 also said
+  `Content-Length: 0`, the web framework's count of the empty body, where RFC 9110 (8.6)
+  allows only the length `GET` would send. Both matter beyond tidiness: these responses are
+  `Cache-Control: public`, and a shared cache that forwards a `HEAD` marks its stored `GET`
+  stale when either field differs (RFC 9111, 4.3.5). `HEAD` now sends `GET`'s `ETag` and
+  `Content-Length`, on the api and the anonymous twin, and on Modal also where the entry is
+  found only by the reload that confirms a stale miss.
+- **`HEAD` honors `If-None-Match` with a 304, as `GET` does.** RFC 9110 (13.1.2) names the
+  two methods together, and a `HEAD` that says 200 to the request `GET` says 304 to is the
+  same disagreement one header over. Only the 200 is conditional: a result in flight is
+  still 202 and an absent one 404. `meta.json` keeps its key-derived `ETag` on purpose - its
+  body is the result record, which a recompute rewrites even when it reproduces the labels
+  byte for byte, so the labels' digest is not its validator.
 - **A job's input can be a result the server itself computed: `result:<key>`.** Every
   source until now named data that came from outside. `<key>` is the `key` a finished job
   already reports, so jobs compose - CT to segmentation, then something computed from (CT,
@@ -287,6 +330,123 @@
   reads e.g. [0.78, 3.0, 0.78] - while `field_grid_spacing_mm` is the model grid's (z, y, x).
   Nothing said so, and a reader guessed wrong (2026-09-19). The JSON's `units` block now
   states the first; no number changes.
+
+- **A result cache the server cannot write is read whole.** A cache on a read-only
+  filesystem, or in a directory another user owns, is a supported way to read one - the
+  reader's lease and the entry lock have always allowed for it - but the lookup did its
+  least-recently-used touch and its read of `result.json` in one `try`, so where the touch
+  was refused the read was skipped and every hit came back with an empty result. Nothing
+  failed, which is why it went unseen until a listing was smoked over a cache mounted
+  read-only (2026-09-20), and three things quietly answered differently. The `ETag` fell
+  back from the content digest to the key, so `If-None-Match` from a client holding those
+  very bytes got the whole download again instead of a 304. A `result:<key>` reference was
+  refused `result_unreadable`, with the advice to recompute a result that was fine. And
+  `GET /v1/jobs/{id}/result`, which serves the cache entry only when its digest is the
+  job's, fell through to the job's own copy - 410 "purged" once that was gone, with the
+  bytes sitting in the entry. The touch is best effort and on its own now, as the input
+  cache's has been since 2026-09-06: there the LRU loses a touch, that is all. An empty
+  result is left meaning what it was always taken to mean, a `result.json` that is missing
+  or not what was written - which now includes bytes that are not UTF-8 (they raised, a
+  500) and JSON that is not an object. No cache format, lease, claim or eviction rule
+  changed, and nothing stored is recomputed.
+- **`GET /v1/segmentations` takes filters and pages, and its silent cap is gone.** It
+  returned the newest 500 results and said nothing of the rest - a Modal cache of 2,083
+  listed 500 - took no filter, and read every entry one after another, which on a Modal
+  volume is the expensive way round: measured there, listing 2,083 names is 0.03 s and a stat
+  0.4 ms, but the FIRST read of any file is ~24 ms whatever its size, so a serial walk of that
+  cache took 161 s. `limit` (1-1000, default 100) and an opaque `cursor` replace the cap, and
+  the answer carries `next_cursor`, null on the last page. `identity=` (repeatable, up to
+  100: a cohort asks "which of these series are done" in one request) and `task=` filter.
+  `haversack remote results` and `RemoteClient.segmentations` / `iter_segmentations` take
+  the same filters and follow the cursors; against a server from before this, the client
+  refuses to pass off its whole listing as a filtered one.
+- **No index stands behind the listing, on purpose.** An identity -> key index would be one
+  more thing to keep in step with every publication, eviction and delete, by every container;
+  the measurements give three answers that keep nothing. A filter by identity is COMPUTED:
+  the server derives the key of every task it serves, under the default options and each grid
+  token, and looks those names up - what the path surface does for one task - so it reads no
+  entry it does not return, and is as fast on thousands of results as on none. It finds the
+  results that have a path; one computed with other options, or from several inputs, is in
+  the plain and the `task` listing only. Order and paging come from names and stats - the
+  mtime of each entry's pointer - and content is read for the requested page alone. A filter
+  by task alone is the one that needs content: entries are read 32 at a time (the same walk
+  took 4.5 s that way), and a running server remembers each publication's `meta.json` in
+  memory, validated against the pointer's stamp on every use - a cache that rebuilds in
+  seconds, not an index that can be wrong. The task filter is asked of that metadata before
+  an entry's other files are stat'ed, because on the volume stats are the warm cost and,
+  unlike reads, barely overlap. Deployed over that 2,083-result cache, mounted read-only
+  (server-side, one container each): an identity filter 0.55 s, and 0.2-0.3 s with `task=`
+  for one input or for fifty; a first page 0.6-0.7 s; a scan for a task no result has
+  3.5-9.7 s cold and 0.3-0.5 s once remembered; all 2,083 rows by cursor in three requests.
+  Every listing there includes a ~0.2 s volume reload. A key's real cost turned out to be
+  its task's weights versions (a `describe()`), not the lookup, so a request reads them once
+  a task - through `weights_versions` on an executor that pins its own keys, and
+  `create_public_app(..., weights_fn=)` on a twin; asked key by key, fifty inputs across every
+  task took 47 s, and 1.6 s after.
+- **The listing is ordered by publication, and a cursor is a position.** Rows gain
+  `published`, the mtime of the entry's pointer: one atomic rename moves it, at the instant
+  the entry's content changes, and nothing a read does touches it (reads lease a file of their
+  own and touch the key directory, whose mtime would have reshuffled the listing under
+  traffic; `computed` is a job's start on a worker's clock). The cursor holds (time, key),
+  not an offset, so pages stay put while results are published: what arrives after the first
+  page sorts ahead of it, where an offset would repeat a row on every page after it.
+- **A multi-input result is listed.** The listing's stale-key filter re-derived each
+  entry's key from its FIRST identity alone, so every result of a multi-input task read as
+  stale and was dropped. It is held to the same rule as the rest now - listed under the key
+  this server derives from all of its identities, without links, as an upload's is.
+- **On Modal the listing follows the volume rules of 0.12.4.** It is read from a view of
+  the result volume newer than the request - a result missing from a listing reads as "not
+  computed", the listing's form of the false 410 - and a reload that cannot be had is a 503
+  with `Retry-After`, never a shorter list. Its reader threads count as "other threads" to a
+  reload, so every batch of reads runs inside the view lock, held by the thread that started
+  it until the batch has ended; per batch and not per listing, because a cold scan is seconds
+  long and lookups queue behind a waiting reload.
+- **A Modal deployment can name its result-cache volume** (`--cache-volume`,
+  `HAVERSACK_CACHE_VOLUME`; default `<app>-cache`, as before). Every store was named after
+  the app, so a deployment under a new name began with an empty result cache - though a
+  result key holds no app name, which makes a cache portable. Only the cache can be named:
+  scratch, the inputs store and the job store hold one deployment's job ids, uploads and
+  flights. Adopting a cache whose first deployment is gone is completely safe. Two LIVE
+  deployments on one cache behave like more containers of one app, except that single flight
+  lives in the per-app job store, so the same key can be computed twice - duplicate work, not
+  corruption. Either way every publication evicts down to the publishing app's
+  `HAVERSACK_RESULTS_KEEP` (default 500): adopt a larger cache with a larger bound, or lose
+  the difference at the first job. The knob is forwarded to every container like the rest;
+  unforwarded, the containers would commit and reload `<app>-cache`, mounted nowhere.
+- **What is rendered beside a result is the request's to say: `deliverables`.** The preview
+  and the statistics were a deployment setting, so every job paid for both - a cohort run
+  by upload rendered a preview per scan that no route can even serve - and "preview off"
+  meant redeploying. `POST /v1/jobs` takes a `deliverables` form field, a JSON list
+  (`["statistics"]`, `[]` for none); absent, a job gets the deployment's set, exactly as
+  before, and that set is also the ceiling: a name this server does not render, or has
+  never heard of, is refused at submit with what it offers (`GET /v1/health` lists it). A
+  declined deliverable costs nothing - no render, and with an empty list no second read of
+  the two volumes either. `RemoteClient.submit(..., deliverables=[...])` and `haversack
+  remote submit --deliverables statistics` (or `none`) send it. This is the light half of
+  `docs/result-references.md`: what is numpy-only and needs the image and the labels runs
+  where both already are; a GPU model is a job of its own over `result:`.
+- **A deliverable never enters a result's key.** Every option is hashed into the key, so the
+  list is a field of its own and is refused inside `options`: declining a preview and then
+  asking for one is one result - the same `key`, a cache hit, the same labels `ETag` - and
+  no segmentation is ever recomputed to draw a picture of it. No cache key moved and no
+  computed byte changed, so nothing stored is recomputed and `CACHE_EPOCH` stays.
+- **A cache hit still honors the list.** A deliverable the request names and the stored
+  result lacks - declined by the request that computed it, or never rendered - is rendered
+  on the hit, into the generation that already holds the labels and through the path every
+  artifact takes (its pending marker is the single flight, the cache's `add_artifact` the
+  placement), so an artifact can no more land beside another publication's labels than it
+  could before. The server never fetches an input again to do it: what it cannot render it
+  SAYS, in the job's `deliverables_unavailable` with the reason and the way out
+  (`no-cache`), rather than leave a link off without a word. On Modal artifacts are
+  rendered by the worker that computes a result, and a hit reaches no worker, so there a
+  hit reports what is missing and renders nothing; a render-only job is the follow-up.
+- **`links` name what was asked for, and a declined artifact is absent at once.** A job's
+  links advertised whatever the deployment renders; they are built from the job's own list
+  now, less what a hit said it could not deliver. The pending marker records what its
+  render will place, so a GET of a preview the job declined answers 404 immediately
+  instead of 202 until the statistics land. A read never renders: a GET of an artifact a
+  cached result lacks is a 404 that names the request which renders it, for an anonymous
+  caller and an authorized one alike.
 
 
 ## [0.12.4] - 2026-09-19

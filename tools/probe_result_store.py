@@ -50,8 +50,12 @@ def main(url: str) -> int:
             a.put(key, src, {"probe": 2}, {"task": "probe", "computed": 1})
             assert b.get(key)[1] == {"probe": 2}
             print("ok   a republication replaces the other host's copy")
-            assert [e["key"] for e in b.list()] == [key]
-            print("ok   list")
+            rows, position = b.list()          # main's listing contract, 2026-09-21
+            assert [e["key"] for e in rows] == [key], rows
+            assert position is None, position
+            page, _ = b.list(keys=[key])       # computed names: no bucket listing
+            assert [e["key"] for e in page] == [key], page
+            print("ok   list, whole and by computed key")
         return 0
     finally:
         n = 0

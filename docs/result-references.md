@@ -7,7 +7,9 @@ run on haversack. What was READ from the code is marked *(read)*; what is propos
 
 **Status, 2026-09-20: step 1 is built** (`sources.ResultSource`, `labelmap.read_label_map`,
 `tests/test_result_source.py`, `tests/test_result_source_modal.py`) and was deployed to Modal
-under a throwaway name (see "Verified on Modal"). Steps 2 and 3 are not,
+under a throwaway name (see "Verified on Modal"). The per-request list of light deliverables
+("Beside it", below) is built as well, without its per-deliverable identity, which it turned
+out not to need yet. Steps 2 and 3 are not,
 and decision 6 is untouched: nothing in the result-cache format, generations, leases or
 publication changed. The section "What building step 1 changed" lists every place the note
 below was wrong or silent; "What steps 2 and 3 should know" is for whoever builds them.
@@ -129,7 +131,83 @@ dispatching that second job for the caller; `result:` is the mechanism either wa
 hangs off the INPUT (the encode does not depend on any mask), so it is a job of its own
 (`radar:encode`), never a deliverable of a segmentation.
 
-*(step 1 and this, 2026-09-20: nothing here was built, and `result:` is a plain source entry
+*(built, 2026-09-20 - the list, its first rule, and NOT the second: `tests/test_deliverables.py`,
+`tests/test_deliverables_modal.py`, SERVER.md "Deliverables".)* What building it settled:
+
+- **The wire spelling is a form field of its own**, `deliverables`, a JSON list beside
+  `options` and `source` (`[]` for none; absent, the deployment's set, which is also the
+  ceiling). Not a key of `options`: every option is hashed into the result key, so a field
+  that never enters them cannot leak into it by a forgotten `pop` - and `options` that carry
+  the name are refused, as is any parameter model that declares it (`schemas.wire_params`).
+  The names and their files have one home, `jobpolicy.DELIVERABLES`; the door check is
+  `schemas.requested_deliverables`; what a job renders is `jobpolicy.wanted_deliverables`,
+  asked at the door's side AND where the rendering happens, because on Modal those are two
+  processes that a redeploy can leave with different settings.
+- **A cache hit honors the list through the artifact path, and only that.** The local
+  server renders what the stored generation lacks from the input it still holds - the
+  upload just sent, a stored input, a series still in its cache, each pinned for the render
+  - under the same pending marker (now a claim taken in one step, since hits are answered
+  on request threads) and the same `add_artifact` into the generation the hit read. It
+  never fetches an input again: a hit holds no queue slot, and a download to draw a picture
+  of a result nobody is computing is a cost the caller did not ask for. What it cannot
+  deliver is on the job, `deliverables_unavailable`, with the reason. **Modal renders only
+  in the worker that computes**, and a hit reaches no worker - the api container cannot see
+  a worker's staged series, and a whole CT does not belong in its 2 GB - so there a hit
+  says what is missing and renders nothing. The follow-up is a render-only job kind (stage
+  the reference input as any job does - which may fetch, visibly, in a queue slot - then
+  the worker's own artifact thread); it is the one way Modal, and a local hit whose series
+  was evicted, can deliver a declined deliverable without recomputing the labels.
+- **The pending marker says what its render will place.** With lists, "a render is pending
+  for this result" no longer means "this artifact is coming": a GET of a preview the job
+  declined would have answered 202 until the statistics landed, then 404. The marker
+  carries the names (`artifact_state(key, name)`), which is also how a hit knows whether a
+  running render will bring what it wants.
+- **A read never renders.** A GET of an artifact a cached result lacks is a 404 that names
+  the POST which renders it - anonymous and authorized alike, `Prefer` or not: the path has
+  no job to stage or pin an input under. (An absent RESULT is still computed by an
+  authorized GET with `Prefer`, with the deployment's set.)
+- **The per-deliverable identity was not needed, and is not built.** Nothing here caches a
+  deliverable under a key of its own: an artifact is a file in its result's generation, its
+  presence is the whole test, and the result cache's format, generations, leases and claims
+  are untouched. It becomes necessary the day a deliverable has OPTIONS (a preview at
+  another window, statistics with a ranked field) or its code changes in a way that should
+  re-render stored results: then "is `statistics.json` there" stops meaning "are THESE
+  statistics there". The design for that day: a small sidecar per artifact in the generation
+  (`<file>.id`, written by `add_artifact` with the file, one rename after it) holding the
+  digest of (the labels' output digest, the deliverable's name, its options, its own epoch
+  from `jobpolicy`); `missing_deliverables` compares it instead of testing presence, so a
+  bumped statistics epoch re-renders statistics on the next hit that asks and touches no
+  label; an artifact with no sidecar reads as epoch 0 with no options, which is every
+  artifact rendered so far, so nothing stored is invalidated by introducing it. It is a
+  result-cache content change (a new file kind `put` must carry across a republish or
+  drop), which is why it belongs with step 2's format work and not here.
+
+Verified 2026-09-20. Locally, with a real model: `ts.v2:total_fastest` on a 98 MB abdominal
+CT through `haversack serve` and `haversack remote submit --deliverables none`, then the
+same bytes with `statistics` and with `preview` - two cache hits that rendered real
+statistics (71 structures) and a real preview into the ONE generation of the one entry,
+the downloaded labels byte-identical. On Modal (`haversack-deliv-smoke`, a CPU double
+engine writing real `.seg.nrrd` results, torn down with its three volumes and its Dict;
+the global `haversack-weights` mounted and never written): 31 checks, 30 passing as run and
+the 31st a wrong expectation in the driver (a T1's lowest class is empty, so its statistics
+list two structures, which a direct request then confirmed). Fifteen uploads submitted at
+once with every kind of list (workers free to scale to two containers; how many ran was
+not recorded): every generation held its labels and EXACTLY the deliverables its request
+named; a hit on declined deliverables kept
+its key and its labels ETag, said what was missing and rendered nothing; `no-cache`
+recomputed under the same key with the list of THAT request; on an OpenNeuro input the
+statistics were served by path to an anonymous caller while the declined preview answered
+the 404 that names the POST, with `Prefer` or without; a path GET with `Prefer` on an
+absent result still rendered the deployment's set. Redeployed with
+`HAVERSACK_ARTIFACTS=statistics`: health listed it, `["preview"]` was refused naming what
+the deployment offers, and a request with no list got statistics alone, in the worker as
+at the door. The log tails held overlap lines for the names asked and nothing else - no
+traceback, no refused reload, no FileNotFoundError. Not a full log audit, and no timing was
+compared. NOT exercised on Modal: a hit racing a still-running render, a stale view at the
+hit, and a worker deployed with another set than its api - each held by the volume and Dict
+doubles only.
+
+*(step 1, 2026-09-20: `result:` is a plain source entry
 with a plain role binding - `{"kind": "result", "id": ..., "role": ...}` beside `upload`, `input`
 and the hosted kinds - so nothing in its wire shape assumes it is the only way a consumer reaches
 a result. What WOULD get in the way of the server itself submitting a follow-on job with a

@@ -23,6 +23,13 @@ contract is deliberately small:
                                    referenced output's content digest, resolved here at
                                    submit; a result that is not there is refused with a
                                    409 naming what to compute first.
+                                   `deliverables` (a form field of its own, a JSON list)
+                                   names what is rendered beside the labels - "preview",
+                                   "statistics"; [] for none; absent, this deployment's
+                                   set, which is also the most one may name. Never part
+                                   of the result's key: declining a preview recomputes
+                                   nothing, and a cache hit renders what its list names
+                                   and the stored result lacks.
     GET    /v1/jobs                brief status of every known job
     GET    /v1/inputs/{digest}     whether this server already holds that content
     POST   /v1/inputs             store a multi-file input (a DICOM series) as
@@ -111,8 +118,10 @@ from . import content
 from .content import ContentStore, is_digest
 from .jobstore import JobStore
 from .errors import Cancelled, InputError, HaversackError, ResourceError
-from .jobpolicy import (fill_read_ahead, prefetchable, record_inputs, take_pre_read, refresh_cached_input,
-                        source_cache_key)
+from .jobpolicy import (DELIVERABLES, INPUT_NOT_ON_HAND, RENDER_BUSY, fill_read_ahead,
+                        missing_deliverables, pending_covers, prefetchable, record_inputs,
+                        take_pre_read, refresh_cached_input, source_cache_key,
+                        wanted_deliverables)
 from .progress import CancelToken, Reporter
 
 ACTIVE = ("queued", "running")
@@ -123,7 +132,9 @@ from .jobpolicy import TERMINAL  # noqa: E402
 RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default artifact
 #: The eventually-consistent artifacts, rendered after "done" is already served.
 #: Named once: `put` has to know which files belong to the generation it replaces.
-ARTIFACT_NAMES = ("preview.png", "statistics.json")
+#: They are the files of `jobpolicy.DELIVERABLES` - the names a request asks for them
+#: under (2026-09-20) - read from that table rather than written a second time.
+ARTIFACT_NAMES = tuple(DELIVERABLES.values())
 #: Which publication an entry holds. Written by `put` before the labels file, so an
 #: entry that is visible at all has one, and checked by `add_artifact` so a worker
 #: from an earlier publication cannot write into a later one.
@@ -1027,6 +1038,106 @@ class ReadAhead:
             return None
 
 
+#: ``GET /v1/segmentations``: rows per page. The maximum is what one request may make the
+#: server read - two small files a row - and it mirrors ``/v1/segments``. On a Modal volume
+#: a cold row is ~49 ms of round trips serially and ~2.3 ms on ``LIST_WORKERS`` threads, so
+#: a full page of 1000 is a little over two seconds there the first time and far less after.
+LIST_LIMIT_DEFAULT = 100
+LIST_LIMIT_MAX = 1000
+#: How many ``identity=`` values one listing request may carry. Each costs a key per served
+#: task per path-addressable option set, looked up by name (~200 stats on a full catalog).
+LIST_IDENTITIES_MAX = 100
+#: Threads a listing reads entries on. Reading a Modal volume is cheap per BYTE and dear per
+#: FILE (measured 2026-09-20 on a 2,083-entry cache: the first read of any file ~24 ms
+#: whatever its size, a stat 0.4 ms): a serial walk took 161 s, the same walk on 32 threads
+#: 4.5 s. It is round trips, not data, so the threads wait and do not compute. The listing
+#: itself, deployed over that cache the same day: a scan of all 2,083 entries 3.5 s, 4.2 s and
+#: 9.7 s cold on three containers, 0.3-0.5 s once remembered (``ListingMemo``).
+LIST_WORKERS = 32
+#: The most entries read under one hold of the executor's view lock (see
+#: ``ResultCache.list``): on Modal a volume reload waits for that hold to end, and every
+#: lookup waits behind the reload, so a hold is bounded - ~0.6 s cold at the rates above.
+LIST_CHUNK = 256
+
+
+def encode_cursor(position) -> str:
+    """The listing's position ``(pointer mtime in ns, key)`` as the opaque token the wire
+    carries. Versioned, so the server may change what a position is: a client only ever
+    hands back what it was given."""
+    import base64
+    raw = json.dumps([1, int(position[0]), str(position[1])], separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def decode_cursor(token: str) -> tuple:
+    """``encode_cursor``'s inverse; ValueError for anything this server did not issue."""
+    import base64
+    import binascii
+    try:
+        pad = "=" * (-len(token) % 4)
+        got = json.loads(base64.b64decode(token + pad, altchars=b"-_", validate=True))
+    except (binascii.Error, ValueError, UnicodeDecodeError) as e:
+        raise ValueError("not a cursor") from e
+    if (not isinstance(got, list) or len(got) != 3 or got[0] != 1
+            or isinstance(got[1], bool) or not isinstance(got[1], int)
+            or not isinstance(got[2], str) or not got[2]):
+        raise ValueError("not a cursor")
+    return got[1], got[2]
+
+
+class ListingMemo:
+    """What a listing row takes from ``meta.json``, remembered per PUBLICATION: in memory,
+    bounded, never written to disk.
+
+    ``meta.json`` never changes for a generation, and on a Modal volume reading it again is
+    the expensive half of a row (see ``LIST_WORKERS``). A long-lived server therefore keeps
+    what it parsed, under the stamp of the pointer that named the generation - the mtime of
+    ``<key>/current``, which only a publication moves (see ``ResultCache._stamp``).
+
+    **This is not an index** (the user's decision, 2026-09-20: no identity -> key index,
+    "one more thing to keep in sync"), and the difference is who is believed. An index
+    answers "which entries exist, which match" by itself, so every put, eviction and delete
+    by ANY process or container must reach it, and a missed one makes it silently wrong. The
+    memo answers nothing by itself: every listing still enumerates the cache and stats every
+    pointer, the filesystem alone says what exists and what is current, and a remembered row
+    is used only while its pointer's stamp is the one it was read under. A memo that is
+    empty, lost to a restart, evicted or never consulted costs time - seconds, on the
+    parallel scan - and never an answer. ``capacity`` rows, least recently used first out:
+    the default is ten times the largest cache seen so far (2,083 entries) at well under a
+    kilobyte a row, about 20 MB at the very worst in a container that has 2 GB.
+    """
+
+    def __init__(self, capacity: int = 20000):
+        from collections import OrderedDict
+        self.capacity = int(capacity)
+        self._rows = OrderedDict()
+        self._lock = threading.Lock()          # the listing reads on a pool of threads
+
+    def get(self, key: str, stamp: int):
+        """``(directory name, fields)`` read under exactly this pointer stamp, else None."""
+        with self._lock:
+            hit = self._rows.get(key)
+            if hit is None or hit[0] != stamp:
+                return None
+            self._rows.move_to_end(key)
+            return hit[1], hit[2]
+
+    def put(self, key: str, stamp: int, where: str, fields: dict) -> None:
+        with self._lock:
+            self._rows[key] = (stamp, where, fields)
+            self._rows.move_to_end(key)
+            while len(self._rows) > self.capacity:
+                self._rows.popitem(last=False)
+
+    def drop(self, key: str) -> None:
+        with self._lock:
+            self._rows.pop(key, None)
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._rows)
+
+
 class ResultCache:
     """REQUEST-keyed store of finished results: <root>/<key>/labels.seg.nrrd +
     result.json + meta.json (the readable key components - a cache you can ls).
@@ -1425,48 +1536,270 @@ class ResultCache:
                 return True
         return False
 
-    def list(self, limit: int = 500) -> list:
-        """Completed segmentations, newest first: the readable meta of every
-        cached entry plus size and, when the entry is path-addressable (single
-        source identity, default options), its path-surface URL."""
-        out = []
-        for d in self.root.iterdir():
-            if not d.is_dir() or d.name.startswith("."):
-                continue                       # a tomb mid-reclamation is not an entry
-            g = self._resolve(d.name, lease=False)
-            if g is None:
-                continue
-            labels, meta_p = g / RESULT_NAME, g / "meta.json"
+    def _stamp(self, key: str, probe: bool = False) -> int | None:
+        """When the entry at ``key`` was PUBLISHED, in ns - the listing's clock - or None
+        when ``key`` publishes nothing. One stat and no content read, which is the point:
+        on a Modal volume a stat is 0.4 ms and the first read of any file ~24 ms.
+        ``probe`` is for a COMPUTED name, which usually does not exist (an identity filter
+        derives every task's key to find the few that were run): the key directory is asked
+        first, so a miss is one failed stat and not two (9,400 names, measured: 1.7 s).
+
+        It is the mtime of the POINTER, ``<key>/current``, and no other file would do. A
+        publication writes the pointer under a temporary name and renames it into place
+        (``put``); a rename is atomic and keeps the mtime the file was written with. So a
+        stat meets the previous pointer or the new one, never a missing or half-written
+        file, and under a REpublication (``Cache-Control: no-cache``) the entry's time moves
+        exactly once, at the instant its content does - to a time later than every position
+        a reader paging toward older entries can hold. Nothing else writes the file. A read
+        leases a file of its own inside the generation and touches the KEY directory for
+        the LRU - whose mtime is therefore the last READ, and would reorder the listing
+        under traffic; an artifact lands inside the generation directory; pruning removes
+        generations and never the pointer. ``meta.json``'s ``computed`` is a job's START on
+        its worker's clock and needs a content read besides. A legacy flat entry has no
+        pointer: its labels file, which ``put`` also placed by rename, stands in.
+        """
+        import os
+        d = self.root / key
+        if probe:
             try:
-                meta = json.loads(meta_p.read_text(encoding="utf-8")) if meta_p.exists() else {}
-                st = labels.stat()
-            except (OSError, json.JSONDecodeError):
+                os.stat(d)
+            except OSError:
+                return None
+        for name in (CURRENT_NAME, RESULT_NAME):
+            try:
+                return os.stat(d / name).st_mtime_ns
+            except OSError:
                 continue
-            entry = {"key": d.name, "task": meta.get("task"),
-                     "identity": meta.get("identity"),
-                     "options": meta.get("options"),
-                     "computed": meta.get("computed"), "bytes": st.st_size}
-            links = resource_links(meta.get("task"), meta.get("identity"),
-                                   meta.get("options"),
-                                   preview=(g / "preview.png").exists(),
-                                   statistics=(g / "statistics.json").exists())
-            if links:
-                entry["links"] = links
-            out.append(entry)
-        out.sort(key=lambda e: e.get("computed") or 0, reverse=True)
-        return out[:limit]
+        return None
+
+    def _names(self) -> list:
+        """The name of everything under the root that may be an entry, from ONE directory
+        listing and no stat: what is not an entry has no stamp (``_stamp``). A dotfile is a
+        tomb mid-reclamation or a probe. The directory is closed before returning - on a
+        Modal volume an open directory refuses the volume's next reload."""
+        import os
+        try:
+            with os.scandir(self.root) as it:
+                return [e.name for e in it if not e.name.startswith(".")]
+        except OSError:
+            return []
+
+    def _fields(self, key: str, stamp: int, memo=None):
+        """What ``meta.json`` says of the entry ``key`` published at ``stamp``:
+        ``(directory, fields, remembered)``, or None when there is no readable entry. Two
+        content reads - the pointer and ``meta.json`` - or none, when ``memo`` remembers
+        this publication (see ``ListingMemo``)."""
+        hit = memo.get(key, stamp) if memo is not None else None
+        if hit is not None:
+            d = self.root / key
+            return (d / hit[0] if hit[0] else d), hit[1], True
+        return self._read_fields(key, stamp, memo)
+
+    def _read_fields(self, key: str, stamp: int, memo=None):
+        d = self.root / key
+        where = self._resolve(key, lease=False)    # ONE resolution; hands out no path
+        if where is None:
+            return None
+        try:
+            meta = json.loads((where / "meta.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            meta = {}                          # an entry from before meta.json: still listed
+        except (OSError, ValueError):
+            return None
+        if not isinstance(meta, dict):
+            return None
+        fields = {k: meta.get(k) for k in ("task", "identity", "options", "computed")}
+        # Remembered under the stamp the CALLER saw. If a publication landed between that
+        # stat and this read, what was read belongs to the new pointer and is filed under
+        # the old one's stamp - which no stat will ever return again, so it is never
+        # found, only evicted. (Re-checking the stamp here was a stat a row for nothing.)
+        if memo is not None:
+            memo.put(key, stamp, where.name if where != d else "", fields)
+        return where, fields, False
+
+    def _row(self, key: str, stamp: int, found, memo=None) -> dict | None:
+        """The listing's row for an entry ``_fields`` found. A REMEMBERED generation that
+        pruning has since taken is read again - not dropped from the listing, and not
+        answered from memory."""
+        where, fields, remembered = found
+        row = self._row_at(key, stamp, where, fields)
+        if row is None and remembered:
+            memo.drop(key)
+            again = self._read_fields(key, stamp, memo)
+            row = self._row_at(key, stamp, again[0], again[1]) if again is not None else None
+        return row
+
+    def _row_at(self, key: str, stamp: int, where: Path, fields: dict) -> dict | None:
+        """A row from what ``meta.json`` said and what only the directory can say now - the
+        labels' size, and which artifacts have arrived (they do, after "done"): stats, no
+        content. None when the labels are gone."""
+        import os
+        try:
+            size = os.stat(where / RESULT_NAME).st_size
+        except OSError:
+            return None
+        task, identity, options = fields.get("task"), fields.get("identity"), fields.get("options")
+        row = {"key": key, "task": task, "identity": identity, "options": options,
+               "computed": fields.get("computed"), "published": stamp / 1e9, "bytes": size}
+        if resource_links(task, identity, options):    # asked first: two stats saved a row
+            row["links"] = resource_links(task, identity, options,
+                                          preview=(where / "preview.png").exists(),
+                                          statistics=(where / "statistics.json").exists())
+        return row
+
+    def list(self, *, keys=None, limit: int | None = None, after=None, accept=None,
+             match=None, memo=None, hold=None, workers: int | None = None) -> tuple:
+        """Completed segmentations, newest PUBLISHED first: ``(rows, position)``, where
+        ``position`` resumes the listing after the last entry this call looked at - pass it
+        back as ``after`` - and is None when nothing is left. A row is the readable meta of
+        an entry, its size, when it was published, and its path-surface links when it has
+        any (``resource_links``). No index anywhere (decided 2026-09-20): three stateless
+        mechanisms, each from a measurement of what a Modal volume charges for (a directory
+        listing of 2,083 names 0.03 s, a stat 0.4 ms, the FIRST read of a file ~24 ms
+        whatever its size).
+
+        1. ``keys`` - a filter by identity is COMPUTED, not searched. The caller derives
+           the key of every result it could mean (``serve.result_key``; the route does it
+           per served task and path-addressable option set) and only those names are
+           stat'ed: no directory listing, and no entry read that is not returned.
+        2. Order and paging come from NAMES and STATS - the pointer's mtime, ``_stamp`` -
+           and content is read only for the entries of the page asked for. ``after`` is a
+           position ``(stamp, key)``, not an offset, so a page is the same page whatever
+           was published since the one before it: a new entry sorts ahead of every
+           position already handed out. There is no cap: the listing used to keep the
+           newest 500 and say nothing of the rest.
+        3. ``match`` / ``accept`` - a filter that needs CONTENT (a task) reads every entry
+           until the page is full, ``workers`` at a time, because the cost is round trips
+           and they overlap; ``memo`` spares a long-lived server the re-read.
+
+        ``match(fields)`` is asked of what ``meta.json`` says alone (``task``, ``identity``,
+        ``options``, ``computed``), BEFORE the entry's files are stat'ed; ``accept(row)`` of
+        the finished row. Both in the calling thread and outside any hold. The split is a
+        measurement (Modal, 2026-09-20): with every row remembered, a scan of 2,083 entries
+        for a task none of them had was still 1.5 s, all of it stats - a stat is 0.23 ms
+        there and, unlike a read, barely overlaps (0.11 ms on 32 threads) - and three of a
+        row's four stats are for its size and artifacts, which a refused row never shows.
+        While every row is accepted a page reads exactly its own entries; after the first
+        refusal the scan reads ``LIST_CHUNK`` at a time, so at most one chunk is read beyond
+        the page (and remembered, where there is a memo).
+
+        ``hold`` is a callable returning a context manager that is held around EVERY batch
+        of reads, and only around them. On Modal it is the api container's view lock,
+        shared (``modal_app._cache_view``): a volume reload hides the whole volume from the
+        container's other threads while it runs, and this method's readers ARE other
+        threads. The arrangement is safe because a batch's threads are started inside the
+        hold and the hold is not left until every one of them has finished (``each``) - so
+        no read of this listing can overlap a reload, which needs the lock exclusive - and
+        it is per batch rather than per listing because a cold scan is seconds long: a
+        reload waits at most ``CACHE_RELOAD_WAIT_S`` for readers, and lookups queue behind
+        a waiting reload. Between two batches the view may be reloaded; an entry that went
+        in between reads as gone and is skipped, one that arrived is newer than this
+        listing, and a republished one moved its stamp, so the memo does not vouch for it.
+        """
+        import contextlib
+        import os
+        from concurrent.futures import ThreadPoolExecutor, wait
+        hold = hold or contextlib.nullcontext
+        workers = LIST_WORKERS if workers is None else int(workers)
+        pool = []                              # started on first need, joined before return
+
+        def order(position):                   # newest first; the key makes it total
+            return -position[0], position[1]
+
+        def each(fn, items) -> list:
+            """``fn`` over ``items`` in order, under ONE hold that outlasts every call."""
+            with hold():
+                if len(items) < 4 or workers < 2:
+                    return [fn(x) for x in items]
+                if not pool:
+                    pool.append(ThreadPoolExecutor(max_workers=workers,
+                                                   thread_name_prefix="haversack-list"))
+                futures = []
+                try:
+                    for x in items:
+                        futures.append(pool[0].submit(fn, x))
+                finally:
+                    wait(futures)              # even when a submit failed: see ``hold``
+                return [f.result() for f in futures]
+
+        try:
+            if keys is None:
+                with hold():
+                    names = self._names()
+            else:                              # names the caller computed: never a path
+                names = [k for k in dict.fromkeys(map(str, keys))
+                         if k and not k.startswith(".") and os.sep not in k
+                         and not (os.altsep and os.altsep in k)]
+            computed = keys is not None
+            # The stats go a CHUNK at a time too, each under its own hold. They went as one
+            # batch, so one hold outlasted every name: 1.9 s of the 2.0 s a reload waits on a
+            # cache of 2,083, and a refusal - then 503s for everybody else - from an identity
+            # filter at its documented maximum (~18,800 derived keys). Found by an adversarial
+            # pass on the merge, 2026-09-21; `_list_cache` already promised what this now does.
+            stamps = []
+            for j in range(0, len(names), LIST_CHUNK):
+                stamps += each(lambda k: self._stamp(k, probe=computed), names[j:j + LIST_CHUNK])
+            found = sorted(((t, k) for k, t in zip(names, stamps) if t is not None), key=order)
+            if after is not None:
+                found = [c for c in found if order(c) > order(after)]
+            rows, i, clean = [], 0, True
+            while i < len(found) and (limit is None or len(rows) < limit):
+                need = len(found) - i if limit is None else limit - len(rows)
+                chunk = found[i:i + (min(need, LIST_CHUNK) if clean else LIST_CHUNK)]
+                said = each(lambda c: self._fields(c[1], c[0], memo), chunk)
+                wanted = [(c, f) for c, f in zip(chunk, said)
+                          if f is not None and (match is None or match(f[1]))]
+                built = dict(zip((c for c, _ in wanted),
+                                 each(lambda cf: self._row(cf[0][1], cf[0][0], cf[1], memo),
+                                      wanted)))
+                for c in chunk:
+                    if limit is not None and len(rows) >= limit:
+                        break                  # read ahead of the page: remembered, not sent
+                    i += 1
+                    row = built.get(c)
+                    if row is not None and (accept is None or accept(row)):
+                        rows.append(row)
+                    else:
+                        clean = False
+            return rows, (found[i - 1] if 0 < i < len(found) else None)
+        finally:
+            for p in pool:
+                p.shutdown(wait=True)
 
     def get(self, key: str):
+        """``(labels path, result)`` for what ``key`` publishes now, leased - or None.
+
+        The LRU touch is best effort, and on its own. A cache this process cannot WRITE - a
+        read-only filesystem (EROFS), a directory another uid owns (EPERM) - is a supported
+        way to read one: ``_take_lease`` and ``_entry_lock`` both allow for it, and
+        ``SeriesCache`` has treated its own touch this way all along. There the LRU loses a
+        touch, that is all. The touch used to share one ``try`` with the read of
+        ``result.json``, so a refused touch SKIPPED the read and every hit came back with
+        ``{}`` for its result (found 2026-09-20, from a listing smoked over a cache mounted
+        read-only). Nothing failed, which is what made it a defect. The ETag fell back from
+        the content digest to the key, so a client holding those very bytes downloaded them
+        again; a ``result:<key>`` reference was refused as ``result_unreadable``, with the
+        advice to recompute a result that was fine; and the job result route, which takes
+        an entry only when its digest is the job's (``same_output``), fell through to the
+        job's own scratch copy - a 410 "purged" once that was gone, with the bytes sitting
+        in the entry.
+
+        ``{}`` means what ``same_output`` always took it to mean: a ``result.json`` that is
+        missing, unreadable, or not what ``put`` writes (bad JSON, bytes that are not UTF-8,
+        anything but an object).
+        """
         g = self._resolve(key)
         if g is None:
             return None
         try:
-            import os as _os
-            _os.utime(self.root / key)         # LRU touch
+            os.utime(self.root / key)          # LRU touch
+        except OSError:
+            pass                               # not ours to write: read on (see above)
+        try:
             result = json.loads((g / "result.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):          # ValueError: JSONDecodeError, UnicodeDecodeError
             result = {}
-        return g / RESULT_NAME, result
+        return g / RESULT_NAME, result if isinstance(result, dict) else {}
 
     def adopt(self, key: str, gen: str, *, names=(), sizes=None) -> bool:
         """Make an existing, COMPLETE generation directory this entry's current one.
@@ -1959,12 +2292,27 @@ def same_output(own, published) -> bool:
     return a is not None and a == digest(published)
 
 
-def not_modified(request, etag: str):
+#: what a 304 repeats from its 200, beside the ETag (RFC 9110 15.4.5; Date is the server's)
+_NOT_MODIFIED_KEEPS = ("cache-control", "content-location", "expires", "vary")
+
+
+def not_modified(request, etag: str, headers=None):
     """A 304 when the client already holds this exact content, else None.
 
     RFC 9110 conditional GET - the other half of an ETag we have been sending
     but never acting on. A label volume is megabytes and a Slicer client asks
     for the same one repeatedly.
+
+    ``headers`` is what the 200 would have carried. RFC 9110 15.4.5: a 304 MUST repeat
+    the 200's Cache-Control, Content-Location, Expires and Vary, and until 2026-09-21
+    this sent the ETag alone, so the path surface's 304 dropped ``Cache-Control: public,
+    max-age=3600`` and ``Vary: Prefer``. Nothing else crosses, and ``Preference-Applied``
+    deliberately: the same section says SHOULD NOT for the rest, and a cache writes a
+    304's fields onto EVERY stored response holding that validator (RFC 9111 4.3.4) -
+    chosen by the ETag, not by the request's Prefer - so one ``wait=30`` echo would land
+    on the variant stored for a plain GET. The echo is optional on any response (RFC
+    7240 3). A 200 with none of the four (the job result route's) gets the 304 it
+    always got.
     """
     from fastapi.responses import Response
     raw = ""
@@ -1976,7 +2324,9 @@ def not_modified(request, etag: str):
         return None
     tags = {t.strip() for t in raw.split(",")}
     if etag in tags or "*" in tags:
-        return Response(status_code=304, headers={"ETag": etag})
+        kept = {k: v for k, v in (headers or {}).items()
+                if k.lower() in _NOT_MODIFIED_KEEPS}
+        return Response(status_code=304, headers={**kept, "ETag": etag})
     return None
 
 
@@ -2045,7 +2395,13 @@ def artifact_overlap(pair, task, artifacts, *, preview_out, statistics_out,
     when the entry was evicted meanwhile - dropped, never recreated), and
     ALWAYS run ``finish(placed)`` - the pending-marker clear, plus any
     commit/logging the environment wants. ``placed`` is [(name, seconds)]
-    for what actually landed."""
+    for what actually landed.
+
+    ``artifacts`` is what THIS job renders - its request's list held to the
+    deployment's set (``jobpolicy.wanted_deliverables``) - and nothing outside it is
+    rendered: a declined preview costs no render. The renderers live here, so the two
+    names are spelled here too; the files they land as are ``jobpolicy.DELIVERABLES``'s,
+    and a test drives each name of that table through this function."""
     placed = []
     try:
         from .preview import render_preview
@@ -2057,13 +2413,13 @@ def artifact_overlap(pair, task, artifacts, *, preview_out, statistics_out,
             t0 = time.time()
             png = render_preview(None, None, preview_out, title=task, pair=pair)
             dt = time.time() - t0
-            if png and place("preview.png", png):
+            if png and place(DELIVERABLES["preview"], png):
                 placed.append(("preview", dt))
         if "statistics" in artifacts:
             t0 = time.time()
             sj = compute_statistics(None, None, statistics_out, pair=pair)
             dt = time.time() - t0
-            if sj and place("statistics.json", sj):
+            if sj and place(DELIVERABLES["statistics"], sj):
                 placed.append(("statistics", dt))
     except Exception:
         pass
@@ -2117,6 +2473,19 @@ class JobRecord:
     #: canonical - it is what keys and routes - and the worker runs
     #: ``run_name(task, version)``, so the catalog installs that version or refuses it.
     version: str | None = None
+    #: What this job renders beside its labels, in ``jobpolicy.DELIVERABLES`` order: the
+    #: request's list, or the deployment's set when it named none (2026-09-20). On the
+    #: record and NOT in ``options``, which are hashed into ``cache_key``: asking for a
+    #: preview, or declining one, must never move a result's key.
+    deliverables: tuple = ()
+    #: ``{name: why}`` for what a cache hit's list named, the stored generation lacks,
+    #: and this server could not render then - said on the job rather than left out of
+    #: ``links`` without a word.
+    deliverables_unavailable: dict | None = None
+    #: Set, under the executor's condition variable, when publication has read the list:
+    #: a submit that joins this flight may add to ``deliverables`` only before that.
+    #: Runtime only - a restored job has not reached publication.
+    deliverables_sealed: bool = False
 
 
 class _PrepareDone(Exception):
@@ -2155,8 +2524,14 @@ class LocalExecutor:
         # it or the server fetched it.
         self.content = ContentStore(self.series_cache,
                                     decode=decode_for_fast_read)
+        #: The deliverables this deployment renders: the default for a request that names
+        #: none, and the ceiling for one that does (the submit door refuses a name
+        #: outside it).
         self.artifacts = set(artifacts or ())
-        self._artifacts_pending: dict = {}   # cache_key -> (owner jid, set at)
+        # cache_key -> (owner jid, set at, names being rendered). The single flight of
+        # the artifact path: one render per result at a time, whether it follows a
+        # compute or a cache hit whose list the stored generation does not satisfy.
+        self._artifacts_pending: dict = {}
         self.cache = ResultCache(cache_dir, keep=keep_cached) if cache_dir else None
         if result_store is not None:
             # the shared store is the authority and the local cache its read-through copy
@@ -2181,6 +2556,8 @@ class LocalExecutor:
                     "(AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_ENDPOINT / "
                     "AWS_REGION for S3-compatible stores)") from None
         self._sweeper = None
+        #: what the listing remembers of each publication's meta.json - see ListingMemo
+        self._listing_memo = ListingMemo()
         # `result:<key>` - a result this server computed, as an input - resolves against
         # THIS executor's cache, so the executor builds that source; it is in nobody's
         # `default_sources()`. Added to whatever registry the operator chose, because it
@@ -2233,6 +2610,10 @@ class LocalExecutor:
                 "refresh_input": bool(rec.refresh_input),
                 "input_refresh_skipped": bool(rec.input_refresh_skipped),
                 "version": rec.version,
+                # a list, so a job re-queued by a restart still declines what its
+                # caller declined (an absent key is a record from before the list)
+                "deliverables": list(rec.deliverables),
+                "deliverables_unavailable": rec.deliverables_unavailable,
                 "needed_credentials": bool(rec.source_tokens)}
 
     def _persist(self, rec: JobRecord) -> None:
@@ -2276,7 +2657,11 @@ class LocalExecutor:
                             cache_key=r.get("cache_key"), created=r.get("created") or time.time(),
                             refresh_input=bool(r.get("refresh_input")),
                             input_refresh_skipped=bool(r.get("input_refresh_skipped")),
-                            version=r.get("version"))
+                            version=r.get("version"),
+                            # held to what THIS process renders; a record from before
+                            # the list has none and gets the deployment's set
+                            deliverables=wanted_deliverables(r.get("deliverables"),
+                                                             self.artifacts))
             self._jobs[rec.id] = rec
             self._pending.append(rec.id)
             # the single-flight marker, oldest first: without it a re-ask for the same
@@ -2321,11 +2706,16 @@ class LocalExecutor:
     def submit(self, jid: str, jdir: Path, input_path, task: str, options: dict,
                *, source=None, identity: tuple = (), no_cache: bool = False,
                source_tokens: dict | None = None, inputs: tuple = (),
-               refresh_input: bool = False, version: str | None = None) -> JobRecord:
+               refresh_input: bool = False, version: str | None = None,
+               deliverables=None) -> JobRecord:
+        # `deliverables`: the request's list (None: it named none). It goes on the
+        # record and is never seen by `result_key` below - rendering a preview, or
+        # declining one, is not a different result (2026-09-20).
         rec = JobRecord(id=jid, task=task, options=options, dir=jdir, input_path=input_path,
                         source=list(source or [{"kind": "upload"}]), input_identity=tuple(identity),
                         input_paths=tuple(inputs), source_tokens=source_tokens or None,
-                        refresh_input=bool(refresh_input), version=version)
+                        refresh_input=bool(refresh_input), version=version,
+                        deliverables=wanted_deliverables(deliverables, self.artifacts))
         if self.cache is not None and identity:
             rec.cache_key = result_key(identity, task, options,
                                        weights_versions_of(self.segmenter, task))
@@ -2335,6 +2725,9 @@ class LocalExecutor:
                     rec.labels_path, rec.result = Path(hit[0]), hit[1]
                     rec.state, rec.cached = "done", True
                     rec.started = rec.finished = time.time()
+                    # a hit still honors the list: before the record is written or
+                    # seen, so its first status already says what it could not deliver
+                    self._render_on_hit(rec)
                     self._persist(rec)
                     with self._cv:
                         self._jobs[jid] = rec
@@ -2355,6 +2748,15 @@ class LocalExecutor:
                     import shutil
                     shutil.rmtree(jdir, ignore_errors=True)
                     self._joiners[other.id] = self._joiners.get(other.id, 0) + 1
+                    # One flight, one render: what this caller asked for joins that
+                    # job's list, never narrows it, and only while publication has not
+                    # read it - after that the job's own `deliverables` says what it
+                    # delivers, and a later ask is a cache hit, which renders the rest.
+                    if not other.deliverables_sealed:
+                        both = set(other.deliverables) | set(rec.deliverables)
+                        if both != set(other.deliverables):
+                            other.deliverables = wanted_deliverables(both, self.artifacts)
+                            self._persist(other)
                     return other
             if len(self._pending) >= self.max_pending:
                 raise QueueFull(f"queue is full ({self.max_pending} pending)")
@@ -2411,23 +2813,167 @@ class LocalExecutor:
     def cache_delete(self, key: str) -> bool:
         return self.cache.delete(key) if self.cache is not None else False
 
-    def cache_list(self) -> list:
-        return self.cache.list() if self.cache is not None else []
+    def cache_list(self, *, keys=None, limit=None, after=None, accept=None,
+                   match=None) -> tuple:
+        """``ResultCache.list`` over this server's cache: ``(rows, position)``. The same
+        call ModalExecutor answers over its volume, so the route is written once."""
+        if self.cache is None:
+            return [], None
+        return self.cache.list(keys=keys, limit=limit, after=after, accept=accept,
+                               match=match, memo=self._listing_memo)
 
-    def artifact_state(self, key: str) -> str:
+    def artifact_state(self, key: str, name: str | None = None) -> str:
         """"pending" while the overlap thread is still placing this entry's
         artifacts; "absent" once it finished (or never ran) - at which point a
-        missing artifact file is definitive."""
-        cur = self._artifacts_pending.get(key)
+        missing artifact file is definitive.
+
+        ``name`` asks about ONE deliverable: a render that was not asked for it will
+        never place it, so its absence is definitive at once - a GET of a declined
+        preview answers 404, not 202 until the statistics land (2026-09-20)."""
+        with self._cv:
+            cur = self._live_pending(key)
         if cur is None:
             return "absent"
-        if time.time() - cur[1] > ARTIFACT_PENDING_TTL:
-            # a killed/hung overlap thread left its marker; without this the
-            # refuse-if-present set makes it immortal and every artifact GET
-            # 202s forever (Modal has the same rule as a 900s Dict sweep)
+        names = cur[2] if len(cur) > 2 else None
+        return "pending" if name is None or pending_covers(names, name) else "absent"
+
+    def _live_pending(self, key: str):
+        """The pending marker for ``key`` - ``(owner, set at, names)`` - or None. Asked
+        under ``_cv``. One older than ARTIFACT_PENDING_TTL is dropped here:
+        a killed/hung overlap thread left its marker; without this the
+        refuse-if-present set makes it immortal and every artifact GET
+        202s forever (Modal has the same rule as a 900s Dict sweep)."""
+        cur = self._artifacts_pending.get(key)
+        if cur is not None and time.time() - cur[1] > ARTIFACT_PENDING_TTL:
             self._artifacts_pending.pop(key, None)
-            return "absent"
-        return "pending"
+            return None
+        return cur
+
+    def _claim_pending(self, key: str, owner: str, names) -> bool:
+        """Take the artifact path's single flight for ``key``; False when a live render
+        holds it. Refuse-if-present, in one step under ``_cv``: since a cache hit renders
+        too (2026-09-20) the claim is asked for from submit threads as well as the one
+        dispatcher, and two asks of one key must not both start a render."""
+        with self._cv:
+            if self._live_pending(key) is not None:
+                return False
+            self._artifacts_pending[key] = (owner, time.time(), tuple(names))
+            return True
+
+    def _reference_on_hand(self, rec: JobRecord):
+        """``(image, release)`` for the image a cache hit's deliverables render against -
+        the task's first declared input, as ``reference_input`` has it - if this server
+        holds it NOW; ``(None, release)`` when it does not. ``release`` lets go of the pin.
+
+        Never a fetch. The labels are cached and a deliverable is light; a download to
+        draw a preview of a result nobody is computing is a cost the caller did not ask
+        for, under a queue slot no job holds - so an input that is gone is SAID to be
+        gone (``deliverables_unavailable``), and `no-cache` is the caller's lever.
+        """
+        def nothing():
+            pass
+        entry = (rec.source or [{"kind": "upload"}])[0]
+        kind = entry.get("kind", "upload")
+        if kind == "upload":
+            p = rec.input_paths[0][1] if rec.input_paths else rec.input_path
+            return (Path(p) if p is not None and Path(p).exists() else None), nothing
+        if kind == "input":
+            digest = str(entry.get("id") or entry.get("sha256") or "")
+            self.content.pin(digest)           # BEFORE the look: the store is LRU
+            try:
+                if self.content.has(digest):
+                    return self.content.fast_path(digest), lambda: self.content.unpin(digest)
+            except Exception:                  # noqa: BLE001 - unreadable is not on hand
+                pass
+            self.content.unpin(digest)
+            return None, nothing
+        sk = source_cache_key(entry)
+        if sk is None or not sk.ident:
+            return None, nothing
+        self.series_cache.pin(sk.key)          # BEFORE the look: eviction skips a pin
+        if self.series_cache.has(sk.key):
+            return self.series_cache.path(sk.key), lambda: self.series_cache.unpin(sk.key)
+        self.series_cache.unpin(sk.key)
+        return None, nothing
+
+    def _render_on_hit(self, rec: JobRecord) -> None:
+        """A cache hit honors its request's list (2026-09-20).
+
+        The labels are served as they are - same key, same generation, same ETag. What
+        the list names and that generation lacks (the request that computed it declined
+        it, or it never rendered) is rendered NOW, into that generation, through the
+        path every artifact takes: the pending marker as the single flight, the overlap
+        body, the cache's atomic ``add_artifact``. No second mechanism, so the routes
+        that wait on a pending artifact, and the rule that an artifact never lands
+        beside another publication's labels, hold for it unchanged.
+
+        What cannot be rendered is recorded on the job with the reason: the input is no
+        longer on this server, or a render of this result that does not include it is
+        still running. ``links`` then leaves it out - said, never silently omitted.
+        """
+        if self.cache is None or not rec.cache_key or rec.labels_path is None:
+            return
+        labels = Path(rec.labels_path)
+        missing = missing_deliverables(rec.deliverables, labels.parent)
+        if not missing:
+            return
+
+        def ride(cur) -> None:
+            # a render of this result is running: what it will place is on its way,
+            # and what it will not cannot be started beside it (one flight per result)
+            names = cur[2] if len(cur) > 2 else None
+            rec.deliverables_unavailable = {
+                d: RENDER_BUSY for d in missing if not pending_covers(names, d)} or None
+
+        with self._cv:
+            cur = self._live_pending(rec.cache_key)
+        if cur is not None:
+            return ride(cur)
+        image, release = self._reference_on_hand(rec)
+        if image is None:
+            rec.deliverables_unavailable = {d: INPUT_NOT_ON_HAND for d in missing}
+            return
+        if not self._claim_pending(rec.cache_key, rec.id, missing):
+            release()                          # another ask of this key claimed it first
+            with self._cv:
+                cur = self._live_pending(rec.cache_key)
+            return ride(cur) if cur is not None else None
+        # the generation the labels were read from: the render lands there or nowhere
+        gen = labels.parent.name
+        try:
+            threading.Thread(target=self._hit_worker,
+                             args=(rec, image, labels, gen[2:] if gen.startswith("g-") else None,
+                                   missing, release),
+                             name="haversack-artifacts", daemon=True).start()
+        except Exception:                      # noqa: BLE001 - a hit is never failed by this
+            release()
+            self._release_pending(rec.cache_key, rec.id)
+
+    def _release_pending(self, key: str, owner: str) -> None:
+        """Only the owner clears: a duplicate flight's finish must not turn a sibling's
+        still-pending artifacts into definitive 404s."""
+        with self._cv:
+            if self._artifacts_pending.get(key, (None,))[0] == owner:
+                self._artifacts_pending.pop(key, None)
+
+    def _hit_worker(self, rec: JobRecord, image, labels: Path, generation, names,
+                    release) -> None:
+        """A cache hit's render. The pair is loaded here rather than in ``submit`` - a
+        read of two volumes has no place on a request's thread - and from then on it is
+        ``_artifact_worker``, the same as after a compute."""
+        try:
+            try:
+                from .preview import load_oriented_pair
+                pair = load_oriented_pair(image, labels)
+            except Exception:                  # noqa: BLE001 - best effort, as every artifact
+                pair = None
+            if pair is None:
+                self._release_pending(rec.cache_key, rec.id)
+                return
+            self._artifact_worker(pair, rec.cache_key, rec.dir, rec.task, rec.id,
+                                  generation, names)
+        finally:
+            release()
 
     # -- introspection -------------------------------------------------------
     def get(self, jid: str) -> JobRecord | None:
@@ -2736,6 +3282,13 @@ class LocalExecutor:
                     rec.state = "done"
                     self._persist(rec)
 
+                with self._cv:
+                    # What THIS job renders: read once, held again to what this process
+                    # renders, and sealed - a submit that joined the flight may have
+                    # added to the list up to here, and must not believe it did after.
+                    wanted = wanted_deliverables(rec.deliverables, self.artifacts)
+                    rec.deliverables, rec.deliverables_sealed = wanted, True
+
                 def _set_pending(key: str) -> None:
                     # refuse-if-present: a duplicate flight must not ACQUIRE
                     # ownership by stomping - it would then legally clear the
@@ -2743,19 +3296,15 @@ class LocalExecutor:
                     # probes would read a definitive 404 for artifacts that
                     # land seconds later. The owner's finish clears; then a
                     # later flight may set again.
-                    cur = self._artifacts_pending.get(key)
-                    if cur is None or time.time() - cur[1] > ARTIFACT_PENDING_TTL:
-                        self._artifacts_pending[key] = (rec.id, time.time())
+                    self._claim_pending(key, rec.id, wanted)
 
                 def _clear_pending(key: str) -> None:
-                    # only the owner clears: a duplicate flight's finish must
-                    # not turn our still-pending artifacts into definitive 404s
-                    if self._artifacts_pending.get(key, (None,))[0] == rec.id:
-                        self._artifacts_pending.pop(key, None)
+                    self._release_pending(key, rec.id)
 
                 def _start(pair, key: str, generation=None) -> None:
                     threading.Thread(target=self._artifact_worker,
-                                     args=(pair, key, rec.dir, rec.task, rec.id, generation),
+                                     args=(pair, key, rec.dir, rec.task, rec.id, generation,
+                                           wanted),
                                      name="haversack-artifacts", daemon=True).start()
 
                 if rec.cancel_token.cancelled:
@@ -2767,7 +3316,9 @@ class LocalExecutor:
                     segmenter=self.segmenter, task=rec.task,
                     identity=rec.input_identity, options=rec.options,
                     cache_key=rec.cache_key, labels_path=rec.labels_path,
-                    input_image=reference_input(inp), artifacts=self.artifacts,
+                    # the request's list, not the deployment's set: nothing it declined
+                    # is rendered, and an empty list skips the pair load as well
+                    input_image=reference_input(inp), artifacts=wanted,
                     cache_enabled=self.cache is not None,
                     migrate_key=_migrate,
                     set_pending=_set_pending,
@@ -2782,15 +3333,13 @@ class LocalExecutor:
                 pass
             except Cancelled:
                 rec.state = "cancelled"
-                if (rec.cache_key and self._artifacts_pending.get(
-                        rec.cache_key, (None,))[0] == rec.id):
-                    self._artifacts_pending.pop(rec.cache_key, None)
+                if rec.cache_key:
+                    self._release_pending(rec.cache_key, rec.id)
             except Exception as e:             # noqa: BLE001 - reported to the client
                 rec.state = "failed"
                 rec.error = f"{type(e).__name__}: {e}"
-                if (rec.cache_key and self._artifacts_pending.get(
-                        rec.cache_key, (None,))[0] == rec.id):
-                    self._artifacts_pending.pop(rec.cache_key, None)   # failed after pending add
+                if rec.cache_key:
+                    self._release_pending(rec.cache_key, rec.id)   # failed after pending add
             finally:
                 for key in pinned:
                     self.series_cache.unpin(key)
@@ -2811,17 +3360,18 @@ class LocalExecutor:
                 self._evict()
 
     def _artifact_worker(self, pair, cache_key: str, jdir: Path, task: str,
-                         owner: str, generation=None) -> None:
+                         owner: str, generation=None, names=None) -> None:
         """Post-completion artifacts via the shared overlap body; placement
         is the cache's atomic add_artifact, finish clears the pending marker
-        only when this job still owns it."""
+        only when this job still owns it. ``names`` is what this job renders - its
+        request's list, or what a cache hit found missing; None is the deployment's
+        set, which is all there was to render before requests could say."""
 
         def _finish(placed) -> None:
-            if self._artifacts_pending.get(cache_key, (None,))[0] == owner:
-                self._artifacts_pending.pop(cache_key, None)
+            self._release_pending(cache_key, owner)
 
         artifact_overlap(
-            pair, task, self.artifacts,
+            pair, task, self.artifacts if names is None else names,
             preview_out=jdir / "preview.png",
             statistics_out=jdir / "statistics.json",
             place=lambda name, path: self.cache.add_artifact(
@@ -2967,6 +3517,10 @@ class LocalExecutor:
             d["result"] = r["result"]
         if r.get("cache_key"):
             d["key"] = r["cache_key"]
+        if r.get("deliverables") is not None:  # absent: a record from before the list
+            d["deliverables"] = list(r["deliverables"])
+        if r.get("deliverables_unavailable"):
+            d["deliverables_unavailable"] = dict(r["deliverables_unavailable"])
         return d
 
     def statuses(self) -> list[dict]:
@@ -3017,6 +3571,13 @@ class LocalExecutor:
                 d["key"] = rec.cache_key
             if rec.options:
                 d["options"] = dict(rec.options)
+            if rec.kind != "prepare":
+                # what this job renders beside its labels - beside `options`, never in
+                # them - and what a cache hit could not, with the reason; `links` is
+                # built from the two
+                d["deliverables"] = list(rec.deliverables)
+                if rec.deliverables_unavailable:
+                    d["deliverables_unavailable"] = dict(rec.deliverables_unavailable)
         if rec.cached:
             d["cached"] = True
         if not brief and rec.state == "done" and rec.result is not None:
@@ -3180,10 +3741,12 @@ class CacheOnlyExecutor:
 
     def __init__(self, cache_get, key_fn, tasks_fn, *, inflight_fn=None,
                  resolve_fn=None, list_fn=None, sources=None, versions_fn=None,
-                 confirm_absent=None):
+                 confirm_absent=None, weights_fn=None):
         self._get, self._key, self._inflight = cache_get, key_fn, inflight_fn
         if confirm_absent is not None:     # optional: without it a miss is taken as read
             self.confirm_absent = confirm_absent
+        if weights_fn is not None:         # optional: the weights versions ``key_fn`` keys
+            self.weights_versions = weights_fn     # on, so a listing reads them once a task
         self._versions = versions_fn
         self.segmenter = self._TaskView(tasks_fn, resolve_fn)
         self.sources = _source_registry(sources)
@@ -3265,6 +3828,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             return _key_override(identity, task, opts)
         return result_key((identity,), task, opts,
                           weights_versions_of(seg, task))
+
+    def norm_ident(prefix: str, ident: str) -> str:
+        """An identifier as the path surface keys it: stripped, and an IDC series UUID in
+        lower case. Shared by the surface and the listing's identity filter, which must
+        derive the very key the surface would."""
+        ident = ident.strip()
+        return ident.lower() if prefix == "idc" else ident
 
     def _source_enabled(srcobj) -> bool:
         # _idc_enabled stays the patchable seam for the idc source
@@ -3630,7 +4200,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 "device": str(policy.get("device", "?")),
                 "n_tasks": len(seg.tasks()), "accepting": executor.accepting,
                 "sources": ["upload"] + [k for k, v in sources.items()
-                                         if _source_enabled(v)]}
+                                         if _source_enabled(v)],
+                # what a job here can be asked to render beside its labels - the
+                # default of a request that names none, and the most one may name
+                "deliverables": list(wanted_deliverables(
+                    None, getattr(executor, "artifacts", ()) or ()))}
 
     @app.get("/v1/version", tags=["service"])
     def version():
@@ -3801,50 +4375,170 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         return {"sources": [dict(v.describe(), enabled=_source_enabled(v))
                             for v in sources.values()]}
 
-    @app.get("/v1/segmentations", tags=["results"])
-    def list_segmentations(request: Request):
-        """Authorized only (review finding): the listing enumerates every
+    def listed_identity(raw: str) -> str:
+        """An ``identity=`` value as the identity a result key holds: a content digest as
+        it stands, or ``<source>:<identifier>`` for a source this app mounts WITH a path
+        surface, normalized and checked exactly as that surface does it - the listing's
+        filter is the path surface's key derivation, asked for many tasks at once."""
+        raw = (raw or "").strip()
+        if is_digest(raw):
+            return raw
+        prefix, sep, ident = raw.partition(":")
+        srcobj = sources.get(prefix) if sep else None
+        if srcobj is None or getattr(srcobj, "path_addressable", True) is False:
+            mounted = ", ".join(f"{p}:" for p, s in sources.items()
+                                if getattr(s, "path_addressable", True) is not False)
+            raise HTTPException(422, (
+                f"identity {raw!r}: expected <source>:<identifier> for a source this server "
+                f"mounts ({mounted}), or a content digest ({content.BLOB}<hex>)"))
+        ident = norm_ident(prefix, ident)
+        if not re.fullmatch(srcobj.id_pattern, ident):
+            raise HTTPException(422, f"{ident!r} is not a valid {prefix} identifier")
+        return srcobj.identity(ident)
+
+    @app.get("/v1/segmentations", tags=["results"], responses={
+        422: {"description": "a filter or page the listing refuses: an identity that is "
+                             "neither <source>:<identifier> for a mounted source nor a "
+                             "content digest, more than 100 identities, an unknown task, a "
+                             "limit outside 1-1000, a cursor this server did not issue"},
+        503: {"description": "this server's view of the result cache could not be "
+                             "refreshed (Modal: a volume reload was refused); retry"}})
+    def list_segmentations(
+            request: Request,
+            identity: list[str] | None = Query(None, description=(
+                "only results computed from this input: <source>:<identifier> "
+                "(idc:<crdc_series_uuid>, ...) or a content digest. Repeat it for several "
+                "inputs - the answer is the union. Computed, not searched: the results the "
+                "path surface can address for that input, under this server's current "
+                "weights")),
+            task: str | None = Query(None, description="only results of this task"),
+            limit: int = Query(LIST_LIMIT_DEFAULT, description=(
+                f"rows on this page, 1-{LIST_LIMIT_MAX}")),
+            cursor: str | None = Query(None, description=(
+                "the previous page's next_cursor, as given"))):
+        """Cached results this server can still resolve, newest published first, a page at
+        a time: ``{"segmentations": [...], "next_cursor": ...}``, the cursor null on the
+        last page. Each row: ``key``, ``task``, ``identity``, ``options``, ``computed``,
+        ``published`` (what the order is by), ``bytes``, and ``links`` when the result has
+        a path.
+
+        Authorized only (review finding): the listing enumerates every
         cached result including sha256 identities of authenticated users'
         uploads - not part of the anonymous tier. The public twin's listing
         stays an explicit operator opt-in (list_fn): read_only serves it
-        anonymously when a lister exists and drops the route otherwise."""
+        anonymously when a lister exists and drops the route otherwise.
+
+        No index stands behind this (2026-09-20) - see ``ResultCache.list`` for the three
+        mechanisms. ``identity`` derives the key of each served task under each
+        path-addressable option set and looks those names up, so it finds what the path
+        surface can serve for that input and nothing else: a result computed with other
+        options, or from several inputs, is in the plain and the ``task`` listing only. A
+        sync route on purpose: the lookup blocks (on Modal it can wait out a volume
+        reload), and FastAPI runs a sync route on a worker thread, off the event loop."""
         if not read_only:
             require_auth(request)
+        if not 1 <= limit <= LIST_LIMIT_MAX:
+            raise HTTPException(422, f"limit must be between 1 and {LIST_LIMIT_MAX}")
+        after = None
+        if cursor is not None:
+            try:
+                after = decode_cursor(cursor)
+            except ValueError:
+                raise HTTPException(422, "cursor: not one this server issued; start again "
+                                         "without it") from None
+        want = None
+        if task is not None:
+            want = canon_task(task)
+            if want is None:
+                raise HTTPException(422, unknown_task(task))
+        if identity and len(identity) > LIST_IDENTITIES_MAX:
+            raise HTTPException(422, f"at most {LIST_IDENTITIES_MAX} identities a request")
         lister = getattr(executor, "cache_list", None)
-        entries = lister() if lister else []
-        keep = []                          # advertise only links that resolve
+        if lister is None:
+            return {"segmentations": [], "next_cursor": None}
+        _weights_of = getattr(executor, "weights_versions", None)
         wv_memo: dict = {}                 # weights per task, once per request
-        for e in entries:                  # on THIS app's mounted sources
-            ident0 = str((e.get("identity") or [""])[0])
+        canon_memo: dict = {}
+
+        def key_of(identities, canonical: str, opts: dict) -> str:
+            """The key an entry with these identities is published under NOW. All of them:
+            a multi-input result is keyed on every role's identity, and asking only the
+            first dropped each one from the listing as stale-keyed.
+
+            A task's weights versions are read ONCE a request. They are the whole cost of a
+            key - a ``describe()`` of the task, on Modal against the weights volume - and an
+            identity filter derives tasks x option sets x identities of them: measured on
+            Modal 2026-09-20, the lookup of 188 computed names took 0.05 s and deriving them
+            2.1 s cold, twice over for the two option sets, and once more per identity. An
+            executor that pins key derivation says how it reads versions
+            (``weights_versions``); one that offers only ``resource_key`` (an operator's
+            twin) is asked key by key."""
+            ids = tuple(identities)
+            if _key_override is not None and _weights_of is None:
+                return _key_override(ids[0] if len(ids) == 1 else ids, canonical, opts)
+            if canonical not in wv_memo:
+                wv_memo[canonical] = (_weights_of(canonical) if _weights_of is not None
+                                      else weights_versions_of(seg, canonical))
+            return result_key(ids, canonical, opts, wv_memo[canonical])
+
+        def canonical_of(t) -> str | None:
+            if t not in canon_memo:
+                try:
+                    canon_memo[t] = canon_task(str(t))
+                except HTTPException:      # one odd row must not refuse the listing
+                    canon_memo[t] = None
+            return canon_memo[t]
+
+        def of_wanted_task(e: dict) -> bool:
+            """The ``task`` filter. Asked twice, of one rule: of ``meta.json``'s fields
+            before an entry's files are stat'ed (``match`` - what makes a scan for a rare
+            task cheap), and of the finished row, so a lister that knows nothing of
+            ``match`` still filters."""
+            t = e.get("task")
+            return want is None or (t is not None and canonical_of(t) == want)
+
+        def accept(e: dict) -> bool:       # advertise only links that resolve
+            idents = e.get("identity") if isinstance(e.get("identity"), list) else []
+            ident0 = str((idents or [""])[0])          # on THIS app's mounted sources
             pfx = ident0.split(":", 1)[0] if ":" in ident0 else None
             if pfx in _ALL_SOURCE_PREFIXES and pfx not in sources:
-                continue                   # a hosted source this app does not mount
+                return False               # a hosted source this app does not mount
             t = e.get("task")
-            canonical = canon_task(str(t)) if t is not None else None
+            canonical = canonical_of(t) if t is not None else None
             if t is not None and canonical is None:
-                continue                   # task this catalog cannot serve
-            ident = (e.get("identity") or [None])[0]
+                return False               # task this catalog cannot serve
+            if not of_wanted_task(e):
+                return False
             key = e.get("key")
-            if canonical and ident and key:
+            if canonical and idents and key:
                 # key round-trip: a stale-keyed entry's link 404s WITH a
                 # recompute hint - following the listing's own remedy would
                 # duplicate GPU work for bytes already cached
                 try:
-                    if _key_override is not None:
-                        fresh = _key_override(ident, canonical,
-                                              e.get("options") or {})
-                    else:
-                        if canonical not in wv_memo:
-                            wv_memo[canonical] = weights_versions_of(seg, canonical)
-                        fresh = result_key((ident,), canonical,
-                                           e.get("options") or {},
-                                           wv_memo[canonical])
-                    if fresh != key:
-                        continue
+                    if key_of(idents, canonical, e.get("options") or {}) != key:
+                        return False
                 except Exception:
                     pass
-            keep.append(e)
-        return {"segmentations": keep}
+            return True
+
+        keys = None
+        if identity:
+            wanted = list(dict.fromkeys(listed_identity(i) for i in identity))
+            if want is not None:
+                served = [want]
+            else:
+                try:
+                    served = list(dict.fromkeys(filter(None, map(canonical_of, seg.tasks()))))
+                except Exception as e:     # noqa: BLE001 - a fault, not "nothing computed"
+                    raise HTTPException(503, "this server cannot list its tasks right "
+                                             "now") from e
+            # what the path surface keys: the default options and each grid token
+            menu = [{}] + [dict(o) for o in GRID_TOKENS.values()]
+            keys = [key_of((i,), t, o) for i in wanted for t in served for o in menu]
+        rows, position = lister(keys=keys, limit=limit, after=after, accept=accept,
+                                match=of_wanted_task if want is not None else None)
+        return {"segmentations": rows,
+                "next_cursor": encode_cursor(position) if position is not None else None}
 
     @app.get("/v1/tasks/{task}", tags=["tasks"])
     def describe(task: str):
@@ -3861,7 +4555,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
     @app.post("/v1/jobs", status_code=202, tags=["jobs"])
     async def submit(request: Request, file: UploadFile | None = File(None),
                      task: str = Form(...), options: str = Form("{}"),
-                     source: str = Form(None)):
+                     source: str = Form(None), deliverables: str = Form(None)):
         require_auth(request)
         try:
             opts = json.loads(options)
@@ -3872,8 +4566,26 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             src = json.loads(source) if source else [{"kind": "upload"}]
             if not (isinstance(src, list) and all(isinstance(x, dict) for x in src)):
                 raise ValueError("source must be a JSON list of objects")
+            asked = json.loads(deliverables) if deliverables is not None else None
         except ValueError as e:
             raise HTTPException(422, f"bad request: {e}") from e
+        # Which deliverables THIS request wants rendered beside its labels: a field of its
+        # own, and refused inside `options` - every option is hashed into the result key,
+        # and asking for a preview, or declining one, must never recompute or re-key a
+        # segmentation (2026-09-20). Checked against what this deployment renders, which
+        # is the default when the field is absent and the ceiling when it is not.
+        from .errors import RequestError
+        from .schemas import DELIVERABLES_FIELD, requested_deliverables
+        if DELIVERABLES_FIELD in opts:
+            raise HTTPException(422, {
+                "code": "misplaced_deliverables",
+                "message": f"`{DELIVERABLES_FIELD}` is a form field of its own, beside "
+                           "`options`, not an option: options are part of a result's key "
+                           "and what is rendered beside it is not"})
+        try:
+            wanted = requested_deliverables(asked, getattr(executor, "artifacts", ()))
+        except RequestError as e:
+            raise HTTPException(e.status, e.detail) from None
         # RFC 9111 semantics, deliberately: `no-cache` means "do not SERVE a stored
         # result", not "do not store one" - that is `no-store`, which we do not offer.
         # So this skips the lookup and still publishes (see the overwriting put in
@@ -3957,7 +4669,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             return await _accept(request, jid, jdir, binding, task, opts, src,
                                  file, no_cache, executor, seg,
                                  caller_asked_no_cache, version=version,
-                                 handed=handed, role_specs=declared)
+                                 handed=handed, role_specs=declared, wanted=wanted)
         except QueueFull as e:
             _discard(jdir)
             raise HTTPException(429, str(e), headers={"Retry-After": "30"}) from e
@@ -3977,7 +4689,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
     async def _accept(request, jid, jdir, binding, task, opts, src, file,
                       no_cache, executor, seg, caller_asked_no_cache=False,
-                      version=None, handed=None, role_specs=None):
+                      version=None, handed=None, role_specs=None, wanted=None):
+        # `wanted`: the request's deliverables, already checked (None: it named none).
+        # It rides beside `opts` to the executor and never into them - `opts` is keyed.
         # `role_specs`: role -> what the task declares it takes (_validate_request's
         # `declared`). NOT named `declared` here: the upload branch below has a local of
         # that name, and an upload bound before a reference - upload a CT, refer to its
@@ -4170,6 +4884,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                 # passed only when set, so an executor that predates
                                 # pins keeps its signature
                                 **({"version": version} if version else {}),
+                                # likewise: a request that named no list is the
+                                # executor's own default
+                                **({"deliverables": wanted} if wanted is not None else {}),
                                 refresh_input=caller_asked_no_cache,
                                 source_tokens=tokens,
                                 inputs=tuple(staged) if multi else ())
@@ -4220,11 +4937,16 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         if out.get("state") == "done":
             if out.get("result_available", True):   # an evicted record says when it is gone
                 links["result"] = f"/v1/jobs/{jid}/result"
-            kinds = set(getattr(executor, "artifacts", ()) or ())
+            # What THIS job was asked to deliver, less what it said it could not - so a
+            # link is there only for what is, or will be, there (2026-09-20). The
+            # artifact overlap runs after done, so this reads the job's own list rather
+            # than probing the cache per request; a record from before the list (none on
+            # it) advertises what this deployment renders, as every job then did.
+            asked = out.get("deliverables")
+            kinds = set(getattr(executor, "artifacts", ()) or ()) if asked is None else set(asked)
+            kinds -= set(out.get("deliverables_unavailable") or ())
             links.update(resource_links(
                 out.get("task"), out.get("input_identity"), out.get("options"),
-                # the artifact overlap runs after done, so advertise what this
-                # deployment renders rather than probing the cache per request
                 preview="preview" in kinds, statistics="statistics" in kinds))
         out["links"] = links
         return out
@@ -4454,8 +5176,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         base = f"/v1/{prefix}/{{ident:path}}/{{task}}"
 
         def norm(ident: str) -> str:
-            ident = ident.strip()
-            return ident.lower() if prefix == "idc" else ident
+            return norm_ident(prefix, ident)
 
         def keyed(ident: str, task: str, opts: dict | None = None):
             canonical = canon_task(task)
@@ -4474,14 +5195,53 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         def _register_probe(tok: str, gopts: dict):
             @app.head(base + f"/labels{tok}.seg.nrrd", tags=["results"])
             def probe(request: Request, ident: str, task: str):
+                """200 materialized / 202 computing / 404 absent, never a compute.
+
+                The 200 describes the representation GET would send (RFC 9110 9.3.2):
+                the same validator - the content digest, from the entry's result, which
+                both lookups hand back - and the same Content-Length. Until 2026-09-21
+                it built its headers without the result, so its ETag was the key-derived
+                fallback GET never issues, and Starlette filled in ``Content-Length: 0``
+                from the empty body, which RFC 9110 8.6 forbids unless GET's content
+                would be empty too. A client asking "has this changed?" compared a tag
+                no GET had given it, and a shared cache that forwards a HEAD marks its
+                stored GET stale when either field differs (RFC 9111 4.3.5) - on
+                responses sent ``Cache-Control: public``.
+
+                ``If-None-Match`` is honored, deliberately: RFC 9110 13.1.2 names GET
+                and HEAD together for the 304, GET answers it here, and a HEAD that
+                said 200 to the request GET says 304 to would be the same disagreement
+                one header over. Only the 200 is conditional, as on GET: a flight or an
+                absence selects no representation for a tag to match. GET's other
+                fields (Content-Type, Content-Disposition, Last-Modified) are left to
+                GET - nothing acts on them here, and each would be a second copy of a
+                fact ``FileResponse`` owns."""
                 from fastapi import Response
                 key = keyed(norm(ident), task, gopts)
                 if key is None:
                     raise HTTPException(404, "unknown resource")
+
+                def found(hit):
+                    headers = _resource_headers(key, hit[1])
+                    # WITH the headers, as GET's two sites hand them: a HEAD's 304 repeats its
+                    # 200's Cache-Control and Vary too (RFC 9110 15.4.5). The seam between two
+                    # branches of 2026-09-21 - the conditional HEAD and the 304's headers -
+                    # that `test_whatever_a_conditional_head_answers_says_what_its_200_says`
+                    # was written to catch when they met.
+                    fresh = not_modified(request, headers["ETag"], headers)
+                    if fresh is not None:
+                        return fresh
+                    resp = Response(status_code=200, headers=headers)
+                    try:                       # the file GET's FileResponse would stat
+                        resp.headers["content-length"] = str(os.stat(hit[0]).st_size)
+                    except OSError:            # left since the lookup: no length beats
+                        del resp.headers["content-length"]     # a wrong one; 200 stands
+                    return resp
+
                 since = time.monotonic()
                 hit = executor.cache_get(key)
                 if hit is not None:
-                    return Response(status_code=200, headers=_resource_headers(key))
+                    return found(hit)
                 jid = executor.find_inflight(key)
                 if jid is not None:
                     # anonymous callers see this too (user decision): watching a
@@ -4490,8 +5250,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     return Response(status_code=202,
                                     headers=_progress_headers(snap.get("progress")))
                 # a miss from a stale view is not "not materialized" (503 if unverifiable)
-                if confirm_absent(key, since) is not None:
-                    return Response(status_code=200, headers=_resource_headers(key))
+                hit = confirm_absent(key, since)
+                if hit is not None:
+                    return found(hit)
                 raise HTTPException(404, "not materialized")
 
         _grid_routes(_register_probe)
@@ -4518,7 +5279,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 def serve_hit(hit):
                     headers = _pref_headers(request, key, hit[1])
                     # the client may already hold these exact bytes
-                    fresh = not_modified(request, headers["ETag"])
+                    fresh = not_modified(request, headers["ETag"], headers)
                     if fresh is not None:
                         return fresh
                     return FileResponse(hit[0], media_type="application/octet-stream",
@@ -4628,7 +5389,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                         raise unseen
                     if src_path is None:       # evicted between done and read
                         raise HTTPException(404, "not materialized")
-                    fresh = not_modified(request, headers["ETag"])
+                    fresh = not_modified(request, headers["ETag"], headers)
                     if fresh is not None:
                         return fresh
                     return FileResponse(src_path, media_type="application/octet-stream",
@@ -4733,6 +5494,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     hit = confirm_absent(key, since)   # 503 when a stale view cannot tell
                 if hit is None:
                     raise HTTPException(404, "not materialized")
+                # The key-derived validator, NOT the labels' digest, and on purpose
+                # (2026-09-21, when the HEAD probe took the digest): this body is the
+                # result record, which a recompute rewrites (timings, provenance) even
+                # when it reproduces the labels byte for byte, so the labels' digest
+                # would call two different bodies one. The honest tag is a digest of
+                # this JSON; nothing here evaluates If-None-Match, so no client is told
+                # "not modified" on the strength of this one.
                 return JSONResponse(hit[1], headers=_resource_headers(key))
 
         _grid_routes(_register_meta)
@@ -4869,8 +5637,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
             if (found := await look()) is not None:
                 return found
-            state_fn = getattr(executor, "artifact_state", None)
-            pending = state_fn is not None and state_fn(key) == "pending"
+            _state = getattr(executor, "artifact_state", None)
+
+            def state_fn(k: str) -> str:
+                # asked about THIS deliverable: a render that was not asked for it
+                # will never place it, so its absence is definitive at once
+                return _state(k, what)
+            pending = _state is not None and state_fn(key) == "pending"
             if pending:
                 if deadline is None:
                     deadline = time.time()
@@ -4896,7 +5669,16 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 p = Path(again[0]).parent / filename if again is not None else None
                 if p is not None and p.exists():
                     return p
-            raise HTTPException(404, f"no {what} for this result")
+            # A read never renders (decided 2026-09-20): a deliverable is asked for where
+            # the input is named and can be held - POST /v1/jobs - and this URL serves
+            # what exists, to anyone. Anonymous never computes; an authorized GET of a
+            # stored result's missing artifact does not either, Prefer or not: it has no
+            # job to stage an input under. So the answer is a definitive 404 that names
+            # the door which does.
+            raise HTTPException(404, f"no {what} for this result: it was not asked for when "
+                                     "the result was computed, or could not be rendered; an "
+                                     "authorized POST /v1/jobs of the same input and task "
+                                     f'with deliverables ["{what}"] renders it')
 
         def _register_statistics(tok: str, gopts: dict):
             async def _stats_key(request, ident, task, opts):
@@ -4970,7 +5752,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
 
 def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
-                      list_fn=None, resolve_fn=None, versions_fn=None, confirm_absent=None):
+                      list_fn=None, resolve_fn=None, versions_fn=None, confirm_absent=None,
+                      weights_fn=None):
     """The anonymous read-only twin: cache hits and nothing else.
 
     Since review R4 this is create_app itself over a CacheOnlyExecutor with
@@ -4987,13 +5770,19 @@ def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
     ``key_fn(identity, task, opts)`` maps a source identity string
     ("idc:<uuid>") and grid options to the result-cache key - the twin must
     key exactly as the writer did. ``list_fn`` (optional) backs
-    /v1/segmentations; omit it to keep the twin listing-free. ``confirm_absent(key,
+    /v1/segmentations; omit it to keep the twin listing-free. It is called as
+    ``list_fn(keys=, limit=, after=, accept=, match=)`` and answers ``(rows, position)`` -
+    ``ResultCache.list``'s own signature, so a bound ``cache.list`` is one (2026-09-20;
+    it used to take nothing and return every row, capped at 500). ``confirm_absent(key,
     since)`` (optional) re-asks a miss of a current view - see ResultsNotVisible.
+    ``weights_fn(task)`` (optional) is the weights-versions list ``key_fn`` keys ``task``
+    on - ``result_key``'s fourth argument: with it the listing reads a task's versions once
+    a request instead of once a key, and MUST then derive exactly what ``key_fn`` would.
     """
     ex = CacheOnlyExecutor(cache_get, key_fn, tasks_fn, inflight_fn=inflight,
                            resolve_fn=resolve_fn, list_fn=list_fn,
                            sources=sources, versions_fn=versions_fn,
-                           confirm_absent=confirm_absent)
+                           confirm_absent=confirm_absent, weights_fn=weights_fn)
     return create_app(ex, read_only=True)
 
 

@@ -397,11 +397,28 @@ haversack remote submit scan.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
 ```
 
 `submit` uploads, shows progress, and downloads the labels; `--no-wait` returns a job id for
-`status`, `fetch`, and `cancel`. The endpoints are under `/v1/` (`/v1/health`, `/v1/tasks`,
+`status`, `fetch`, and `cancel`. `haversack remote results` lists what the server has already
+computed, newest first - `--identity idc:<crdc_series_uuid>` for one input (or several: repeat
+it), `--task` for one task - so a cohort can ask what is done before submitting anything. The
+endpoints are under `/v1/` (`/v1/health`, `/v1/tasks`,
 `/v1/jobs`); the OpenAPI document is at `/docs`. The server is ready when `GET /v1/health`
 answers; stop it with Ctrl-C (or kill the process) - queued jobs are kept in its `jobs.db`
 and re-queued when it starts again. On this M2 a `total_fast` job through the
 server produced labels voxel-identical to the command line's.
+
+Beside the labels the server renders two light deliverables, a three-plane `preview` and
+per-structure `statistics`, after the job already reports done. A request says which it
+wants:
+
+```bash
+haversack remote submit scan.nii.gz --task ts.v2:total_fast --deliverables none
+haversack remote submit idc:<crdc_series_uuid> --task ts.v2:total --deliverables statistics
+```
+
+Without the flag a job gets the server's own set (`GET /v1/health` lists it), which is also
+the most a request may name. A deliverable is never part of the result: declining the
+preview computes the same labels under the same key, and asking for it later is a cache hit
+that renders it then - or says why it cannot. The command line's `segment` renders neither.
 
 A finished job reports a `key`, and `result:<key>` names that result as the INPUT of another
 job on the same server - one job's labels as another's mask, without the bytes leaving the

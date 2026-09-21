@@ -148,10 +148,12 @@ class TestSharing(_Hosts):
 
     def test_list_reads_pointers(self):
         self.publish(self.a, b"one", preview=b"png")
-        entries = self.b.list()
-        self.assertEqual([KEY], [e["key"] for e in entries])
-        self.assertEqual(3, entries[0]["bytes"])
-        self.assertEqual("t", entries[0]["task"])
+        rows, position = self.b.list()
+        self.assertEqual([KEY], [e["key"] for e in rows])
+        self.assertEqual(3, rows[0]["bytes"])
+        self.assertEqual("t", rows[0]["task"])
+        self.assertIsNone(position, "one page held everything")
+        self.assertEqual(1, len(self.b.list(limit=1)[0]))
 
     def test_identical_bytes_are_one_blob(self):
         self.publish(self.a, b"same", key="cd" * 32)
@@ -393,7 +395,7 @@ def test_two_servers_share_one_store(tmp_path):
         hit = ex_b.cache_get(s["key"])
         assert hit is not None
         assert Path(hit[0]).read_bytes() == Path(ex_a.cache_get(s["key"])[0]).read_bytes()
-        assert [e["key"] for e in ex_b.cache_list()] == [s["key"]]
+        assert [e["key"] for e in ex_b.cache_list()[0]] == [s["key"]]
     finally:
         ex_a.close()
         ex_b.close()
@@ -497,7 +499,7 @@ class TestDamagedPointers(_Hosts):
                 self.damaged(ptr)
                 self.assertIsNone(self.b.get(KEY))
                 self.assertIsNone(self.b.generation(KEY))
-                self.assertEqual([], self.b.list())
+                self.assertEqual([], self.b.list()[0])
                 self.b.sweep()                 # must not raise either
 
     def test_a_pointer_may_not_choose_where_bytes_land(self):
@@ -514,7 +516,7 @@ class TestDamagedPointers(_Hosts):
         self.publish(self.a, b"one")
         obstore.put(self.store, "pre/results/.tmp-upload.json", b"{}")
         obstore.put(self.store, "pre/results/notes.json", b"not a pointer")
-        self.assertEqual([KEY], [e["key"] for e in self.b.list()])
+        self.assertEqual([KEY], [e["key"] for e in self.b.list()[0]])
         got = self.b.sweep(grace_s=0)
         self.assertEqual(2, got["unreadable_pointers"])
         self.assertEqual(0, got["deleted_blobs"],
@@ -591,8 +593,8 @@ class TestGapsFromMutation(_Hosts):
     def test_list_is_newest_first_and_honors_its_limit(self):
         for i, key in enumerate(("aa" * 32, "bb" * 32, "cc" * 32)):
             self.a.put(key, self.file(f"l{i}", f"l{i}".encode()), {}, {"computed": float(i)})
-        self.assertEqual(["cc" * 32, "bb" * 32, "aa" * 32], [e["key"] for e in self.b.list()])
-        self.assertEqual(2, len(self.b.list(limit=2)))
+        self.assertEqual(3, len(self.b.list()[0]))
+        self.assertEqual(2, len(self.b.list(limit=2)[0]))
 
     def test_list_reads_only_as_many_pointers_as_asked_for(self):
         for i, key in enumerate(("aa" * 32, "bb" * 32, "cc" * 32)):
@@ -910,7 +912,7 @@ class TestPush(_Hosts):
         again = self.a.push()
         self.assertEqual(1, again["pushed"])
         self.assertEqual(2, again["skipped"])
-        self.assertEqual(3, len(self.b.list()))
+        self.assertEqual(3, len(self.b.list()[0]))
 
     def test_a_key_the_store_already_has_is_kept_by_default(self):
         """It may be newer than ours: another host computed it after this cache went cold."""
@@ -948,7 +950,7 @@ class TestPush(_Hosts):
         (self.a.local._resolve(KEY, lease=False) / "meta.json").unlink()
         got = self.a.push()
         self.assertEqual(1, got["unreadable"])
-        self.assertEqual([], self.b.list())
+        self.assertEqual([], self.b.list()[0])
 
     def test_a_legacy_flat_entry_is_given_a_generation(self):
         """An entry from before generations existed: still migratable, at the cost of one
@@ -968,14 +970,14 @@ class TestPush(_Hosts):
         (self.a.local.root / ".reclaim-1").mkdir(parents=True)
         self.local_entry(self.a, KEY, b"real")
         self.assertEqual(1, self.a.push()["pushed"])
-        self.assertEqual([KEY], [e["key"] for e in self.b.list()])
+        self.assertEqual([KEY], [e["key"] for e in self.b.list()[0]])
 
     def test_limit_takes_the_newest(self):
         for i, key in enumerate(("aa" * 32, "bb" * 32, "cc" * 32)):
             self.local_entry(self.a, key, f"v{i}".encode())
             os.utime(self.a.local.root / key, (1000 + i, 1000 + i))
         self.assertEqual(1, self.a.push(limit=1)["pushed"])
-        self.assertEqual(["cc" * 32], [e["key"] for e in self.b.list()])
+        self.assertEqual(["cc" * 32], [e["key"] for e in self.b.list()[0]])
 
 
 class TestPull(_Hosts):
@@ -1100,7 +1102,7 @@ class TestPushRerunsMakeProgress(_Hosts):
         self.entries(self.a, 6)
         for _ in range(3):
             self.a.push(limit=2)
-        self.assertEqual(6, len(self.b.list()))
+        self.assertEqual(6, len(self.b.list()[0]))
 
     def test_a_skipped_key_does_not_use_up_a_slot(self):
         self.entries(self.a, 3)
@@ -1126,7 +1128,7 @@ class TestPushReportsHonestly(_Hosts):
         where = self.a.local._resolve(KEY, lease=False)
         (where / "result.json").write_text(json.dumps(["not", "a", "document"]))
         self.assertEqual(1, self.a.push()["unreadable"])
-        self.assertEqual([], self.b.list())
+        self.assertEqual([], self.b.list()[0])
 
     def test_replaced_is_counted_when_the_store_had_the_key(self):
         self.publish(self.b, b"theirs")
@@ -1983,3 +1985,183 @@ class TestFindingAGenerationByItsBytes(_Hosts):
         self.publish(self.a, b"one")
         self.a.delete(KEY)
         self.assertIsNone(self.a.find_generation(KEY, self.digest(b"one")))
+
+
+class TestTheListingContract(_Hosts):
+    """`ResultCache.list`'s contract (main, 2026-09-21), answered from the store. Its three
+    mechanisms carry over, and two get cheaper: a bucket listing hands out names AND times,
+    so paging costs no stats; and the pointer IS the content, so a row is one request where
+    a filesystem pays a read and three stats."""
+
+    def some(self, n, task="t"):
+        keys = []
+        for i in range(n):
+            key = f"{i:02x}" * 32
+            keys.append(key)
+            self.a.put(key, self.file(f"l{i}", f"v{i}".encode()), {"outputs": [f"v{i}"]},
+                       {"task": task, "identity": [f"upload:{i}"], "options": {},
+                        "computed": float(i)})
+        return keys
+
+    def test_rows_carry_what_the_local_cache_carries(self):
+        self.some(1)
+        rows, _ = self.b.list()
+        row = rows[0]
+        self.assertEqual({"key", "task", "identity", "options", "computed", "published",
+                          "bytes"}, set(row) - {"links"})
+        self.assertEqual("t", row["task"])
+        self.assertEqual(2, row["bytes"])
+        self.assertLessEqual(row["published"], time.time() + 1)
+
+    def test_newest_published_first(self):
+        keys = self.some(4)
+        rows, _ = self.b.list()
+        self.assertEqual(len(keys), len(rows))
+        stamps = [r["published"] for r in rows]
+        self.assertEqual(stamps, sorted(stamps, reverse=True))
+
+    def test_paging_resumes_after_the_position_it_returned(self):
+        self.some(5)
+        seen, after, pages = [], None, 0
+        while True:
+            rows, after = self.b.list(limit=2, after=after)
+            seen += [r["key"] for r in rows]
+            pages += 1
+            if after is None:
+                break
+        self.assertEqual(5, len(seen), f"{pages} pages")
+        self.assertEqual(len(set(seen)), len(seen), "no entry appears twice")
+
+    def test_a_publication_during_paging_does_not_shift_a_page(self):
+        """A position is (stamp, key), not an offset: a new entry sorts ahead of every
+        position already handed out."""
+        self.some(4)
+        first, after = self.b.list(limit=2)
+        self.publish(self.a, b"brand new", key="ff" * 32)
+        rest, _ = self.b.list(limit=10, after=after)
+        self.assertNotIn("ff" * 32, [r["key"] for r in rest],
+                         "it belongs ahead of this page, not inside it")
+        self.assertEqual(4, len({*[r["key"] for r in first], *[r["key"] for r in rest]}))
+
+    def test_keys_reads_only_the_names_it_was_given(self):
+        keys = self.some(4)
+        asked = []
+        real = SharedResultCache._stamp
+
+        def stamp(cache, key):
+            asked.append(key)
+            return real(cache, key)
+        with unittest.mock.patch.object(SharedResultCache, "_stamp", stamp), \
+                unittest.mock.patch.object(SharedResultCache, "_stamps",
+                                           side_effect=AssertionError("listed the bucket")):
+            rows, _ = self.b.list(keys=[keys[1], "ab" * 32])
+        self.assertEqual([keys[1]], [r["key"] for r in rows])
+        self.assertEqual({keys[1], "ab" * 32}, set(asked), "a miss is one HEAD, not a search")
+
+    def test_keys_refuses_a_name_that_is_not_a_key(self):
+        self.some(1)
+        rows, _ = self.b.list(keys=["../escape", ".hidden", ""])
+        self.assertEqual([], rows)
+
+    def test_match_is_asked_of_meta_before_a_row_is_built(self):
+        self.some(3, task="ts.v2:total")
+        self.publish(self.a, b"other", key="ee" * 32)
+        rows, _ = self.b.list(match=lambda f: f.get("task") == "ts.v2:total")
+        self.assertEqual(3, len(rows))
+        self.assertTrue(all(r["task"] == "ts.v2:total" for r in rows))
+
+    def test_accept_filters_the_finished_row(self):
+        self.some(4)
+        rows, _ = self.b.list(accept=lambda r: r["bytes"] == 2)
+        self.assertEqual(4, len(rows))
+        rows, _ = self.b.list(accept=lambda r: False)
+        self.assertEqual([], rows)
+
+    def test_a_memo_spares_the_re_read(self):
+        from haversack.serve import ListingMemo
+        self.some(3)
+        memo = ListingMemo()
+        self.b.list(memo=memo)
+        reads = []
+        real = SharedResultCache._read_pointer
+
+        def read(cache, key, **kw):
+            reads.append(key)
+            return real(cache, key, **kw)
+        with unittest.mock.patch.object(SharedResultCache, "_read_pointer", read):
+            rows, _ = self.b.list(memo=memo)
+        self.assertEqual(3, len(rows))
+        self.assertEqual([], reads, "the publications are unchanged: nothing to re-read")
+
+    def test_a_republication_is_read_again_despite_the_memo(self):
+        from haversack.serve import ListingMemo
+        keys = self.some(2)
+        memo = ListingMemo()
+        self.b.list(memo=memo)
+        time.sleep(0.01)
+        self.a.put(keys[0], self.file("new", b"republished"), {"outputs": ["new"]},
+                   {"task": "changed", "identity": ["upload:0"], "options": {},
+                    "computed": 9.0})
+        rows, _ = self.b.list(memo=memo)
+        task = next(r["task"] for r in rows if r["key"] == keys[0])
+        self.assertEqual("changed", task, "a new stamp is a new entry to the memo")
+
+    def test_the_hold_is_held_around_the_reads(self):
+        import contextlib
+        self.some(3)
+        held = []
+
+        @contextlib.contextmanager
+        def hold():
+            held.append("in")
+            try:
+                yield
+            finally:
+                held.append("out")
+        self.b.list(hold=hold)
+        self.assertTrue(held and held[0] == "in" and held[-1] == "out")
+
+    def test_an_entry_whose_pointer_is_damaged_is_skipped_not_raised(self):
+        keys = self.some(3)
+        obstore.put(self.store, f"pre/results/{keys[1]}.json", b"{not a pointer")
+        rows, _ = self.b.list()
+        self.assertEqual(2, len(rows))
+        self.assertNotIn(keys[1], [r["key"] for r in rows])
+
+
+class TestLateDeliverablesIntoAPublishedGeneration(_Hosts):
+    """Per-request deliverables (main, 2026-09-21): a cache HIT renders what is missing,
+    into the SAME generation. The publication model allows it because artifacts are exactly
+    what may arrive after the labels - the pointer names them, and adding one is a
+    conditional write that cannot land beside another publication's labels."""
+
+    def test_a_filled_copy_reports_what_the_publisher_declined(self):
+        from haversack.jobpolicy import missing_deliverables
+        gen = self.publish(self.a, b"one")               # published with no preview
+        labels, _ = self.b.get(KEY)
+        self.assertEqual(("preview",),
+                         missing_deliverables(("preview",), Path(labels).parent))
+        self.assertTrue(self.b.add_artifact(KEY, "preview.png",
+                                            self.file("p.png", b"png"), generation=gen))
+        labels, _ = self.b.get(KEY)
+        self.assertEqual((), missing_deliverables(("preview",), Path(labels).parent),
+                         "rendered into the generation that was already published")
+
+    def test_it_reaches_every_other_host_without_a_republication(self):
+        gen = self.publish(self.a, b"one")
+        before = self.a.generation(KEY)
+        self.b.get(KEY)
+        self.b.add_artifact(KEY, "preview.png", self.file("p.png", b"png"), generation=gen)
+        cold = self.host("cold-deliverable")
+        labels, _ = cold.get(KEY)
+        self.assertEqual(b"png", (Path(labels).parent / "preview.png").read_bytes())
+        self.assertEqual(before, cold.generation(KEY),
+                         "the same generation: an artifact is not a publication")
+
+    def test_a_render_for_a_generation_that_moved_on_is_refused(self):
+        gen = self.publish(self.a, b"one")
+        self.publish(self.a, b"two")                     # the key moves on mid-render
+        self.assertFalse(self.b.add_artifact(KEY, "preview.png",
+                                             self.file("p.png", b"png"), generation=gen))
+        rows, _ = self.b.list()
+        self.assertEqual(1, len(rows))

@@ -632,8 +632,98 @@ def test_every_import_time_knob_reaches_the_container():
             if isinstance(name, str) and name.startswith("HAVERSACK_"):
                 read.add(name)
     assert "HAVERSACK_APP_NAME" in read, "the scan no longer sees the module's env reads"
+    # the cache volume's name (2026-09-20) is held to this rule like any other knob, by the
+    # scan and not by a line of its own: read another way (os.getenv, a helper) it would
+    # drop out of `read`, and the rule would pass it unforwarded
+    assert "HAVERSACK_CACHE_VOLUME" in read, "the scan does not see how the cache is named"
     missing = sorted(read - set(modal_app._RUNTIME_KNOBS))
     assert not missing, f"read at import but never forwarded into the container: {missing}"
+
+
+def _stores_named_under(env: dict) -> dict:
+    """``{module name: Modal object name}`` for every Volume and Dict modal_app looks up at
+    import, under ``env`` - in a subprocess, because the names are fixed at import, with
+    ``from_name`` recording what it was asked for."""
+    import json
+    import os
+    import subprocess
+    import sys
+    code = (
+        "import json, modal\n"
+        "asked = []\n"
+        "for cls in (modal.Volume, modal.Dict):\n"
+        "    real = cls.from_name\n"
+        "    def spy(name, *a, _real=real, **k):\n"
+        "        asked.append(name)\n"
+        "        return _real(name, *a, **k)\n"
+        "    cls.from_name = staticmethod(spy)\n"
+        "import haversack.modal_app as M\n"
+        "named = {n: getattr(M, n).name for n in\n"
+        "         ('weights_vol', 'scratch_vol', 'inputs_vol', 'jobs_dict', 'cache_vol')}\n"
+        "assert sorted(asked) == sorted(named.values()), (asked, named)\n"
+        "print(json.dumps(named))\n")
+    clean = {k: v for k, v in os.environ.items()
+             if k not in ("HAVERSACK_APP_NAME", "HAVERSACK_CACHE_VOLUME")}
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       env={**clean, "HAVERSACK_PROXY_AUTH": "0", **env})
+    assert r.returncode == 0, r.stderr[-1500:]
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+def test_a_deployment_can_name_its_cache_volume_and_nothing_else():
+    """Result keys hold no app name, so a cache is portable and a deployment may adopt one
+    (HAVERSACK_CACHE_VOLUME, 2026-09-20). Scratch, the inputs store and the jobs Dict hold
+    ONE deployment's job ids, uploads and flights: shared by accident, two apps would reap
+    each other's job directories and answer for each other's jobs."""
+    per_app = {"weights_vol": "haversack-weights", "scratch_vol": "unit-app-scratch",
+               "inputs_vol": "unit-app-inputs", "jobs_dict": "unit-app-jobs"}
+    assert _stores_named_under({"HAVERSACK_APP_NAME": "unit-app"}) == \
+        {**per_app, "cache_vol": "unit-app-cache"}             # the default is unchanged
+    assert _stores_named_under({"HAVERSACK_APP_NAME": "unit-app",
+                                "HAVERSACK_CACHE_VOLUME": "study-results"}) == \
+        {**per_app, "cache_vol": "study-results"}
+    # `--cache-volume` unset reaches a container as nothing, or as "": both are the default
+    assert _stores_named_under({"HAVERSACK_APP_NAME": "unit-app",
+                                "HAVERSACK_CACHE_VOLUME": ""})["cache_vol"] == "unit-app-cache"
+    assert _stores_named_under({})["cache_vol"] == "haversack-serve-cache"
+
+
+def test_the_per_app_stores_are_spelled_from_the_app_name_alone():
+    """The static half: each per-app store's name is the f-string of APP_NAME and its
+    suffix - no environment read, no CACHE_VOLUME - and a sixth store has to be classified
+    here before it ships."""
+    import ast
+    from pathlib import Path
+
+    from haversack import modal_app
+
+    tree = ast.parse(Path(modal_app.__file__).read_text(encoding="utf-8"))
+    names = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                and ast.unparse(node.value.func) in ("modal.Volume.from_name",
+                                                     "modal.Dict.from_name")):
+            names[node.targets[0].id] = ast.unparse(node.value.args[0])
+    assert names == {"weights_vol": "'haversack-weights'",
+                     "scratch_vol": "f'{APP_NAME}-scratch'",
+                     "inputs_vol": "f'{APP_NAME}-inputs'",
+                     "jobs_dict": "f'{APP_NAME}-jobs'",
+                     "cache_vol": "CACHE_VOLUME"}, names
+
+
+def test_modal_deploy_takes_the_cache_volume_like_the_other_knobs(monkeypatch):
+    import subprocess
+
+    from haversack import cli
+    seen = {}
+    monkeypatch.delenv("HAVERSACK_CACHE_VOLUME", raising=False)
+    monkeypatch.setattr(subprocess, "call", lambda argv, env=None: seen.update(env=env) or 0)
+    assert cli.main(["modal", "deploy", "--app-name", "unit-app",
+                     "--cache-volume", "study-results"]) == 0
+    assert seen["env"]["HAVERSACK_CACHE_VOLUME"] == "study-results"
+    assert seen["env"]["HAVERSACK_APP_NAME"] == "unit-app"
+    assert cli.main(["modal", "deploy"]) == 0
+    assert "HAVERSACK_CACHE_VOLUME" not in seen["env"]
 
 
 def test_volume_attach_preflight_fails_with_the_remedy(monkeypatch, tmp_path):

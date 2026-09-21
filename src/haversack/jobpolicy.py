@@ -28,6 +28,65 @@ from typing import NamedTuple
 TERMINAL = ("done", "failed", "cancelled")
 
 
+#: The light deliverables haversack can render beside a result: the name a request asks
+#: for one under -> the file it lands as, inside the result's own generation. The one
+#: place the names are written (2026-09-20): ``serve.ARTIFACT_NAMES`` is derived from
+#: it, the submit door refuses any other name, and a test holds ``artifact_overlap`` -
+#: which owns the renderers, and so has to spell the names again - to this table.
+#:
+#: WHICH of them a deployment renders is its own setting (``LocalExecutor(artifacts=)``,
+#: ``HAVERSACK_ARTIFACTS`` on Modal); which of THOSE a job renders is the request's
+#: (``deliverables`` on ``POST /v1/jobs``). Order here is the canonical order of every
+#: list built from it, so a job's record does not depend on how the caller sorted.
+#:
+#: **A deliverable is never part of a result's identity.** It is rendered FROM the
+#: labels, after them, into the generation that already holds them - so asking for one,
+#: or declining it, must not move the result key (no recompute, the same cache hit, the
+#: same ETag). That is why the list is a request field of its own and never an option:
+#: every option is hashed into the key.
+DELIVERABLES = {"preview": "preview.png", "statistics": "statistics.json"}
+
+#: Why a cache hit could not deliver what its request named. Said on the job
+#: (``deliverables_unavailable``), never by silently leaving the link out.
+INPUT_NOT_ON_HAND = ("not rendered for this stored result, and the input image is no "
+                     "longer staged on this server, so rendering it would mean fetching "
+                     "the input again; Cache-Control: no-cache recomputes the result "
+                     "with its deliverables")
+RENDER_BUSY = ("another render of this result is still running and does not include it; "
+               "submit again when it has finished")
+
+
+def wanted_deliverables(asked, offered) -> tuple:
+    """What one job renders: the request's list held to the deployment's set.
+
+    ``asked`` None means the request named no list - the deployment's whole set, which
+    is what every job rendered before requests could say (2026-09-20). Anything else is
+    a list of names, ``[]`` for none. The deployment's set is the DEFAULT and the
+    CEILING: the submit door refuses a name outside it, and this holds the line again
+    where the rendering happens, because the two can be different processes with
+    different settings (a Modal worker still warm from the previous deploy).
+    """
+    offered = set(offered or ())
+    names = offered if asked is None else set(asked)
+    return tuple(d for d in DELIVERABLES if d in names and d in offered)
+
+
+def missing_deliverables(wanted, generation_dir) -> tuple:
+    """Which of ``wanted`` the generation at ``generation_dir`` does not hold - declined
+    by the request that computed it, or never rendered. A file's presence is the whole
+    test: a generation's files never change once placed, artifacts only arrive."""
+    from pathlib import Path
+    g = Path(generation_dir)
+    return tuple(d for d in wanted if not (g / DELIVERABLES[d]).exists())
+
+
+def pending_covers(names, deliverable: str) -> bool:
+    """Whether a pending render whose marker lists ``names`` will place ``deliverable``.
+    A marker that lists nothing predates per-request lists (a Modal record written by
+    the previous deploy): it renders that deployment's whole set, so it covers anything."""
+    return names is None or deliverable in names
+
+
 def purgeable(meta, now: float, ttl_s: float) -> bool:
     """May this job record be dropped?
 
