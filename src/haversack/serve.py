@@ -4340,14 +4340,48 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         def _register_probe(tok: str, gopts: dict):
             @app.head(base + f"/labels{tok}.seg.nrrd", tags=["results"])
             def probe(request: Request, ident: str, task: str):
+                """200 materialized / 202 computing / 404 absent, never a compute.
+
+                The 200 describes the representation GET would send (RFC 9110 9.3.2):
+                the same validator - the content digest, from the entry's result, which
+                both lookups hand back - and the same Content-Length. Until 2026-09-21
+                it built its headers without the result, so its ETag was the key-derived
+                fallback GET never issues, and Starlette filled in ``Content-Length: 0``
+                from the empty body, which RFC 9110 8.6 forbids unless GET's content
+                would be empty too. A client asking "has this changed?" compared a tag
+                no GET had given it, and a shared cache that forwards a HEAD marks its
+                stored GET stale when either field differs (RFC 9111 4.3.5) - on
+                responses sent ``Cache-Control: public``.
+
+                ``If-None-Match`` is honored, deliberately: RFC 9110 13.1.2 names GET
+                and HEAD together for the 304, GET answers it here, and a HEAD that
+                said 200 to the request GET says 304 to would be the same disagreement
+                one header over. Only the 200 is conditional, as on GET: a flight or an
+                absence selects no representation for a tag to match. GET's other
+                fields (Content-Type, Content-Disposition, Last-Modified) are left to
+                GET - nothing acts on them here, and each would be a second copy of a
+                fact ``FileResponse`` owns."""
                 from fastapi import Response
                 key = keyed(norm(ident), task, gopts)
                 if key is None:
                     raise HTTPException(404, "unknown resource")
+
+                def found(hit):
+                    headers = _resource_headers(key, hit[1])
+                    fresh = not_modified(request, headers["ETag"])
+                    if fresh is not None:
+                        return fresh
+                    resp = Response(status_code=200, headers=headers)
+                    try:                       # the file GET's FileResponse would stat
+                        resp.headers["content-length"] = str(os.stat(hit[0]).st_size)
+                    except OSError:            # left since the lookup: no length beats
+                        del resp.headers["content-length"]     # a wrong one; 200 stands
+                    return resp
+
                 since = time.monotonic()
                 hit = executor.cache_get(key)
                 if hit is not None:
-                    return Response(status_code=200, headers=_resource_headers(key))
+                    return found(hit)
                 jid = executor.find_inflight(key)
                 if jid is not None:
                     # anonymous callers see this too (user decision): watching a
@@ -4356,8 +4390,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     return Response(status_code=202,
                                     headers=_progress_headers(snap.get("progress")))
                 # a miss from a stale view is not "not materialized" (503 if unverifiable)
-                if confirm_absent(key, since) is not None:
-                    return Response(status_code=200, headers=_resource_headers(key))
+                hit = confirm_absent(key, since)
+                if hit is not None:
+                    return found(hit)
                 raise HTTPException(404, "not materialized")
 
         _grid_routes(_register_probe)
@@ -4585,6 +4620,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     hit = confirm_absent(key, since)   # 503 when a stale view cannot tell
                 if hit is None:
                     raise HTTPException(404, "not materialized")
+                # The key-derived validator, NOT the labels' digest, and on purpose
+                # (2026-09-21, when the HEAD probe took the digest): this body is the
+                # result record, which a recompute rewrites (timings, provenance) even
+                # when it reproduces the labels byte for byte, so the labels' digest
+                # would call two different bodies one. The honest tag is a digest of
+                # this JSON; nothing here evaluates If-None-Match, so no client is told
+                # "not modified" on the strength of this one.
                 return JSONResponse(hit[1], headers=_resource_headers(key))
 
         _grid_routes(_register_meta)
