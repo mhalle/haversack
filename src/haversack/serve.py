@@ -1457,16 +1457,39 @@ class ResultCache:
         return out[:limit]
 
     def get(self, key: str):
+        """``(labels path, result)`` for what ``key`` publishes now, leased - or None.
+
+        The LRU touch is best effort, and on its own. A cache this process cannot WRITE - a
+        read-only filesystem (EROFS), a directory another uid owns (EPERM) - is a supported
+        way to read one: ``_take_lease`` and ``_entry_lock`` both allow for it, and
+        ``SeriesCache`` has treated its own touch this way all along. There the LRU loses a
+        touch, that is all. The touch used to share one ``try`` with the read of
+        ``result.json``, so a refused touch SKIPPED the read and every hit came back with
+        ``{}`` for its result (found 2026-09-20, from a listing smoked over a cache mounted
+        read-only). Nothing failed, which is what made it a defect. The ETag fell back from
+        the content digest to the key, so a client holding those very bytes downloaded them
+        again; a ``result:<key>`` reference was refused as ``result_unreadable``, with the
+        advice to recompute a result that was fine; and the job result route, which takes
+        an entry only when its digest is the job's (``same_output``), fell through to the
+        job's own scratch copy - a 410 "purged" once that was gone, with the bytes sitting
+        in the entry.
+
+        ``{}`` means what ``same_output`` always took it to mean: a ``result.json`` that is
+        missing, unreadable, or not what ``put`` writes (bad JSON, bytes that are not UTF-8,
+        anything but an object).
+        """
         g = self._resolve(key)
         if g is None:
             return None
         try:
-            import os as _os
-            _os.utime(self.root / key)         # LRU touch
+            os.utime(self.root / key)          # LRU touch
+        except OSError:
+            pass                               # not ours to write: read on (see above)
+        try:
             result = json.loads((g / "result.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):          # ValueError: JSONDecodeError, UnicodeDecodeError
             result = {}
-        return g / RESULT_NAME, result
+        return g / RESULT_NAME, result if isinstance(result, dict) else {}
 
     def generation(self, key: str) -> str | None:
         """Which publication the entry at ``key`` currently holds, or None."""

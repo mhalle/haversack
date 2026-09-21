@@ -80,6 +80,25 @@
   Nothing said so, and a reader guessed wrong (2026-09-19). The JSON's `units` block now
   states the first; no number changes.
 
+- **A result cache the server cannot write is read whole.** A cache on a read-only
+  filesystem, or in a directory another user owns, is a supported way to read one - the
+  reader's lease and the entry lock have always allowed for it - but the lookup did its
+  least-recently-used touch and its read of `result.json` in one `try`, so where the touch
+  was refused the read was skipped and every hit came back with an empty result. Nothing
+  failed, which is why it went unseen until a listing was smoked over a cache mounted
+  read-only (2026-09-20), and three things quietly answered differently. The `ETag` fell
+  back from the content digest to the key, so `If-None-Match` from a client holding those
+  very bytes got the whole download again instead of a 304. A `result:<key>` reference was
+  refused `result_unreadable`, with the advice to recompute a result that was fine. And
+  `GET /v1/jobs/{id}/result`, which serves the cache entry only when its digest is the
+  job's, fell through to the job's own copy - 410 "purged" once that was gone, with the
+  bytes sitting in the entry. The touch is best effort and on its own now, as the input
+  cache's has been since 2026-09-06: there the LRU loses a touch, that is all. An empty
+  result is left meaning what it was always taken to mean, a `result.json` that is missing
+  or not what was written - which now includes bytes that are not UTF-8 (they raised, a
+  500) and JSON that is not an object. No cache format, lease, claim or eviction rule
+  changed, and nothing stored is recomputed.
+
 
 ## [0.12.4] - 2026-09-19
 
