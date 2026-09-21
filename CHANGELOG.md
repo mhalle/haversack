@@ -80,6 +80,71 @@
   Nothing said so, and a reader guessed wrong (2026-09-19). The JSON's `units` block now
   states the first; no number changes.
 
+- **`GET /v1/segmentations` takes filters and pages, and its silent cap is gone.** It
+  returned the newest 500 results and said nothing of the rest - a Modal cache of 2,083
+  listed 500 - took no filter, and read every entry one after another, which on a Modal
+  volume is the expensive way round: measured there, listing 2,083 names is 0.03 s and a stat
+  0.4 ms, but the FIRST read of any file is ~24 ms whatever its size, so a serial walk of that
+  cache took 161 s. `limit` (1-1000, default 100) and an opaque `cursor` replace the cap, and
+  the answer carries `next_cursor`, null on the last page. `identity=` (repeatable, up to
+  100: a cohort asks "which of these series are done" in one request) and `task=` filter.
+  `haversack remote results` and `RemoteClient.segmentations` / `iter_segmentations` take
+  the same filters and follow the cursors; against a server from before this, the client
+  refuses to pass off its whole listing as a filtered one.
+- **No index stands behind the listing, on purpose.** An identity -> key index would be one
+  more thing to keep in step with every publication, eviction and delete, by every container;
+  the measurements give three answers that keep nothing. A filter by identity is COMPUTED:
+  the server derives the key of every task it serves, under the default options and each grid
+  token, and looks those names up - what the path surface does for one task - so it reads no
+  entry it does not return, and is as fast on thousands of results as on none. It finds the
+  results that have a path; one computed with other options, or from several inputs, is in
+  the plain and the `task` listing only. Order and paging come from names and stats - the
+  mtime of each entry's pointer - and content is read for the requested page alone. A filter
+  by task alone is the one that needs content: entries are read 32 at a time (the same walk
+  took 4.5 s that way), and a running server remembers each publication's `meta.json` in
+  memory, validated against the pointer's stamp on every use - a cache that rebuilds in
+  seconds, not an index that can be wrong. The task filter is asked of that metadata before
+  an entry's other files are stat'ed, because on the volume stats are the warm cost and,
+  unlike reads, barely overlap. Deployed over that 2,083-result cache, mounted read-only
+  (server-side, one container each): an identity filter 0.55 s, and 0.2-0.3 s with `task=`
+  for one input or for fifty; a first page 0.6-0.7 s; a scan for a task no result has
+  3.5-9.7 s cold and 0.3-0.5 s once remembered; all 2,083 rows by cursor in three requests.
+  Every listing there includes a ~0.2 s volume reload. A key's real cost turned out to be
+  its task's weights versions (a `describe()`), not the lookup, so a request reads them once
+  a task - through `weights_versions` on an executor that pins its own keys, and
+  `create_public_app(..., weights_fn=)` on a twin; asked key by key, fifty inputs across every
+  task took 47 s, and 1.6 s after.
+- **The listing is ordered by publication, and a cursor is a position.** Rows gain
+  `published`, the mtime of the entry's pointer: one atomic rename moves it, at the instant
+  the entry's content changes, and nothing a read does touches it (reads lease a file of their
+  own and touch the key directory, whose mtime would have reshuffled the listing under
+  traffic; `computed` is a job's start on a worker's clock). The cursor holds (time, key),
+  not an offset, so pages stay put while results are published: what arrives after the first
+  page sorts ahead of it, where an offset would repeat a row on every page after it.
+- **A multi-input result is listed.** The listing's stale-key filter re-derived each
+  entry's key from its FIRST identity alone, so every result of a multi-input task read as
+  stale and was dropped. It is held to the same rule as the rest now - listed under the key
+  this server derives from all of its identities, without links, as an upload's is.
+- **On Modal the listing follows the volume rules of 0.12.4.** It is read from a view of
+  the result volume newer than the request - a result missing from a listing reads as "not
+  computed", the listing's form of the false 410 - and a reload that cannot be had is a 503
+  with `Retry-After`, never a shorter list. Its reader threads count as "other threads" to a
+  reload, so every batch of reads runs inside the view lock, held by the thread that started
+  it until the batch has ended; per batch and not per listing, because a cold scan is seconds
+  long and lookups queue behind a waiting reload.
+- **A Modal deployment can name its result-cache volume** (`--cache-volume`,
+  `HAVERSACK_CACHE_VOLUME`; default `<app>-cache`, as before). Every store was named after
+  the app, so a deployment under a new name began with an empty result cache - though a
+  result key holds no app name, which makes a cache portable. Only the cache can be named:
+  scratch, the inputs store and the job store hold one deployment's job ids, uploads and
+  flights. Adopting a cache whose first deployment is gone is completely safe. Two LIVE
+  deployments on one cache behave like more containers of one app, except that single flight
+  lives in the per-app job store, so the same key can be computed twice - duplicate work, not
+  corruption. Either way every publication evicts down to the publishing app's
+  `HAVERSACK_RESULTS_KEEP` (default 500): adopt a larger cache with a larger bound, or lose
+  the difference at the first job. The knob is forwarded to every container like the rest;
+  unforwarded, the containers would commit and reload `<app>-cache`, mounted nowhere.
+
 
 ## [0.12.4] - 2026-09-19
 

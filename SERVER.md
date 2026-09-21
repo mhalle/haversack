@@ -32,7 +32,9 @@ haversack remote submit idc:<crdc_series_uuid> --task ts.v2:total_fast -o labels
 ```
 
 `submit` uploads (or names a hosted series), streams progress, and downloads the labels;
-`--no-wait` returns a job id for `status`, `fetch`, and `cancel`. `GET /v1/health` answers
+`--no-wait` returns a job id for `status`, `fetch`, and `cancel`. `haversack remote results`
+lists what the server has computed, newest first (`--identity idc:<crdc_series_uuid>`,
+`--task`, `--limit`, `--json`; see "Listing results"). `GET /v1/health` answers
 when the server is ready. That is the personal setup: the server generated a token, printed
 it, and left it in `~/.cache/haversack/serve/<port>.token`, readable by you alone and
 stamped with the server's process id, and `haversack remote` on the same machine read it
@@ -148,14 +150,60 @@ either its canonical `eco:name` form or its bare alias. A grid variant is a toke
 filename: `labels_res-1mm.seg.nrrd` is the same result restored at 1 mm isotropic, and every
 artifact takes the same token. Reads obey the rules above: a cache hit is served with
 `Cache-Control: public` and an `ETag`; a miss is 404 unless the caller is authorized and
-sends `Prefer`. `GET /v1/segmentations` lists every cached result this server can still
-resolve (its mounted sources, its current weights) with its links, for authorized callers,
-because the listing reveals the identities of uploaded content.
+sends `Prefer`. `GET /v1/segmentations` lists the cached results (next section).
 
 Uploads are not path-addressable - their identity is a digest nobody else can guess - so an
 uploaded input's result is fetched through its job's `result` link, which is where the ETag
 revalidation earns its keep. No content digest is: not a stored input's, and not a `result`
 reference's, whose identity is the digest of the output it names.
+
+## Listing results
+
+`GET /v1/segmentations` lists the cached results this server can still resolve - its mounted
+sources, its tasks, its CURRENT weights: an entry whose key this server would no longer
+derive is left out, because its link would 404 and suggest a recompute. It is for authorized
+callers, because the listing reveals the identities of uploaded content, and a filter by
+digest would confirm one. Newest published first, a page at a time:
+
+```
+GET /v1/segmentations?identity=idc:<crdc_series_uuid>&task=ts.v2:total&limit=100&cursor=<token>
+
+{"segmentations": [{"key": ..., "task": ..., "identity": [...], "options": {...},
+                    "computed": ..., "published": ..., "bytes": ..., "links": {...}}, ...],
+ "next_cursor": "<token>" | null}
+```
+
+`links` is there when the result has a path (one hosted input, default options or a grid
+token); an upload's result, a `result:` reference's and a multi-input one are listed without.
+`published` is what the order is by: the time of the publication the entry holds now, so a
+result recomputed with `no-cache` moves to the head, and nothing a READ does moves anything.
+
+- **`limit`** is 1-1000, default 100. There is no other cap: before 2026-09-20 the listing
+  returned the newest 500 and said nothing of the rest.
+- **`cursor`** is the previous answer's `next_cursor`, handed back as given; it is null on the
+  last page. It is a position, not an offset, so pages stay put while results are published:
+  what is published (or republished) after your first page sorts ahead of it and is at the
+  head of your next listing - never a repeated row, never a shifted one. A cursor the server
+  did not issue is a 422.
+- **`identity`** keeps the results computed from one input: `<source>:<identifier>` for a
+  source from `/v1/sources` with a path surface, or a content digest (`sha256:<hex>`, what an
+  upload's job reports as its `input_identity`). Repeat it, up to 100 times, for several
+  inputs at once - the answer is the union, which is how a cohort asks "which of these series
+  are done". It is COMPUTED, not searched: the server derives the key of every task it serves,
+  under the default options and each grid token, and looks those names up - what a `HEAD` on
+  each path would tell you, in one request, and as fast on a cache of thousands as on an
+  empty one. So it finds exactly the results that have a path, plus an upload's under those
+  same options. A result computed with other options (`interp`, `folds`, ...) or from several
+  inputs is not found this way; the plain listing and the `task` filter show it.
+- **`task`** keeps one task's results (any spelling the task routes take). With `identity`
+  it is one key per option set. Alone it is the one filter that has to read every entry's
+  metadata, which the server does in parallel and remembers in memory for as long as it
+  runs - there is no index on disk to fall out of step with the cache.
+
+A 422 names what was refused (an identity that is neither form, an unknown task, a `limit`
+out of range, a foreign cursor). On Modal the listing is read from a view of the result
+volume newer than the request, like every other statement that something is absent; when no
+such view can be had the answer is 503 with `Retry-After`, never a shorter list.
 
 ## Sources and the input store
 
@@ -358,7 +406,7 @@ reports which engines are enabled, and `GET /v1/tasks/{task}` names each task's 
 ## Deploying to Modal
 
 ```bash
-haversack modal deploy [--gpu L40S] [--app-name haversack-serve] [--scaledown 120] [--no-proxy-auth]
+haversack modal deploy [--gpu L40S] [--app-name haversack-serve] [--cache-volume NAME] [--scaledown 120] [--no-proxy-auth]
 modal app stop haversack-serve --yes
 ```
 
@@ -379,10 +427,33 @@ default on), `HAVERSACK_WARM_TASK` (the task loaded at startup, default `ts.v2:t
 `HAVERSACK_INPUTS_GB` (default 50), `HAVERSACK_API_MIRROR_GB` (default 2: the api container's
 local copies of the results it serves), `HAVERSACK_ARTIFACTS` (default `preview,statistics`),
 `HAVERSACK_IDC_CLOUD` (`aws`, or `gcp` to read IDC's Google Cloud mirror first - for a
-deployment that lives there),
+deployment that lives there), `HAVERSACK_CACHE_VOLUME` (the result cache's volume, below),
 and `HAVERSACK_PUBLIC=1`, which adds an anonymous read-only twin that serves cache hits and
 nothing else. A redeploy does not preempt warm containers running the old code; stop the
 app first. Costs run while a worker is warm.
+
+A deployment's stores are named after the app - `<app>-scratch`, `<app>-inputs`, the
+`<app>-jobs` job store, `<app>-cache` - except the weights volume, `haversack-weights`, which
+every deployment shares. `--cache-volume` / `HAVERSACK_CACHE_VOLUME` names the result cache
+instead, so a deployment under a new name can start with an earlier one's results: a result
+key holds no app name (input identity, task, options, weights versions, cache epoch), so a
+cache answers the same requests whichever app mounts it. Only the cache can be named;
+scratch, inputs and the job store hold one deployment's job ids, uploads and flights. Nothing
+is renamed or migrated, and unset means `<app>-cache` as before. Two cases:
+
+- **The cache's first deployment is gone** (stopped, or redeployed under another name):
+  completely safe. It is the same volume, read and written by the same code.
+- **Two live deployments share one cache**: they behave like more worker containers of one
+  app, which is a case the cache is built for - a result is published as a whole generation
+  behind one pointer. The one difference is single flight: "a submit whose key is already in
+  flight joins that job" is decided in the per-app job store, so the two apps can each
+  compute the same key at the same time. That is duplicate GPU work, not corruption: both
+  publish, one pointer wins, the other generation is pruned.
+
+In both, mind `HAVERSACK_RESULTS_KEEP`: every publication evicts down to the PUBLISHING app's
+bound (default 500), least recently used first. A deployment that adopts a cache of 2,000
+results with the default evicts 1,500 of them at its first job - deploy it with a bound at
+least the size of the cache it adopts. With two live apps the smaller bound is the real one.
 
 ## Operating it
 
@@ -414,7 +485,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/segments` | read | which tasks produce a segment, and with what label value |
 | POST | `/v1/tasks/<task>/prepare` | token | install a task's weights now |
 | GET | `/v1/sources` | read | the hosted sources (and `result`), their identifier grammar, and which have a path surface |
-| GET | `/v1/segmentations` | token | every cached result, with links |
+| GET | `/v1/segmentations` | token | cached results, newest first: `identity`, `task`, `limit`, `cursor` |
 | POST | `/v1/jobs` | token | submit |
 | GET | `/v1/jobs` | token | brief status of every known job |
 | GET | `/v1/jobs/<id>` | token | full status, result metadata, links |

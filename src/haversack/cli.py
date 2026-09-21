@@ -715,6 +715,11 @@ def _command_line() -> click.Group:
                          help=('worker GPU (default L40S; A10 is the economical fast-mode '
                                'choice)')),
             click.Option(['--app-name'], help='Modal app name (default: haversack-serve)'),
+            click.Option(['--cache-volume'],
+                         help=('the Modal volume holding the result cache (default: <app '
+                               'name>-cache). Result keys hold no app name, so a deployment '
+                               'under a new name can adopt an earlier one\'s results; set '
+                               'HAVERSACK_RESULTS_KEEP at least as high as the cache it adopts')),
             click.Option(['--scaledown'], type=int,
                          help=('seconds a warm worker lingers after its last job (Modal caps at '
                                '1200)')),
@@ -783,6 +788,27 @@ def _command_line() -> click.Group:
         'tasks', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
         short_help='what the server can segment')
     remote.add_command(remote_tasks)
+    remote_results = _Command(
+        'results', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+        short_help='the results the server holds, newest first',
+        help=('Lists cached results (GET /v1/segmentations; needs the token): when each was '
+              'published, its task, its input and the path of its labels - or its key, for a '
+              'result with no path (an upload, several inputs, non-default options). '
+              '--identity is computed by the server, not searched, so it is immediate on a '
+              'cache of any size; it finds the results that have a path.'),
+        params=[
+            click.Option(['--identity'], multiple=True,
+                         help=('only results of this input: <source>:<identifier>, e.g. '
+                               'idc:<crdc_series_uuid>, or a content digest (sha256:<hex>). '
+                               'Repeat for several inputs')),
+            click.Option(['--task'], help='only results of this task'),
+            click.Option(['--limit'], type=int, default=100, show_default=True,
+                         help=("stop after this many results; 0 follows the server's cursors "
+                               'to the end')),
+            click.Option(['--json'], is_flag=True,
+                         help='the rows as one JSON document instead of a table'),
+        ])
+    remote.add_command(remote_results)
 
     docs = _Command(
         'docs', callback=_dispatch(_cmd_docs, 'docs'),
@@ -868,6 +894,8 @@ def _cmd_modal(args) -> int:
         env["HAVERSACK_GPU"] = args.gpu
     if args.app_name:
         env["HAVERSACK_APP_NAME"] = args.app_name
+    if args.cache_volume:
+        env["HAVERSACK_CACHE_VOLUME"] = args.cache_volume
     if args.scaledown:
         env["HAVERSACK_SCALEDOWN"] = str(args.scaledown)
     if args.no_proxy_auth:
@@ -907,6 +935,26 @@ def _cmd_remote(args) -> int:
     if args.rcmd == "tasks":
         for t in c.tasks():
             print(t)
+    elif args.rcmd == "results":
+        import datetime
+        import itertools
+        if args.limit < 0:
+            from .errors import InputError
+            raise InputError("--limit must be 0 (every result) or more")
+        # a page no larger than what is still wanted, and never over the server's maximum
+        rows = c.iter_segmentations(identity=list(args.identity) or None, task=args.task,
+                                    page_size=min(args.limit, 1000) if args.limit else 1000)
+        rows = list(itertools.islice(rows, args.limit) if args.limit else rows)
+        if args.json:
+            print(json.dumps({"segmentations": rows}, indent=2))
+            return 0
+        for e in rows:
+            when = e.get("published") or e.get("computed")
+            stamp = (datetime.datetime.fromtimestamp(when, datetime.timezone.utc)
+                     .strftime("%Y-%m-%dT%H:%M:%SZ") if when else "-")
+            where = (e.get("links") or {}).get("labels") or f"key:{e.get('key')}"
+            print("\t".join([stamp, str(e.get("task")),
+                             ",".join(map(str, e.get("identity") or [])) or "-", where]))
     elif args.rcmd == "status":
         print(json.dumps(c.status(args.job_id), indent=2))
     elif args.rcmd == "fetch":

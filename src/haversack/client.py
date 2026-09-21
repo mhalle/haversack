@@ -99,6 +99,46 @@ class RemoteClient:
             params["count_only"] = "true"
         return self._json("GET", "/v1/segments", params=params)
 
+    def segmentations(self, *, identity=None, task: str | None = None,
+                      limit: int | None = None, cursor: str | None = None) -> dict:
+        """One page of the results the server holds (``GET /v1/segmentations``, authorized):
+        ``{"segmentations": [...], "next_cursor": ...}``, newest published first.
+
+        ``identity`` is one input or several - ``"idc:<crdc_series_uuid>"``, any
+        ``<source>:<identifier>`` the server mounts, or a content digest - and the answer
+        is the union of their results; ``task`` keeps one task's. The server computes an
+        identity filter rather than searching for it, so it finds what has a path (default
+        options and the grid variants, single-input) and is as fast on a cache of thousands
+        as on an empty one. Pass ``next_cursor`` back as ``cursor`` for the next page, or
+        use :meth:`iter_segmentations`, which does."""
+        ids = [identity] if isinstance(identity, str) else list(identity or [])
+        params = [("identity", i) for i in ids]
+        for k, v in (("task", task), ("limit", limit), ("cursor", cursor)):
+            if v is not None:
+                params.append((k, v))
+        page = self._json("GET", "/v1/segmentations", params=params)
+        if "next_cursor" not in page and (ids or task or cursor):
+            # a server from before 2026-09-20 ignores the parameters and answers with its
+            # whole listing (the newest 500): never hand that back as if it were filtered
+            raise RemoteError("this server's /v1/segmentations predates filters and paging "
+                              "(its answer has no next_cursor), so it returned its whole "
+                              "listing; upgrade the server, or list without a filter")
+        return page
+
+    def iter_segmentations(self, *, identity=None, task: str | None = None,
+                           page_size: int | None = None):
+        """Every row of :meth:`segmentations`, following the server's cursors to the end.
+        The cursor is a position, not an offset, so what is published while this runs
+        neither repeats a row nor skips one: it sorts ahead of where the walk already is."""
+        cursor = None
+        while True:
+            page = self.segmentations(identity=identity, task=task, limit=page_size,
+                                      cursor=cursor)
+            yield from page.get("segmentations") or []
+            cursor = page.get("next_cursor")
+            if not cursor:
+                return
+
     def submit(self, image, task: str, **options) -> str:
         """``image`` is a local file to upload, or ``"<source>:<identifier>"``
         (e.g. ``"idc:<crdc_series_uuid>"``) to have the server fetch the input

@@ -397,7 +397,10 @@ haversack remote submit scan.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
 ```
 
 `submit` uploads, shows progress, and downloads the labels; `--no-wait` returns a job id for
-`status`, `fetch`, and `cancel`. The endpoints are under `/v1/` (`/v1/health`, `/v1/tasks`,
+`status`, `fetch`, and `cancel`. `haversack remote results` lists what the server has already
+computed, newest first - `--identity idc:<crdc_series_uuid>` for one input (or several: repeat
+it), `--task` for one task - so a cohort can ask what is done before submitting anything. The
+endpoints are under `/v1/` (`/v1/health`, `/v1/tasks`,
 `/v1/jobs`); the OpenAPI document is at `/docs`. The server is ready when `GET /v1/health`
 answers; stop it with Ctrl-C (or kill the process) - queued jobs are kept in its `jobs.db`
 and re-queued when it starts again. On this M2 a `total_fast` job through the
