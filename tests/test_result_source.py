@@ -693,7 +693,9 @@ def test_a_result_reference_gets_no_path_surface_and_no_path_links(server):
     _, _, client = server
     up = _upstream(client)
     s = _done(client, _post(client, "relabel", [{"kind": "result", "id": up["key"]}]))
-    assert set(s["links"]) == {"self", "events", "result"}, s["links"]
+    # no PATH links: since 2026-09-21 the job offers its artifacts job-scoped instead
+    assert {"self", "events", "result", "meta"} <= set(s["links"]), s["links"]
+    assert all(u.startswith(f"/v1/jobs/{s['id']}") for u in s["links"].values()), s["links"]
     assert not [r.path for r in client.app.routes if r.path.startswith("/v1/result")]
     assert [r.path for r in client.app.routes if r.path.startswith("/v1/toy/")]
     listed = {x["prefix"]: x for x in client.get("/v1/sources").json()["sources"]}

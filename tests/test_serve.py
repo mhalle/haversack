@@ -2882,12 +2882,16 @@ def test_a_job_hands_back_its_key_and_the_urls_for_everything_it_made(tmp_path, 
 def test_links_are_absent_where_a_result_is_not_path_addressable(tmp_path):
     """An upload is identified by its sha256, which the path surface does not
     address - so the job offers its job-scoped URLs and no labels link, rather
-    than a URL that would 404."""
+    than a URL that would 404. Since 2026-09-21 the job-scoped URLs include the
+    artifacts (`meta` here: this server renders no deliverables), and no link names
+    a path - tests/test_job_artifacts.py follows them."""
     seg, ex, client = make(tmp_path)
     jid = submit(client)                      # a plain upload
     links = wait_state(client, jid)["links"]
     assert links["result"].endswith("/result")
-    assert "labels" not in links and "meta" not in links
+    assert "labels" not in links
+    assert all(url.startswith(f"/v1/jobs/{jid}") for url in links.values()), links
+    assert client.get(links["meta"]).status_code == 200    # and no link 404s
 
 
 # -- cache control: RFC 9111 semantics, per request and per engine ----------

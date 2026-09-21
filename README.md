@@ -419,6 +419,9 @@ Without the flag a job gets the server's own set (`GET /v1/health` lists it), wh
 the most a request may name. A deliverable is never part of the result: declining the
 preview computes the same labels under the same key, and asking for it later is a cache hit
 that renders it then - or says why it cannot. The command line's `segment` renders neither.
+A finished job's `links` name where each one is: by the result's path when it has one, and
+through the job itself (`/v1/jobs/<id>/preview.png`, `/statistics.tsv`, with the token) when
+it does not - the result of an uploaded scan, above all.
 
 A finished job reports a `key`, and `result:<key>` names that result as the INPUT of another
 job on the same server - one job's labels as another's mask, without the bytes leaving the

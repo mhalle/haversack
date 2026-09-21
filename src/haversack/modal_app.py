@@ -725,6 +725,41 @@ def _clear_pending_marker(key: str, jid: str) -> None:
         pass
 
 
+def _pending_marker(key: str, *, sweep: bool):
+    """The live ``artifacts:`` marker for ``key`` - one Dict get - or None. ``sweep``
+    removes a dead one on the way; the anonymous twin passes False, because it writes
+    nothing anywhere, not even housekeeping."""
+    m = jobs_dict.get(f"artifacts:{key}")
+    if not (isinstance(m, dict) and m.get("state") == "pending"):
+        return None
+    # the same 900 s rule the local executor applies on read: a marker a killed
+    # overlap thread left behind must not answer 202 forever
+    if time.time() - float(m.get("t") or 0) > 900:
+        # and the marker goes, as it does locally: left in place, the writer's
+        # refuse-if-present rule would decline to mark a genuinely new flight
+        if sweep:
+            try:
+                jobs_dict.pop(f"artifacts:{key}", None)
+            except Exception:                  # noqa: BLE001 - a read path must not fail on it
+                pass
+        return None
+    return m
+
+
+def _artifact_state(key: str, name: str | None = None, *, sweep: bool) -> str:
+    """"pending" while a worker's overlap will still place ``name`` into ``key``'s entry
+    (any deliverable, for ``name`` None), else "absent". One rule for the api and for
+    the twin (2026-09-21): the twin had no view of the marker at all, so between `done`
+    and the worker's commit of a preview it called the preview ABSENT - a 404 for a file
+    seconds away, to the anonymous poller told everywhere else to read 404 as final
+    (seen on the smoke `haversack-doors-smoke`, with a render slowed to 10 s)."""
+    from haversack.jobpolicy import pending_covers
+    m = _pending_marker(key, sweep=sweep)
+    if m is None:
+        return "absent"
+    return "pending" if name is None or pending_covers(m.get("names"), name) else "absent"
+
+
 def _clear_own_artifacts_marker(jid: str, meta: dict) -> None:
     """Failure-path cleanup: drop this job's artifacts-pending marker (the
     overlap worker owns it on success). Without this a put that raised
@@ -1535,8 +1570,13 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         # to what this container renders - the api checked it against ITS setting, and a
         # worker still warm from the previous deploy may have another. A record with no
         # list is a previous deploy's, or a path-surface ask: the deployment's set.
-        from haversack.jobpolicy import wanted_deliverables
+        from haversack.jobpolicy import unkeyed_deliverables, wanted_deliverables
         wanted = wanted_deliverables(meta.get("deliverables"), ARTIFACTS)
+        # no key, no entry, nothing to render into: said on the record before `done`,
+        # as the local executor does, so `links` never names what no door serves
+        unkeyed = unkeyed_deliverables(wanted, meta.get("cache_key"))
+        if unkeyed:
+            _emit(jid, {"deliverables_unavailable": unkeyed})
 
         def _set_pending(key: str) -> None:
             _set_pending_marker(key, jid, wanted)
@@ -1985,32 +2025,14 @@ class ModalExecutor:
 
     def _pending_marker(self, key: str):
         """The live ``artifacts:`` marker for ``key`` - one Dict get - or None."""
-        m = jobs_dict.get(f"artifacts:{key}")
-        if not (isinstance(m, dict) and m.get("state") == "pending"):
-            return None
-        # the same 900 s rule the local executor applies on read: a marker a killed
-        # overlap thread left behind must not answer 202 forever
-        if time.time() - float(m.get("t") or 0) > 900:
-            # and the marker goes, as it does locally: left in place, the writer's
-            # refuse-if-present rule would decline to mark a genuinely new flight
-            try:
-                jobs_dict.pop(f"artifacts:{key}", None)
-            except Exception:                  # noqa: BLE001 - a read path must not fail on it
-                pass
-            return None
-        return m
+        return _pending_marker(key, sweep=True)
 
     def artifact_state(self, key: str, name: str | None = None) -> str:
         """As the local executor's: "pending" while a worker's overlap is still placing
         this entry's artifacts - and, asked about ONE deliverable, only when that render
         was asked for it (the marker's ``names``; a marker without them is a previous
         deploy's, which rendered its whole set)."""
-        from haversack.jobpolicy import pending_covers
-        m = self._pending_marker(key)
-        if m is None:
-            return "absent"
-        return ("pending" if name is None or pending_covers(m.get("names"), name)
-                else "absent")
+        return _artifact_state(key, name, sweep=True)
 
     def _unrendered_on_hit(self, key: str, wanted, hit) -> dict:
         """``{name: why}`` for what a cache hit's list names and its stored generation
@@ -2440,5 +2462,9 @@ if PUBLIC:
                                  # a miss read from a view a refused reload left stale
                                  # is a 503, not a 404 (see _confirm_cache_absent)
                                  confirm_absent=_confirm_cache_absent,
+                                 # a render still running is a 202, not a 404: read
+                                 # from the marker, never swept from here
+                                 artifact_state=lambda key, name=None: _artifact_state(
+                                     key, name, sweep=False),
                                  # so a pinned read can be answered, not refused outright
                                  versions_fn=lambda t: installed_versions(seg, t))

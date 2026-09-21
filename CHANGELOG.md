@@ -2,6 +2,62 @@
 
 ## [Unreleased]
 
+- **A result with no path can reach its deliverables: `/v1/jobs/<id>/preview.png`,
+  `/statistics.json`, `/statistics.tsv`, `/meta.json`.** The artifacts beside a result were
+  served only by its path, and a result whose identity has no path - an upload's, a
+  `result:` reference's, a multi-input job's - had none: the job rendered `preview.png` and
+  `statistics.json` into its cache entry, reported `deliverables: ["preview", "statistics"]`
+  with nothing unavailable, and offered no link, because no route served them. The person
+  who uploads a local scan from 3D Slicer is exactly who wants the statistics. The new
+  routes are the job's own and authorized like `/result`, never anonymous - a job's preview
+  shows what was uploaded - and resolve as `/result` does: through the job's key to its
+  published entry, held to the digest this job reported, and by its answers (404, 409 not
+  done, 410 gone, 503 not visible yet), then 202 with `Retry-After` while a render that will
+  place the artifact is pending and 404 when none will, with the job's own reason. A
+  path-less job's `links` carry them as `meta`, `preview` and `statistics` - the names a
+  path-addressable result uses, so a client follows one name either way. Listing rows for
+  such results stay without links: the listing is of results and knows no job. A job with no
+  cache entry to render into (a server without a result cache) now says so in
+  `deliverables_unavailable` rather than list what nothing would serve.
+- **Fixed: an artifact's strong `ETag` did not change when its bytes did.** `meta.json`,
+  `preview.png` and `statistics.json` / `.tsv` all carried one tag derived from the result
+  KEY, under `Cache-Control: public, max-age=3600`. A `Cache-Control: no-cache` recompute
+  republishes under the same key, so the same URL then served different bytes - a preview of
+  8290 and then 8309 bytes, a `volume_ml` of 0.384 and then 0.512 - under an unchanged
+  strong validator, which RFC 9110 (8.8.1) forbids, while the labels' tag (their content
+  digest) moved as it should. Each artifact's `ETag` is now the digest of the body it sends.
+  The content rather than the publication, because the read is already paid: three of the
+  four bodies are built per request and a `HEAD` owes them to its `Content-Length`, the
+  fourth is a PNG of kilobytes, and a digest is also right for a legacy entry with no
+  generation and for a job's own copy. With a tag that can be trusted, `If-None-Match` is
+  answered on all four as on the labels: a 304 that repeats `Cache-Control` and `Vary` and
+  never `Preference-Applied`. The labels' tag, the result key and every computed byte are
+  untouched.
+- **Fixed: `HEAD` on an artifact was a 405, and its `Allow` named a method the URL never
+  had.** `HEAD` had just become the compute-free probe for labels, and deliverables now land
+  after `done` - so "has the preview rendered?" was exactly the request being refused, with
+  `Allow: DELETE` on the api (the greedy `DELETE /v1/<source>/<id>/<task>` pattern also
+  matches `.../<task>/preview.png`, was registered first, and the router answers a 405 from
+  the first route whose path matches) and `Allow: GET` on the anonymous twin, which claims
+  header parity with the api by construction. Every artifact route - by path with its grid
+  tokens, on the twin, and through a job - now answers `HEAD` with `GET`'s `ETag`,
+  `Content-Length`, `Cache-Control` and `Vary` and no body, honors `If-None-Match`, and
+  never computes, renders or waits: 202 while the labels compute or a render that will place
+  that deliverable is pending, 404 otherwise - at once for a deliverable nobody asked for,
+  since no render is coming. A 405 now lists the methods of the URL asked about, whichever
+  routes they live in.
+- **Fixed: the anonymous twin called an artifact that was still rendering absent.** The
+  twin's executor had no view of the pending-render marker, so between a job's `done` and
+  its preview landing - on Modal, the worker's commit of it - a GET of `preview.png` there
+  answered 404, to the anonymous poller told everywhere else that a 404 is final. Found by
+  deploying (`haversack-doors-smoke`, a render slowed to 10 s), not by the suite: locally
+  the window is milliseconds. `create_public_app` takes the writer's `artifact_state` as a
+  read-only signal, as it takes `inflight`, and the Modal twin reads the marker (and never
+  sweeps a dead one: it writes nothing). It answers 202 with `Retry-After`, as the api does.
+- **`If-None-Match` is compared weakly.** `W/"<tag>"` matches `"<tag>"`, as RFC 9110
+  (13.1.2) requires of this header; the strings were compared whole, so a client or proxy
+  that had weakened the tag - which one that re-encodes a body must - downloaded a label
+  volume it already held. The safe direction, and still wrong.
 - **Fixed: a 304 for a result by path dropped the caching fields its 200 carries.** A
   conditional `GET` of `/v1/<source>/<identifier>/<task>/labels.seg.nrrd` answered 304 with
   the `ETag` alone, while the 200 for the same request says `Cache-Control: public,
@@ -29,9 +85,9 @@
 - **`HEAD` honors `If-None-Match` with a 304, as `GET` does.** RFC 9110 (13.1.2) names the
   two methods together, and a `HEAD` that says 200 to the request `GET` says 304 to is the
   same disagreement one header over. Only the 200 is conditional: a result in flight is
-  still 202 and an absent one 404. `meta.json` keeps its key-derived `ETag` on purpose - its
-  body is the result record, which a recompute rewrites even when it reproduces the labels
-  byte for byte, so the labels' digest is not its validator.
+  still 202 and an absent one 404. (`meta.json` kept a key-derived `ETag` at that point, its
+  body being the result record and not the labels; it has a validator of its own now - the
+  artifact entries above.)
 - **A job's input can be a result the server itself computed: `result:<key>`.** Every
   source until now named data that came from outside. `<key>` is the `key` a finished job
   already reports, so jobs compose - CT to segmentation, then something computed from (CT,

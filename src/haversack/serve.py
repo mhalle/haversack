@@ -121,7 +121,7 @@ from .errors import Cancelled, InputError, HaversackError, ResourceError
 from .jobpolicy import (DELIVERABLES, INPUT_NOT_ON_HAND, RENDER_BUSY, fill_read_ahead,
                         missing_deliverables, pending_covers, prefetchable, record_inputs,
                         take_pre_read, refresh_cached_input, source_cache_key,
-                        wanted_deliverables)
+                        unkeyed_deliverables, wanted_deliverables)
 from .progress import CancelToken, Reporter
 
 ACTIVE = ("queued", "running")
@@ -135,6 +135,16 @@ RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default ar
 #: They are the files of `jobpolicy.DELIVERABLES` - the names a request asks for them
 #: under (2026-09-20) - read from that table rather than written a second time.
 ARTIFACT_NAMES = tuple(DELIVERABLES.values())
+#: What is SERVED beside a result's labels: the URL's file name -> (the file in the
+#: generation it is built from, the deliverable that file belongs to). ``meta.json`` is
+#: built from the result record, which every entry has, so it names neither. The one
+#: table both doors register from (2026-09-21) - the path surface, with its grid tokens,
+#: and the job-scoped routes - each name under GET and HEAD alike, so a view added here
+#: cannot come to exist at one door, or under one verb, and not the other.
+ARTIFACT_VIEWS = {"meta.json": (None, None),
+                  "preview.png": (DELIVERABLES["preview"], "preview"),
+                  "statistics.json": (DELIVERABLES["statistics"], "statistics"),
+                  "statistics.tsv": (DELIVERABLES["statistics"], "statistics")}
 #: Which publication an entry holds. Written by `put` before the labels file, so an
 #: entry that is visible at all has one, and checked by `add_artifact` so a worker
 #: from an earlier publication cannot write into a later one.
@@ -2182,6 +2192,74 @@ def etag_of(key: str, result=None) -> str:
     return f'"{digest}"' if digest else f'"{key[:32]}"'
 
 
+def body_etag(body: bytes) -> str:
+    """The validator for an ARTIFACT beside a result - ``meta.json``, ``preview.png``,
+    ``statistics.json`` / ``.tsv`` - the digest of the very bytes sent, in the labels'
+    own spelling (``"sha256:<hex>"``).
+
+    Until 2026-09-21 all four carried ``etag_of(key)``, the KEY-derived tag, under
+    ``Cache-Control: public, max-age=3600``. A ``Cache-Control: no-cache`` recompute
+    republishes under the same key, so one URL then served other bytes (a preview of
+    8290 and then 8309 bytes, a ``volume_ml`` of 0.384 and then 0.512) under an
+    unchanged STRONG validator, which RFC 9110 8.8.1 forbids: a cache revalidating its
+    stored preview was told "not modified" about a picture of the previous labels - and
+    the four URLs of one result shared the one value besides.
+
+    Why the content and not the publication (a generation id plus the artifact's name,
+    which needs no read): the read is already paid. Three of the four bodies are BUILT
+    per request - ``meta.json`` from the result record, ``statistics.json``
+    re-serialized, the ``.tsv`` derived from it - so a HEAD owes them to its
+    ``Content-Length`` anyway, and the fourth is a PNG of kilobytes. A digest is also
+    right where a generation's name is not: a legacy flat entry has no generation, a
+    job's own copy is no publication at all, and two publications that render the same
+    bytes ARE the same to a cache - the labels' tag has always said so. A file that
+    goes from absent to present within a generation goes from 404 to 200: no tag was
+    ever issued for the absence, so none can be stale.
+    """
+    import hashlib
+    return f'"sha256:{hashlib.sha256(body).hexdigest()}"'
+
+
+def answer_body(request, resp, headers: dict):
+    """GET's 200, HEAD's 200 or either one's 304 for a response whose body is in hand.
+
+    ``resp`` is the 200 a GET sends and ``headers`` its caching fields, ETag included.
+    HEAD gets the same fields and the GET's ``Content-Length`` and ``Content-Type`` with
+    no content (RFC 9110 9.3.2); a matching ``If-None-Match`` gets the 304 on either
+    verb, as the labels do. One function, so the two verbs cannot come to disagree
+    about a representation - the defect the labels' probe had until 2026-09-21."""
+    from fastapi.responses import Response
+    fresh = not_modified(request, headers["ETag"], headers)
+    if fresh is not None:
+        return fresh
+    if request.method == "HEAD":
+        head = Response(status_code=200, headers=headers)
+        head.headers["content-length"] = str(len(resp.body))   # GET's, never the 0 of
+        head.headers["content-type"] = resp.headers["content-type"]    # an empty body
+        return head
+    resp.headers.update(headers)
+    return resp
+
+
+def artifact_response(view: str, *, result=None, path=None):
+    """The 200 a GET of one ``ARTIFACT_VIEWS`` name sends, its body in hand: the result
+    record for ``meta.json``, else built from the generation's file at ``path``. In
+    hand - never a ``FileResponse`` streamed at send time - because the validator is
+    the digest of these bytes (``body_etag``) and a HEAD owes their length; the files
+    are a PNG and a JSON of kilobytes. Blocking (it reads), so async routes call it off
+    the loop; OSError when the file left between the look and the read."""
+    from fastapi.responses import JSONResponse, Response
+    if view == "meta.json":
+        return JSONResponse(result or {})
+    if view == "preview.png":
+        return Response(Path(path).read_bytes(), media_type="image/png")
+    stats = json.loads(Path(path).read_text(encoding="utf-8"))
+    if view == "statistics.json":
+        return JSONResponse(stats)
+    from .statistics import statistics_tsv
+    return Response(statistics_tsv(stats), media_type="text/tab-separated-values")
+
+
 def same_output(own, published) -> bool:
     """Whether a published entry holds the bytes a job reported: both content digests
     known and equal. A missing digest is not a match - an entry whose result.json is
@@ -2225,8 +2303,18 @@ def not_modified(request, etag: str, headers=None):
         return None
     if not raw:
         return None
-    tags = {t.strip() for t in raw.split(",")}
-    if etag in tags or "*" in tags:
+
+    def opaque(tag: str) -> str:
+        # RFC 9110 13.1.2: If-None-Match uses the WEAK comparison - two tags match when
+        # their opaque parts do, whatever `W/` either wears (8.8.3.2). Until 2026-09-21
+        # the strings were compared whole, so `W/"<our tag>"` - what a proxy that
+        # re-encodes a body hands back, having weakened the tag as it must - was a 200
+        # and the whole label volume again. The safe direction, and still wrong.
+        tag = tag.strip()
+        return tag[2:] if tag.startswith("W/") else tag
+
+    tags = {opaque(t) for t in raw.split(",")}
+    if opaque(etag) in tags or "*" in tags:
         kept = {k: v for k, v in (headers or {}).items()
                 if k.lower() in _NOT_MODIFIED_KEEPS}
         return Response(status_code=304, headers={**kept, "ETag": etag})
@@ -3131,6 +3219,11 @@ class LocalExecutor:
                     # added to the list up to here, and must not believe it did after.
                     wanted = wanted_deliverables(rec.deliverables, self.artifacts)
                     rec.deliverables, rec.deliverables_sealed = wanted, True
+                    # no entry to render into (no result cache, or no identity to key
+                    # one by): said before `done` is observable, so `links` never names
+                    # what no door will serve (2026-09-21)
+                    rec.deliverables_unavailable = unkeyed_deliverables(
+                        wanted, rec.cache_key) or rec.deliverables_unavailable
 
                 def _set_pending(key: str) -> None:
                     # refuse-if-present: a duplicate flight must not ACQUIRE
@@ -3590,8 +3683,10 @@ class CacheOnlyExecutor:
 
     def __init__(self, cache_get, key_fn, tasks_fn, *, inflight_fn=None,
                  resolve_fn=None, list_fn=None, sources=None, versions_fn=None,
-                 confirm_absent=None, weights_fn=None):
+                 confirm_absent=None, weights_fn=None, artifact_state=None):
         self._get, self._key, self._inflight = cache_get, key_fn, inflight_fn
+        if artifact_state is not None:     # optional: without it no render is ever
+            self.artifact_state = artifact_state   # known to be pending (see below)
         if confirm_absent is not None:     # optional: without it a miss is taken as read
             self.confirm_absent = confirm_absent
         if weights_fn is not None:         # optional: the weights versions ``key_fn`` keys
@@ -3787,6 +3882,40 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         return JSONResponse({"detail": {"code": "not_visible_yet", "message": str(exc)}},
                             status_code=503,
                             headers={"Retry-After": str(NOT_VISIBLE_RETRY_AFTER_S)})
+
+    @app.exception_handler(405)
+    async def _method_not_allowed(request: Request, exc):
+        """``Allow`` names the methods of THIS url (RFC 9110 15.5.6), not of whichever
+        route the router met first.
+
+        Starlette answers a 405 from the first route whose PATH matches, with that one
+        route's methods. Here the verbs of one URL are separate routes (HEAD, GET and
+        DELETE of a labels file), and the bare-task ``DELETE /v1/<source>/<id>/<task>``
+        is a greedy pattern that also matches every artifact URL - taking ``preview.png``
+        for the task - and is registered before them. So until 2026-09-21 a HEAD of
+        ``.../preview.png`` was refused with ``Allow: DELETE``: a method that URL has
+        never had (the alias answers it 404, no such task), and not the GET it has.
+
+        The methods are the union over the matching routes with the MOST SPECIFIC
+        template - the most literal text, which is how the artifact's own route outranks
+        the alias whose ``{task}`` swallowed its file name. It only describes: this runs
+        when no route matched path and method both, so no dispatch depends on it, and it
+        reads the router at request time, so the read-only twin (which drops routes
+        after they are registered) answers for what it kept."""
+        from starlette.routing import Match
+        best, allowed = -1, set()
+        for r in app.router.routes:
+            methods = getattr(r, "methods", None)
+            if not methods or r.matches(request.scope)[0] == Match.NONE:
+                continue
+            literal = len(re.sub(r"\{[^}]*\}", "", getattr(r, "path", "")))
+            if literal > best:
+                best, allowed = literal, set(methods)
+            elif literal == best:
+                allowed |= set(methods)
+        allow = ", ".join(sorted(allowed)) or (getattr(exc, "headers", None) or {}).get("Allow", "")
+        return JSONResponse({"detail": "Method Not Allowed"}, status_code=405,
+                            headers={"Allow": allow})
 
     _confirm = getattr(executor, "confirm_absent", None)
 
@@ -4794,9 +4923,23 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             asked = out.get("deliverables")
             kinds = set(getattr(executor, "artifacts", ()) or ()) if asked is None else set(asked)
             kinds -= set(out.get("deliverables_unavailable") or ())
-            links.update(resource_links(
+            by_path = resource_links(
                 out.get("task"), out.get("input_identity"), out.get("options"),
-                preview="preview" in kinds, statistics="statistics" in kinds))
+                preview="preview" in kinds, statistics="statistics" in kinds)
+            if not by_path and "result" in links:
+                # A result with NO PATH - an upload, a `result:` reference, a
+                # multi-input job, options off the grid menu - reaches its artifacts
+                # through its job, under the names a path-addressable one uses, so a
+                # client follows `links.preview` without asking which kind it has.
+                # Until 2026-09-21 such a job rendered its deliverables into the cache
+                # and advertised nothing: no route served them. Only beside `result`:
+                # these resolve through the same bytes, and are gone when they are.
+                by_path = {"meta": f"/v1/jobs/{jid}/meta.json"}
+                if "preview" in kinds:
+                    by_path["preview"] = f"/v1/jobs/{jid}/preview.png"
+                if "statistics" in kinds:
+                    by_path["statistics"] = f"/v1/jobs/{jid}/statistics.tsv"
+            links.update(by_path)
         out["links"] = links
         return out
 
@@ -4965,6 +5108,168 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                      "Content-Disposition": f'attachment; filename="{name}"'},
             background=BackgroundTask(fh.close))
 
+    # -- the artifacts beside a result: one body, two doors, both verbs ---------
+    def _prefer_echo(request, h: dict) -> dict:
+        """``h`` plus the RFC 7240 echo of the token the client SENT (respond-async is
+        echoed as itself, never rewritten to wait=0)."""
+        for raw in request.headers.getlist("prefer"):
+            for token in raw.split(","):
+                token = token.strip().lower()
+                if token == "respond-async":
+                    h["Preference-Applied"] = "respond-async"
+                    return h
+                if token.startswith("wait="):
+                    w = _prefer_wait_raw(request, wait_max)
+                    if w is not None:
+                        h["Preference-Applied"] = f"wait={int(w)}"
+                    return h
+        return h
+
+    def _artifact_headers(request, resp, *, shared: bool) -> dict:
+        """The caching fields of an artifact's 200: its validator is the digest of the
+        body in hand (``body_etag``). ``shared`` is the path surface - anonymous reads
+        of public data, cacheable by anyone for the hour the labels are. A job's
+        artifacts are neither: they sit behind the token and can show an upload, so
+        ``private``; and ``no-cache``, store but revalidate, because what a job's URL
+        serves can still change (absent, then rendered; an entry republished with the
+        same labels) and the ETag makes asking cheap. HEAD never waits, so it never
+        echoes a ``Prefer`` - as the labels' probe does not."""
+        h = {"Cache-Control": "public, max-age=3600" if shared else "private, no-cache",
+             "ETag": body_etag(resp.body), "Vary": "Prefer"}
+        return h if request.method == "HEAD" else _prefer_echo(request, h)
+
+    async def _await_artifact(key, labels, filename: str, what: str, *, deadline,
+                              look_again, confirmed=None, why: str | None = None):
+        """The artifact file beside ``labels``, waiting out a pending overlap thread.
+        202 + Retry-After while pending (or Prefer: wait exhausted); 404 only when its
+        absence is definitive. ``deadline`` is the REQUEST's one Prefer budget, shared
+        with the materialize leg - two legs must not each spend wait_max - and None
+        never waits, which is every HEAD.
+
+        The door supplies the two re-asks, each answering a labels path or None:
+        ``look_again()`` of the entry as it stands - on Modal the path in hand is a
+        local copy taken at lookup, which an artifact placed since does not reach
+        (2026-09-19) - and ``confirmed(since)`` of a view newer than ``since``, for an
+        executor whose view can be stale. By path both are the key's entry; through a
+        job both hold the entry to the job's own digest (``_job_result``). ``why`` is
+        the job's own reason it could not deliver this one, said in the 404."""
+        since = time.monotonic()
+        state = {"path": Path(labels).parent / filename}
+
+        async def look():
+            if state["path"].exists():
+                return state["path"]
+            again = await asyncio.to_thread(look_again)
+            if again is not None:
+                state["path"] = Path(again).parent / filename
+            return state["path"] if state["path"].exists() else None
+
+        if (found := await look()) is not None:
+            return found
+        _state = getattr(executor, "artifact_state", None)
+
+        def state_fn() -> str:
+            # asked about THIS deliverable: a render that was not asked for it
+            # will never place it, so its absence is definitive at once
+            return _state(key, what)
+        pending = _state is not None and bool(key) and state_fn() == "pending"
+        if pending:
+            if deadline is None:
+                deadline = time.time()
+            while time.time() < deadline:
+                await asyncio.sleep(0.2)
+                if (found := await look()) is not None:
+                    return found
+                if state_fn() != "pending":
+                    break
+            if (found := await look()) is not None:
+                return found
+            if state_fn() == "pending":
+                raise HTTPException(202,
+                                    headers=_progress_headers(
+                                        None, {"Retry-After": "2"}),
+                                    detail=f"{what} still materializing")
+        if (found := await look()) is not None:   # placed between our probe and
+            return found                          # the pending flag clearing
+        if confirmed is not None:
+            # a stale view is not an absence: ask one newer than this request, and
+            # answer 503 if none can be had (adversarial review, 2026-09-19)
+            again = await asyncio.to_thread(confirmed, since)
+            p = Path(again).parent / filename if again is not None else None
+            if p is not None and p.exists():
+                return p
+        if why:
+            raise HTTPException(404, f"no {what} for this job's result: {why}")
+        # A read never renders (decided 2026-09-20): a deliverable is asked for where
+        # the input is named and can be held - POST /v1/jobs - and this URL serves
+        # what exists, to anyone. Anonymous never computes; an authorized GET of a
+        # stored result's missing artifact does not either, Prefer or not: it has no
+        # job to stage an input under. So the answer is a definitive 404 that names
+        # the door which does.
+        raise HTTPException(404, f"no {what} for this result: it was not asked for when "
+                                 "the result was computed, or could not be rendered; an "
+                                 "authorized POST /v1/jobs of the same input and task "
+                                 f'with deliverables ["{what}"] renders it')
+
+    async def _artifact_answer(request, view: str, *, shared: bool, result=None, path=None):
+        """The response for one view whose entry (``result``) or file (``path``) is in
+        hand: GET's 200, HEAD's 200, or the 304 of either."""
+        try:
+            resp = await asyncio.to_thread(artifact_response, view, result=result, path=path)
+        except OSError:                        # left between the look and the read
+            raise HTTPException(404, "not materialized") from None
+        return answer_body(request, resp, _artifact_headers(request, resp, shared=shared))
+
+    def _register_job_artifact(view: str):
+        file, what = ARTIFACT_VIEWS[view]
+
+        async def job_artifact(request: Request, jid: str):
+            """One artifact of a job's result - the door for results with NO PATH (an
+            upload, a ``result:`` reference, a multi-input job), and open to every job.
+
+            Authorized like ``/result``, never anonymous: a job's artifacts show what was
+            uploaded. Resolved like ``/result`` too - through the job's key to its
+            published entry, leased, and only while that entry holds the bytes THIS job
+            reported (``same_output``), else beside the job's own copy - and answered by
+            its rules: 404 no such job, 409 not done, 410 the bytes are gone, 503 not
+            visible yet. Then the artifact's own: 202 + Retry-After while a render that
+            will place it is pending, 404 when none will - with the job's own reason
+            where it gave one. HEAD is the same answer with no body, and never waits:
+            ``Prefer: wait=N`` on a GET waits out a render, as it does by path."""
+            require_auth(request)
+            state, labels, res = await asyncio.to_thread(_job_result, jid)
+            if state is None:
+                raise HTTPException(404, f"no job {jid!r}")
+            if state != "done":
+                raise HTTPException(409, f"job is {state}, not done")
+            if labels is None:                 # done, but the bytes were purged
+                raise HTTPException(410, "result no longer on the server; recompute it")
+            if what is None:
+                return await _artifact_answer(request, view, shared=False, result=res)
+            status = executor.status_of(jid) or {}
+            key = status.get("cache_key") or status.get("key")
+            w = None if request.method == "HEAD" else _prefer_wait_raw(request, wait_max)
+
+            def confirmed(since: float):
+                again = confirm_absent(key, since)
+                return again[0] if again is not None and \
+                    same_output(status.get("result"), again[1]) else None
+
+            found = await _await_artifact(
+                key, labels, file, what, deadline=None if w is None else time.time() + w,
+                look_again=lambda: _job_result(jid)[1],
+                confirmed=confirmed if _confirm is not None and key else None,
+                why=(status.get("deliverables_unavailable") or {}).get(what))
+            return await _artifact_answer(request, view, shared=False, path=found)
+
+        # two routes, one function: FastAPI names an operation after its first method,
+        # so one route under both verbs would publish two operations with one id
+        app.head(f"/v1/jobs/{{jid}}/{view}", tags=["jobs"])(job_artifact)
+        app.get(f"/v1/jobs/{{jid}}/{view}", tags=["jobs"])(job_artifact)
+
+    for _view in ARTIFACT_VIEWS:
+        _register_job_artifact(_view)
+
     @app.delete("/v1/jobs/{jid}", tags=["jobs"])
     def cancel(request: Request, jid: str):
         require_auth(request)
@@ -4993,19 +5298,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         SENT (respond-async is echoed as itself, never rewritten to
         wait=0); applied uniformly - labels and artifacts, waits and
         cache hits alike (a hit trivially satisfies wait=N)."""
-        h = _resource_headers(key, result)
-        for raw in request.headers.getlist("prefer"):
-            for token in raw.split(","):
-                token = token.strip().lower()
-                if token == "respond-async":
-                    h["Preference-Applied"] = "respond-async"
-                    return h
-                if token.startswith("wait="):
-                    w = _prefer_wait_raw(request, wait_max)
-                    if w is not None:
-                        h["Preference-Applied"] = f"wait={int(w)}"
-                    return h
-        return h
+        return _prefer_echo(request, _resource_headers(key, result))
 
     # The explicit HEAD registration is the compute-free probe, and the one
     # place status codes distinguish in-flight: 200 materialized / 202
@@ -5316,53 +5609,6 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             # one" on every path-addressed artifact, not only the labels
             return wants_no_cache(request) and authed(request)
 
-        def _register_meta(tok: str, gopts: dict):
-            @app.get(base + f"/meta{tok}.json", tags=["results"])
-            def meta(request: Request, ident: str, task: str):
-                key = keyed(norm(ident), task, gopts)
-                if key is None:
-                    raise HTTPException(404, "unknown resource")
-                since = time.monotonic()
-                skip = _skip_cache(request)
-                hit = None if skip else executor.cache_get(key)
-                if hit is None and not skip:
-                    hit = confirm_absent(key, since)   # 503 when a stale view cannot tell
-                if hit is None:
-                    raise HTTPException(404, "not materialized")
-                # The key-derived validator, NOT the labels' digest, and on purpose
-                # (2026-09-21, when the HEAD probe took the digest): this body is the
-                # result record, which a recompute rewrites (timings, provenance) even
-                # when it reproduces the labels byte for byte, so the labels' digest
-                # would call two different bodies one. The honest tag is a digest of
-                # this JSON; nothing here evaluates If-None-Match, so no client is told
-                # "not modified" on the strength of this one.
-                return JSONResponse(hit[1], headers=_resource_headers(key))
-
-        _grid_routes(_register_meta)
-
-        def _register_preview(tok: str, gopts: dict):
-            @app.get(base + f"/preview{tok}.png", tags=["results"])
-            async def preview(request: Request, ident: str, task: str):
-                key = keyed(norm(ident), task, gopts)
-                if key is None:
-                    raise HTTPException(404, "unknown resource")
-                w = _prefer_wait_raw(request, wait_max)
-                deadline = None if w is None else time.time() + w
-                since = None if _skip_cache(request) else time.monotonic()
-                hit = None if since is None else \
-                    await asyncio.to_thread(executor.cache_get, key)
-                if hit is None:
-                    hit = await _materialize_entry(request, norm(ident),
-                                                   canon_task(task), gopts, key,
-                                                   deadline, since)
-                png = await _await_artifact(request, key, hit,
-                                            "preview.png", "preview",
-                                            deadline=deadline)
-                return FileResponse(png, media_type="image/png",
-                                    headers=_pref_headers(request, key))
-
-        _grid_routes(_register_preview)
-
         async def _materialize_entry(request, ident: str, task: str, opts: dict,
                                      key: str, deadline: float, since: float | None = None):
             """Initiate the segmentation chain from an artifact GET - the
@@ -5450,109 +5696,87 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                 headers=_progress_headers(snap.get("progress"),
                                                           {"Retry-After": "5"}))
 
-        async def _await_artifact(request, key, hit, filename: str, what: str,
-                                  deadline: float | None = None):
-            """The artifact file, waiting out a pending overlap thread. 202 +
-            Retry-After while pending (or Prefer: wait exhausted); 404 only
-            when its absence is definitive. ``deadline`` is the REQUEST's one
-            Prefer budget, shared with the materialize leg - two legs must
-            not each spend wait_max."""
-            path = Path(hit[0]).parent / filename
-            since = time.monotonic()
+        def _register_artifact(view: str, tok: str, gopts: dict):
+            file, what = ARTIFACT_VIEWS[view]
+            stem, _, ext = view.partition(".")
 
-            async def look():
-                """The file, or None. Asked again of the entry when the path in hand
-                lacks it: on Modal that path is a local copy taken at lookup, which
-                an artifact placed since does not reach (2026-09-19)."""
-                if path.exists():
-                    return path
-                again = await asyncio.to_thread(executor.cache_get, key)
-                p = Path(again[0]).parent / filename if again is not None else None
-                return p if p is not None and p.exists() else None
+            async def artifact(request: Request, ident: str, task: str):
+                """One artifact of a path-addressed result, under GET and HEAD.
 
-            if (found := await look()) is not None:
-                return found
-            _state = getattr(executor, "artifact_state", None)
+                Both verbs describe ONE representation: the validator is the digest of
+                the body (``body_etag``), a HEAD carries the GET's ETag, Content-Length,
+                Cache-Control and Vary, and either answers a matching ``If-None-Match``
+                with a 304 that repeats the caching fields - what the labels do. Until
+                2026-09-21 there was no HEAD here at all (405, ``Allow: DELETE``), the
+                tag was the key's, and nothing evaluated ``If-None-Match``; ``meta.json``
+                said so in as many words, which was true only while its tag could not
+                be trusted. Artifacts land late, so "has the preview rendered?" is a
+                question worth a probe that does not download the answer.
 
-            def state_fn(k: str) -> str:
-                # asked about THIS deliverable: a render that was not asked for it
-                # will never place it, so its absence is definitive at once
-                return _state(k, what)
-            pending = _state is not None and state_fn(key) == "pending"
-            if pending:
-                if deadline is None:
-                    deadline = time.time()
-                while time.time() < deadline:
-                    await asyncio.sleep(0.2)
-                    if (found := await look()) is not None:
-                        return found
-                    if state_fn(key) != "pending":
-                        break
-                if (found := await look()) is not None:
-                    return found
-                if state_fn(key) == "pending":
-                    raise HTTPException(202,
-                                        headers=_progress_headers(
-                                            None, {"Retry-After": "2"}),
-                                        detail=f"{what} still materializing")
-            if (found := await look()) is not None:   # placed between our probe and
-                return found                          # the pending flag clearing
-            if _confirm is not None:
-                # a stale view is not an absence: ask one newer than this request, and
-                # answer 503 if none can be had (adversarial review, 2026-09-19)
-                again = await asyncio.to_thread(confirm_absent, key, since)
-                p = Path(again[0]).parent / filename if again is not None else None
-                if p is not None and p.exists():
-                    return p
-            # A read never renders (decided 2026-09-20): a deliverable is asked for where
-            # the input is named and can be held - POST /v1/jobs - and this URL serves
-            # what exists, to anyone. Anonymous never computes; an authorized GET of a
-            # stored result's missing artifact does not either, Prefer or not: it has no
-            # job to stage an input under. So the answer is a definitive 404 that names
-            # the door which does.
-            raise HTTPException(404, f"no {what} for this result: it was not asked for when "
-                                     "the result was computed, or could not be rendered; an "
-                                     "authorized POST /v1/jobs of the same input and task "
-                                     f'with deliverables ["{what}"] renders it')
-
-        def _register_statistics(tok: str, gopts: dict):
-            async def _stats_key(request, ident, task, opts):
-                key = keyed(norm(ident), task, opts)
+                HEAD is a read of what exists: it never computes, never renders, never
+                waits, and ignores ``Prefer`` and ``Cache-Control: no-cache``. 200 (or
+                304) when the artifact is there; 202 + Retry-After while the labels are
+                still computing, or a render that will place THIS deliverable is
+                pending; 404 otherwise - a deliverable nobody asked for is a definitive
+                404, not a 202, since no render is coming. ``meta.json`` is every
+                entry's and waits on nothing, under either verb: 404 until the labels
+                are published, as its GET has always answered."""
+                from fastapi import Response
+                key = keyed(norm(ident), task, gopts)
                 if key is None:
                     raise HTTPException(404, "unknown resource")
-                w = _prefer_wait_raw(request, wait_max)
-                deadline = None if w is None else time.time() + w
-                since = None if _skip_cache(request) else time.monotonic()
-                hit = None if since is None else \
-                    await asyncio.to_thread(executor.cache_get, key)
-                if hit is None:
-                    hit = await _materialize_entry(request, norm(ident),
-                                                   canon_task(task), opts, key,
-                                                   deadline, since)
-                return key, hit, deadline
+                head = request.method == "HEAD"
+                if head or what is None:
+                    since = time.monotonic()
+                    # `no-cache` from an authorized caller means "not the stored one";
+                    # a HEAD starts nothing, so there it has nothing to mean
+                    skip = not head and _skip_cache(request)
+                    hit = None if skip else await asyncio.to_thread(executor.cache_get, key)
+                    if hit is None and not skip:
+                        jid = executor.find_inflight(key) if what is not None else None
+                        if jid is not None:    # computing: what a GET of it answers too
+                            snap = executor.status_of(jid) or {}
+                            return Response(status_code=202, headers=_progress_headers(
+                                snap.get("progress"), {"Retry-After": "5"}))
+                        hit = await asyncio.to_thread(confirm_absent, key, since)  # 503 when
+                    if hit is None:                        # a stale view cannot tell
+                        raise HTTPException(404, "not materialized")
+                    deadline = None
+                else:
+                    w = _prefer_wait_raw(request, wait_max)
+                    deadline = None if w is None else time.time() + w
+                    since = None if _skip_cache(request) else time.monotonic()
+                    hit = None if since is None else \
+                        await asyncio.to_thread(executor.cache_get, key)
+                    if hit is None:
+                        hit = await _materialize_entry(request, norm(ident),
+                                                       canon_task(task), gopts, key,
+                                                       deadline, since)
+                if what is None:
+                    return await _artifact_answer(request, view, shared=True, result=hit[1])
 
-            @app.get(base + f"/statistics{tok}.json", tags=["results"])
-            async def statistics_json(request: Request, ident: str, task: str):
-                key, hit, deadline = await _stats_key(request, ident, task, gopts)
-                sj = await _await_artifact(request, key, hit,
-                                           "statistics.json", "statistics",
-                                           deadline=deadline)
-                return JSONResponse(json.loads(sj.read_text(encoding="utf-8")),
-                                    headers=_pref_headers(request, key))
+                def entry_labels(again):
+                    return again[0] if again is not None else None
 
-            @app.get(base + f"/statistics{tok}.tsv", tags=["results"])
-            async def statistics_tsv_view(request: Request, ident: str, task: str):
-                from fastapi import Response
-                from .statistics import statistics_tsv
-                key, hit, deadline = await _stats_key(request, ident, task, gopts)
-                sj = await _await_artifact(request, key, hit,
-                                           "statistics.json", "statistics",
-                                           deadline=deadline)
-                return Response(statistics_tsv(json.loads(sj.read_text(encoding="utf-8"))),
-                                media_type="text/tab-separated-values",
-                                headers=_pref_headers(request, key))
+                found = await _await_artifact(
+                    key, hit[0], file, what, deadline=deadline,
+                    look_again=lambda: entry_labels(executor.cache_get(key)),
+                    confirmed=None if _confirm is None else
+                    (lambda since: entry_labels(confirm_absent(key, since))))
+                return await _artifact_answer(request, view, shared=True, path=found)
 
-        _grid_routes(_register_statistics)
+            # two routes, one function (see the job-scoped registration)
+            url = base + f"/{stem}{tok}.{ext}"
+            app.head(url, tags=["results"])(artifact)
+            app.get(url, tags=["results"])(artifact)
+
+        def _register_artifacts(tok: str, gopts: dict):
+            # every view under every grid token, from the one table: a view added
+            # there is served here and through a job, under both verbs
+            for view in ARTIFACT_VIEWS:
+                _register_artifact(view, tok, gopts)
+
+        _grid_routes(_register_artifacts)
 
     for _prefix, _srcobj in sources.items():
         # a source that says it has no path surface gets none (`result`: its identity
@@ -5588,7 +5812,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
 def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
                       list_fn=None, resolve_fn=None, versions_fn=None, confirm_absent=None,
-                      weights_fn=None):
+                      weights_fn=None, artifact_state=None):
     """The anonymous read-only twin: cache hits and nothing else.
 
     Since review R4 this is create_app itself over a CacheOnlyExecutor with
@@ -5613,11 +5837,17 @@ def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
     ``weights_fn(task)`` (optional) is the weights-versions list ``key_fn`` keys ``task``
     on - ``result_key``'s fourth argument: with it the listing reads a task's versions once
     a request instead of once a key, and MUST then derive exactly what ``key_fn`` would.
+    ``artifact_state(key, name)`` (optional) is the writer's pending-render signal -
+    "pending" while a render that will place deliverable ``name`` into ``key``'s entry is
+    still running, else "absent" - read-only like ``inflight``. With it an artifact that is
+    seconds from landing answers 202 + Retry-After here as it does on the api; without it
+    (before 2026-09-21 there was no way to give it) the twin cannot tell and says 404.
     """
     ex = CacheOnlyExecutor(cache_get, key_fn, tasks_fn, inflight_fn=inflight,
                            resolve_fn=resolve_fn, list_fn=list_fn,
                            sources=sources, versions_fn=versions_fn,
-                           confirm_absent=confirm_absent, weights_fn=weights_fn)
+                           confirm_absent=confirm_absent, weights_fn=weights_fn,
+                           artifact_state=artifact_state)
     return create_app(ex, read_only=True)
 
 
