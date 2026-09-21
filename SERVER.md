@@ -76,7 +76,9 @@ up to N seconds (default 30, at most 110) and returns the bytes if they arrive i
 computation and returns 202 at once. A `HEAD` on the same path probes without computing:
 200 cached, 202 in flight (with the same progress headers), 404 absent. Its 200 carries
 the `ETag` and `Content-Length` the `GET` would, and like the `GET` it answers a matching
-`If-None-Match` with 304. Every artifact beside the labels answers `HEAD` too (see
+`If-None-Match` with 304. A 404 on a result path says `Cache-Control: no-store`, as a 202
+does: "not materialized" lasts only until somebody computes the result, and a cache that
+kept it would hide the `public` 200 that follows. Every artifact beside the labels answers `HEAD` too (see
 "Results by path"). The header never goes in the URL, so the URL stays the pure
 cache key.
 

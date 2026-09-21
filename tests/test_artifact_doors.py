@@ -257,6 +257,37 @@ def test_an_artifacts_absence_is_never_for_a_cache_to_keep(tmp_path, monkeypatch
     ex.close()
 
 
+def test_not_materialized_is_never_for_a_cache_to_keep(tmp_path, monkeypatch):
+    """The labels' own 404: "not materialized" lasts until somebody computes the result,
+    and the 200 that follows is ``public, max-age=3600`` - a shared cache that kept the
+    404 on a heuristic (RFC 9111 4.2.2) would hide the result behind it. HEAD and GET,
+    anonymous and authorized, the default grid and a token, the api and the twin."""
+    seg, ex, client, _ = _server(tmp_path, monkeypatch, token=TOKEN)
+    twin = _twin_of(seg, ex)
+    labels = [p.rsplit("/", 1)[-1] for p in _file_routes(client.app)
+              if p.startswith("/v1/idc/") and "/labels" in p]
+    assert len(labels) == 1 + len(GRID_TOKENS), labels     # from the router, tokens included
+    asks = [(c, verb, hdr) for c, hdrs in ((client, ({}, AUTH)), (twin, ({},)))
+            for hdr in hdrs for verb in ("GET", "HEAD")]
+    for name in labels:
+        for c, verb, hdr in asks:
+            r = c.request(verb, f"{BASE}/{name}", headers=hdr)
+            assert r.status_code == 404, (name, verb, hdr, r.status_code)
+            assert r.headers.get("cache-control") == "no-store", (name, verb, hdr)
+    for c, verb, hdr in asks:                              # a task this server does not know
+        r = c.request(verb, BASE.replace("total_fast", "nosuchtask") + "/labels.seg.nrrd",
+                      headers=hdr)
+        assert r.status_code == 404 and r.headers.get("cache-control") == "no-store", (verb, hdr)
+
+    # ...and then it IS computed: the sequence a kept 404 would have hidden
+    ok = client.get(f"{BASE}/labels.seg.nrrd", headers={**AUTH, "Prefer": "wait=30"})
+    assert ok.status_code == 200 and ok.headers["cache-control"] == "public, max-age=3600"
+    for c, verb, hdr in asks:
+        r = c.request(verb, f"{BASE}/labels.seg.nrrd", headers=hdr)
+        assert r.status_code == 200 and r.headers["cache-control"] == "public, max-age=3600"
+    ex.close()
+
+
 def test_head_says_202_while_the_labels_are_still_computing(tmp_path, monkeypatch):
     """What a GET of the same artifact answers then; ``meta.json`` is 404 until the labels
     are published, under either verb, as its GET has always been."""

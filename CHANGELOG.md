@@ -54,6 +54,13 @@
   the window is milliseconds. `create_public_app` takes the writer's `artifact_state` as a
   read-only signal, as it takes `inflight`, and the Modal twin reads the marker (and never
   sweeps a dead one: it writes nothing). It answers 202 with `Retry-After`, as the api does.
+- **"Not materialized" says `Cache-Control: no-store` too.** The labels' own 404 - HEAD
+  probe and GET, the api and the anonymous twin, every grid token - stated no freshness,
+  beside a 200 that says `public, max-age=3600`. It is the answer until somebody computes
+  the result, which is the next thing an authorized caller does with it, so a shared cache
+  that kept it on a heuristic (RFC 9111, 4.2.2) would go on hiding a result that exists.
+  Every 404 of these routes, the unknown task's included: a task unknown today is served
+  after the deploy that adds its catalog, and an uncached error costs one request.
 - **An artifact's 404 says `Cache-Control: no-store`**, as its 202 always has. An artifact
   arrives late - after `done`, on a cache hit that asks for it, and with a shared result
   store from another host into the same generation - so "not here" only ever means "not as

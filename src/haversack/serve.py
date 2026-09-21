@@ -5212,8 +5212,15 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                  f'with deliverables ["{what}"] renders it')
 
     def _absence_is_never_stored(route):
-        """An artifact route whose 404s say ``Cache-Control: no-store`` - as its 202s
-        always have (``_progress_headers``).
+        """A result route whose 404s say ``Cache-Control: no-store`` - as its 202s
+        always have (``_progress_headers``). On the labels' routes (HEAD probe and GET)
+        as on the artifacts': "not materialized" is the answer until somebody computes
+        the result, which is the very next thing an authorized caller does with it, and
+        the 200 that follows says ``public, max-age=3600`` - so a shared cache that had
+        kept the 404 on a heuristic would go on hiding a result for as long as it
+        pleased. Every 404 of these routes, the unknown task's included: a task unknown
+        today is served after the deploy that adds its catalog, and an uncached error
+        costs a request.
 
         An artifact arrives LATE: rendered after `done`, on a cache hit that asks for it,
         and - with a result store several hosts share - by another host into the same
@@ -5226,14 +5233,25 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         request looks again (2026-09-21, with the object-store session)."""
         import functools
 
-        @functools.wraps(route)
-        async def guarded(*args, **kwargs):
-            try:
-                return await route(*args, **kwargs)
-            except HTTPException as e:
-                if e.status_code == 404:
-                    e.headers = {**(e.headers or {}), "Cache-Control": "no-store"}
-                raise
+        def unstored(e):
+            if e.status_code == 404:
+                e.headers = {**(e.headers or {}), "Cache-Control": "no-store"}
+            return e
+
+        if asyncio.iscoroutinefunction(route):
+            @functools.wraps(route)
+            async def guarded(*args, **kwargs):
+                try:
+                    return await route(*args, **kwargs)
+                except HTTPException as e:
+                    raise unstored(e)
+        else:                                  # a plain route stays one: FastAPI runs it
+            @functools.wraps(route)            # in its threadpool, off the event loop
+            def guarded(*args, **kwargs):
+                try:
+                    return route(*args, **kwargs)
+                except HTTPException as e:
+                    raise unstored(e)
         return guarded
 
     async def _artifact_answer(request, view: str, *, shared: bool, result=None, path=None):
@@ -5362,6 +5380,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
         def _register_probe(tok: str, gopts: dict):
             @app.head(base + f"/labels{tok}.seg.nrrd", tags=["results"])
+            @_absence_is_never_stored
             def probe(request: Request, ident: str, task: str):
                 """200 materialized / 202 computing / 404 absent, never a compute.
 
@@ -5427,6 +5446,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
         def _register_resource(tok: str, gopts: dict):
             @app.get(base + f"/labels{tok}.seg.nrrd", tags=["results"])
+            @_absence_is_never_stored
             async def resource(request: Request, ident: str, task: str):
                 ident = norm(ident)
                 if not re.fullmatch(pat, ident):
