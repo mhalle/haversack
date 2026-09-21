@@ -20,6 +20,14 @@ fetch path SSRF-free, so keep patterns strict when adding sources.
 Identity strings are ``"<prefix>:<identifier>"`` - the result-cache key
 component - so the ``idc`` source reproduces the established ``idc:<uuid>``
 identities byte for byte.
+
+One source is not a repository and is in nobody's :func:`default_sources`:
+:class:`ResultSource` (``result:<key>``, 2026-09-20) names a result THIS server
+computed, is constructed by the executor that holds the result cache, and is the one
+source whose identity is not its identifier: it is the referenced output's content
+digest, because a key can be republished with other bytes. It is also the one source
+that is asked at submit (:meth:`DataSource.pin`) and has no path surface
+(:attr:`DataSource.path_addressable`).
 """
 import contextlib
 import json

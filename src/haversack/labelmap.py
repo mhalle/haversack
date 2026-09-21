@@ -138,6 +138,12 @@ def read_label_map(path, *, require_names: bool = True) -> LabelMap:
 
     ``require_names=False`` lets a nameless label map through (a NIfTI, a bare NRRD) with
     ``names == {}``, for a consumer that really does mean label values.
+
+    Refused whatever is asked, because each would make a lookup BY NAME a silent choice:
+    two segments on one label value, two label values under one name, overlapping
+    (layered or vector) segments, and voxels that are not integers. ``task`` comes from the
+    record a ``result:`` fetch left beside the bytes when there is one about THESE bytes,
+    else from the file's own header, else it is None.
     """
     import SimpleITK as sitk
     file = _the_file(path)

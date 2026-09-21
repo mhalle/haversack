@@ -36,9 +36,17 @@
   and `haversack.labelmap.read_label_map` reads a `.seg.nrrd` with its segment names, its
   geometry and the task that made it. A consumer of (image, mask) selects structures by
   name - `liver` is a different label value in every catalog - so a label map that carries
-  no names (a NIfTI) is refused unless the caller asks for label values. The reader is its
-  own module: `io.read_image` stays the image reader, and the default `segment` path
-  imports none of it. No shipped task takes a label map yet.
+  no names (a NIfTI) is refused unless the caller asks for label values, and one where a
+  name cannot be matched to voxels without choosing - two segments on one value, two values
+  under one name, layered segments, non-integer voxels - is refused always. The reader is
+  its own module: `io.read_image` stays the image reader, and the default `segment` path
+  imports none of it. Every declared role is required, as image roles are. No shipped task
+  takes a label map yet.
+- **`GET /v1/sources` says which prefixes have a path surface.** Every entry gains
+  `path_addressable`, and a server with a result cache lists one more entry, `result`, for
+  which it is false. Additive, and the only thing here an existing client can see besides
+  the dead links below going away: no route, no accepted request, no refusal code and no
+  cache key changed, so nothing stored is recomputed.
 - **The terms of the original data survive the hop.** A result computed from a reference
   records, in `provenance.inputs`, the digest, the upstream key, output, task and weights
   versions, and that task's attribution; `derived_from` carries what is above that hop flat

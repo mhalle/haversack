@@ -164,7 +164,11 @@ each: `idc` (NCI Imaging Data Commons, by crdc_series_uuid), `tcia` (by SeriesIn
 `openneuro` (`ds<number>/<file path>`), `zenodo` (`<record>/<file>`, `!member` for a file
 inside a zip), `hf` (Hugging Face, `<owner>/<repo>@<revision>/<path>`), `s3` (`<bucket>/<key>`,
 where the bucket must be one the server serves - the response lists them) and `github`
-(`<owner>/<repo>@<tag>/<asset>`, the tag required). A fetch happens
+(`<owner>/<repo>@<tag>/<asset>`, the tag required). A server that keeps a result cache also
+lists `result` - not a repository but a result this server computed, named by its key (see
+"Results as inputs"). Each entry carries its `prefix`, `id_pattern`, `description`, whether it
+is `enabled`, and `path_addressable`: whether results of its inputs have the path surface
+above. Every hosted source does; `result` does not. A fetch happens
 at dispatch, as a visible "fetch" progress stage, so submits stay small and a full queue
 never wastes an upload. Fetched series live in a bounded cache in the work directory.
 
@@ -193,6 +197,10 @@ result:<key>!<name>                a named output; only `labels` exists today
 result:<key>@sha256:<digest>       pinned: refused unless the output is still those bytes
 ```
 
+The `id` of the source entry is whatever follows `result:` - the key alone, or with `!<name>`,
+`@sha256:<digest>`, or both (`<key>!labels@sha256:<digest>`). `haversack remote submit
+result:<key> --task ...` sends the same thing for a task that takes one label map.
+
 The key is 64 hex characters and nothing else, so a reference can only name a result of
 THIS server: there is no way to spell a host, and a result on another server cannot be
 referenced.
@@ -211,7 +219,9 @@ instead (409 `result_changed`).
 worker: 409 `result_missing` when the server holds no such result (never computed here, or
 evicted - run the job that produces it first, then submit again), 422 `unknown_output`
 naming the outputs the result has, 422 `wrong_input_kind` when a label map is bound to a
-role that takes an image. On Modal a miss is believed only from a view of the result volume
+role that takes an image, 409 `result_unreadable` for an entry that states no usable digest
+for its output (recompute it with `no-cache`), and 422 `unsupported_output` for a listed
+output this build cannot hand over yet. On Modal a miss is believed only from a view of the result volume
 newer than the request; when none can be had the answer is 503 with `Retry-After`, as it is
 for a read. The worker that fetches a reference resolves it AGAIN and hashes what it copied,
 so a job computes only ever from the bytes it was keyed on. If the result was recomputed or
@@ -227,8 +237,11 @@ the downstream result; it never recomputes the upstream one, which is that job's
 intensity volume, or `labels`, a label map read with its segment names
 (`haversack.labelmap.read_label_map`: the names, the geometry, and the task that made it). A
 consumer selects structures by NAME - `liver` is a different label value in every catalog -
-so a label map without names (a NIfTI) is refused by default. A `.seg.nrrd` uploaded or
-stored by digest binds to a `labels` role as a reference does.
+so a label map without names (a NIfTI) is refused by default, and one where a name could not
+be matched to voxels without choosing is refused always: two segments on one label value, two
+label values under one name, overlapping (layered) segments, or voxels that are not integers.
+A `.seg.nrrd` uploaded or stored by digest binds to a `labels` role as a reference does; the
+task that made it is known for a reference, and for an upload only if its header says.
 
 A result computed from a reference says so in `provenance.inputs`: the record has `kind:
 result`, the digest, and an `origin` naming the upstream `result` key, `output`, `task` and
@@ -400,7 +413,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/tasks/<task>` | read | describe a task |
 | GET | `/v1/segments` | read | which tasks produce a segment, and with what label value |
 | POST | `/v1/tasks/<task>/prepare` | token | install a task's weights now |
-| GET | `/v1/sources` | read | the hosted sources and their identifier grammar |
+| GET | `/v1/sources` | read | the hosted sources (and `result`), their identifier grammar, and which have a path surface |
 | GET | `/v1/segmentations` | token | every cached result, with links |
 | POST | `/v1/jobs` | token | submit |
 | GET | `/v1/jobs` | token | brief status of every known job |

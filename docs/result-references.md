@@ -277,7 +277,10 @@ Each is followed by what step 1 did about it *(built)*.
    as a CT and cache the answer. The reader is `haversack/labelmap.py`, not `io.py`: `io` is the
    image reader and every caller expects a bare image back. It reads the header keys
    `result.Segmentation.save` writes (named once, in `result.py`; they are 3D Slicer's), refuses
-   a nameless label map by default and a layered one always. **The upstream task name is not in
+   a nameless label map by default and, always, one where a name cannot be matched to voxels
+   without choosing (layered, two segments on one value, two values under one name,
+   non-integer voxels - the last three since the review round below). Every declared role is
+   required: `bind_sources` never reads `required`. **The upstream task name is not in
    every header**: only the nnU-Net pipeline writes `task` into its provenance; FastSurfer,
    SynthStrip, VoxTell and the MONAI bundles do not. The result cache's `meta.json` has it for
    every engine, so a fetched reference's `.input.json` carries it and the reader asks that
