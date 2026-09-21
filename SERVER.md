@@ -97,7 +97,8 @@ server already holds, a hosted identifier such as `{"kind": "idc", "crdc_series_
 "Results as inputs"). Options are validated at submit against the task's published parameter schema, and
 sources are bound to the task's declared inputs by role name, never by position, so a wrong
 request is refused with a 422 naming the problem rather than failing minutes later in a
-worker. On the local server the queue is a bounded FIFO (`--max-pending`, default 16) and
+worker. An optional `deliverables` JSON list says what is rendered beside the labels (see
+"Deliverables"). On the local server the queue is a bounded FIFO (`--max-pending`, default 16) and
 past it the answer is 429 with `Retry-After`; on Modal the platform queues without bound. A
 submit whose key is already in flight joins that job rather than starting a second one.
 The response is 202 with the job id.
@@ -106,9 +107,9 @@ A job's status (`GET /v1/jobs/{id}`) carries its `state` (`queued`, `running`, `
 `failed`, `cancelled`), timestamps, a `progress` snapshot (stage, detail, part, fraction,
 elapsed), the `input_identity`, the result `key`, and once done a `result` block with the
 structure names, volumes in ml, provenance, timings, and the content digest of the output,
-plus a `links` object: `self`, `events`, `result`, and for a path-addressable result the
-labels and the artifacts this deployment produces. Follow the links rather than building
-URLs.
+plus `deliverables` - what this job renders beside its labels - and a `links` object: `self`,
+`events`, `result`, and for a path-addressable result the labels, the metadata and the
+deliverables this job was asked for. Follow the links rather than building URLs.
 
 `GET /v1/jobs/{id}/events` is Server-Sent Events: each event is the same status snapshot,
 so a dropped stream needs no replay - resubscribe, or poll the status URL. `GET
@@ -206,6 +207,50 @@ A 422 names what was refused (an identity that is neither form, an unknown task,
 out of range, a foreign cursor). On Modal the listing is read from a view of the result
 volume newer than the request, like every other statement that something is absent; when no
 such view can be had the answer is 503 with `Retry-After`, never a shorter list.
+## Deliverables
+
+Beside the labels a server renders light deliverables: `preview`, a three-plane overlay
+(`preview.png`), and `statistics`, per-structure volumes and intensities (`statistics.json`,
+also as `.tsv`). They are rendered after the job already reports `done`, into the result's
+own cache entry, so they are eventually consistent: a GET of one that is still rendering
+answers 202 with `Retry-After`.
+
+**Which are rendered is the request's to say.** `POST /v1/jobs` takes a `deliverables` form
+field, a JSON list of names: `["statistics"]`, or `[]` for none. Absent, the job gets the
+deployment's set - `GET /v1/health` lists it as `deliverables` - and that set is also the
+ceiling: a name this server does not render (`deliverable_not_offered`) or has never heard
+of (`unknown_deliverable`) is refused at submit, with a 422 that says what the server
+offers. The list is a field of its own, beside `options`; inside them it is refused
+(`misplaced_deliverables`).
+
+**A deliverable is never part of the result.** Options are part of a result's key; the list
+is not. Declining the preview computes the same labels under the same `key`, with the same
+`ETag`, and a later request for that input and task is a cache hit whatever either list
+said.
+
+**A cache hit still honors the list.** When the labels are cached and the stored result
+lacks a deliverable the request names - an earlier request declined it, or it never
+rendered - the local server renders it then, from the input it still holds (the upload
+just sent, a stored input, a fetched series still in its cache), into the same cache entry:
+no recompute, no new generation, and one render per result at a time. It never fetches an
+input again to do so. What it cannot deliver it says: the job's `deliverables_unavailable`
+maps each such name to the reason - the input is no longer staged on the server, or a
+render of this result that does not include it is still running - and `links` leaves it
+out. `Cache-Control: no-cache` recomputes the result with its deliverables. A Modal
+deployment renders only in the worker that computes a result, so there a cache hit never
+renders: it reports what the stored result lacks in the same field (or, when the api
+container cannot see the result volume's latest state, that it cannot tell yet).
+
+A job's status carries `deliverables`, the list it renders, and its `links` name only what
+was asked for and is, or will be, there. A submit that joins a job already in flight adds
+its names to that job's list, until the job publishes.
+
+**A read never renders.** `preview.png` and `statistics.json` by path serve what exists, to
+anyone. When the result is cached and the artifact is not, the answer is 404 - to an
+anonymous caller and to an authorized one, with `Prefer` or without - and it names the door
+that renders it: an authorized `POST /v1/jobs` of the same input and task with the
+deliverable in its list. (A result that is not cached at all is still computed by an
+authorized GET with `Prefer`, with the deployment's set.)
 
 ## Sources and the input store
 
@@ -427,7 +472,9 @@ Deploy-time knobs, all environment variables because Modal resolves decorators a
 default on), `HAVERSACK_WARM_TASK` (the task loaded at startup, default `ts.v2:total_fast`),
 `HAVERSACK_JOBS_TTL_H` (default 72), `HAVERSACK_RESULTS_KEEP` (default 500),
 `HAVERSACK_INPUTS_GB` (default 50), `HAVERSACK_API_MIRROR_GB` (default 2: the api container's
-local copies of the results it serves), `HAVERSACK_ARTIFACTS` (default `preview,statistics`),
+local copies of the results it serves), `HAVERSACK_ARTIFACTS` (default `preview,statistics`:
+the deliverables this deployment renders - the default of a request that names none, and the
+most one may name),
 `HAVERSACK_IDC_CLOUD` (`aws`, or `gcp` to read IDC's Google Cloud mirror first - for a
 deployment that lives there), `HAVERSACK_CACHE_VOLUME` (the result cache's volume, below),
 and `HAVERSACK_PUBLIC=1`, which adds an anonymous read-only twin that serves cache hits and

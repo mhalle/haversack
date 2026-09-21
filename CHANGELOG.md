@@ -192,6 +192,40 @@
   `HAVERSACK_RESULTS_KEEP` (default 500): adopt a larger cache with a larger bound, or lose
   the difference at the first job. The knob is forwarded to every container like the rest;
   unforwarded, the containers would commit and reload `<app>-cache`, mounted nowhere.
+- **What is rendered beside a result is the request's to say: `deliverables`.** The preview
+  and the statistics were a deployment setting, so every job paid for both - a cohort run
+  by upload rendered a preview per scan that no route can even serve - and "preview off"
+  meant redeploying. `POST /v1/jobs` takes a `deliverables` form field, a JSON list
+  (`["statistics"]`, `[]` for none); absent, a job gets the deployment's set, exactly as
+  before, and that set is also the ceiling: a name this server does not render, or has
+  never heard of, is refused at submit with what it offers (`GET /v1/health` lists it). A
+  declined deliverable costs nothing - no render, and with an empty list no second read of
+  the two volumes either. `RemoteClient.submit(..., deliverables=[...])` and `haversack
+  remote submit --deliverables statistics` (or `none`) send it. This is the light half of
+  `docs/result-references.md`: what is numpy-only and needs the image and the labels runs
+  where both already are; a GPU model is a job of its own over `result:`.
+- **A deliverable never enters a result's key.** Every option is hashed into the key, so the
+  list is a field of its own and is refused inside `options`: declining a preview and then
+  asking for one is one result - the same `key`, a cache hit, the same labels `ETag` - and
+  no segmentation is ever recomputed to draw a picture of it. No cache key moved and no
+  computed byte changed, so nothing stored is recomputed and `CACHE_EPOCH` stays.
+- **A cache hit still honors the list.** A deliverable the request names and the stored
+  result lacks - declined by the request that computed it, or never rendered - is rendered
+  on the hit, into the generation that already holds the labels and through the path every
+  artifact takes (its pending marker is the single flight, the cache's `add_artifact` the
+  placement), so an artifact can no more land beside another publication's labels than it
+  could before. The server never fetches an input again to do it: what it cannot render it
+  SAYS, in the job's `deliverables_unavailable` with the reason and the way out
+  (`no-cache`), rather than leave a link off without a word. On Modal artifacts are
+  rendered by the worker that computes a result, and a hit reaches no worker, so there a
+  hit reports what is missing and renders nothing; a render-only job is the follow-up.
+- **`links` name what was asked for, and a declined artifact is absent at once.** A job's
+  links advertised whatever the deployment renders; they are built from the job's own list
+  now, less what a hit said it could not deliver. The pending marker records what its
+  render will place, so a GET of a preview the job declined answers 404 immediately
+  instead of 202 until the statistics land. A read never renders: a GET of an artifact a
+  cached result lacks is a 404 that names the request which renders it, for an anonymous
+  caller and an authorized one alike.
 
 
 ## [0.12.4] - 2026-09-19

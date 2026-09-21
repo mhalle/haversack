@@ -139,12 +139,21 @@ class RemoteClient:
             if not cursor:
                 return
 
-    def submit(self, image, task: str, **options) -> str:
+    def submit(self, image, task: str, *, deliverables=None, **options) -> str:
         """``image`` is a local file to upload, or ``"<source>:<identifier>"``
         (e.g. ``"idc:<crdc_series_uuid>"``) to have the server fetch the input
         from one of its registered data sources. A path that exists locally
-        always wins over the shorthand reading."""
+        always wins over the shorthand reading.
+
+        ``deliverables`` names what the server renders beside the labels - ``["preview",
+        "statistics"]``, any subset, ``[]`` for none; None sends nothing and the server
+        renders its own set (``GET /v1/health`` lists it; a name outside it is refused).
+        A keyword of its own and a form field of its own, NOT one of ``options``: those
+        are part of the result's key, and declining a preview must not name another
+        result."""
         data = {"task": task, "options": json.dumps(options)}
+        if deliverables is not None:
+            data["deliverables"] = json.dumps(list(deliverables))
         img = str(image)
         prefix = img.split(":", 1)[0] if ":" in img else ""
         if prefix.isidentifier() and prefix.islower() and not Path(img).exists():
@@ -230,9 +239,11 @@ class RemoteClient:
                 return snap
             time.sleep(poll_interval)
 
-    def run(self, image, task: str, output, *, on_status=None, **options) -> dict:
-        """submit + wait + fetch: the whole round trip. Returns the final status."""
-        jid = self.submit(image, task, **options)
+    def run(self, image, task: str, output, *, on_status=None, deliverables=None,
+            **options) -> dict:
+        """submit + wait + fetch: the whole round trip. Returns the final status.
+        ``deliverables`` as in :meth:`submit`."""
+        jid = self.submit(image, task, deliverables=deliverables, **options)
         final = self.wait(jid, on_status=on_status)
         if final["state"] == "done":
             self.fetch(jid, output)

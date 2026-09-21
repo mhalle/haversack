@@ -381,8 +381,8 @@ def test_an_artifact_placed_after_the_first_look_is_found_by_the_wait(monkeypatc
             (g / "preview.png").write_bytes(png)
         return hit
     monkeypatch.setattr(ex, "cache_get", cache_get)
-    monkeypatch.setattr(ex, "artifact_state",
-                        lambda key: "pending" if state["n"] < 3 else "absent")
+    monkeypatch.setattr(ex, "artifact_state",    # (key, the deliverable asked about)
+                        lambda key, name=None: "pending" if state["n"] < 3 else "absent")
     r = client.get(PATH.replace("labels.seg.nrrd", "preview.png"),
                    headers={"Prefer": "wait=5"})
     assert r.status_code == 200, r.text

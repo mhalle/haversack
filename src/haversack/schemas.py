@@ -288,6 +288,15 @@ def parameter_groups(engine_params, *, processing: bool = True) -> dict:
     return out
 
 
+#: The request field that names a job's deliverables (2026-09-20). A FORM FIELD beside
+#: ``options`` and ``source``, never a key inside ``options``: every option is hashed into
+#: the result key, and a deliverable must never be (``jobpolicy.DELIVERABLES``). The name
+#: is RESERVED among options for that reason - and because ``RemoteClient.submit`` takes
+#: it as a keyword beside ``**options``, so a parameter of this name could not be sent.
+#: ``wire_params`` refuses a parameter model that declares it.
+DELIVERABLES_FIELD = "deliverables"
+
+
 @lru_cache(maxsize=None)
 def wire_params(algorithm: type, processing: bool) -> type:
     """The single flat model a request's ``options`` are validated against.
@@ -304,6 +313,12 @@ def wire_params(algorithm: type, processing: bool) -> type:
     same field without complaint - the first base's field wins - so until 2026-09-12 this
     promise held only on paper, and an engine declaring ``grid`` would have replaced ours.
     """
+    taken = set(algorithm.model_fields) | (set(ProcessingParams.model_fields) if processing
+                                           else set())
+    if DELIVERABLES_FIELD in taken:
+        raise TypeError(f"an option may not be named {DELIVERABLES_FIELD!r}: that is the "
+                        "request's own field for what is rendered beside a result, and an "
+                        "option of that name would enter the result key - rename it")
     if not processing:
         return algorithm
     if algorithm is NoParams:
@@ -372,6 +387,41 @@ def bind_sources(sources: list, inputs, *, multi_input: bool, task: str = "") ->
                            f"{what}needs {len(declared)} named inputs; missing: "
                            + ", ".join(missing), missing=missing, declared=declared)
     return [(d, bound[d]) for d in declared]
+
+
+def requested_deliverables(names, offered) -> tuple | None:
+    """A submit's ``deliverables``, checked against what THIS server renders.
+
+    ``names`` is the parsed form field: None when the request sent none - the caller
+    gets the deployment's set, exactly as before the field existed - else a JSON list
+    of names, ``[]`` for none. Returns the canonical tuple (``jobpolicy.DELIVERABLES``
+    order, duplicates folded), or None for "not sent".
+
+    Refused HERE, at submit, with the fix in one line - what this server offers. A
+    name haversack has never heard of and one this deployment chose not to render get
+    different codes, because a client fixes them differently (a typo; another server),
+    and the same remedy. Never dropped in silence: a caller who asked for a preview and
+    got a finished job without one would go looking for a rendering bug.
+    """
+    from .jobpolicy import DELIVERABLES
+    if names is None:
+        return None
+    have = [d for d in DELIVERABLES if d in set(offered or ())]
+    offers = (f"this server offers {', '.join(have)}" if have
+              else "this server renders none") + " ([] asks for none)"
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise RequestError("bad_deliverables",
+                           f"`{DELIVERABLES_FIELD}` must be a JSON list of names, e.g. "
+                           f'["statistics"]; {offers}', offered=have)
+    for n in names:
+        if n not in DELIVERABLES:
+            raise RequestError("unknown_deliverable", f"unknown deliverable {n!r}; {offers}",
+                               deliverable=n, offered=have)
+        if n not in have:
+            raise RequestError("deliverable_not_offered",
+                               f"this server does not render {n!r}; {offers}",
+                               deliverable=n, offered=have)
+    return tuple(d for d in DELIVERABLES if d in names)
 
 
 def validate_options(model, options: dict) -> dict:
