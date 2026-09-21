@@ -958,3 +958,36 @@ def test_the_task_filter_reaches_the_volume_before_the_stats_do(monkeypatch, tmp
     disk = _Disk(monkeypatch, m.CACHE_ROOT)
     assert _listing(client, task="total")["segmentations"] == []
     assert dict(disk.statted) == {k: 1 for k in keys} and sum(disk.opened.values()) == 0
+
+
+
+def test_no_hold_outlasts_a_chunk_of_anything_stats_included(tmp_path):
+    """On Modal a hold is the shared side of the cache view, and a reload waits only
+    ``CACHE_RELOAD_WAIT_S`` for it. The READS were chunked from the start; the STATS were one
+    batch under one hold (900 names, 900 stats in one hold - an adversarial pass, 2026-09-21),
+    which at the measured 2,083 entries is 1.9 s of a 2.0 s wait. Every hold is bounded now."""
+    import contextlib
+    import threading
+    from haversack import serve
+    cache, _ = _cache(tmp_path, n=3 * serve.LIST_CHUNK + 17)
+    ops, holds, lock = [], [], threading.Lock()
+    real = cache._stamp
+
+    def counted(key, **kw):
+        with lock:
+            ops[-1] += 1
+        return real(key, **kw)
+    cache._stamp = counted
+
+    @contextlib.contextmanager
+    def hold():
+        with lock:
+            ops.append(0)
+        yield
+        with lock:
+            holds.append(ops[-1])
+    rows, _ = cache.list(limit=10, hold=hold)
+    assert len(rows) == 10
+    assert sum(holds) == 3 * serve.LIST_CHUNK + 17            # every name was stat'ed once
+    assert max(holds) <= serve.LIST_CHUNK, holds
+

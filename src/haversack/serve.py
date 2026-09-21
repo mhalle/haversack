@@ -1720,8 +1720,15 @@ class ResultCache:
                          if k and not k.startswith(".") and os.sep not in k
                          and not (os.altsep and os.altsep in k)]
             computed = keys is not None
-            found = sorted(((t, k) for k, t in zip(names, each(
-                lambda k: self._stamp(k, probe=computed), names)) if t is not None), key=order)
+            # The stats go a CHUNK at a time too, each under its own hold. They went as one
+            # batch, so one hold outlasted every name: 1.9 s of the 2.0 s a reload waits on a
+            # cache of 2,083, and a refusal - then 503s for everybody else - from an identity
+            # filter at its documented maximum (~18,800 derived keys). Found by an adversarial
+            # pass on the merge, 2026-09-21; `_list_cache` already promised what this now does.
+            stamps = []
+            for j in range(0, len(names), LIST_CHUNK):
+                stamps += each(lambda k: self._stamp(k, probe=computed), names[j:j + LIST_CHUNK])
+            found = sorted(((t, k) for k, t in zip(names, stamps) if t is not None), key=order)
             if after is not None:
                 found = [c for c in found if order(c) > order(after)]
             rows, i, clean = [], 0, True
