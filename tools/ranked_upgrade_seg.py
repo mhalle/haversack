@@ -1,19 +1,19 @@
-"""Upgrade an existing ranked store's segment metadata to duckn seg extension 0.7, in place.
+"""Upgrade an existing ranked store's segment metadata to duckn seg extension 0.8, in place.
 
-The builder writes 0.7 for new stores. This is for stores that already exist - the demo
-packages - where re-emitting to rebuild is not on. It reads the root's `seg` extension back
-through duckn's own model, which migrates the 0.6 shape (group membership carried as an
-array-valued `label_value`) to `members`, then states what the builder now states and the
-old stores never did:
+The builder writes 0.8 for new stores. This is for stores that already exist - the demo
+packages - where re-emitting to rebuild is not on. It reads the root's `seg` extension
+through duckn's reader, which migrates 0.6 and 0.7 (a group becomes a segment listing its
+members' values, `background: true` becomes the background role, colors become CSS
+strings), then states what the builder now states:
 
-  * a background LEAF per part (class 0 of the softmax, flagged `background`), so every
-    value in `ranks[0] - 1` resolves to a segment and the part's partition can include it;
-  * one partition group per part (`classes_<i>`: every class, background included,
-    `disjoint` and `exhaustive` of the model's domain);
-  * the engine's named unions re-derived with their claims (GROUP_CLAIMS in the builder), so
-    an upgraded store carries exactly what a fresh build would.
+  * a background segment per part (class 0 of the softmax, `role: "background"`);
+  * NO generated groups. Until 0.8 the builder wrote a partition group per part
+    (`classes_<i>`) and the engine's named unions (`g_lungs`, ...). Those are facts about a
+    labeling scheme, not about a store, and seg 0.8 keeps them outside it; the upgrade
+    removes the ones the builder generated and keeps any a user authored, as the union
+    segments the migration made of them.
 
-The result goes through duckn's consistency validator before it is written, a processing
+The result is checked against duckn's consistency rules before it is written, a processing
 step is appended to the store's provenance, and the README is refreshed. Works on a
 directory or a zarr zip (staged and repacked).
 
@@ -22,13 +22,12 @@ usage: uv run python tools/ranked_upgrade_seg.py STORE.duckn [STORE.duckn ...]
 import copy
 from pathlib import Path
 
-from duckn import SegmentationExtension
+from duckn import read_seg_extension
 
-from haversack.ranked_build import (GENERATED_GROUP_IDS, named_groups, part_partition,
-                                   write_readme)
-from haversack.ranked_store import leaf, open_store, root_attrs, segmentation
+from haversack.ranked_build import GENERATED_GROUP_IDS, write_readme
+from haversack.ranked_store import open_store, root_attrs, segment, segmentation
 
-STEP = "Segment metadata upgraded to seg 0.7"
+STEP = "Segment metadata upgraded to seg 0.8"
 
 
 def upgrade(store: Path) -> None:
@@ -57,44 +56,35 @@ def _upgrade(st, store: Path) -> None:
     if not order:
         raise SystemExit(f"{store}: the haversack block has no `part_order`")
 
-    # duckn migrates the 0.6 shape on read; from here on everything is 0.7 objects
+    # duckn migrates older shapes on read, and reports what it changed
     was = str(ext["seg"].get("version"))
-    seg = SegmentationExtension.model_validate(ext["seg"])
-    leaves = [s for s in seg.segments if s.label_value is not None]
+    seg, reported = read_seg_extension(ext["seg"])
+    for d in reported:
+        print(f"    {d}", flush=True)
+    # What the builder generated goes: a generated id belongs to the builder whether or not
+    # this engine still generates it (`GENERATED_GROUP_IDS`), and so does a part's partition.
+    segments = [s for s in seg.segments
+                if s.id not in GENERATED_GROUP_IDS and not s.id.startswith("classes_")]
     multi = len(order) > 1
     for i, _o in enumerate(order):
-        if not any(s.background and (s.layer or 0) == i for s in leaves):
-            leaves.append(leaf(f"background_{i}", "background", 0, layer=i if multi else None,
-                               background=True))
+        if not any(s.role == "background" and (s.layer or 0) == i for s in segments):
+            segments.append(segment(f"background_{i}", "background", 0,
+                                    layer=i if multi else None, role="background"))
     if not multi:
-        # `layer` states which part a leaf belongs to; a single-part store has nothing to say
-        leaves = [s.model_copy(update={"layer": None}) if s.layer is not None else s
-                  for s in leaves]
-    # The named unions are re-derived (their claims are the builder's decision); any
-    # other group the store had is kept as it was.
-    #
-    # `GENERATED_GROUP_IDS`, not `claims_for(engine)`: what the builder may rewrite is
-    # not the same question as what it currently generates for THIS engine, and the
-    # difference is exactly this migration. A monai store written before 2026-09-08
-    # carries `g_lungs` from the old nnU-Net fallback; monai claims nothing now, so
-    # `claims_for` returned an empty set, the id looked user-authored, and it was
-    # re-emitted verbatim with `exhaustive=True` - leaving in place the anatomical
-    # assertion the fix removed from fresh builds, while the provenance step claimed
-    # the named unions had been rewritten.
-    known = GENERATED_GROUP_IDS
-    kept = [s for s in seg.segments if s.members is not None
-            and s.id not in known and not s.id.startswith("classes_")]
-    groups = [part_partition(i, o["name"], leaves) for i, o in enumerate(order)]
-    groups += named_groups(engine, leaves) + kept
-    new_seg = segmentation(leaves + groups)             # duckn's validator runs here
+        # `layer` states which part a segment belongs to; a single-part store has nothing to say
+        segments = [s.model_copy(update={"layer": None}) if s.layer is not None else s
+                    for s in segments]
+    new_seg = segmentation(                              # duckn's rules are checked here
+        segments, terminologies={k: v.model_dump(exclude_none=True)
+                                 for k, v in (seg.terminologies or {}).items()})
 
     pv = dict(ext.get("provenance") or {"version": "1.0"})
     steps = [s for s in pv.get("processing", []) if s.get("name") != STEP]
     steps.append({
         "name": STEP,
-        "description": "root `seg` extension rewritten as duckn seg 0.7: leaves and groups "
-                       "(`members`), a background leaf and a partition group per part, the "
-                       "named unions with their disjoint/exhaustive claims; in place",
+        "description": "root `seg` extension rewritten as duckn seg 0.8: segments listing "
+                       "their label values, a background segment per part, the builder's "
+                       "generated groups removed; in place",
         "software": {"name": "ranked_upgrade_seg.py",
                      "url": "https://github.com/mhalle/haversack"},
         "parameters": {"from_version": was, "to_version": new_seg.version,
@@ -103,9 +93,8 @@ def _upgrade(st, store: Path) -> None:
     others = {k: v for k, v in ext.items() if k not in ("seg", "provenance")}
     root.attrs.update(root_attrs(new_seg, provenance=pv, **others))
     write_readme(st)
-    n_leaf = sum(1 for s in new_seg.segments if s.label_value is not None)
-    print(f"  {store.name}: seg {was} -> {new_seg.version}, {n_leaf} leaves, "
-          f"{len(new_seg.segments) - n_leaf} groups", flush=True)
+    print(f"  {store.name}: seg {was} -> {new_seg.version}, "
+          f"{len(new_seg.segments)} segments", flush=True)
 
 
 def main(argv=None):

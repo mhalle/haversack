@@ -67,7 +67,8 @@ def test_segment_to_store_builds_a_verified_store_and_cleans_up(tmp_path, monkey
         by = {s.id: s for s in segs.segments}
         assert by["c1"].name == "a" and by["c2"].name == "b"     # the task's own label map
         assert by["c1"].extent is not None                        # class 1 has voxels
-        assert by["classes_0"].exhaustive and by["classes_1"].disjoint
+        assert by["background_0"].role == "background" and by["background_1"].layer == 1
+        assert not [i for i in by if i.startswith("classes_")]        # seg 0.8: no groups
         assert sorted(st.root["parts"].group_keys()) == ["0", "1"]
         assert "distance" in st.root["parts/0"]
         rk = np.asarray(st.root["parts/0/ranks"][0])

@@ -36,6 +36,39 @@
   published as a release asset: Dataset857 (`thigh_shoulder_muscles`, `commercial` upstream)
   appeared in `v3.0.0-weights`, and taking its URL would have made haversack download what
   upstream installs only through its licensed backend. It is reported as `license_gated`.
+- **Ranked stores are written under duckn seg 0.8, and carry the model's classes and nothing
+  derived from them.** duckn 0.4.0 changes what a segment is - it lists `label_values`,
+  always an array; `background: true` is `role: "background"`; a color is a CSS string - and
+  has no groups. The builder used to write two kinds: a `classes_<i>` partition per part,
+  and named unions (`g_lungs` over TotalSegmentator's five lobes, a vertebral column,
+  FastSurfer's subcortical sets) with `disjoint` and `exhaustive` claims. Those unions are
+  ours, not the model's - no TotalSegmentator task emits a "lungs" class - and they are
+  facts about a labeling scheme, the same for every store a model produces, so they move to
+  a document outside the store. The partition needs no statement at all: a part's classes
+  are disjoint because no two list the same value, and the background role means "none of
+  the described structures is here". `GROUP_CLAIMS`, `named_groups` and `part_partition`
+  are gone; `ranked_store.segment()` replaces `leaf()` and `group()`. **Clients that read
+  `label_value`, `members`, or a `g_*` / `classes_*` id from a store's raw attributes must
+  change** (the bundled `preview.html` still reads `label_value`). Stores already delivered
+  keep reading: `read_segmentation`, `ranked_restore` and the tools read both shapes, duckn
+  migrating the older one (a group becomes a segment listing its members' values).
+  `tools/ranked_upgrade_seg.py` now upgrades a store to 0.8 in place: it removes every
+  group the builder ever generated, whatever engine wrote it, and keeps one a user authored.
+- **A store declares the labeling scheme it was produced under.** `labeling_scheme` names
+  an entry of `terminologies`, and each class the catalog names carries its name as an exact
+  designation in it - which is what lets a hierarchy, a color table or a cross-walk written
+  once for a scheme find its segments in every store. For the `ts.v2` catalog the key is the
+  ecosystem-qualified name of the task whose class list it is, the `uri` carries the
+  catalog's major version and the task and not the release
+  (`https://github.com/wasserth/TotalSegmentator#v2:total`), `version` is the package
+  version the registry was generated from, and `url` is that release's tree. Checked
+  against upstream at 2.13.0: all 51 label maps equal TotalSegmentator's own `class_map`,
+  and the six `_fast` / `_fastest` variants have no class list of their own - they are their
+  base task's classes from a coarser model - so they declare its scheme
+  (`ts.v2:total_fast` writes `ts.v2:total`). A build handed its own names declares no
+  scheme, and neither does an engine that names its own labels;
+  `ModelEcosystem.labeling_scheme` is where the other catalogs will answer.
+- duckn is pinned at `v0.4.0`.
 
 - **`HEAD /v1/jobs/<id>/result`, and a "gone" no cache may keep.** An adversarial pass on
   the artifact routes below found the one file route they left without a `HEAD` - a job's

@@ -329,6 +329,17 @@ class ModelEcosystem:
         (the "the checkpoint is the spec" rule)."""
         return {}
 
+    def labeling_scheme(self, task: str) -> dict | None:
+        """The duckn labeling scheme a store of ``task`` declares, or None when this ecosystem
+        has no published class list to name (an operator's own models, free-text prompts).
+
+        ``{"key", "name", "uri", "version", "url"}``. The ``uri`` identifies the CLASS LIST
+        across files and is compared byte for byte, so it carries what changes the list - the
+        catalog's major version, the task - and not the release; ``version`` is the release,
+        which documents written for the scheme list exactly. Tasks that share one class list
+        share one scheme. Answered offline, like :meth:`label_version`."""
+        return None
+
     def label_version(self, task: str) -> dict:
         """What pins this task's label list, answered offline from what this build ships: the
         release and digest of the checkpoint its names are read from, a bundle's version, an
@@ -483,6 +494,34 @@ class TSEcosystem(ModelEcosystem):
             meta = data.get("_meta", {}) if isinstance(data, dict) else {}
             cached = self._raw_registry = (meta, {d["name"]: d for d in items})
         return cached
+
+    #: TotalSegmentator's repository: the identity of its class lists, and where a release's
+    #: definition of them can be read.
+    UPSTREAM = "https://github.com/wasserth/TotalSegmentator"
+
+    def labeling_scheme(self, task: str) -> dict | None:
+        # The registry's label maps are TotalSegmentator's own `class_map`, entry for entry
+        # (checked against upstream at the registry's ts_version). Its `--fast` variants are
+        # not tasks upstream and have no class list of their own: `total_fast` and
+        # `total_fastest` ARE `total`'s classes from a coarser model. One class list is one
+        # scheme, so they declare `total`'s - which is what lets a hierarchy or a color table
+        # written for `ts.v2:total` apply to all three.
+        meta, entries = self._registry_entries()
+        if task not in entries:
+            raise LookupError(f"unknown ts.v2 task {task!r}")
+        base = task
+        for suffix in ("_fastest", "_fast"):
+            stem = task.removesuffix(suffix)
+            if stem != task and entries.get(stem, {}).get("label_map") == entries[task]["label_map"]:
+                base = stem
+                break
+        major = self.name.partition(".")[2]                          # "v2"
+        version = str(meta.get("ts_version"))
+        return {"key": f"{self.name}:{base}",
+                "name": f"TotalSegmentator {major} class labels, task {base}",
+                "uri": f"{self.UPSTREAM}#{major}:{base}",
+                "version": version,
+                "url": f"{self.UPSTREAM}/tree/v{version}"}
 
     def label_version(self, task: str) -> dict:
         # The labels ARE the registry entry, generated from TotalSegmentator's own source at
