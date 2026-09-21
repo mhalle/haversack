@@ -232,7 +232,11 @@ reports `volume_ml_field` and `area_cm2_field` **beside** `volume_ml`, never ins
 and passes the clip. Without a code the output is byte-identical to before — asserted,
 because that is what makes shipping both safe. The field numbers carry their own
 `field_grid_spacing_mm`: the code lives on the model grid, the labelmap has been restored
-onto the input's, and for area that distinction is load-bearing.
+onto the input's, and for area that distinction is load-bearing. The two spacings are also
+written in different axis orders — `field_grid_spacing_mm` is the model grid's (z, y, x),
+`grid_spacing_mm` is (x, y, z) in RAS, since it is measured after the RAS reorientation.
+Both say so in the JSON's `units`, and `test_grid_spacing_is_ras_xyz_not_the_stored_axis_order`
+pins the RAS one.
 
 **Not wired into the server.** `serve.artifact_overlap` computes from the in-RAM pair with
 no input or disk dependence, and the ranked code is not there — carrying it in is a design
