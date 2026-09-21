@@ -28,10 +28,28 @@ class RequestError(InputError):
     ``loc``/``msg``/``type`` alongside ours.
     """
 
+    #: The HTTP status the wire answers with. 422: the request itself is wrong.
+    status = 422
+
     def __init__(self, code: str, message: str, **detail):
         super().__init__(message)
         self.code = code
         self.detail = {"code": code, "message": message, **detail}
+
+
+class UnresolvedReference(RequestError):
+    """A well-formed request that refers to something this server does not hold NOW: a
+    result that was never computed here, has been evicted, or was republished with other
+    bytes since the caller pinned it (``result:`` references, 2026-09-20).
+
+    409, not 422: nothing about the request's shape is wrong, and the same request
+    succeeds once the state is put right - which is RFC 9110's conflict, and what a pinned
+    task version this server does not run already answers. Raised at submit, where the
+    caller is still listening, and again by a worker that re-resolves the reference and
+    finds other bytes: the job fails by this name rather than compute from them.
+    """
+
+    status = 409
 
 
 class ModelNotFound(HaversackError, FileNotFoundError):

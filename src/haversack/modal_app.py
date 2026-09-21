@@ -474,6 +474,94 @@ def _confirm_cache_absent(key: str, since: float):
                             "(a volume reload was refused); retry shortly")
 
 
+# -- `result:` references: the two readers a ResultSource resolves through here --------
+#
+# A reference is resolved twice - in the api container at submit, to key the job on the
+# referenced output's digest, and again in the worker that fetches it (a lease taken here
+# does not reach a worker's pruning, so the worker asks again and compares) - and both
+# read the CACHE volume, so both follow the rules of 2026-09-19 above and below: nothing
+# is read from the volume while another thread of the container may be reloading it, what
+# is handed out is a local copy, and a miss is believed only from a view newer than the
+# question. ``fresh`` is how the source asks for that view; it asks only after a stale one
+# answered "missing" or "other bytes", the two answers a stale view can get wrong.
+
+
+def _api_result_entry(key: str, *, fresh: bool = False):
+    """``ResultSource``'s reader in the api container: ``cache_get``'s own lookup (a view
+    up to ``CACHE_FRESH_S`` old, read under ``_cache_view`` shared, handed out as the
+    container-local mirror of the generation - meta.json included), and for ``fresh`` the
+    confirming reload, which raises ``ResultsNotVisible`` (a 503 at submit) when no reload
+    takes rather than let a stale miss refuse a job whose mask is there."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def held():
+        if fresh:
+            yield _confirm_cache_absent(key, time.monotonic())
+        else:
+            _reload_cache_view(max_age=CACHE_FRESH_S)
+            yield _read_cache(key)
+    return held()
+
+
+def _worker_result_entry(vol_lock):
+    """``ResultSource``'s reader in a worker, over that worker's ``_vol_lock``.
+
+    The lock is held from the reload through the lookup AND the caller's block - the
+    source copies the file inside it - because a worker's other threads commit and reload
+    this volume (the previous job's artifact overlap, the sweep), and either hides every
+    path on it for its duration. ``ResultCache()`` is built under it too: it mkdirs its
+    root. Without ``fresh`` there is no reload: the view a worker already has usually
+    holds the entry, and the pinned digest says whether it is the right one. With it, a
+    refused reload is retried over ``CACHE_CONFIRM_DELAYS_S``; what is visible after the
+    last one may still do (the digest decides), and an entry that is simply not in view
+    is ``ResultsNotVisible`` - "cannot see it yet" - never "gone".
+    """
+    import contextlib
+
+    def entry(key: str, *, fresh: bool = False):
+        @contextlib.contextmanager
+        def held():
+            from haversack.serve import ResultCache, ResultsNotVisible
+            attempts = CACHE_CONFIRM_DELAYS_S if fresh else (0.0,)
+            for i, delay in enumerate(attempts):
+                if delay:
+                    time.sleep(delay)              # never with the lock held
+                last = i == len(attempts) - 1
+                with vol_lock:
+                    took = _reload_logged(cache_vol, "cache") if fresh else True
+                    hit = (ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).get(key)
+                           if took or last else None)
+                    if took or hit is not None:
+                        yield hit
+                        return
+            raise ResultsNotVisible(
+                f"this worker cannot see result {key[:12]}... in the result cache yet (a "
+                "volume reload was refused); submit again shortly")
+        return held()
+    return entry
+
+
+def _worker_sources(vol_lock) -> dict:
+    """A worker's source registry: every hosted source, and ``result:`` over this worker's
+    view of the cache volume. One function, so the tests drive the wiring ``setup`` runs."""
+    from haversack.sources import ResultSource, default_sources, registry
+    return registry(default_sources() + [ResultSource(_worker_result_entry(vol_lock))])
+
+
+def _worker_series_cache(sources: dict, root, budget_bytes: int):
+    """A worker's staging cache over ``sources``: every fetch through the one door that
+    records what the bytes are and where they came from."""
+    from haversack.serve import SeriesCache
+    from haversack.sources import fetch_recording_origin
+
+    def fetch_source(key, entry, credentials=None):
+        prefix, ident = key.split(":", 1)
+        return fetch_recording_origin(sources[prefix], ident, entry, credentials)
+
+    return SeriesCache(Path(root), fetch_source, budget_bytes=budget_bytes)
+
+
 def _check_volumes_attached() -> None:
     """Fail fast, with the fix, if a mounted volume is not actually attached.
 
@@ -1442,19 +1530,14 @@ class _WorkerBase:
         the GPU snapshot already carries it)."""
         _pkg_dir()
         _check_volumes_attached()
-        from haversack.serve import ReadAhead, SeriesCache
-        from haversack.sources import fetch_recording_origin, registry
-        self._sources = registry(None)
-
-        def fetch_source(key, entry, credentials=None):
-            prefix, ident = key.split(":", 1)
-            return fetch_recording_origin(self._sources[prefix], ident, entry, credentials)
-
-        self.series_cache = SeriesCache(Path("/dev/shm/series_cache"), fetch_source,
-                                        budget_bytes=int(SHM_CACHE_GB * (1 << 30)))
+        from haversack.serve import ReadAhead
+        self._vol_lock = threading.Lock()    # scan-thread reload vs save+commit
+        # after the lock: the `result:` source reads the cache volume under it
+        self._sources = _worker_sources(self._vol_lock)
+        self.series_cache = _worker_series_cache(self._sources, "/dev/shm/series_cache",
+                                                 int(SHM_CACHE_GB * (1 << 30)))
         self.read_ahead = ReadAhead()
         self.content = _content_store()      # uploads referred to by digest
-        self._vol_lock = threading.Lock()    # scan-thread reload vs save+commit
         # Never reset: under the GPU snapshot `preload` already ran and recorded
         # WARM_TASK here, and wiping it costs a redundant prepare + a multi-GB
         # weights_vol.commit() on the first job of every restored container.
@@ -1775,8 +1858,11 @@ class ModalExecutor:
 
     @property
     def sources(self):
-        from haversack.sources import registry
-        return registry(None)
+        # every hosted source, and `result:` over THIS container's view of the cache
+        # volume - the executor builds that one, as LocalExecutor does (it is in nobody's
+        # default_sources()). A worker has its own, over its own lock: _worker_sources.
+        from haversack.sources import ResultSource, default_sources, registry
+        return registry(default_sources() + [ResultSource(_api_result_entry)])
 
     def submit_prepare(self, jid, jdir, task):
         meta = {"id": jid, "task": task, "options": {}, "kind": "prepare",

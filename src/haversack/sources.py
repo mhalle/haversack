@@ -20,18 +20,31 @@ fetch path SSRF-free, so keep patterns strict when adding sources.
 Identity strings are ``"<prefix>:<identifier>"`` - the result-cache key
 component - so the ``idc`` source reproduces the established ``idc:<uuid>``
 identities byte for byte.
+
+One source is not a repository and is in nobody's :func:`default_sources`:
+:class:`ResultSource` (``result:<key>``, 2026-09-20) names a result THIS server
+computed, is constructed by the executor that holds the result cache, and is the one
+source whose identity is not its identifier: it is the referenced output's content
+digest, because a key can be republished with other bytes. It is also the one source
+that is asked at submit (:meth:`DataSource.pin`) and has no path surface
+(:attr:`DataSource.path_addressable`).
 """
+import contextlib
+import json
 import os
 import re
+import shutil
 import urllib.error
 from pathlib import Path
+from typing import NamedTuple
 
 from . import content, fetchlib
 from .errors import InputError
 
 __all__ = ["DataSource", "UrlTemplateSource", "IDCSource", "GitHubReleaseSource",
-           "ObjectStoreSource", "S3Source", "GCSSource", "default_sources", "IDC_BUCKETS",
-           "IDC_GCS_BUCKETS", "PUBLIC_S3_BUCKETS", "PUBLIC_GCS_BUCKETS", "CRDC_RE"]
+           "ObjectStoreSource", "S3Source", "GCSSource", "ResultSource", "default_sources",
+           "IDC_BUCKETS", "IDC_GCS_BUCKETS", "PUBLIC_S3_BUCKETS", "PUBLIC_GCS_BUCKETS",
+           "CRDC_RE"]
 
 CRDC_RE = r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
 
@@ -100,9 +113,40 @@ class DataSource:
     id_pattern: str = ""
     description: str = ""
 
+    #: Whether :meth:`pin` has to be asked before a job is keyed. False for every
+    #: repository: their identifiers name their bytes as they stand (or, for ``s3:`` and
+    #: ``github:``, as well as the repository lets anything name them). True for a source
+    #: whose identifier names bytes only through a lookup this server has to make - a
+    #: ``result:`` reference, whose key can be republished with other bytes (2026-09-20).
+    #: Tested with ``is True`` at the wire: sources are duck-typed, and a Mock's every
+    #: attribute is truthy.
+    pins_at_submit: bool = False
+
+    #: Whether results of this source's inputs get the path surface
+    #: (``/v1/<prefix>/<identifier>/<task>/...``). A path names a result by an identifier
+    #: that stays put and can be keyed with no lookup; a source whose identity needs one
+    #: says False here, is not mounted, and its results are reached through their jobs.
+    path_addressable: bool = True
+
     def enabled(self) -> bool:
         """Whether this source can fetch on this install (dependencies etc.)."""
         return True
+
+    def pin(self, identifier: str, kind: str | None = None) -> str:
+        """The identifier a JOB carries for the one a caller sent: the same, for every
+        source whose identifier already says which bytes it means.
+
+        Asked once, at submit, of a source that sets :attr:`pins_at_submit`, and the
+        answer replaces the caller's identifier from there on - it is what
+        :meth:`identity` is taken from, what the series cache is keyed by and what
+        :meth:`fetch` is handed in the worker. So a lookup happens in ONE place and
+        everything after it is a pure function of the pinned string; asking twice could
+        be answered twice, and a job keyed on one answer would fetch the other.
+        ``kind`` is what the role it is bound to declares it takes (``image``,
+        ``labels``), for a source that can tell. May do I/O, and may block: async routes
+        call it off the loop. Raises :class:`~haversack.errors.RequestError`.
+        """
+        return identifier
 
     def fetch(self, identifier: str, dest_dir: Path, *, credentials=None) -> Path:
         """Materialize the input. ``credentials`` is an optional per-request
@@ -180,7 +224,10 @@ class DataSource:
         return None
     def describe(self) -> dict:
         return {"prefix": self.prefix, "id_pattern": self.id_pattern,
-                "enabled": self.enabled(), "description": self.description}
+                "enabled": self.enabled(), "description": self.description,
+                # which prefixes `/v1/<prefix>/...` exists for: a client follows links,
+                # but one that lists sources can now see that `result` has no paths
+                "path_addressable": self.path_addressable}
 
 
 class UrlTemplateSource(DataSource):
@@ -270,6 +317,9 @@ def _license(name, url=None) -> dict | None:
 
 
 INPUT_SIDECAR = ".input.json"
+#: What an input record may carry beyond origin / license / cite, for an input this server
+#: computed itself: the ``attribution`` of the task that made it, and ``derived_from``.
+DERIVED_INPUT_KEYS = ("attribution", "derived_from")
 
 
 def sole_file(directory) -> Path | None:
@@ -402,6 +452,12 @@ def fetch_recording_origin(src, identifier: str, entry, credentials=None):
             record["origin"] = {**(said.get("origin") or {}), "fetched": fetched_at}
             record["license"] = said.get("license")
             record["cite"] = list(said.get("cite") or [])
+            # an input this server COMPUTED says what made it and what it was made from
+            # (ResultSource.describe_input): named here so nothing else a source's
+            # answer happens to hold reaches a result's provenance
+            for extra in DERIVED_INPUT_KEYS:
+                if said.get(extra):
+                    record[extra] = said[extra]
         else:
             record["origin"] = {"fetched": fetched_at}
             record["note"] = "the source could not determine this input's origin or license"
@@ -1370,6 +1426,399 @@ class GitHubReleaseSource(ArchiveReadingSource):
         return url, size
 
 
+# -- a result this server computed, as an input (2026-09-20) --------------------------
+#
+# Every source above names data that came from OUTSIDE. This one names a result haversack
+# itself computed, by the `key` a finished job already reports, so that jobs compose: CT ->
+# segmentation -> something computed from (CT, segmentation), each step cached under the
+# rules every other result is. docs/result-references.md is the design note.
+#
+# The three parts of the identifier, each written ONCE, here:
+
+#: A result key, as ``serve.result_key`` mints one: a sha256 hexdigest. No host, no path,
+#: no URL can be spelled in this alphabet, so a reference can only ever name an entry of
+#: THIS server's result cache - the SSRF boundary is kept by construction, and a result on
+#: another server stays unreferenceable, on purpose (it would be a caller-chosen host).
+RESULT_KEY_RE = r"[0-9a-f]{64}"
+#: The name of one output of a result, as ``result.outputs[].name`` spells it. Selected
+#: with ``!``, the separator the archive sources use for a member of their outer object.
+OUTPUT_NAME_RE = r"[a-z][a-z0-9_]{0,31}"
+#: The bytes a reference is pinned to: a content digest in ``content``'s blob grammar,
+#: which is also the form ``result.outputs[].sha256`` holds. After ``@``, as a task's
+#: version and an ``hf:`` commit are.
+RESULT_PIN_RE = r"sha256:[0-9a-f]{64}"
+
+#: Where :meth:`ResultSource.fetch` leaves what the referenced result said about itself,
+#: for :meth:`ResultSource.describe_input` to read back without asking the cache again.
+UPSTREAM_SIDECAR = ".upstream.json"
+
+
+class ResultRef(NamedTuple):
+    """``<key>[!<output>][@<digest>]``, parsed. ``output`` None is the primary output;
+    ``digest`` None is a reference nobody has pinned yet."""
+    key: str
+    output: str | None = None
+    digest: str | None = None
+
+    def __str__(self) -> str:
+        return (self.key + (f"!{self.output}" if self.output else "")
+                + (f"@{self.digest}" if self.digest else ""))
+
+
+class Resolved(NamedTuple):
+    """What a reference resolved to. ``path`` is good only while the reader that produced
+    it is open (on Modal that is a volume lock): copy inside, read the copy after."""
+    ref: ResultRef                  # pinned: its output and digest are both set
+    path: Path
+    kind: str
+    result: dict                    # the entry's result.json
+    meta: dict                      # its meta.json; {} when unreadable
+
+
+def select_output(outputs, name: str | None):
+    """The entry of ``result.outputs`` a reference means, or None when it names one the
+    result does not have. THE output-name rule: no name is the FIRST output - the primary
+    one, whose digest is the result's ETag and whose file ``cache_get`` hands back - and a
+    name is matched exactly. Only ``labels`` exists today (2026-09-20)."""
+    outs = [o for o in (outputs or []) if isinstance(o, dict)]
+    if name is None:
+        return outs[0] if outs else None
+    return next((o for o in outs if o.get("name") == name), None)
+
+
+def _stated_weights(prov: dict) -> list:
+    """The weights versions an upstream result's OWN provenance states, ``id=version``.
+    The nnU-Net pipeline lists its models; an engine with one set of weights names it
+    ``<engine>_version``, and a MONAI bundle ``bundle_version``. Best effort and for
+    reading only: what PINS them is the key, which was built from them."""
+    models = [m for m in (prov.get("models") or []) if isinstance(m, dict)]
+    if models:
+        return [f"{m.get('weights')}={m.get('version') or 'unknown'}" for m in models]
+    # a NAME and a plain string, and not this package's own version: `_version`,
+    # `haversack_version` and a nested value each read as weights until a review fed
+    # them in (2026-09-20)
+    return [f"{k[:-len('_version')]}={v}" for k, v in sorted(prov.items())
+            if isinstance(k, str) and k.endswith("_version") and k != "_version"
+            and not k.startswith("haversack") and isinstance(v, str) and v]
+
+
+def _carried_forward(upstream_inputs) -> dict:
+    """``{"results": [...], "inputs": [...]}``: everything above one hop, FLAT.
+
+    A chain can be long and a graph can fan in, so nesting each hop's records inside the
+    next would copy the whole ancestry at every step. Instead an intermediate result is
+    carried BY REFERENCE - its key, digest, task and weights, a fixed few fields - and
+    only the ORIGINAL inputs, the ones that came from outside, are carried by value, once
+    each: their origin, license and citation are what must survive, no identifier can
+    recover them later (a series' license is per series and an upstream entry is evicted
+    in time), and they are small. A task's own terms need no copy: they follow from its
+    name (``haversack cite <task>``).
+    """
+    hops, leaves, seen_hops, seen_leaves = [], [], set(), set()
+
+    def hop(h):
+        if not isinstance(h, dict):
+            return
+        k = (str(h.get("result")), str(h.get("digest")))
+        if k not in seen_hops:
+            seen_hops.add(k)
+            hops.append(h)
+
+    def leaf(rec):
+        if not isinstance(rec, dict):
+            return
+        k = rec.get("identity")
+        # merged only on an identity it HAS: two records that state none are two inputs,
+        # and folding them into one dropped the second one's license (review, 2026-09-20)
+        if k is not None:
+            if str(k) in seen_leaves:
+                return
+            seen_leaves.add(str(k))
+        leaves.append({f: v for f, v in rec.items() if f != "role"})   # a role means something
+                                                                       # only to its own task
+    for rec in upstream_inputs or []:
+        if not isinstance(rec, dict):
+            continue
+        if rec.get("kind") != ResultSource.prefix:
+            leaf(rec)
+            continue
+        o = rec.get("origin") if isinstance(rec.get("origin"), dict) else {}
+        hop({"result": o.get("result"), "output": o.get("output"),
+             "digest": rec.get("identity"), "task": o.get("task"),
+             "weights": o.get("weights")})
+        above = rec.get("derived_from") if isinstance(rec.get("derived_from"), dict) else {}
+        for h in above.get("results") or []:
+            hop(h)
+        for r in above.get("inputs") or []:
+            leaf(r)
+    return {"results": hops, "inputs": leaves}
+
+
+class ResultSource(DataSource):
+    """A result this server computed, as a job's input: ``result:<key>``.
+
+    ``<key>`` is the ``key`` a finished job reports. ``result:<key>`` means the result's
+    primary output (``labels`` today) and ``result:<key>!<name>`` a named one;
+    ``@sha256:<digest>`` pins the bytes, and a pinned reference whose result has since
+    been republished with other bytes is refused rather than followed.
+
+    **Its identity is the output's content digest, never the key.** ``Cache-Control:
+    no-cache`` republishes new bytes under the SAME key, so a downstream result keyed on
+    the key would silently outlive the mask it was computed from. The digest is the same
+    string an upload of those bytes has, so referring and re-sending land on one result,
+    as they do for ``{"kind": "input"}``.
+
+    **One resolution, in one place** (:meth:`_open`): key -> the entry's current
+    generation -> the named output -> its digest. :meth:`pin` asks it once at submit and
+    writes the answer INTO the identifier (``<key>!<name>@<digest>``); from there
+    :meth:`identity` and the series-cache key are pure functions of that string, and
+    :meth:`fetch`, in a worker, asks the same question again and compares. It has to: on
+    Modal a lease taken at submit, in the api container, does not reach a worker's
+    pruning, so between the two the entry can be republished or evicted - and then the job
+    FAILS, by name, rather than compute from bytes its key was not built from. What
+    :meth:`fetch` copies is hashed as well, so not even a copy torn by a volume reload
+    gets through.
+
+    It needs the executor's result cache, so it is CONSTRUCTED BY THE EXECUTOR and is not
+    in :func:`default_sources`: ``reader(key, fresh=False)`` is a context manager yielding
+    ``(path of the primary output, result.json)`` or None, the path readable while it is
+    open. ``fresh=True`` asks for a view no older than the call - a reload, on Modal - and
+    may raise ``serve.ResultsNotVisible``. It is asked stale first: a view that is behind
+    can only answer "missing" or "other bytes", never a false match, because the digest
+    decides; so only a refusal is re-asked of a fresh one.
+
+    The consequence, seen on Modal (smoke of 2026-09-20): a worker whose view of the cache
+    volume PREDATES a republication or an eviction still holds the pinned generation, reads
+    it, and computes - from exactly the bytes its key was built from, so the result is what
+    its key says. A worker that started after the change cannot read them and fails the job
+    by name. Both are right: the rule is "never from OTHER bytes", not "never after the
+    upstream moved on".
+
+    Not path-addressable (:attr:`path_addressable`): a path is keyed with no lookup.
+    """
+
+    prefix = "result"
+    id_pattern = rf"{RESULT_KEY_RE}(?:!{OUTPUT_NAME_RE})?(?:@{RESULT_PIN_RE})?"
+    description = ("a result this server computed, by the key its job reports "
+                   "(!<output> for a named output; @sha256:<digest> pins the bytes)")
+    pins_at_submit = True
+    path_addressable = False
+
+    def __init__(self, reader=None):
+        self._reader = reader
+
+    def enabled(self) -> bool:
+        return self._reader is not None
+
+    @classmethod
+    def parse(cls, identifier: str) -> ResultRef:
+        if not re.fullmatch(cls.id_pattern, str(identifier)):
+            raise InputError(f"{cls.prefix}:{identifier} is not a valid {cls.prefix} "
+                             f"identifier - {cls.description}")
+        # exact, because none of the three alphabets holds the other two's separators
+        head, _, digest = str(identifier).partition("@")
+        key, _, output = head.partition("!")
+        return ResultRef(key, output or None, digest or None)
+
+    def explain_refusal(self, identifier: str) -> None:
+        """The two things people send instead of a key."""
+        if re.fullmatch(r"[0-9a-f]{12}", identifier):
+            raise InputError(f"{self.prefix}:{identifier} looks like a job id; a result is "
+                             "named by the `key` in that job's status (GET /v1/jobs/<id>)")
+        if "/" in identifier:
+            raise InputError(f"{self.prefix}:{identifier}: a reference names a result of THIS "
+                             "server by its key (64 hex); a URL, a path or another server's "
+                             "result cannot be referenced")
+
+    def check(self, identifier: str, credentials=None) -> None:
+        self.explain_refusal(identifier)
+        super().check(identifier, credentials)
+        if credentials:
+            raise InputError(f"{self.prefix}: a reference to this server's own result takes "
+                             "no credentials")
+
+    # -- the one resolution ------------------------------------------------------------
+    def _judge(self, ref: ResultRef, hit):
+        """``Resolved``, or the refusal to raise if a fresh view says the same."""
+        from .errors import RequestError, UnresolvedReference
+        from .labelmap import LABELS_KIND
+        short = ref.key[:12]
+        if hit is None:
+            return UnresolvedReference(
+                "result_missing",
+                f"no result {ref.key} on this server (never computed here, or evicted): "
+                "run the job that produces it first - its status reports this `key` - "
+                "then submit this one again", key=ref.key)
+        path, result = Path(hit[0]), (hit[1] or {})
+        outputs = result.get("outputs") or []
+        names = [o.get("name") for o in outputs if isinstance(o, dict)]
+        out = select_output(outputs, ref.output)
+        if out is None and not names:
+            return UnresolvedReference(
+                "result_unreadable",
+                f"result {short}... records no outputs (an entry from an older build, or "
+                "an unreadable one): recompute it with Cache-Control: no-cache, then "
+                "submit this one again", key=ref.key)
+        if out is None:
+            return RequestError(
+                "unknown_output",
+                f"result {short}... has no output {ref.output!r}; it has {', '.join(names)}"
+                f" - write {self.prefix}:{ref.key}!{names[0]}, or drop the !name for the "
+                "first", key=ref.key, output=ref.output, outputs=names)
+        digest, name = str(out.get("sha256") or ""), str(out.get("name") or "")
+        # RESULT_PIN_RE, not content.is_digest: that accepts a tree digest and uppercase
+        # hex, so pin() could mint an identifier its own grammar - and identity() - refuse
+        if not re.fullmatch(RESULT_PIN_RE, digest) or not re.fullmatch(OUTPUT_NAME_RE, name):
+            return UnresolvedReference(
+                "result_unreadable",
+                f"result {short}... states no digest for its output {name!r}: recompute "
+                "it with Cache-Control: no-cache, then submit this one again", key=ref.key)
+        if out is not select_output(outputs, None):
+            # cache_get hands back the primary output's file and no other; where a second
+            # output's file lives is the result cache's to say, when it has any
+            return RequestError(
+                "unsupported_output",
+                f"result {short}... lists an output {name!r} this build cannot read as an "
+                f"input yet; {self.prefix}:{ref.key} is its primary output",
+                key=ref.key, output=name)
+        if ref.digest is not None and ref.digest != digest:
+            return UnresolvedReference(
+                "result_changed",
+                f"the referenced result changed: {ref.key} now holds {digest}, not "
+                f"{ref.digest} (it was recomputed since); submit again with "
+                f"{self.prefix}:{ref.key} to use what it holds now",
+                key=ref.key, expected=ref.digest, actual=digest)
+        try:
+            meta = json.loads((path.parent / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        return Resolved(ResultRef(ref.key, name, digest), path,
+                        str(out.get("kind") or LABELS_KIND), result,
+                        meta if isinstance(meta, dict) else {})
+
+    @contextlib.contextmanager
+    def _open(self, identifier: str):
+        """THE resolution, for :meth:`pin` and :meth:`fetch` alike. Yields a
+        :class:`Resolved` whose path is readable inside the block."""
+        ref = self.parse(identifier)
+        if self._reader is None:
+            raise InputError(f"{self.prefix}:{ref.key[:12]}...: this server keeps no result "
+                             "cache, so there is nothing a reference could name")
+        verdict = None
+        for fresh in (False, True):
+            # EVERY refusal is re-asked of a fresh view, not only "missing": a view that
+            # is behind holds the previous generation, whose digest - and, once results
+            # have more than one output, whose output list - is not the current one's
+            with self._reader(ref.key, fresh=fresh) as hit:
+                verdict = self._judge(ref, hit)
+                if isinstance(verdict, Resolved):
+                    yield verdict
+                    return
+        raise verdict
+
+    def pin(self, identifier: str, kind: str | None = None) -> str:
+        """``<key>!<output>@<digest>`` for what the reference resolves to NOW, or a refusal
+        with the fix in one line. Always spelled whole, so ``result:<key>`` and
+        ``result:<key>!labels`` are one series-cache entry."""
+        from .errors import RequestError
+        with self._open(identifier) as got:
+            if kind is not None and kind != got.kind:
+                raise RequestError(
+                    "wrong_input_kind",
+                    f"{self.prefix}:{got.ref.key[:12]}...!{got.ref.output} is a {got.kind} "
+                    f"output, and the role it is bound to takes {kind!r}: bind it to a role "
+                    f"that takes {got.kind!r} (see the task's `inputs`)",
+                    output=got.ref.output, output_kind=got.kind, role_kind=kind)
+            return str(got.ref)
+
+    def identity(self, identifier: str) -> str:
+        """The content digest - read out of a PINNED identifier, so this does no lookup,
+        as no source's identity does. An unpinned one has no identity yet: guessing it
+        here would be a second resolution, free to disagree with the first."""
+        ref = self.parse(identifier)
+        if ref.digest is None:
+            raise InputError(f"{self.prefix}:{identifier} is not pinned to its bytes; its "
+                             "identity comes from pin(), which the server asks at submit")
+        return ref.digest
+
+    def fetch(self, identifier: str, dest_dir: Path, *, credentials=None) -> Path:
+        ref = self.parse(identifier)
+        if ref.digest is None:
+            raise InputError(f"{self.prefix}:{identifier} is not pinned to its bytes, and a "
+                             "job never computes from bytes its key was not built from")
+        dest = Path(dest_dir) / "series"
+        dest.mkdir(exist_ok=True)
+        tmp = dest / ".copy.part"                 # a dotfile: never read as content
+        try:
+            with self._open(identifier) as got:   # asked AGAIN, and compared: see the class
+                out = dest / got.path.name        # its suffix is what a reader goes by
+                shutil.copyfile(got.path, tmp)
+                said = self._said(got)
+            # hashed outside the block: the copy is local, and the block may be a volume lock
+            actual = content.digest_file(tmp)
+            if actual != ref.digest:
+                raise InputError(f"fetch of {self.prefix}:{ref.key[:12]}... failed: the bytes "
+                                 f"read are {actual}, not {ref.digest} - the entry was being "
+                                 "replaced while it was copied, so submit again; if it "
+                                 "repeats, the entry's labels are not what its result.json "
+                                 "states: recompute it with Cache-Control: no-cache")
+            os.replace(tmp, out)
+        finally:
+            # a copy cut short by a volume that vanished mid-read is left nowhere: the entry
+            # directory outlives a failed fetch, and the next one claims inside it
+            tmp.unlink(missing_ok=True)
+        try:
+            (Path(dest_dir) / UPSTREAM_SIDECAR).write_text(
+                json.dumps(said, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass                                   # the provenance is thinner; the bytes stand
+        return dest
+
+    def _said(self, got: Resolved) -> dict:
+        """:meth:`describe_input`'s answer, from the entry itself: the hop by reference,
+        the task's own credit, and what is above it (:func:`_carried_forward`)."""
+        prov = got.result.get("provenance") if isinstance(got.result.get("provenance"), dict) else {}
+        origin = {"result": got.ref.key, "output": got.ref.output,
+                  "task": got.meta.get("task") or prov.get("task"),
+                  "weights": _stated_weights(prov),
+                  "determined_by": "this server's result cache (the referenced entry's "
+                                   "own meta.json and result.json)"}
+        if got.meta.get("computed") is not None:
+            origin["computed"] = got.meta["computed"]
+        try:
+            above = _carried_forward(prov.get("inputs"))
+        except Exception as e:             # noqa: BLE001 - a record is a courtesy: an upstream
+            # provenance no build of ours wrote must not fail a fetch whose bytes verified
+            above = {"results": [], "inputs": [], "error": f"{type(e).__name__}: {e}"}
+        said = {"origin": origin, "license": None, "cite": [], "derived_from": above}
+        if prov.get("attribution"):
+            said["attribution"] = prov["attribution"]
+        return said
+
+    def describe_input(self, identifier: str, fetched=None, credentials=None) -> dict | None:
+        """The hop, and what is above it. ``license`` is None on purpose: a computed
+        input's terms are not one license but what follows from the task that made it
+        (``attribution``) and the data it was made from (``derived_from.inputs``, each
+        with its own license and citation), and this does not invent a combination."""
+        if fetched is not None:
+            try:
+                return json.loads((Path(fetched).parent / UPSTREAM_SIDECAR)
+                                  .read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+        ref = self.parse(identifier)
+        return {"origin": {"result": ref.key, "output": ref.output,
+                           "determined_by": "the reference itself; the entry was not read"},
+                "license": None, "cite": []}
+
+    def forget(self, identifier: str) -> None:
+        """Nothing to drop, deliberately. ``Cache-Control: no-cache`` on a DOWNSTREAM job
+        asks every source for fresh bytes, and for this one that means resolving the
+        reference again - which :meth:`pin` does at every submit and :meth:`fetch` at
+        every fetch, from the cache itself, with no memory in between. It never means
+        recomputing the UPSTREAM result: that is its own job's ``no-cache``."""
+
+
 def check_identifier(src, identifier: str, credentials=None) -> None:
     """``src.check(...)``, for a source that has one.
 
@@ -1584,6 +2033,12 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
         return Path(spec)
     kind, ident = parsed
     src = reg.get("http" if kind == "https" else kind)
+    if src is None and kind == ResultSource.prefix:
+        # shaped like a source, and one only a SERVER has: it names an entry of that
+        # server's result cache, and the command line keeps none
+        raise InputError(f"{kind}:{ident[:12]}... names a result on a haversack server, and "
+                         "the command line has no result cache to look in: submit it there "
+                         "(haversack remote submit ...)")
     if src is None:
         raise InputError(f"unknown input source {kind!r}; known: {', '.join(sorted(reg))} and http(s) URLs")
     if hasattr(src, "enabled") and not src.enabled():

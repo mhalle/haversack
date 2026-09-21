@@ -198,6 +198,12 @@ def source_cache_key(source) -> SourceKey | None:
     return SourceKey(kind, ident, f"{kind}:{ident}")
 
 
+#: Source kinds the prefetcher leaves alone: content this server already holds. Literals,
+#: because this module imports no source at import time; ``result`` is
+#: ``sources.ResultSource.prefix``, and tests/test_result_source.py holds the two together.
+NOT_STAGED_AHEAD = ("input", "result")
+
+
 def prefetchable(*, state, kind, refresh_input, sources) -> bool:
     """May this job's input be staged ahead of its turn?
 
@@ -221,6 +227,13 @@ def prefetchable(*, state, kind, refresh_input, sources) -> bool:
     - An ``input`` source: resolved through the content store, so there is no
       series to stage and no local file to pre-read either. Treating it as an
       upload once killed the prefetch thread on ``cache.pin(None)``.
+    - A ``result`` reference (2026-09-20). Its fetch is a copy of a few MB out of
+      this server's own result cache, so there is nothing to hide behind the GPU;
+      what it would be PRE-READ as is an image, and a label map is read for its
+      segment names, which an image reader drops; and on Modal that copy reads the
+      cache volume, which the prefetch thread then never has to touch. The fetch
+      takes the worker's volume lock itself all the same, so this exclusion is an
+      economy and not what keeps it correct.
     """
     if state != "queued" or kind == "prepare":
         return False
@@ -229,7 +242,7 @@ def prefetchable(*, state, kind, refresh_input, sources) -> bool:
     entries = list(sources or [{"kind": "upload"}])
     if len(entries) > 1:
         return False
-    return entries[0].get("kind", "upload") != "input"
+    return entries[0].get("kind", "upload") not in NOT_STAGED_AHEAD
 
 
 def take_pre_read(read_ahead, key: str, *, fresh_bytes_wanted: bool):

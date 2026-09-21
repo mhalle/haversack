@@ -747,8 +747,9 @@ def _command_line() -> click.Group:
         short_help='upload, wait with progress, download the labels',
         params=[
             click.Argument(['input'],
-                           help=('a local image file, or idc:<crdc_series_uuid> to segment '
-                                 'straight from the Imaging Data Commons')),
+                           help=('a local image file; <source>:<identifier> for a source the '
+                                 'server lists, e.g. idc:<crdc_series_uuid>; or result:<key>, a '
+                                 'result that server computed, for a task that takes a label map')),
             click.Option(['--task'], required=True,
                          help='a task name the server lists (`haversack remote tasks`)'),
             click.Option(['-o', '--output'],
