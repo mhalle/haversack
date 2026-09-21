@@ -90,19 +90,26 @@ def _qualified(task):
 
 
 def scheme_for(engine, task):
-    """The duckn labeling scheme a store of ``task`` declares (``ModelEcosystem
-    .labeling_scheme``), or None: an engine that names its own labels, an ecosystem with no
-    published class list, or a task the catalog cannot place. None is an honest answer - a
-    store then declares no scheme - so nothing here raises."""
+    """``(scheme, code_of)`` for a store of ``task``: the duckn labeling scheme it declares
+    (``ModelEcosystem.labeling_scheme``) and ``code_of(value, name)``, the scheme's code for a
+    class or None where it has no exact one (``ModelEcosystem.scheme_code``). ``(None, None)``
+    when there is no scheme to declare: an ecosystem with no published class list, or a task
+    the catalog cannot place. That is an honest answer - the store then declares none - so
+    nothing here raises. Which classes a scheme covers, and how it spells them, is the
+    ecosystem's judgment; the builder knows nothing of catalogs."""
     try:
-        from haversack.engines import registry as _registry
-        if engine in _registry.ENGINES and _registry.ENGINES.get(engine).label_names is not None:
-            return None
-        name, cat = _qualified(task)
-        eco, short, _canonical, _version = cat.resolve(name)
-        return eco.labeling_scheme(short)
+        # Every catalog this build KNOWS, not the ones this machine serves: which scheme a
+        # class list belongs to is a fact about the catalog, and a store built where an
+        # engine is switched off must not lose it.
+        from haversack.ecosystems import EcosystemCatalog, known_ecosystems
+        name, _served = _qualified(task)
+        eco, short, _canonical, _version = EcosystemCatalog(known_ecosystems()).resolve(name)
+        scheme = eco.labeling_scheme(short)
+        if scheme is None:
+            return None, None
+        return scheme, lambda value, label: eco.scheme_code(short, value, label)
     except Exception:                              # noqa: BLE001 - no scheme is a valid store
-        return None
+        return None, None
 
 
 CASCADE_PART = re.compile(r":s\d+$")      # a cascade stage is named `<task>:s<i>`
@@ -821,7 +828,8 @@ def generator_steps(meta, items, engine, *, parts_kept="all", layers=("occupancy
 
 
 def build(src, out, case, parts="all", allow_unnamed=False,
-          distance_voxels=DISTANCE_VOXELS, names=None, quiet=False, source=None):
+          distance_voxels=DISTANCE_VOXELS, names=None, quiet=False, source=None,
+          model_names=False):
     """Build the store at ``out`` from an emit directory ``src``. ``names`` (label id -> name)
     overrides the catalog lookup, for a caller that already holds the task's label map.
     Progress goes to stderr (``quiet`` silences it). ``source`` is a duckn provenance source
@@ -837,13 +845,15 @@ def build(src, out, case, parts="all", allow_unnamed=False,
     src, out = Path(src), Path(out)
     meta = json.loads((src / "meta.json").read_text(encoding="utf-8"))
     with open_store(out, "w") as st:   # a directory, or a standard zarr zip when OUT ends in .zip
-        _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say, source)
+        _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say,
+                    source, model_names)
     if not quiet:                        # sizing the store walks it: not for a dropped line
         say(f"wrote {out} ({st.size_bytes() / 1e6:.2f} MB)")
     return out
 
 
-def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say, source=None):
+def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say,
+                source=None, model_names=False):
     root = st.root
     segs, order = [], []
 
@@ -851,9 +861,11 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
     NAMES = (dict(names) if names is not None
              else names_for(engine, meta.get("task"), allow_unnamed, say=say))
 
-    # The labeling scheme is declared only when the names ARE the catalog's: a caller that
+    # The labeling scheme is declared only when the names ARE the model's: a caller that
     # hands in its own names has left the scheme, and a code must be the scheme's own word.
-    scheme = scheme_for(engine, meta.get("task")) if names is None else None
+    # `model_names` is how a caller that read the names off the run itself says so.
+    scheme, code_of = (scheme_for(engine, meta.get("task"))
+                       if names is None or model_names else (None, None))
 
     items = list(meta["parts"].items())
     if parts == "last" and len(items) > 1:
@@ -1020,8 +1032,11 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
             sid = f"c{v}_l{i}" if v in shared else f"c{v}"
             # a class the scheme names carries its name as an exact designation in it: that
             # is what lets a document written for the scheme find the segment in any store
-            coded = ([{"scheme": scheme["key"], "code": part_names[v]}]
-                     if scheme and v in part_names else None)
+            code = code_of(v, part_names[v]) if scheme and v in part_names else None
+            coded = None if code is None else [{
+                "scheme": scheme["key"], "code": code,
+                # where the code is not the name, the name is the code's meaning
+                **({"meaning": part_names[v]} if code != part_names[v] else {})}]
             segs.append(segment(sid, part_names.get(v, f"label_{v}"), v, layer=lay,
                                 extent=boxes.get(v), designations=coded))
         del wins

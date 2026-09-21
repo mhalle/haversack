@@ -41,7 +41,7 @@ from pathlib import Path
 
 import zippeek
 
-REPO = "robert-graf/VibeSegmentator"
+REPO = "robert-graf/VIBESegmentator"
 TAG = "v1.0.0"
 API = f"https://api.github.com/repos/{REPO}/releases/tags/{TAG}"
 #: The licence of the repository the release is published from. Recorded per task

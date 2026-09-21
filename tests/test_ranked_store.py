@@ -551,7 +551,7 @@ def test_a_build_declares_its_scheme_and_codes_every_class_in_it(tmp_path, monke
     import haversack.ranked_build as rb
     scheme = {"key": "ts.v2:total", "name": "n", "version": "2.13.0",
               "uri": "https://github.com/wasserth/TotalSegmentator#v2:total", "url": "u"}
-    monkeypatch.setattr(rb, "scheme_for", lambda engine, task: scheme)
+    monkeypatch.setattr(rb, "scheme_for", lambda engine, task: (scheme, lambda v, n: n))
     monkeypatch.setattr(rb, "names_for", lambda *a, **k: {1: "liver", 2: "spleen"})
     emit = _synthetic_emit(tmp_path)
     out = build.build(emit, tmp_path / "s.duckn", "s", quiet=True)
@@ -569,3 +569,61 @@ def test_a_build_declares_its_scheme_and_codes_every_class_in_it(tmp_path, monke
                        names={1: "mine", 2: "also mine"})
     with rs.open_store(out2) as st:
         assert rs.read_segmentation(st.root).labeling_scheme is None
+
+
+def _fastsurfer_emit(tmp_path):
+    """A FastSurfer-shaped emit: aparc+aseg ids as values, one of them a channel that
+    `split_cortex_labels` lateralizes only after the network."""
+    labels = [0, 17, 1003, 1012]          # background, Left-Hippocampus, a bilateral channel, an exact one
+    torch.manual_seed(1)
+    logits = torch.randn(len(labels), 12, 12, 12)
+    code = encode(logits, depth=2, clip=8.0)
+    src = tmp_path / "fs-emit"
+    src.mkdir()
+    for nm, arr in (("ranks", code.ranks), ("support", code.support), ("tail", code.tail)):
+        if arr is not None:
+            np.save(src / f"asegdkt_{nm}.npy", arr)
+    part = {**code.meta, "engine": "fastsurfer", "task": "fastsurfer:asegdkt", "part": "asegdkt",
+            "labels": labels,
+            "frame": {"canonical": Geometry(shape_zyx=(12, 12, 12), spacing_zyx=(1.0, 1.0, 1.0),
+                                            origin_xyz=(0.0, 0.0, 0.0),
+                                            direction_xyz=tuple(D)).to_record()},
+            "model_grid": [12, 12, 12], "envelope": {"start": [0, 0, 0], "stop": [12, 12, 12]},
+            "softmax": {"classes": len(labels), "weights": "fastsurfer", "version": "2.5.4"},
+            "haversack": "test"}
+    (src / "meta.json").write_text(json.dumps(
+        {"image": "t1.nii", "task": "fastsurfer:asegdkt", "depth": 2, "clip": 8.0,
+         "envelope_mm": None, "parts": {"asegdkt": part}}, default=str))
+    return src
+
+
+def test_a_fastsurfer_store_codes_by_id_and_leaves_a_bilateral_channel_uncoded(tmp_path):
+    """A ranked store holds the network's channels BEFORE FastSurfer's spatial hemisphere
+    split, so value 1003 is both caudal middle frontal cortices under a left-hemisphere
+    name: not exactly the concept its id names, and a designation must be exact."""
+    build = _tool("ranked_build_store")
+    out = build.build(_fastsurfer_emit(tmp_path), tmp_path / "fs.duckn", "fs", quiet=True)
+    with rs.open_store(out) as st:
+        seg = rs.read_segmentation(st.root)
+    assert seg.labeling_scheme == "fastsurfer:asegdkt"
+    assert seg.terminologies["fastsurfer:asegdkt"].uri.endswith("#v2:asegdkt")
+    by = {s.label_values[0]: s for s in seg.segments}
+    d = by[17].designations[0]
+    assert (d.scheme, d.code, d.meaning) == ("fastsurfer:asegdkt", "17", "Left-Hippocampus")
+    assert by[1012].designations[0].code == "1012"
+    assert by[1003].designations is None and by[1003].name.startswith("ctx-lh-")
+    assert by[0].role == "background" and by[0].designations is None
+    assert _tool("ranked_verify").verify(out, deep=True, quiet=True)
+
+
+def test_names_the_run_reported_keep_the_scheme_and_a_callers_own_do_not(tmp_path, monkeypatch):
+    """`segment_to_store` always hands names to the builder - the run's own - which used to
+    switch the scheme off on the one path the product uses. `model_names` says whose they are."""
+    build = _tool("ranked_build_store")
+    emit = _synthetic_emit(tmp_path)
+    names = build.names_for("nnunetv2", "total_fast")
+    for flag, want in ((True, "ts.v2:total"), (False, None)):
+        out = build.build(emit, tmp_path / f"m{flag}.duckn", "m", quiet=True, names=names,
+                          model_names=flag)
+        with rs.open_store(out) as st:
+            assert rs.read_segmentation(st.root).labeling_scheme == want

@@ -125,3 +125,30 @@ def test_the_stores_argmax_is_the_runs_labels(tmp_path, monkeypatch):
             aligned = np.flip(aligned, axis=axis)
     assert painted.shape == aligned.shape, (painted.shape, aligned.shape)
     assert (painted == aligned).all()
+
+
+def test_segment_to_store_tells_the_builder_whose_names_it_hands_over(tmp_path, monkeypatch):
+    """The run's own names may carry the labeling scheme; a caller's own, or a run that could
+    not name its classes (`labels_unnamed`, a MONAI region head), may not."""
+    import haversack.ranked_build as rb
+    import haversack.ranked_output as ro
+    from types import SimpleNamespace
+    seen = []
+    monkeypatch.setattr(rb, "build", lambda *a, **k: seen.append(k["model_names"]))
+
+    def run(prov):
+        return lambda *a, **k: SimpleNamespace(schema=SimpleNamespace(names={1: "a"}),
+                                               provenance=prov)
+    monkeypatch.setattr(ro, "main", run({}))
+    ro.segment_to_store("x.nii", "t", tmp_path / "a.duckn")
+    ro.segment_to_store("x.nii", "t", tmp_path / "b.duckn", names={1: "mine"})
+    monkeypatch.setattr(ro, "main", run({"labels_unnamed": True}))
+    ro.segment_to_store("x.nii", "t", tmp_path / "c.duckn")
+    assert seen == [True, False, False]
+
+
+def test_a_store_output_is_offered_for_nnunet_and_fastsurfer_only():
+    from haversack.ranked_output import supports_store_output
+    assert supports_store_output("ts.v2:total_fast")
+    assert supports_store_output("fastsurfer:asegdkt")
+    assert not supports_store_output("synthstrip:mask")

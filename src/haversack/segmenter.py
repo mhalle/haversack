@@ -133,7 +133,9 @@ class Segmenter:
     def segment(self, image, task, **overrides):
         """Segment ``image`` with ``task``; any policy argument may be overridden for this call."""
         from .engines.registry import NNUNETV2
-        unknown = set(overrides) - set(POLICY) - {"progress", "outside", "cancel"}
+        # `probabilities` is a ranked sink (haversack.ranked.RankedSpec): both the nnU-Net
+        # pipeline and an engine's runner take one, and it is per call, not policy
+        unknown = set(overrides) - set(POLICY) - {"progress", "outside", "cancel", "probabilities"}
         if unknown:
             raise TypeError(f"unknown argument(s) {sorted(unknown)}; policy is {sorted(POLICY)}")
         eng = self.engine_for(task)

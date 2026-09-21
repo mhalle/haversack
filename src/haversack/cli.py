@@ -1533,9 +1533,11 @@ def _cmd_segment(args) -> int:
         if is_store_output(args.output):
             # undocumented: a `.duckn` / `.duckn.zip` output is a ranked store - the whole
             # output distribution, not the labels (see haversack.ranked_output)
-            if engine_task:
-                raise InputError("a ranked store output is available for nnU-Net tasks only")
-            from .ranked_output import input_source, segment_to_store
+            from .ranked_output import input_source, segment_to_store, supports_store_output
+            if not supports_store_output(args.task):
+                raise InputError("a ranked store output is available for nnU-Net tasks and "
+                                 "FastSurfer only: this task's engine returns labels, not the "
+                                 "distribution a store holds")
             img = resolve(inputs[0])
             r, out = segment_to_store(
                 img, args.task, args.output, case=source_stem(inputs[0]),

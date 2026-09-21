@@ -68,6 +68,39 @@
   (`ts.v2:total_fast` writes `ts.v2:total`). A build handed its own names declares no
   scheme, and neither does an engine that names its own labels;
   `ModelEcosystem.labeling_scheme` is where the other catalogs will answer.
+- **Every catalog with a published class list declares its scheme, and the scheme now
+  reaches the stores the product writes.** The first cut never fired on the normal path:
+  `segment_to_store` hands the builder the run's own names, and the builder declared a scheme
+  only when it was handed none - so only `tools/ranked_build_store.py` ever wrote one.
+  `build(model_names=True)` says whose names they are; a caller's own names, or a run that
+  could not name its classes (`labels_unnamed`, a MONAI region head), still declare nothing.
+  Schemes resolve against every catalog this build knows, not the ones a machine serves.
+  Per catalog, each claim checked against upstream on 2026-09-21: **`moose`** per task,
+  versioned by the asset's release stamp, its `fast_*` tasks NOT folded onto their base
+  (separate upstream models whose lists coincide by fact), and `clin_ct_dental` declaring
+  DentalSegmentator's scheme, whose model it is; **`mrsegmentator`** `base` only, versioned
+  by upstream's `weights_version` (`1.2`, not the source tag) - `body_comp` names its classes
+  in German inside its checkpoint while upstream publishes them in English, so it declares
+  none; **`cads`** per task, all nine lists equal to upstream's own label-map module value for
+  value (pinned in `tests/fixtures`); **`totalvibe`** with `vibe` and `vibe_sagittal` sharing one
+  scheme, none for `body_regions` and `feet_bones` (digit-string names), and the repository
+  spelled `VIBESegmentator` as upstream spells it - the manifest had it wrong, and a uri is
+  compared byte for byte; **`dentalsegmentator`** identified by the weights' Zenodo concept
+  DOI; **`monai`** per bundle, the bundle name in the uri and its version as the release;
+  **`synthstrip`**, **`voxtell`** and **`custom`** declare none.
+- **FastSurfer stores code their classes by id, and 19 of them carry no code.** FastSurfer's
+  identifier for a class is the aparc+aseg number, so `ModelEcosystem.scheme_code` lets a
+  catalog say how it spells a class - and whether it has an exact code for it at all. A
+  ranked store holds the network's channels BEFORE `split_cortex_labels`, which lateralizes
+  19 lh-numbered cortical ids spatially (it is why the LUT has 31 `ctx-lh-*` ids and 14
+  `ctx-rh-*`): in a store, value 1003 is both caudal middle frontal cortices under a
+  left-hemisphere name. A designation says a segment IS a concept, so those 19 carry none.
+  Read from upstream's source at v2.5.4, not measured on a case. Their NAMES are still the
+  left-hemisphere ones, which is a separate thing to put right.
+- **A ranked store can be written for `fastsurfer:asegdkt`** (`-o case.duckn`): the engine
+  already hands over its pre-argmax field, and the refusal that kept engine tasks out now
+  admits the engines whose runner takes a ranked sink. `Segmenter.segment` accepts
+  `probabilities=`.
 - duckn is pinned at `v0.4.0`.
 
 - **`HEAD /v1/jobs/<id>/result`, and a "gone" no cache may keep.** An adversarial pass on
