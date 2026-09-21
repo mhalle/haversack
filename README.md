@@ -259,7 +259,8 @@ would be cached where every reader of that cache can ask for it.
 `idc:`, `s3:` and `gs:` need `obstore`, which is part of the normal install; the
 others use the standard library. The hosted prefixes are exactly the sources a `haversack
 serve` accepts; bare URLs are local-only, because a server must not be pointed at arbitrary
-hosts.
+hosts. A server adds one the command line has no use for: `result:<key>`, a result that
+server itself computed (see "Local server").
 
 ## Getting data with `get`
 
@@ -401,6 +402,21 @@ haversack remote submit scan.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
 answers; stop it with Ctrl-C (or kill the process) - queued jobs are kept in its `jobs.db`
 and re-queued when it starts again. On this M2 a `total_fast` job through the
 server produced labels voxel-identical to the command line's.
+
+A finished job reports a `key`, and `result:<key>` names that result as the INPUT of another
+job on the same server - one job's labels as another's mask, without the bytes leaving the
+server - for a task whose `inputs` declare a role of kind `labels`:
+
+```bash
+haversack remote submit result:<key> --task <a task that takes a label map> -o out.seg.nrrd
+```
+
+A result that is not on the server is refused at submit, with what to compute first. A
+consumer reads such a mask with `haversack.labelmap.read_label_map`, which hands back the
+segment names with the voxels, because a structure is selected by name and never by label
+value. No task shipped today takes a label map: the source and the role are what such a
+task - statistics under a segmentation, a cascade gated on an organ - is built on. The
+server guide has the rules ("Results as inputs").
 
 That is the whole of it for a single machine. The server has its own guide for the rest -
 the rules that decide reads and computes, results addressed by what was segmented, the

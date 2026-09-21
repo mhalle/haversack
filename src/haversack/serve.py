@@ -17,6 +17,12 @@ contract is deliberately small:
                                    the public IDC buckets; needs the idc extra). A bare
                                    multipart file remains valid shorthand forever. Kind
                                    "url" is reserved for the authenticated tier.
+                                   {"kind": "result", "id": "<key>"} names a result THIS
+                                   server computed, by the `key` its job reports - so one
+                                   job's labels are another's mask. Its identity is the
+                                   referenced output's content digest, resolved here at
+                                   submit; a result that is not there is refused with a
+                                   409 naming what to compute first.
     GET    /v1/jobs                brief status of every known job
     GET    /v1/inputs/{digest}     whether this server already holds that content
     POST   /v1/inputs             store a multi-file input (a DICOM series) as
@@ -126,7 +132,8 @@ GENERATION_NAME = ".generation"
 #: atomic rename of this file IS the publication.
 CURRENT_NAME = "current"
 from .sources import (FETCH_EPOCH,  # noqa: E402
-                      CRDC_RE, IDC_BUCKETS, check_identifier as _check_identifier,  # noqa: E402
+                      CRDC_RE, IDC_BUCKETS, ResultSource,  # noqa: E402
+                      check_identifier as _check_identifier,
                       fetch_recording_origin as _fetch_recording_origin,
                       registry as _source_registry)
 
@@ -203,8 +210,14 @@ def wants_no_cache(request) -> bool:
     return any(d.strip().lower() == "no-cache" for d in raw.split(","))
 
 
-def _validate_request(seg, task, sources: list, options: dict) -> list:
+def _validate_request(seg, task, sources: list, options: dict, *,
+                      declared: dict | None = None) -> list:
     """Check a submit against what the task itself declares.
+
+    ``declared``, when a dict is passed, is filled ``{role: its inputs[] entry}`` from the
+    same ``describe()`` the binding was made against - so a caller that needs what a role
+    TAKES (a ``result:`` reference is checked against the role's ``kind``) reads the
+    declaration this function read, and does not describe the task a second time.
 
     Two things, both answerable before any work starts: the options are validated
     against the task's published parameter schema (the same declaration that
@@ -243,7 +256,10 @@ def _validate_request(seg, task, sources: list, options: dict) -> list:
     try:
         if not unknown:
             validate_options(wire_params(eng.parameters, eng.processing_knobs), options)
-        return bind_sources(sources, declared_inputs(desc),
+        inputs = declared_inputs(desc)
+        if declared is not None:
+            declared.update({str(i.get("name")): i for i in inputs or []})
+        return bind_sources(sources, inputs,
                             multi_input=eng.multi_input, task=task)
     except RequestError as e:
         raise HTTPException(422, e.detail) from e
@@ -273,11 +289,21 @@ def resource_links(task, identity, options, *, preview=False, statistics=False) 
     for grid variants, which identities are addressable at all (a single
     source identity, not an upload's sha256), and which options keep a result
     addressable are all decisions the server owns and can change.
+
+    **A content digest is never path-addressable** (decided 2026-09-20, here and nowhere
+    else): not an upload's, not a stored input's, and not a ``result:`` reference's - whose
+    identity IS the referenced output's digest, so that referring to a result and sending
+    its bytes are one request. A path names a result by an identifier that stays put and
+    can be keyed with no lookup; a result's key can be republished with other bytes, so a
+    ``/v1/result/<key>/<task>/...`` would need the result cache read on every anonymous
+    probe, and nothing single-input consumes a label map yet. It is asked of
+    ``content.is_digest`` rather than of the ``sha256:`` spelling: that test let
+    ``sha256-tree:`` through - an uploaded DICOM series referred to by digest - and minted
+    ``/v1/sha256-tree/<hex>/...`` links no route has ever served.
     """
     ident = list(identity or [])
-    if (len(ident) != 1 or ":" not in str(ident[0])
-            or str(ident[0]).startswith("sha256:")):
-        return {}                       # uploads and multi-source: job-scoped only
+    if len(ident) != 1 or ":" not in str(ident[0]) or is_digest(ident[0]):
+        return {}                       # content digests and multi-source: job-scoped only
     opts = options or {}
     tok = next((t for t, o in GRID_TOKENS.items() if o == opts), None)
     if opts and tok is None:
@@ -2155,6 +2181,13 @@ class LocalExecutor:
                     "(AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_ENDPOINT / "
                     "AWS_REGION for S3-compatible stores)") from None
         self._sweeper = None
+        # `result:<key>` - a result this server computed, as an input - resolves against
+        # THIS executor's cache, so the executor builds that source; it is in nobody's
+        # `default_sources()`. Added to whatever registry the operator chose, because it
+        # names no repository they could have chosen: it is a capability of having a
+        # result cache, and a server without one does not offer the kind at all.
+        if self.cache is not None and ResultSource.prefix not in self.sources:
+            self.sources[ResultSource.prefix] = ResultSource(self._result_entry)
         self._inflight: dict[str, str] = {}      # cache key -> active job id
         self._joiners: dict[str, int] = {}       # job id -> clients riding it besides the first
         self._cv = threading.Condition()
@@ -2360,6 +2393,14 @@ class LocalExecutor:
     # -- cache face (shared by the path surface and the public tier) ---------
     def cache_get(self, key: str):
         return self.cache.get(key) if self.cache is not None else None
+
+    def _result_entry(self, key: str, *, fresh: bool = False):
+        """The reader a :class:`~haversack.sources.ResultSource` resolves through: the
+        LEASED lookup, so the generation it hands back outlives the copy a fetch makes of
+        it whatever is published or evicted meanwhile (``GENERATION_GRACE_S``). ``fresh``
+        means nothing here: a local filesystem is always the current view."""
+        import contextlib
+        return contextlib.nullcontext(self.cache_get(key))
 
     def find_inflight(self, key: str):
         with self._cv:
@@ -3853,6 +3894,10 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             if kind == "url":
                 raise HTTPException(422, "source kind 'url' is reserved for the "
                                          "authenticated tier")
+            if kind == ResultSource.prefix and kind not in sources:
+                raise HTTPException(422, "this server keeps no result cache, so a "
+                                         f"{kind!r} source has nothing to name; send the "
+                                         "bytes instead (kind 'upload' or 'input')")
             if kind != "upload" and kind not in sources:
                 raise HTTPException(422, f"unknown source kind {kind!r}; this server "
                                          f"offers upload, {', '.join(sources)}")
@@ -3894,7 +3939,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # answer is already in hand - not deep inside a worker minutes later, and
         # never in silence (an option we do not know is a typo or a stale client,
         # and accepting it leaves the caller believing a knob was turned).
-        binding = _validate_request(seg, task, src, opts)
+        declared: dict = {}                # role -> what the task says it takes
+        binding = _validate_request(seg, task, src, opts, declared=declared)
         if not executor.accepting:
             raise HTTPException(429, "queue is full, retry later",
                                 headers={"Retry-After": "30"})
@@ -3911,7 +3957,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             return await _accept(request, jid, jdir, binding, task, opts, src,
                                  file, no_cache, executor, seg,
                                  caller_asked_no_cache, version=version,
-                                 handed=handed)
+                                 handed=handed, role_specs=declared)
         except QueueFull as e:
             _discard(jdir)
             raise HTTPException(429, str(e), headers={"Retry-After": "30"}) from e
@@ -3931,7 +3977,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
     async def _accept(request, jid, jdir, binding, task, opts, src, file,
                       no_cache, executor, seg, caller_asked_no_cache=False,
-                      version=None, handed=None):
+                      version=None, handed=None, role_specs=None):
+        # `role_specs`: role -> what the task declares it takes (_validate_request's
+        # `declared`). NOT named `declared` here: the upload branch below has a local of
+        # that name, and an upload bound before a reference - upload a CT, refer to its
+        # segmentation, the commonest request there is - turned it into None, so the mask
+        # role read as an image and every such job was refused (found on Modal, 2026-09-20).
         multi = len(binding) > 1
         # Only a multi-input job needs to look past the declared `file` part;
         # re-parsing the form for the single case would change nothing and
@@ -4075,6 +4126,25 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 hint = (" (expected 8-4-4-4-12 hex; a dotted value would be a DICOM "
                         "SeriesInstanceUID, which needs /v1/resolve)") if kind == "idc" else ""
                 raise HTTPException(422, str(e) + hint) from None
+            if getattr(sources[kind], "pins_at_submit", False) is True:
+                # A source whose identifier names its bytes only through a lookup (a
+                # `result:` reference) is asked ONCE, here, and the answer replaces what
+                # the caller sent: the identity below, the series-cache key and the
+                # worker's fetch are all read out of the pinned string, so none of them
+                # can be answered differently from the others. A reference that does not
+                # resolve is REFUSED here, with what to compute first - never a queued job
+                # that fails minutes later in a worker. Off the loop: on Modal the lookup
+                # may wait out a volume reload, and a miss is confirmed against a view
+                # newer than this request (503, not a refusal, when none can be had).
+                from .errors import RequestError
+                from .schemas import input_kind
+                try:
+                    ident = await asyncio.to_thread(
+                        sources[kind].pin, ident, input_kind((role_specs or {}).get(role)))
+                except RequestError as e:
+                    raise HTTPException(e.status, e.detail) from None
+                except InputError as e:
+                    raise HTTPException(422, str(e)) from None
             src_entry["id"] = ident
             staged.append((role, None))
             idents.append(sources[kind].identity(ident))
@@ -4868,6 +4938,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         _grid_routes(_register_statistics)
 
     for _prefix, _srcobj in sources.items():
+        # a source that says it has no path surface gets none (`result`: its identity
+        # needs a lookup, and a path is keyed without one - see resource_links, which
+        # mints no link for it either). `is False`: a duck-typed stand-in that says
+        # nothing is mounted, as every source always was.
+        if getattr(_srcobj, "path_addressable", True) is False:
+            continue
         _mount_source(_prefix, _srcobj)
 
     if read_only:

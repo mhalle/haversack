@@ -200,6 +200,85 @@
   the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
   be written no longer fails a publication that already succeeded; and `list` reads at most
   `limit` pointers rather than one per entry in the bucket.
+- **A job's input can be a result the server itself computed: `result:<key>`.** Every
+  source until now named data that came from outside. `<key>` is the `key` a finished job
+  already reports, so jobs compose - CT to segmentation, then something computed from (CT,
+  segmentation) - and each step is cached under the rules every other result is, so a cheap
+  step run again never repeats the expensive one before it. `result:<key>!<name>` selects a
+  named output (only `labels` exists) and `@sha256:<digest>` pins the bytes. The key is 64
+  hex characters and nothing else, so no host can be spelled and a result on another server
+  cannot be referenced. `GET /v1/sources` lists `result` on a server that keeps a result
+  cache. This is step 1 of `docs/result-references.md`; results that are not label maps, and
+  an engine that needs them, are not part of it.
+- **The identity of a reference is the content digest of the output it names, not the key.**
+  `Cache-Control: no-cache` republishes other bytes under the same key, and a downstream
+  result keyed on the key would silently outlive the mask it was computed from. The server
+  resolves the reference at submit and keys the job on the digest it finds - the same digest
+  an upload of those bytes has, so referring to a result and sending its bytes are one
+  request with one cached answer. `no-cache` on the downstream job resolves the reference
+  again; it never recomputes the upstream result.
+- **A reference that does not resolve is refused at submit, with what to compute first**
+  (409 `result_missing`; 422 for an output the result does not have, or a label map bound to
+  a role that takes an image) - never a queued job that fails minutes later in a worker,
+  which on Modal is a GPU container started for nothing. The worker that fetches a reference
+  resolves it a second time and hashes what it copied, because on Modal a lease taken in the
+  api container does not reach a worker's pruning: a job computes only ever from the bytes it
+  was keyed on, and where a result was recomputed or evicted in between and those bytes can
+  no longer be read, it fails with "the referenced result changed" (or "no result ...")
+  rather than compute from others. On
+  Modal both resolutions read the result volume under the rules of 0.12.4 - never while
+  another thread of the container may be reloading it, a local copy made under the lock, a
+  miss believed only from a view newer than the request (503 otherwise) - and the prefetch
+  thread never stages a reference at all.
+- **An input role can take a label map.** A task's `inputs[].kind` is `image` or `labels`,
+  and `haversack.labelmap.read_label_map` reads a `.seg.nrrd` with its segment names, its
+  geometry and the task that made it. A consumer of (image, mask) selects structures by
+  name - `liver` is a different label value in every catalog - so a label map that carries
+  no names (a NIfTI) is refused unless the caller asks for label values, and one where a
+  name cannot be matched to voxels without choosing - two segments on one value, two values
+  under one name, layered segments, non-integer voxels - is refused always. The reader is
+  its own module: `io.read_image` stays the image reader, and the default `segment` path
+  imports none of it. Every declared role is required, as image roles are. No shipped task
+  takes a label map yet.
+- **`GET /v1/sources` says which prefixes have a path surface.** Every entry gains
+  `path_addressable`, and a server with a result cache lists one more entry, `result`, for
+  which it is false. Additive, and the only thing here an existing client can see besides
+  the dead links below going away: no route, no accepted request, no refusal code and no
+  cache key changed, so nothing stored is recomputed.
+- **The terms of the original data survive the hop.** A result computed from a reference
+  records, in `provenance.inputs`, the digest, the upstream key, output, task and weights
+  versions, and that task's attribution; `derived_from` carries what is above that hop flat
+  - earlier hops by reference, each original input once by value with its origin, license
+  and citation - so a long chain does not copy its whole ancestry at every step, and the
+  terms outlive the upstream entries' eviction. They are recorded by the computation, so
+  the one exception is a cache hit on an answer first computed from an UPLOAD of the same
+  label bytes: that answer says "uploaded by the caller", whoever asks for it next, as an
+  upload and a stored input already shared theirs. `no-cache` recomputes it from the
+  reference.
+- **No content digest is path-addressable.** A job status linked
+  `/v1/sha256-tree/<hex>/<task>/...` for an uploaded DICOM series referred to by digest - a
+  path no route has ever served - because the rule was written against the `sha256:`
+  spelling. It is asked of the digest grammar now, which is also what keeps a reference's
+  result off the path surface: a path is keyed with no lookup, and a reference needs one.
+
+- **A license a catalog states for one task now reaches the result, not only `describe`.**
+  `segment` wrote a result's attribution from the catalog's name and the modality alone, so
+  a license a manifest states per task never reached the `.seg.nrrd` header: it fell back to
+  the catalog's. The engine path always handed over the catalog's own record of the task;
+  the nnU-Net path now does too. Nothing shipped was misstated - every manifest that names a
+  per-task license repeats its catalog's - but a catalog whose tasks differ in license would
+  have been, in the one copy of the terms that travels with a download. A per-task license
+  that only repeats its catalog's keeps the catalog's fuller record (it names the code's
+  license as well), so no shipped task's header changes: without that, 17 would have lost
+  `code` or changed case for the same facts, and a result's ETag is the digest of that file.
+
+- **`statistics.json` says which axis order each spacing is in.** `grid_spacing_mm` is
+  (x, y, z) in RAS - the labelmap's spacing AFTER the RAS reorientation, so a coronal series
+  reads e.g. [0.78, 3.0, 0.78] - while `field_grid_spacing_mm` is the model grid's (z, y, x).
+  Nothing said so, and a reader guessed wrong (2026-09-19). The JSON's `units` block now
+  states the first; no number changes.
+
+
 ## [0.12.4] - 2026-09-19
 
 - **A finished Modal job no longer answers 410 "purged" while its result is there.** On

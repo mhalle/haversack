@@ -28,6 +28,15 @@ labelmap has been restored onto the input's. So the field numbers carry their
 own spacing in `field_grid_spacing_mm`, and an AREA in particular must never be
 compared across grids - it is a first-derivative functional and genuinely
 depends on the sampling, unlike a volume.
+
+The two spacings are written in DIFFERENT axis orders, which a reader cannot
+guess and one session did guess wrong (2026-09-19): `grid_spacing_mm` is
+(x, y, z) in RAS millimeters, because it is `GetSpacing()` of the labelmap
+AFTER `DICOMOrient(..., "RAS")` - so a coronal series reads e.g.
+[0.78, 3.0, 0.78], the 3 mm step on the anterior axis, not in the third slot.
+`field_grid_spacing_mm` is the model grid's (z, y, x), the order the ranked
+code and everything else in the kernel use. Both are stated in the JSON's own
+`units` block for the same reason.
 """
 import json
 from pathlib import Path
@@ -166,11 +175,14 @@ def compute_statistics(image, labels_path, out_json, *, pair=None,
             if got is not None:
                 row["volume_ml_field"] = round(got[0] / 1000.0, 3)
                 row["area_cm2_field"] = round(got[1] / 100.0, 3)
+        # axis order is stated, not implied: sp is GetSpacing() of the RAS-oriented
+        # labelmap, so (x, y, z); the field's spacing below is the model grid's (z, y, x)
         out = {"units": {"intensity": unit, "volume": "ml", "area": "cm2",
-                         "centroid": "mm (RAS)"},
+                         "centroid": "mm (RAS)", "grid_spacing_mm": "mm (x, y, z in RAS)"},
                "grid_spacing_mm": [round(float(s), 4) for s in sp],
                "structures": structures}
         if field:
+            out["units"]["field_grid_spacing_mm"] = "mm (z, y, x on the model grid)"
             out["field_grid_spacing_mm"] = [
                 round(float(v), 4) for v in ranked_code.meta["spacing_zyx"]]
         if ranked_code is not None:

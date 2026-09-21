@@ -186,3 +186,26 @@ def _raising(code):
     c = copy.copy(code)
     c.meta = dict(code.meta, spacing_zyx=[0.0, 0.0, 0.0])   # measure() rejects this
     return c
+
+
+def test_grid_spacing_is_ras_xyz_not_the_stored_axis_order(tmp_path):
+    """`grid_spacing_mm` is (x, y, z) in RAS, because it is measured after the
+    RAS reorientation - and the JSON says so in its `units`. Written 2026-09-19:
+    a reader took it for the stored index order and read a coronal series'
+    3 mm step as a rectangular pixel. The volumes pin the geometry beside it,
+    so a mutant that reorders the spacing alone is still caught."""
+    lab = np.zeros((4, 5, 6), np.uint16)      # (z, y, x) as SimpleITK hands arrays over
+    lab[1:3, 1:4, 1:5] = 1
+    gray = np.full(lab.shape, -1000, np.int16)
+    # a coronal-like stored order: the 3 mm step sits on the SECOND stored axis
+    gi, lp = _pair(gray, lab, {1: "s1"}, tmp_path / "cor", spacing=(0.8, 3.0, 0.5))
+    li = sitk.ReadImage(str(lp))
+    for v in (gi, li):                        # stored L, S, A -> RAS reorders to x, y, z
+        v.SetDirection((-1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0))
+    sitk.WriteImage(li, str(lp))
+    out = json.loads(compute_statistics(gi, str(lp), tmp_path / "s.json").read_text())
+    assert out["units"]["grid_spacing_mm"] == "mm (x, y, z in RAS)"
+    # stored (0.8, 3.0, 0.5) on (L, S, A) is (0.8, 0.5, 3.0) on (x, y, z) = (R, A, S)
+    assert out["grid_spacing_mm"] == [0.8, 0.5, 3.0]
+    assert out["structures"][0]["volume_ml"] == pytest.approx(2 * 3 * 4 * 0.8 * 3.0 * 0.5 / 1000.0,
+                                                              abs=5e-4)   # the JSON rounds to 3 decimals
