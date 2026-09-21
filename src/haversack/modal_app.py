@@ -32,7 +32,8 @@ economical fast-mode choice), HAVERSACK_APP_NAME, HAVERSACK_SCALEDOWN (seconds, 
 conservative: a forgotten/left-up deploy idles at most ~2 min of GPU (~$0.07 on L40S)
 before scaling down; raise it to keep a busy server warmer), HAVERSACK_PROXY_AUTH,
 HAVERSACK_SNAPSHOT (memory snapshots, default ON - measured 2026-08-24: cold spawn->start
-10-14 s -> 6.4-6.7 s, one 35 s snapshot-creation run per deploy).
+10-14 s -> 6.4-6.7 s, one 35 s snapshot-creation run per deploy), HAVERSACK_CACHE_VOLUME (the
+result cache's volume, default ``<app name>-cache`` - see ``CACHE_VOLUME``).
 
 The image mounts the *running* haversack package (works from an editable checkout or an
 installed wheel alike). TODO(release): switch to ``uv_pip_install("haversack==<ver>")``
@@ -49,6 +50,28 @@ from pathlib import Path
 import modal
 
 APP_NAME = os.environ.get("HAVERSACK_APP_NAME", "haversack-serve")
+#: The Modal volume that holds the RESULT CACHE, by default this app's own (2026-09-20).
+#: Every other per-app store is named after the app, so a deployment under a new name began
+#: with an empty result cache - though a result key holds no app name at all (identity x task
+#: x options x weights versions x epoch, see ``serve.result_key``), which makes a cache
+#: portable: what `haversack-radar-val` computed answers the same requests under any name.
+#: Only the cache is nameable. Scratch, the inputs store and the jobs Dict hold one
+#: deployment's job ids, uploads and flights, and stay ``{APP_NAME}-...``.
+#:
+#: Two cases, and they differ. Reusing a cache whose first deployment is GONE is completely
+#: safe: it is the same volume read by the same code. Two LIVE deployments on one cache behave
+#: like more containers of one app - publication by generation is what already lets several
+#: workers write one volume - with one difference: single flight lives in the per-app jobs
+#: Dict (the ``inflight:`` markers), so each app can compute the same key at once. That is
+#: duplicate work, never corruption: both publish a generation, one pointer wins, and the
+#: other generation is pruned once no reader holds it.
+#:
+#: One thing to set in BOTH cases: every publication evicts down to the publishing app's own
+#: ``HAVERSACK_RESULTS_KEEP`` (default 500), so a deployment that adopts a 2,000-entry cache
+#: with the default would evict 1,500 results at its first job. Deploy it with a bound at
+#: least the size of the cache it adopts; with two live apps the smaller bound is the real one.
+#: An unset or empty value means the default; nothing is renamed or migrated.
+CACHE_VOLUME = os.environ.get("HAVERSACK_CACHE_VOLUME") or f"{APP_NAME}-cache"
 GPU = os.environ.get("HAVERSACK_GPU", "L40S")
 PROXY_AUTH = os.environ.get("HAVERSACK_PROXY_AUTH", "1") not in ("0", "false", "no")
 SCALEDOWN = int(os.environ.get("HAVERSACK_SCALEDOWN", "120"))
@@ -132,6 +155,11 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   "HAVERSACK_APP_NAME", "HAVERSACK_GPU", "HAVERSACK_PROXY_AUTH",
                   "HAVERSACK_SCALEDOWN", "HAVERSACK_GPU_SNAPSHOT", "HAVERSACK_SNAPSHOT",
                   "HAVERSACK_MAX_CONTAINERS", "HAVERSACK_INPUTS_GB", "HAVERSACK_API_MIRROR_GB",
+                  # Which volume is the result cache (2026-09-20). Unforwarded it would be
+                  # the app-name defect again: every container re-derives `<app>-cache`, so
+                  # the deploy mounts the named cache at /cache while the containers commit
+                  # and reload the app's own volume, which is mounted nowhere.
+                  "HAVERSACK_CACHE_VOLUME",
                   *_engines.engine_env_vars())
 
 # Base image (the ASGI api container + the nnU-Net GPU Worker). uv-NATIVE: the nnU-Net
@@ -193,7 +221,10 @@ scratch_vol = modal.Volume.from_name(f"{APP_NAME}-scratch", create_if_missing=Tr
 # can be recomputed from its recipe, an evicted upload is simply gone.
 inputs_vol = modal.Volume.from_name(f"{APP_NAME}-inputs", create_if_missing=True)
 jobs_dict = modal.Dict.from_name(f"{APP_NAME}-jobs", create_if_missing=True)
-cache_vol = modal.Volume.from_name(f"{APP_NAME}-cache", create_if_missing=True)
+# The one store a deployment may name (HAVERSACK_CACHE_VOLUME, see CACHE_VOLUME above): its
+# keys carry no app name. The three above stay per app, and a test reads these five lines
+# to keep it so - scratch and the Dict hold THIS deployment's job ids and flights.
+cache_vol = modal.Volume.from_name(CACHE_VOLUME, create_if_missing=True)
 
 # -- the api container's view of the cache volume ---------------------------------
 #
@@ -457,21 +488,64 @@ def _read_cache(key: str):
         return _mirror(g, Path(MIRROR_ROOT) / key / g.name) / RESULT_NAME, hit[1]
 
 
-def _confirm_cache_absent(key: str, since: float):
-    """The entry under ``key`` as seen from a view newer than ``since`` (a monotonic
-    time), or None when that view has no such entry - a VERIFIED miss. Reloads, a
-    bounded number of times, only when no reload since ``since`` has taken; raises
-    ``ResultsNotVisible`` when none does, so the caller answers "not visible here yet"
-    rather than "gone" or "never computed"."""
+def _cache_view_since(since: float) -> None:
+    """Return once this container's view of the cache volume is newer than ``since`` (a
+    monotonic time). Reloads, a bounded number of times, only when no reload since
+    ``since`` has taken; raises ``ResultsNotVisible`` when none does, so the caller answers
+    "not visible here yet" rather than "gone" or "never computed". The one loop behind
+    every absence this container vouches for: a lookup's miss (``_confirm_cache_absent``)
+    and a listing, whose every row NOT in it is a miss (``_list_cache``)."""
     from haversack.serve import ResultsNotVisible
     for delay in CACHE_CONFIRM_DELAYS_S:
         if delay:
             time.sleep(delay)
         with _cache_confirm_lock:
             if _cache_view_as_of >= since or _reload_cache_view():
-                return _read_cache(key)
+                return
     raise ResultsNotVisible("this server cannot see the result cache's latest state yet "
                             "(a volume reload was refused); retry shortly")
+
+
+def _confirm_cache_absent(key: str, since: float):
+    """The entry under ``key`` as seen from a view newer than ``since`` (a monotonic
+    time), or None when that view has no such entry - a VERIFIED miss. Raises
+    ``ResultsNotVisible`` when no such view can be had (see ``_cache_view_since``)."""
+    _cache_view_since(since)
+    return _read_cache(key)
+
+
+#: What this container's listings remember of each publication's meta.json, for as long
+#: as the container lives - see ``serve.ListingMemo`` (made on first use: serve is a
+#: call-time import here).
+_listing_memo = []
+
+
+def _list_cache(*, keys=None, limit=None, after=None, accept=None, match=None) -> tuple:
+    """``ResultCache.list`` over the cache VOLUME, from the api container or the twin.
+
+    The 2026-09-19 rules, all three. (1) The listing is read from a view newer than the
+    request, or not at all: a result missing from it reads as "not computed", and a client
+    that lists to decide what to compute would compute it again - the listing's form of
+    the false 410. A refused reload is a 503, never a shorter list. (2) Nothing is read
+    while another thread may be reloading: ``ResultCache.list`` reads on a pool of threads,
+    which are "other threads" to a reload exactly as another request's is, so every batch
+    of its reads runs inside ``_cache_view`` held shared by the thread that started it, and
+    that hold ends only when the batch has. Per batch, not per listing: a cold scan of
+    2,000 entries is seconds, a reload waits ``CACHE_RELOAD_WAIT_S`` for readers and every
+    lookup queues behind a waiting reload (writer preference), so one long hold would stall
+    the container's reads; ``serve.LIST_CHUNK`` bounds a hold to well under that wait. (3)
+    It hands out no path and takes no lease - rows are copied out as plain data - so no
+    volume file is open, or relied on, once it returns. ``ResultCache()`` mkdirs its root,
+    a touch of the volume, so it too is built under the lock; the hold is never nested
+    (a second shared acquire behind a waiting reload would wait on itself)."""
+    from haversack.serve import LIST_WORKERS, ListingMemo, ResultCache
+    _cache_view_since(time.monotonic())
+    if not _listing_memo:
+        _listing_memo.append(ListingMemo())
+    with _cache_view.shared():
+        cache = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP)
+    return cache.list(keys=keys, limit=limit, after=after, accept=accept, match=match,
+                      memo=_listing_memo[0], hold=_cache_view.shared, workers=LIST_WORKERS)
 
 
 # -- `result:` references: the two readers a ResultSource resolves through here --------
@@ -566,11 +640,12 @@ def _check_volumes_attached() -> None:
     """Fail fast, with the fix, if a mounted volume is not actually attached.
 
     A memory snapshot (HAVERSACK_SNAPSHOT, on by default) captures the container with its
-    volume handles; if one of the per-app volumes (`{APP_NAME}-scratch/cache/inputs`) is
-    deleted and recreated afterwards, a restored container carries the dead handle and the
-    FIRST WRITE fails deep in a job with a cryptic "volume vo-... not attached" (2026-09-03).
-    A tiny write here surfaces it at startup instead, and names the remedy. Runs post-restore
-    (in `setup`, snap-less), never during snapshotting - a volume touch there is unsafe.
+    volume handles; if one of the deployment's volumes (`{APP_NAME}-scratch`, `-inputs`, and
+    the cache, `CACHE_VOLUME`) is deleted and recreated afterwards, a restored container
+    carries the dead handle and the FIRST WRITE fails deep in a job with a cryptic "volume
+    vo-... not attached" (2026-09-03). A tiny write here surfaces it at startup instead, and
+    names the remedy. Runs post-restore (in `setup`, snap-less), never during snapshotting -
+    a volume touch there is unsafe.
     """
     import os
     for root in (SCRATCH_ROOT, CACHE_ROOT, INPUTS_ROOT, WEIGHTS_ROOT):
@@ -1892,11 +1967,8 @@ class ModalExecutor:
             return "absent"
         return "pending"
 
-    def cache_list(self):
-        from haversack.serve import ResultCache
-        _reload_cache_view()
-        with _cache_view.shared():
-            return ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).list()
+    def cache_list(self, *, keys=None, limit=None, after=None, accept=None, match=None):
+        return _list_cache(keys=keys, limit=limit, after=after, accept=accept, match=match)
 
     supports_push = False                    # SSE uses the server's poll branch
     accepting = True                         # Modal's backlog is the queue
@@ -1967,10 +2039,20 @@ class ModalExecutor:
             have = installed_versions(self.segmenter, task)
         return have
 
-    def resource_key(self, identity: str, task: str, opts=None) -> str:
+    def weights_versions(self, task) -> list:
+        """What ``resource_key`` keys ``task`` on - the listing asks it once a task a
+        request and derives its keys itself (``serve.result_key``), where asking
+        ``resource_key`` key by key described the task again for every option set and
+        every identity (2026-09-20). One door, so the two cannot disagree."""
+        return self._fresh_weights_versions(task)
+
+    def resource_key(self, identity, task: str, opts=None) -> str:
+        """The key of one identity - what the path surface asks - or of several: the
+        listing's key round trip hands over every role's identity of a multi-input
+        entry, which is what such an entry was keyed on (2026-09-20)."""
         from haversack.serve import result_key
-        return result_key((identity,), task, opts or {},
-                          self._fresh_weights_versions(task))
+        ids = (identity,) if isinstance(identity, str) else tuple(identity)
+        return result_key(ids, task, opts or {}, self.weights_versions(task))
 
     def submit(self, jid, jdir, input_path, task, options, *, source=None,
                identity=(), no_cache: bool = False, source_tokens=None,
@@ -2232,13 +2314,16 @@ if PUBLIC:
         _pkg_dir()
         os.environ["TOTALSEG_WEIGHTS_PATH"] = WEIGHTS_ROOT
         from haversack import Segmenter
-        from haversack.serve import (ResultCache, create_public_app, installed_versions,
+        from haversack.serve import (create_public_app, installed_versions,
                                  result_key, weights_versions_of)
         seg = Segmenter(device="cpu", weights=WEIGHTS_ROOT)
 
+        def weights_fn(task):
+            return weights_versions_of(seg, task)
+
         def key_fn(identity, task, opts=None):
-            return result_key((identity,), task, opts or {},
-                              weights_versions_of(seg, task))
+            ids = (identity,) if isinstance(identity, str) else tuple(identity)
+            return result_key(ids, task, opts or {}, weights_fn(task))
 
         def get(key):
             _reload_cache_view(max_age=CACHE_FRESH_S)
@@ -2253,13 +2338,9 @@ if PUBLIC:
                 return None
             return {"progress": meta.get("progress")}
 
-        def list_fn():
-            _reload_cache_view()
-            with _cache_view.shared():
-                return ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).list()
-
         return create_public_app(key_fn, get, seg.tasks, inflight=inflight,
-                                 list_fn=list_fn, resolve_fn=seg.resolve_task,
+                                 list_fn=_list_cache, resolve_fn=seg.resolve_task,
+                                 weights_fn=weights_fn,
                                  # a miss read from a view a refused reload left stale
                                  # is a 503, not a 404 (see _confirm_cache_absent)
                                  confirm_absent=_confirm_cache_absent,

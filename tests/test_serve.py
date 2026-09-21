@@ -3777,7 +3777,7 @@ def test_a_cancel_that_lands_after_the_last_patch_still_wins(tmp_path):
     release.set()
     final = wait_state(client, jid)
     assert final["state"] == "cancelled"
-    assert ex.cache_list() == []                                        # nothing published
+    assert ex.cache_list() == ([], None)                                # nothing published
     ex.close()
 
 
