@@ -5211,6 +5211,31 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                  "authorized POST /v1/jobs of the same input and task "
                                  f'with deliverables ["{what}"] renders it')
 
+    def _absence_is_never_stored(route):
+        """An artifact route whose 404s say ``Cache-Control: no-store`` - as its 202s
+        always have (``_progress_headers``).
+
+        An artifact arrives LATE: rendered after `done`, on a cache hit that asks for it,
+        and - with a result store several hosts share - by another host into the same
+        generation, with no republication to announce it. So "not here" is only ever
+        "not here yet, as far as this request could see", and a 404 followed moments
+        later by a 200 is a legitimate sequence. RFC 9111 4.2.2 lets a cache give a 404
+        with no explicit freshness a heuristic one, and the 200 beside it invites shared
+        caches (``public``): without this a proxy may keep answering 404 for a preview
+        that landed a second later. Nothing here remembers an absence either - every
+        request looks again (2026-09-21, with the object-store session)."""
+        import functools
+
+        @functools.wraps(route)
+        async def guarded(*args, **kwargs):
+            try:
+                return await route(*args, **kwargs)
+            except HTTPException as e:
+                if e.status_code == 404:
+                    e.headers = {**(e.headers or {}), "Cache-Control": "no-store"}
+                raise
+        return guarded
+
     async def _artifact_answer(request, view: str, *, shared: bool, result=None, path=None):
         """The response for one view whose entry (``result``) or file (``path``) is in
         hand: GET's 200, HEAD's 200, or the 304 of either."""
@@ -5223,6 +5248,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
     def _register_job_artifact(view: str):
         file, what = ARTIFACT_VIEWS[view]
 
+        @_absence_is_never_stored
         async def job_artifact(request: Request, jid: str):
             """One artifact of a job's result - the door for results with NO PATH (an
             upload, a ``result:`` reference, a multi-input job), and open to every job.
@@ -5700,6 +5726,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             file, what = ARTIFACT_VIEWS[view]
             stem, _, ext = view.partition(".")
 
+            @_absence_is_never_stored
             async def artifact(request: Request, ident: str, task: str):
                 """One artifact of a path-addressed result, under GET and HEAD.
 

@@ -190,7 +190,12 @@ For `preview.png` and `statistics.*` it is the probe for "has it rendered yet": 
 deliverable is pending, and 404 otherwise - a deliverable nobody asked for is a 404 at once,
 not a 202, because no render is coming. The anonymous twin answers the same: it reads the
 api's pending-render marker (before 2026-09-21 it could not, and said 404 for a preview
-seconds from landing). `meta.json` is 404 until the labels are published, under either verb. A method a URL does not have is a 405 whose `Allow` lists the ones it has.
+seconds from landing). `meta.json` is 404 until the labels are published, under either verb. An artifact's absence is never for a cache to keep: its 404, like its
+202, says `Cache-Control: no-store`, because an artifact arrives late - after `done`, on a
+later request that asks for it, from another host where several share a result store - and
+a 404 followed a moment later by a 200 is a legitimate sequence. Read a 404 for a
+deliverable you asked for as "not as far as this request saw", and ask again. A method a
+URL does not have is a 405 whose `Allow` lists the ones it has.
 
 Uploads are not path-addressable - their identity is a digest nobody else can guess - so an
 uploaded input's result is fetched through its job's `result` link, which is where the ETag

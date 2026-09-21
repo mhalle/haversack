@@ -230,6 +230,33 @@ def test_the_twin_says_202_for_a_render_still_running_when_it_is_given_the_signa
     ex.close()
 
 
+def test_an_artifacts_absence_is_never_for_a_cache_to_keep(tmp_path, monkeypatch, renders):  # noqa: F811
+    """An artifact arrives late - after `done`, on a later hit, or (with a shared result
+    store) from another host into the same generation - so its 404 and its 202 are
+    "not yet, as far as this request saw" and say ``no-store``, at both doors, under both
+    verbs, beside a 200 that invites shared caches. Nothing here asserts a 404 STAYS one
+    for a deliverable that was asked for: it may be a 200 a moment later."""
+    seg, ex, client, _ = _server(tmp_path, monkeypatch)
+    renders.gate.clear()
+    try:
+        s = wait_state(client, _post(client, deliverables=["statistics"])["id"], ("done",))
+        doors = (BASE, f"/v1/jobs/{s['id']}")
+        for verb in (client.get, client.head):
+            for door in doors:
+                for view, status in (("statistics.json", 202), ("preview.png", 404)):
+                    r = verb(f"{door}/{view}")
+                    assert r.status_code == status, (door, view, r.status_code)
+                    assert r.headers.get("cache-control") == "no-store", (door, view, status)
+            other = verb(BASE.replace("total_fast", "total") + "/preview.png")   # no entry at all
+            assert other.status_code == 404 and other.headers.get("cache-control") == "no-store"
+    finally:
+        renders.gate.set()
+    _quiet(ex, s["key"])
+    ok = client.get(f"{BASE}/statistics.json")             # and the 200 is still the hour's
+    assert ok.status_code == 200 and "max-age" in ok.headers["cache-control"]
+    ex.close()
+
+
 def test_head_says_202_while_the_labels_are_still_computing(tmp_path, monkeypatch):
     """What a GET of the same artifact answers then; ``meta.json`` is 404 until the labels
     are published, under either verb, as its GET has always been."""
@@ -240,6 +267,7 @@ def test_head_says_202_while_the_labels_are_still_computing(tmp_path, monkeypatc
         for view in ("preview.png", "statistics.json", "statistics.tsv"):
             r = client.head(f"{BASE}/{view}")
             assert r.status_code == 202 and r.headers.get("retry-after"), (view, r.status_code)
+            assert r.headers.get("cache-control") == "no-store", view    # "not yet" is not kept
             assert client.get(f"{BASE}/{view}").status_code == 202, view
         assert client.head(f"{BASE}/meta.json").status_code == 404
         assert client.get(f"{BASE}/meta.json").status_code == 404

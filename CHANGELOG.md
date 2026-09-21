@@ -54,6 +54,13 @@
   the window is milliseconds. `create_public_app` takes the writer's `artifact_state` as a
   read-only signal, as it takes `inflight`, and the Modal twin reads the marker (and never
   sweeps a dead one: it writes nothing). It answers 202 with `Retry-After`, as the api does.
+- **An artifact's 404 says `Cache-Control: no-store`**, as its 202 always has. An artifact
+  arrives late - after `done`, on a cache hit that asks for it, and with a shared result
+  store from another host into the same generation - so "not here" only ever means "not as
+  far as this request saw". The 200 beside it invites shared caches, and RFC 9111 (4.2.2)
+  lets one keep a 404 that states no freshness on a heuristic; a proxy could have gone on
+  answering 404 for a preview that landed a second later. The server remembers no absence
+  either: every request looks again.
 - **`If-None-Match` is compared weakly.** `W/"<tag>"` matches `"<tag>"`, as RFC 9110
   (13.1.2) requires of this header; the strings were compared whole, so a client or proxy
   that had weakened the tag - which one that re-encodes a body must - downloaded a label
