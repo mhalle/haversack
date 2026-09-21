@@ -1940,3 +1940,46 @@ class TestTheServerSweepsItsStore(_Hosts):
         ex.close()
         sweeper.join(10)
         self.assertFalse(sweeper.is_alive(), "it waits on the server's own condition")
+
+
+class TestFindingAGenerationByItsBytes(_Hosts):
+    """`result:<key>` pins the referenced output's digest at submit and resolves again in
+    the worker, refusing other bytes (main, 2026-09-20). On one machine a lease keeps the
+    pinned generation; across machines it cannot, so the question becomes "which generation
+    has these bytes" - which bounded history can answer."""
+
+    def digest(self, labels: bytes) -> str:
+        return f"sha256:{hashlib.sha256(labels).hexdigest()}"
+
+    def test_the_pinned_generation_survives_another_hosts_republication(self):
+        gen1 = self.publish(self.a, b"the referenced result")
+        self.publish(self.b, b"something else")          # another host moves the key on
+        found = self.a.find_generation(KEY, self.digest(b"the referenced result"))
+        self.assertEqual(gen1, found)
+        dest = self.tmp / "pinned"
+        got = self.a.fetch_generation(KEY, found, dest)
+        self.assertIsNotNone(got)
+        self.assertEqual(b"the referenced result", (dest / RESULT_NAME).read_bytes())
+
+    def test_a_sweep_spares_it_while_history_lists_it(self):
+        self.publish(self.a, b"the referenced result")
+        self.publish(self.b, b"something else")
+        self.a.sweep(grace_s=0)
+        self.assertIsNotNone(
+            self.a.find_generation(KEY, self.digest(b"the referenced result")))
+
+    def test_bytes_no_kept_generation_published_are_not_found(self):
+        self.publish(self.a, b"one")
+        self.assertIsNone(self.a.find_generation(KEY, self.digest(b"never published")))
+        for i in range(objectcache.HISTORY_KEEP + 2):    # push the first off the end
+            self.publish(self.a, f"v{i}".encode())
+        self.assertIsNone(self.a.find_generation(KEY, self.digest(b"one")))
+
+    def test_the_current_publication_answers_for_its_own_digest(self):
+        gen = self.publish(self.a, b"current")
+        self.assertEqual(gen, self.a.find_generation(KEY, self.digest(b"current")))
+
+    def test_a_deleted_entry_answers_nothing(self):
+        self.publish(self.a, b"one")
+        self.a.delete(KEY)
+        self.assertIsNone(self.a.find_generation(KEY, self.digest(b"one")))

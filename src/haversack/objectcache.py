@@ -383,6 +383,32 @@ class SharedResultCache:
                  "files": sorted(g["files"])}
                 for g in _generations(ptr)]
 
+    def find_generation(self, key: str, digest: str) -> str | None:
+        """Which kept generation of ``key`` published labels with this digest, if any.
+
+        For `result:` references (main, 2026-09-20), which pin the referenced output's
+        sha256 at submit and resolve AGAIN in the worker, refusing anything that is not
+        those bytes. On one machine the pinned generation survives because the submit took
+        a lease on it; across machines a lease means nothing, and another host may have
+        republished the key in between - so the question the worker actually needs to ask
+        is "which generation has these bytes", not "what is current".
+
+        Bounded history answers it without a lease: the predecessor is listed, the sweep
+        spares what history lists, and :meth:`fetch_generation` materializes it. Newest
+        first, so a digest republished unchanged resolves to the current publication.
+
+        Returns the generation token; ``fetch_generation`` then hands over the bytes.
+        """
+        from .serve import RESULT_NAME
+        ptr, _ = self._read_pointer(key)
+        if ptr is None:
+            return None
+        for gen in _generations(ptr):
+            blob = (gen["files"] or {}).get(RESULT_NAME)
+            if isinstance(blob, dict) and blob.get("digest") == digest:
+                return gen["generation"]
+        return None
+
     def fetch_generation(self, key: str, generation: str, dest) -> dict | None:
         """Materialize one kept generation into ``dest`` (which must exist); its entry, or
         None when that generation is not kept or its bytes have been swept.

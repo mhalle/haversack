@@ -24,6 +24,16 @@
   A hit costs one pointer read - about 85 ms median from this Mac, measured before
   history existed; a key republished four times carries ~5x the pointer, which has not
   been re-measured on a real bucket.
+- **`SharedResultCache.find_generation(key, digest)`**, for `result:` references across
+  machines. A `result:<key>` pins the referenced output's sha256 at submit and resolves
+  again in the worker, refusing other bytes; on one machine the submit's lease keeps that
+  generation alive, but a lease means nothing to another host, which may have republished
+  the key in between. Bounded history answers the question a lease was standing in for -
+  which generation has these bytes - and the sweep spares what history lists, so the pinned
+  result is still there and `fetch_generation` hands it over. Measured: another host
+  republishes, the pin refuses the new bytes, and the pinned generation is still found,
+  fetched and spared by a sweep.
+
 - **A server with `--result-store` sweeps it, every `--sweep-interval-hours` (24 by
   default, 0 to disable).** Now that `delete` leaves bytes for a sweep and a republication
   leaves its predecessor's the same way, a store nothing sweeps only grows - and a
