@@ -140,6 +140,8 @@ where it gave one. `HEAD` answers the same without the body and never waits. Eac
 `ETag` that is the digest of what is sent, honors `If-None-Match`, and is `Cache-Control:
 private, no-cache`: not for a shared cache, and revalidated rather than assumed, which the
 ETag makes cheap.
+Their 404s and 410s - and `/result`'s - say `Cache-Control: no-store`: "gone" turns back
+into 200 when the key is computed again with the same output.
 
 A job with a key is
 served from the result cache's entry for that key - the same bytes the path surface serves -
@@ -589,6 +591,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/jobs/<id>` | token | full status, result metadata, links |
 | GET | `/v1/jobs/<id>/events` | token | status snapshots as Server-Sent Events |
 | GET | `/v1/jobs/<id>/result` | token | the labels (`?format=nii.gz` converts) |
+| HEAD | `/v1/jobs/<id>/result` | token | the same, no body: status, `ETag`, length (none with `?format=`, which a HEAD does not convert) |
 | GET | `/v1/jobs/<id>/meta.json` | token | the job's result: provenance and structure names |
 | HEAD | `/v1/jobs/<id>/meta.json` | token | the same, no body |
 | GET | `/v1/jobs/<id>/preview.png` | token | the job's rendered preview; 202 while it renders |

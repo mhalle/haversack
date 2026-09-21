@@ -115,8 +115,14 @@ def test_every_route_that_names_a_file_answers_head_as_well_as_get(tmp_path, mon
         routes = _file_routes(app)
         views = {p.rsplit("/", 1)[-1] for p in routes}
         assert set(ARTIFACT_VIEWS) | {"labels.seg.nrrd"} <= views, (name, views)
+        # a job's labels are a file too, under a name with no dot in it: the filter
+        # above cannot see `/result`, which is how it kept its 405 through 2026-09-21
+        for r in app.routes:
+            if getattr(r, "path", "").endswith("/result"):
+                routes.setdefault(r.path, set()).update(r.methods or ())
         lacking = sorted(p for p, m in routes.items() if "GET" in m and "HEAD" not in m)
         assert lacking == [], f"{name}: served under GET with no HEAD: {lacking}"
+        assert (name == "api") == ("/v1/jobs/{jid}/result" in routes)
     assert any(p.startswith("/v1/jobs/") for p in _file_routes(client.app))
     assert not any(p.startswith("/v1/jobs/") for p in _file_routes(_twin_of(seg, ex).app))
     ex.close()
@@ -201,6 +207,11 @@ def test_head_never_computes_renders_or_waits(tmp_path, monkeypatch, renders):  
     _quiet(ex, s["key"])
     assert renders.made == ["statistics"]                  # and no HEAD rendered a thing
     assert client.head(f"{BASE}/statistics.tsv").status_code == 200
+    # `no-cache` starts a recompute on a GET; a HEAD starts nothing, so it means nothing
+    r = client.head(f"{BASE}/statistics.tsv",
+                    headers={"Cache-Control": "no-cache", "Prefer": "wait=5"})
+    assert r.status_code == 200 and "preference-applied" not in r.headers, dict(r.headers)
+    assert len(fetches) == 1 and renders.made == ["statistics"]
     ex.close()
 
 
@@ -462,13 +473,60 @@ def test_a_job_artifact_answers_by_the_result_routes_rules(tmp_path, monkeypatch
         for verb in (client.get, client.head):
             assert verb(f"/v1/jobs/nosuchjob/{view}").status_code == 404, view
             assert verb(f"{base}/{view}").status_code == 200, view
+    got, probe = client.get(f"{base}/result"), client.head(f"{base}/result")
+    assert probe.status_code == 200 and probe.content == b""
+    for h in ("etag", "content-length", "content-disposition"):
+        assert probe.headers[h] == got.headers[h], h
+    assert int(probe.headers["content-length"]) == len(got.content)
+    assert client.head(f"{base}/result",
+                       headers={"If-None-Match": got.headers["etag"]}).status_code == 304
+    converted = client.head(f"{base}/result?format=nii.gz")     # converts nothing, so it
+    assert converted.status_code == 200                         # cannot know a length
+    assert "content-length" not in converted.headers
     assert ex.cache.delete(s["key"])
     shutil.rmtree(ex.get(s["id"]).dir)
-    assert client.get(f"{base}/result").status_code == 410
-    for view in ARTIFACT_VIEWS:
+    # gone - until the key is computed again with the same output, when these very URLs
+    # say 200: so the 410 is no more for a cache to keep than the 404 is
+    for view in ("result", *ARTIFACT_VIEWS):
         for verb in (client.get, client.head):
-            assert verb(f"{base}/{view}").status_code == 410, view
+            r = verb(f"{base}/{view}")
+            assert r.status_code == 410 and r.headers["cache-control"] == "no-store", view
     ex.close()
+
+
+def test_only_an_absence_is_marked_no_store(tmp_path, monkeypatch):
+    """404 and 410 are; a 409 (not done) is no absence and no cache keeps it on a
+    heuristic, and a 200 keeps its own policy."""
+    gate = threading.Event()
+    seg, ex, client, _ = _server(tmp_path, monkeypatch, gate=gate)
+    try:
+        s = _post(client, source=None, fill=9)
+        for view in ("result", *ARTIFACT_VIEWS):
+            for verb in (client.get, client.head):
+                r = verb(f"/v1/jobs/{s['id']}/{view}")
+                assert r.status_code == 409 and "cache-control" not in r.headers, view
+        # and a job that is not done links nothing that is not there yet
+        assert not {"result", "meta", "preview", "statistics"} & set(s["links"]), s["links"]
+    finally:
+        gate.set()
+    done = wait_state(client, s["id"], ("done",))
+    _quiet(ex, done["key"])
+    r = client.get(f"/v1/jobs/{s['id']}/meta.json")
+    assert r.status_code == 200 and r.headers["cache-control"] == "private, no-cache"
+    ex.close()
+
+
+def test_a_head_response_carries_no_body():
+    """At unit level because Starlette's TestClient drops a HEAD's body itself, so no
+    route test can see one - and under a real server a body on a HEAD is a protocol
+    error (mutation pass, 2026-09-21)."""
+    import types
+    from fastapi.responses import JSONResponse
+    resp = JSONResponse({"a": 1})
+    req = types.SimpleNamespace(method="HEAD", headers={})
+    out = serve_mod.answer_body(req, resp, {"ETag": '"sha256:x"', "Cache-Control": "private"})
+    assert out.body == b"" and out.headers["content-length"] == str(len(resp.body))
+    assert out.headers["content-type"] == resp.headers["content-type"]
 
 
 def test_a_jobs_artifacts_are_its_own_not_a_republications(tmp_path, monkeypatch):
@@ -493,6 +551,14 @@ def test_a_jobs_artifacts_are_its_own_not_a_republications(tmp_path, monkeypatch
         theirs = client.get(f"/v1/jobs/{second['id']}/{v}").content
         assert theirs != mine[v], f"{v}: the recompute did not change it; proves nothing"
         assert client.get(f"/v1/jobs/{first['id']}/{v}").content == mine[v], v
+    # ...nor through the second look, of a newer view: with the first job's own picture
+    # gone, a confirming lookup that finds the REPUBLISHED entry has found somebody
+    # else's bytes, and the answer is 404 - not their preview (mutation pass, 2026-09-21)
+    theirs = client.get(f"/v1/jobs/{second['id']}/preview.png").content
+    (ex.get(first["id"]).dir / "preview.png").unlink()
+    ex.confirm_absent = lambda key, since: ex.cache.get(key)
+    r = TestClient(create_app(ex)).get(f"/v1/jobs/{first['id']}/preview.png")
+    assert r.status_code == 404 and r.content != theirs, r.status_code
     ex.close()
 
 
@@ -519,6 +585,15 @@ def test_a_stale_view_of_the_entry_is_asked_again_before_a_404(tmp_path, monkeyp
     client = TestClient(create_app(ex))
     r = client.get(f"/v1/jobs/{s['id']}/preview.png")
     assert r.status_code == 200 and asked == [s["key"]], (r.status_code, asked)
+
+    # and the cheaper re-ask comes first: the entry as it stands NOW, which on Modal is
+    # a fresh local copy - no newer view needed when the second lookup already has it
+    looks = []
+    ex.cache_get = lambda key: (looks.append(key) or len(looks) > 1) and real or \
+        (stale / Path(real[0]).name, real[1])
+    del ex.confirm_absent
+    r = TestClient(create_app(ex)).get(f"/v1/jobs/{s['id']}/preview.png")
+    assert r.status_code == 200 and len(looks) >= 2, (r.status_code, looks)
     ex.close()
 
 

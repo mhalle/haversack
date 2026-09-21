@@ -290,3 +290,49 @@ def test_the_pending_state_is_per_deliverable_here_too(monkeypatch, tmp_path):
     jobs["artifacts:K"] = {"state": "pending", "t": time.time() - 1000, "job": "w",
                            "names": ["statistics"]}
     assert ex.artifact_state("K", "statistics") == "absent" and "artifacts:K" not in jobs
+
+
+def test_the_twins_read_of_a_dead_marker_writes_nothing(monkeypatch, tmp_path):
+    """``sweep=False`` is the twin's promise to write nothing anywhere, housekeeping
+    included; the api's read does sweep, or the writer's refuse-if-present rule would
+    decline to mark a new flight. Neither half was observed until a mutation pass
+    (2026-09-21) flipped each and nothing failed."""
+    m, jobs, vol, ex, client, spawned = _api(monkeypatch, tmp_path)
+    dead = {"state": "pending", "t": time.time() - 1000, "job": "w", "names": ["preview"]}
+    jobs["artifacts:K"] = dict(dead)
+    assert m._artifact_state("K", "preview", sweep=False) == "absent"
+    assert jobs.get("artifacts:K") == dead, "the twin's read removed a marker"
+    assert m._artifact_state("K", "preview", sweep=True) == "absent"
+    assert "artifacts:K" not in jobs
+
+
+def test_the_twin_is_handed_the_read_that_does_not_sweep():
+    """...and ``public()`` is where that read is chosen: parsed, since the function runs
+    only in a Modal container."""
+    import ast
+    import haversack.modal_app as mod
+    tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+    sweeps = [kw.value.value for fn in ast.walk(tree)
+              if isinstance(fn, ast.FunctionDef) and fn.name == "public"
+              for call in ast.walk(fn) if isinstance(call, ast.Call)
+              and getattr(call.func, "id", None) == "_artifact_state"
+              for kw in call.keywords if kw.arg == "sweep"]
+    assert sweeps == [False], sweeps
+
+
+def test_the_worker_says_what_a_job_with_no_key_cannot_deliver():
+    """``_execute_job`` runs only in a worker, so this reads it: it must ask
+    ``unkeyed_deliverables`` and emit the answer, or a Modal job with no cache entry
+    advertises artifact links no door serves (the local half is driven for real)."""
+    import ast
+    import haversack.modal_app as mod
+    tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
+    fn = next(f for f in ast.walk(tree)
+              if isinstance(f, ast.FunctionDef) and f.name == "_execute_job")
+    calls = [c for c in ast.walk(fn) if isinstance(c, ast.Call)]
+    assert any(getattr(c.func, "id", getattr(c.func, "attr", None)) == "unkeyed_deliverables"
+               for c in calls)
+    assert any(isinstance(k, ast.Constant) and k.value == "deliverables_unavailable"
+               for c in calls if getattr(c.func, "id", None) == "_emit"
+               for a in c.args if isinstance(a, ast.Dict) for k in a.keys)
+

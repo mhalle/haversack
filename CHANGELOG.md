@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **`HEAD /v1/jobs/<id>/result`, and a "gone" no cache may keep.** An adversarial pass on
+  the artifact routes below found the one file route they left without a `HEAD` - a job's
+  own labels, 405 until now, and invisible to the test that reads the router for file names
+  because its name has no dot. It answers what `GET` would (status, `ETag`, the file's
+  `Content-Length`, a 304 for a matching `If-None-Match`) and converts nothing: with
+  `?format=nii.gz` it says 200 and no length. The job routes' 410 now says `Cache-Control:
+  no-store` as their 404s do - RFC 9111 (4.2.2) lets a cache keep a 410 on a heuristic, and
+  these URLs say 200 again once the key is recomputed with the same output. The new routes'
+  record, in-flight and render-state lookups run off the event loop (on Modal each is a
+  Dict round trip, and the anonymous twin now makes one per artifact miss). One capability
+  went with the artifact work and is recorded here rather than restored: `preview.png` is
+  sent from memory, so it no longer answers `Range` requests (the labels still do).
 - **A result with no path can reach its deliverables: `/v1/jobs/<id>/preview.png`,
   `/statistics.json`, `/statistics.tsv`, `/meta.json`.** The artifacts beside a result were
   served only by its path, and a result whose identity has no path - an upload's, a

@@ -5040,8 +5040,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         return state, path, own
 
 
-    @app.get("/v1/jobs/{jid}/result", tags=["jobs"])
     def result(request: Request, jid: str, format: str = None):
+        """A job's labels, under GET and HEAD. HEAD (2026-09-21: the one file route the
+        artifact work left without it, and invisible to the tripwire that reads the
+        router for names with a dot) answers what GET would - status, ETag, the file's
+        Content-Length, a 304 for a matching ``If-None-Match`` - and converts nothing:
+        with ``?format=`` it says 200 and no length, since the NIfTI's size is only
+        known by writing it."""
         require_auth(request)
         state, path, res = _job_result(jid)
         if state is None:
@@ -5053,6 +5058,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(410, gone)
         task_name = (executor.status_of(jid) or {}).get("task", "labels")
         stem = _task_stem(task_name)           # canonical eco:name is not filename-safe
+        head = request.method == "HEAD"
+        if head and format in ("nii.gz", "nii"):
+            from fastapi import Response
+            probe = Response(status_code=200, media_type="application/gzip")
+            del probe.headers["content-length"]    # Starlette's 0: not this body's length
+            return probe
         if format in ("nii.gz", "nii"):        # the LOSSY conversion, by request only
             import shutil
             import tempfile
@@ -5087,6 +5098,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             fh = open(path, "rb")
         except FileNotFoundError:
             raise HTTPException(410, gone) from None
+        if head:
+            from fastapi import Response
+            with fh:
+                size = os.fstat(fh.fileno()).st_size
+            return Response(status_code=200, media_type="application/octet-stream",
+                            headers={"ETag": etag, "Content-Length": str(size),
+                                     "Content-Disposition":
+                                         f'attachment; filename="{stem}_{jid}.seg.nrrd"'})
         from starlette.background import BackgroundTask
         from starlette.responses import StreamingResponse
 
@@ -5168,11 +5187,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             return found
         _state = getattr(executor, "artifact_state", None)
 
-        def state_fn() -> str:
+        async def state_fn() -> str:
             # asked about THIS deliverable: a render that was not asked for it
-            # will never place it, so its absence is definitive at once
-            return _state(key, what)
-        pending = _state is not None and bool(key) and state_fn() == "pending"
+            # will never place it, so its absence is definitive at once. Off the
+            # loop: on Modal it is a Dict read, and since 2026-09-21 the twin asks too
+            return await asyncio.to_thread(_state, key, what)
+        pending = _state is not None and bool(key) and await state_fn() == "pending"
         if pending:
             if deadline is None:
                 deadline = time.time()
@@ -5180,11 +5200,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 await asyncio.sleep(0.2)
                 if (found := await look()) is not None:
                     return found
-                if state_fn() != "pending":
+                if await state_fn() != "pending":
                     break
             if (found := await look()) is not None:
                 return found
-            if state_fn() == "pending":
+            if await state_fn() == "pending":
                 raise HTTPException(202,
                                     headers=_progress_headers(
                                         None, {"Retry-After": "2"}),
@@ -5234,7 +5254,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         import functools
 
         def unstored(e):
-            if e.status_code == 404:
+            # 410 with it (adversarial pass, 2026-09-21): "the bytes are gone" turns back
+            # into a 200 when the key is recomputed with the same output, and RFC 9111
+            # 4.2.2 lists 410 among the statuses a cache may keep on a heuristic. A 409
+            # is not on that list and is left alone.
+            if e.status_code in (404, 410):
                 e.headers = {**(e.headers or {}), "Cache-Control": "no-store"}
             return e
 
@@ -5253,6 +5277,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 except HTTPException as e:
                     raise unstored(e)
         return guarded
+
+    # the labels' own job route, registered here because its 404 and 410 are absences
+    # too; two routes, one function, as the artifacts' are (one operation id per verb)
+    _job_labels = _absence_is_never_stored(result)
+    app.head("/v1/jobs/{jid}/result", tags=["jobs"])(_job_labels)
+    app.get("/v1/jobs/{jid}/result", tags=["jobs"])(_job_labels)
 
     async def _artifact_answer(request, view: str, *, shared: bool, result=None, path=None):
         """The response for one view whose entry (``result``) or file (``path``) is in
@@ -5290,7 +5320,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 raise HTTPException(410, "result no longer on the server; recompute it")
             if what is None:
                 return await _artifact_answer(request, view, shared=False, result=res)
-            status = executor.status_of(jid) or {}
+            # off the loop: on Modal a record is a Dict round trip (~60-80 ms)
+            status = await asyncio.to_thread(executor.status_of, jid) or {}
             key = status.get("cache_key") or status.get("key")
             w = None if request.method == "HEAD" else _prefer_wait_raw(request, wait_max)
 
@@ -5780,9 +5811,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     skip = not head and _skip_cache(request)
                     hit = None if skip else await asyncio.to_thread(executor.cache_get, key)
                     if hit is None and not skip:
-                        jid = executor.find_inflight(key) if what is not None else None
+                        # both off the loop: on Modal they are Dict reads and a
+                        # FunctionCall probe, and this branch is every anonymous HEAD
+                        jid = await asyncio.to_thread(executor.find_inflight, key) \
+                            if what is not None else None
                         if jid is not None:    # computing: what a GET of it answers too
-                            snap = executor.status_of(jid) or {}
+                            snap = await asyncio.to_thread(executor.status_of, jid) or {}
                             return Response(status_code=202, headers=_progress_headers(
                                 snap.get("progress"), {"Retry-After": "5"}))
                         hit = await asyncio.to_thread(confirm_absent, key, since)  # 503 when

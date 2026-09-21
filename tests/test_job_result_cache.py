@@ -303,6 +303,8 @@ def test_an_evicted_record_does_not_advertise_an_entry_holding_other_bytes(tmp_p
                  {"task": s["task"]})
     st = client.get(f"/v1/jobs/{first}").json()
     assert st["result_available"] is False and "result" not in st["links"]
+    # nor the job's artifact doors: they resolve through the same bytes (2026-09-21)
+    assert set(st["links"]) == {"self", "events"}, st["links"]
     assert client.get(f"/v1/jobs/{first}/result").status_code == 410
     ex.close()
 
