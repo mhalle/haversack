@@ -72,8 +72,10 @@ caller who wants it computed says so with RFC 7240: `Prefer: wait=N` holds the c
 up to N seconds (default 30, at most 110) and returns the bytes if they arrive in time, else
 202 with progress in the headers; `Prefer: wait=0` or `Prefer: respond-async` starts the
 computation and returns 202 at once. A `HEAD` on the same path probes without computing:
-200 cached, 202 in flight (with the same progress headers), 404 absent. The header never
-goes in the URL, so the URL stays the pure cache key.
+200 cached, 202 in flight (with the same progress headers), 404 absent. Its 200 carries
+the `ETag` and `Content-Length` the `GET` would, and like the `GET` it answers a matching
+`If-None-Match` with 304. The header never goes in the URL, so the URL stays the pure
+cache key.
 
 **`Cache-Control: no-cache` recomputes.** On a submit or an authorized result GET (with
 `Prefer`) it means

@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+- **Fixed: `HEAD` on a result path named a validator no `GET` issues.** `GET
+  /v1/<source>/<identifier>/<task>/labels.seg.nrrd` answers with the content digest as its
+  `ETag`; `HEAD` on the same path answered with the first 32 hex characters of the result
+  key, because the probe built its headers without the entry's result - which both of its
+  lookups hand back. A client asking "has this result changed?" with `HEAD` compared a tag
+  it had never been given, and the digest became the validator precisely so that a weights
+  bump which leaves the bytes alone forces no re-download. The same 200 also said
+  `Content-Length: 0`, the web framework's count of the empty body, where RFC 9110 (8.6)
+  allows only the length `GET` would send. Both matter beyond tidiness: these responses are
+  `Cache-Control: public`, and a shared cache that forwards a `HEAD` marks its stored `GET`
+  stale when either field differs (RFC 9111, 4.3.5). `HEAD` now sends `GET`'s `ETag` and
+  `Content-Length`, on the api and the anonymous twin, and on Modal also where the entry is
+  found only by the reload that confirms a stale miss.
+- **`HEAD` honors `If-None-Match` with a 304, as `GET` does.** RFC 9110 (13.1.2) names the
+  two methods together, and a `HEAD` that says 200 to the request `GET` says 304 to is the
+  same disagreement one header over. Only the 200 is conditional: a result in flight is
+  still 202 and an absent one 404. `meta.json` keeps its key-derived `ETag` on purpose - its
+  body is the result record, which a recompute rewrites even when it reproduces the labels
+  byte for byte, so the labels' digest is not its validator.
 - **A job's input can be a result the server itself computed: `result:<key>`.** Every
   source until now named data that came from outside. `<key>` is the `key` a finished job
   already reports, so jobs compose - CT to segmentation, then something computed from (CT,
