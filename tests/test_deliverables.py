@@ -573,6 +573,13 @@ def test_the_vocabulary_has_one_home():
     assert serve_mod.ARTIFACT_NAMES == tuple(DELIVERABLES.values())
     assert jobpolicy.wanted_deliverables(None, {"statistics", "preview"}) == tuple(DELIVERABLES)
     assert jobpolicy.wanted_deliverables(["statistics", "preview"], {"preview"}) == ("preview",)
+    # the ORDER is the catalog's, never the ask's: a submit that joins a flight hands over a
+    # SET of names, so the ask's order there is arbitrary, and the list is persisted and
+    # reported. A mutant that kept the ask's order passed every test until 2026-09-21.
+    assert jobpolicy.wanted_deliverables(["statistics", "preview"],
+                                         {"statistics", "preview"}) == tuple(DELIVERABLES)
+    assert jobpolicy.wanted_deliverables({"statistics", "preview"},
+                                         {"statistics", "preview"}) == tuple(DELIVERABLES)
     assert jobpolicy.wanted_deliverables([], {"preview"}) == ()
     assert jobpolicy.wanted_deliverables(None, ()) == ()
     assert jobpolicy.pending_covers(None, "preview") is True        # a marker without names
