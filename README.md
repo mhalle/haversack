@@ -114,7 +114,9 @@ package it writes your own manifest, `~/.config/haversack/ts_weights.json`
 (`HAVERSACK_TS_MANIFEST` to move it), which is laid over the packaged one on every read and
 survives upgrades; in a source checkout it edits the repository's file. `--dry-run` reports
 without writing, and existing entries are never repointed at a newer release unless you say
-`--update-existing`, because that changes the segmentations.
+`--update-existing`, because that changes the segmentations. A dataset TotalSegmentator serves
+only under its license is never added, even when it is also published as a release asset
+(Dataset857, `thigh_shoulder_muscles`, was in `v3.0.0-weights`); the refresh names it instead.
 
 `coverage` marks the TotalSegmentator tasks whose weights are behind TotalSegmentator's
 commercial license (`appendicular_bones`, `brain_structures`, `coronary_arteries`,
@@ -159,7 +161,13 @@ refused with the qualified form to use: what it meant would depend on which cata
 be installed, and two catalogs can offer the same name.
 
 `total_fast` is the 3 mm whole-body model; `total_fastest` is the 6 mm one (coarser, faster
-still), and `total` runs the five 1.5 mm models. Useful options:
+still), and `total` runs the five 1.5 mm models. TotalSegmentator v3 (upstream's `total_v3`,
+its `v3.0.0-weights` release) is the `ts.v3` catalog with the same three names -
+`ts.v3:total`, `ts.v3:total_fast`, `ts.v3:total_fastest` - beside `ts.v2`'s, which are
+unchanged. Its 117 labels are v2's with value 26 `vertebrae_L6` where v2 has `vertebrae_S1`.
+Upstream states no license for the v3 weights yet (its README lists only v2's `total` as
+Apache-2.0, and the release is marked a prerelease); `haversack cite ts.v3:total` says so.
+Useful options:
 
 | Option | Meaning |
 |---|---|

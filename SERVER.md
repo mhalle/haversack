@@ -410,7 +410,7 @@ the reference. Results of references are not path-addressable; fetch them throug
 `lineage`, `modality`, the `structures`, the `weights` and whether they are installed, the
 `inputs` it takes (each with a role name and a kind - `image` or `labels`; every declared role is required), its
 `parameters` as two JSON Schemas, and its `behavior`. Task names cross the wire as qualified catalog
-names only (a bare `total_fast` is a 404 that names `ts.v2:total_fast`); the in-process API's ability to run a model folder by path stops at this
+names only (a bare `total_fast` is a 404 that names `ts.v2:total_fast` and `ts.v3:total_fast`); the in-process API's ability to run a model folder by path stops at this
 boundary. The grammar `eco:name@version` names an ecosystem, a task, and a weights version;
 all spellings of one task converge on one cache key. A version is a pin, and the server holds
 it the way every catalog does: the INSTALLED version decides, and an unknown one satisfies

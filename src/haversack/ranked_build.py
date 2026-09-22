@@ -128,6 +128,11 @@ def part_partition(index, part_name, leaves):
                  "included", members, disjoint=True, exhaustive=True)
 
 
+#: Catalogs added after 0.11.0 stopped accepting bare task names: no store names a task of
+#: theirs bare, so a bare name in a store's metadata is never resolved into one.
+CATALOGS_AFTER_BARE_NAMES = frozenset({"ts.v3"})
+
+
 def _ts_names(task):
     """TotalSegmentator label id -> name, from the installed catalog.
 
@@ -148,7 +153,10 @@ def _ts_names(task):
     if sep and eco in RENAMED_ECOSYSTEMS:
         name = f"{RENAMED_ECOSYSTEMS[eco]}:{short}"
     elif not sep:
-        found = [n for n in cat.names() if n.partition(":")[2] == name]
+        # a bare name was last written before 0.11.0, so never by a catalog added since -
+        # ts.v3 (2026-09-21) reuses ts.v2's task names and would make every one ambiguous
+        found = [n for n in cat.names() if n.partition(":")[2] == name
+                 and n.partition(":")[0] not in CATALOGS_AFTER_BARE_NAMES]
         if len(found) == 1:
             name = found[0]
     return dict(_resolve_spec(name, cat).label_map)

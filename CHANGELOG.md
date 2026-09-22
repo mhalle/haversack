@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+- **TotalSegmentator v3 is the `ts.v3` catalog: `ts.v3:total`, `ts.v3:total_fast`,
+  `ts.v3:total_fastest`.** Upstream's `total_v3` (Datasets 831-835 at 1.5 mm, 836 at 3 mm,
+  837 at 6 mm, release `v3.0.0-weights`) under v2's task names, the catalog carrying the
+  version as the naming policy has it; `ts.v2` and every result it has keyed are untouched, and
+  a bare `total` now names both catalogs. The registry is generated from TotalSegmentator
+  2.18.0's own source by the new `tools/gen_ts_registry.py` (read out of the PyPI wheel, its
+  digest checked; upstream's `get_task_config` executed, not restated) and checked against
+  every checkpoint's plans and labels by range request. The labels are v2's 117 with value 26
+  `vertebrae_L6` in place of `vertebrae_S1`, as the checkpoints and upstream's v3 class maps
+  both say. Upstream states no license for the v3 weights (its README lists v2's `total` as
+  Apache-2.0 and does not mention v3; the release is a prerelease), and the attribution
+  record says that rather than guess. MR Datasets 870-873 are recorded in the weights manifest
+  and offered by no task: no upstream task uses them yet.
+- **A dataset holding two models of one configuration is refused, never chosen.** Datasets
+  831-836 each ship upstream's default `nnUNetPlans` model and, beside it, the
+  `nnUNetResEncUNetLPlans_8` model upstream runs only for `model_size="small"`. The resolver
+  keyed a dataset's folders by configuration alone, so the one sorting last - the small model
+  - would have run under the default's name without a word. A registry entry now states
+  `models: {dataset: {trainer, plans}}`, every resolve of that weights id carries it (the
+  load, `describe()` and so the result key's weights, `warm`, the orientation decision), and
+  a dataset still holding more than one match raises `AmbiguousModel` - reported as
+  `unresolved` by the doors that already report an installed model they cannot choose from.
+- **`weights refresh` no longer adds a license-gated dataset** that TotalSegmentator has also
+  published as a release asset: Dataset857 (`thigh_shoulder_muscles`, `commercial` upstream)
+  appeared in `v3.0.0-weights`, and taking its URL would have made haversack download what
+  upstream installs only through its licensed backend. It is reported as `license_gated`.
+
 - **`HEAD /v1/jobs/<id>/result`, and a "gone" no cache may keep.** An adversarial pass on
   the artifact routes below found the one file route they left without a `HEAD` - a job's
   own labels, 405 until now, and invisible to the test that reads the router for file names

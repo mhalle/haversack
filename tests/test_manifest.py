@@ -50,6 +50,24 @@ def test_refresh_adds_missing_datasets(fake_github, tmp_path):
     assert set(r["added"]) == {"291", "297", "305"} and set(saved) == {"291", "297", "305"}
 
 
+def test_refresh_does_not_add_a_license_gated_dataset(fake_github, tmp_path):
+    """TotalSegmentator published Dataset857 (thigh_shoulder_muscles, `commercial` upstream,
+    installed only through its licensed backend) as a v3.0.0-weights release asset. A refresh
+    that took its URL would make haversack download what upstream gates."""
+    fake_github.append(_release("v3.0.0", "2026-09-07T00:00:00Z",
+                                [("Dataset857_TotalSegMRI_thigh_shoulder_1088subj.zip", "ddd"),
+                                 ("Dataset870_TotalSegMRI_part1_organs_1751subj.zip", "eee")]))
+    m = tmp_path / "w.json"
+    m.write_text(json.dumps({"weights": {}}))
+    r = wf.refresh_manifest(path=m)
+    saved = json.loads(m.read_text(encoding="utf-8"))["weights"]
+    assert "857" not in saved and "857" not in r["added"]
+    assert set(r["license_gated"]) == {"857"}
+    assert "870" in saved                                # an ungated new dataset is recorded
+    with pytest.raises(Exception, match="license"):      # and fetching it still says why
+        wf.fetch_one(857, tmp_path / "root")
+
+
 def test_new_versions_are_recorded_without_changing_current(fake_github, tmp_path):
     """Facts (what upstream published) update freely; the decision (which to install) does not."""
     m = tmp_path / "w.json"

@@ -17,6 +17,10 @@ The nnU-Net catalogs:
 - ``ts.v2`` - the TotalSegmentator v2 catalog. Its tasks are *compositions* (unions,
   cascades, remaps) that exist only as application logic, so it carries a full
   task registry (guarded by the remap drift test).
+- ``ts.v3`` - TotalSegmentator v3's ``total_v3`` (Datasets 831-837), listed as
+  ``total``/``total_fast``/``total_fastest``: the catalog name carries the ``_v3``. Same
+  shape as ``ts.v2``, its own registry (``tools/gen_ts_registry.py``), the same weights
+  manifest - TotalSegmentator's dataset ids are one namespace.
 - ``moose`` - MOOSE/moosez models. Bare, self-describing nnU-Net checkpoints
   on public release assets: the manifest holds name -> url + folder, and the
   spec is read from the installed checkpoint's own dataset.json.
@@ -63,6 +67,8 @@ MRSEGMENTATOR_MANIFEST = Path(__file__).parent / "data" / "mrsegmentator_weights
 DENTALSEGMENTATOR_MANIFEST = Path(__file__).parent / "data" / "dentalsegmentator_weights.json"
 TOTALVIBE_MANIFEST = Path(__file__).parent / "data" / "totalvibe_weights.json"
 CADS_MANIFEST = Path(__file__).parent / "data" / "cads_weights.json"
+TS_V2_TASKS = Path(__file__).parent / "data" / "ts_tasks.json"
+TS_V3_TASKS = Path(__file__).parent / "data" / "ts_v3_tasks.json"
 
 
 def manifest_entry(entries: dict, task: str, *, what: str = "", generator: str = "") -> dict:
@@ -435,9 +441,12 @@ class TSEcosystem(ModelEcosystem):
 
     name = "ts.v2"
     description = "TotalSegmentator task catalog"
+    #: The registry this catalog's tasks come from. A TotalSegmentator catalog is this class
+    #: with another registry; the weights manifest (``ts_weights.json``) is shared.
+    REGISTRY = TS_V2_TASKS
 
     def __init__(self):
-        self._catalog = TaskCatalog("ts")
+        self._catalog = TaskCatalog("ts", path=self.REGISTRY)
 
     def tasks(self) -> list:
         return self._catalog.names()
@@ -468,7 +477,7 @@ class TSEcosystem(ModelEcosystem):
         """``(_meta, {task: raw entry})`` of the shipped registry, read once."""
         cached = getattr(self, "_raw_registry", None)
         if cached is None:
-            data = json.loads(TaskCatalog._builtin("ts").read_text(encoding="utf-8"))
+            data = json.loads(self.REGISTRY.read_text(encoding="utf-8"))
             items = data["tasks"] if isinstance(data, dict) and "tasks" in data else data
             items = list(items.values()) if isinstance(items, dict) else items
             meta = data.get("_meta", {}) if isinstance(data, dict) else {}
@@ -482,7 +491,7 @@ class TSEcosystem(ModelEcosystem):
         # outputs, not something read out of a checkpoint.
         meta, entries = self._registry_entries()
         if task not in entries:
-            raise LookupError(f"unknown ts.v2 task {task!r}")
+            raise LookupError(f"unknown {self.name} task {task!r}")
         return {"ts_version": str(meta.get("ts_version")),
                 "registry_sha256": _digest(entries[task])}
 
@@ -490,7 +499,25 @@ class TSEcosystem(ModelEcosystem):
         spec = self._catalog.get(task)
         return {"kind": "segments", "modality": spec.modality,
                 "segments": [{"id": n, "value": v} for v, n in spec.label_map.items()],
-                "source": {"file": "haversack/data/ts_tasks.json"}}
+                "source": {"file": f"haversack/data/{self.REGISTRY.name}"}}
+
+
+class TSv3Ecosystem(TSEcosystem):
+    """TotalSegmentator v3: upstream's ``total_v3`` task, Datasets 831-835 (1.5 mm, five
+    parts), 836 (3 mm) and 837 (6 mm), from ``v3.0.0-weights``.
+
+    Listed as ``total``, ``total_fast`` and ``total_fastest`` - the catalog's name says v3,
+    as the naming policy has it (``family.version``; the makers' names are never changed
+    beyond that) - beside ``ts.v2``'s tasks of the same names, whose results and keys it
+    leaves alone. Its labels are v2's 117 with value 26 ``vertebrae_L6`` in place of
+    ``vertebrae_S1``, as upstream's ``class_map["total_v3"]`` and the checkpoints'
+    ``dataset.json`` both say. Every registry entry states ``plans: nnUNetPlans``: 831-836
+    also ship upstream's ``model_size="small"`` ResEnc model beside it, which the resolver
+    would otherwise refuse to choose between."""
+
+    name = "ts.v3"
+    description = "TotalSegmentator v3 task catalog"
+    REGISTRY = TS_V3_TASKS
 
 
 class ZipManifestEcosystem(ModelEcosystem):
@@ -1941,7 +1968,7 @@ _ENGINE_ECOSYSTEMS = {"fastsurfer": FastSurferEcosystem,
 
 #: The nnU-Net catalogs, always served. One tuple for the served set and the structures
 #: index alike, so a catalog added here is mined and checked with no second edit.
-_NNUNET_CATALOGS = (TSEcosystem, MooseEcosystem, MRSegmentatorEcosystem,
+_NNUNET_CATALOGS = (TSEcosystem, TSv3Ecosystem, MooseEcosystem, MRSegmentatorEcosystem,
                     DentalSegmentatorEcosystem, TotalVibeEcosystem, CADSEcosystem)
 
 

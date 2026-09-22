@@ -204,7 +204,7 @@ def test_a_bare_task_name_gets_a_404_naming_the_qualified_one(tmp_path):
 
     ex = LocalExecutor(Qualified(), workdir=tmp_path, max_pending=4, keep_finished=50)
     client = TestClient(create_app(ex))
-    want = "task 'total_fast' needs its catalog: use ts.v2:total_fast"
+    want = "task 'total_fast' needs its catalog: use ts.v2:total_fast or ts.v3:total_fast"
     r = client.get("/v1/tasks/total_fast")
     assert (r.status_code, r.json()["detail"]) == (404, want)
     r = client.post("/v1/jobs", files={"file": ("scan.nii.gz", volume_bytes(7))},

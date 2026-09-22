@@ -58,6 +58,31 @@
     "nnunetv2"
    ]
   },
+  "ts.v3": {
+   "title": "TotalSegmentator v3",
+   "description": "TotalSegmentator's v3 whole-body CT models (upstream task total_v3): the 117 structures of v2's total, with label 26 vertebrae_L6 in place of vertebrae_S1, retrained as five 1.5 mm parts (Datasets 831-835) and single 3 mm (836) and 6 mm (837) models.",
+   "group": "Clinic of Radiology and Nuclear Medicine, University Hospital Basel (Department of Research and Analysis)",
+   "repository": "https://github.com/wasserth/TotalSegmentator",
+   "license": {
+    "code": "Apache-2.0",
+    "weights": "not stated by upstream for v3",
+    "note": "Read 2026-09-21: the repository LICENSE is Apache-2.0; the README's list of models 'openly available for any usage (Apache-2.0 license)' names total but not total_v3, which the README does not mention at all; upstream's task config does not mark total_v3 commercial; the v3.0.0-weights release is a GitHub prerelease whose notes say only 'Add weights for v3.0.0'."
+   },
+   "weights_record": "https://github.com/wasserth/TotalSegmentator/releases/tag/v3.0.0-weights",
+   "cite": [
+    {
+     "title": "TotalSegmentator: Robust Segmentation of 104 Anatomic Structures in CT Images",
+     "authors": "Wasserthal J, Breit HC, Meyer MT, Pradella M, Hinck D, Sauter AW, Heye T, Boll D, Cyriac J, Yang S, Bach M, Segeroth M",
+     "journal": "Radiology: Artificial Intelligence",
+     "year": 2023,
+     "doi": "10.1148/ryai.230024",
+     "pmid": "37795137"
+    }
+   ],
+   "also_cite": [
+    "nnunetv2"
+   ]
+  },
   "moose": {
    "title": "MOOSE (moosez)",
    "description": "Multi-organ objective segmentation of CT, MR and PET, trained on multi-center data; an ENHANCE.PET initiative.",
