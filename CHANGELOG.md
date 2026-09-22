@@ -153,6 +153,9 @@
 - duckn is pinned at `v0.5.1`, seg extension 0.9: a segment may state a union once, as
   `members`. Stores here list values and are read as 0.9 files unchanged; the builder writes
   none, since a union belongs in a store only when its scheme defines it.
+- rankfield is pinned at `v0.3.3`, in `pyproject.toml` and CI's hand-written list. It is
+  v0.3.2's code with duckn pinned at `v0.5.1`, so the two siblings' tags now agree on duckn;
+  no encoder or decoder change and no bytes move.
 
 - **`HEAD /v1/jobs/<id>/result`, and a "gone" no cache may keep.** An adversarial pass on
   the artifact routes below found the one file route they left without a `HEAD` - a job's
