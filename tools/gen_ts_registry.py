@@ -24,7 +24,10 @@ install, just like the other ``--no-project`` generators:
 - ``nnunet.py``: which part class map and dataset->part map a multi-model task paints with -
   the ``if task_name == ...: class_map_parts = ...; map_taskid_to_partname = ...`` chain,
   read by AST. ``total_v3`` has its own (``class_map_5_parts_total_v3``: v2's parts with
-  vertebrae label 2 renamed ``vertebrae_L6``).
+  vertebrae label 2 renamed ``vertebrae_L6``). And the sliding window's tile step - the
+  ``if task_name in [...]: step_size = 0.8 else: step_size = 0.5`` rule, read by AST - as each
+  entry's ``step_size`` (added 2026-09-21: matching it took ts.v3:total from 99.86 % to
+  99.98 % voxel agreement with upstream).
 
 Each entry states ``models: {dataset: {trainer, plans}}`` - v3's Datasets 831-836 each ship
 an ``nnUNetPlans`` AND an ``nnUNetResEncUNetLPlans_8`` 3d_fullres folder, and haversack's
@@ -120,6 +123,25 @@ def _part_maps(nnunet_src: str) -> dict:
     return out
 
 
+def _step_rule(nnunet_src: str) -> tuple[set, float, float]:
+    """``(task names, their step, everyone else's step)`` from nnunet.py's step_size rule."""
+    def step_of(body):
+        for t in body:
+            if (isinstance(t, ast.Assign) and isinstance(t.targets[0], ast.Name)
+                    and t.targets[0].id == "step_size"):
+                return float(ast.literal_eval(t.value))
+        return None
+    for node in ast.walk(ast.parse(nnunet_src)):
+        if (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name) and node.test.left.id == "task_name"
+                and isinstance(node.test.ops[0], ast.In)):
+            yes, no = step_of(node.body), step_of(node.orelse)
+            if yes is not None and no is not None:
+                return set(ast.literal_eval(node.test.comparators[0])), yes, no
+    raise SystemExit("nnunet.py has no `if task_name in [...]: step_size = ...` rule: "
+                     "the generator needs an update")
+
+
 def load_upstream(zf) -> dict:
     ns: dict = {}
     exec(_source(zf, "map_tasks_config.py"), ns)                # noqa: S102 - upstream data
@@ -131,6 +153,7 @@ def load_upstream(zf) -> dict:
     ns["_defaults"] = {"plans": _signature_default(api, "totalsegmentator", "plans"),
                        "model_size": _signature_default(api, "totalsegmentator", "model_size")}
     ns["_part_maps"] = _part_maps(_source(zf, "nnunet.py"))
+    ns["_step_rule"] = _step_rule(_source(zf, "nnunet.py"))
     return ns
 
 
@@ -168,6 +191,8 @@ def entry_for(up: dict, task: str, mode: str, name: str) -> dict:
                           "label_remap": {str(k): inv[v] for k, v in sorted(local.items())}})
         out.update(shape="label_union", union=union)
     out["models"] = {str(w): choice for w in ids}
+    names, special, other = up["_step_rule"]
+    out["step_size"] = special if task in names else other
     out["label_map"] = {str(k): v for k, v in sorted(label_map.items())}
     out["upstream"] = {"task": task, "mode": mode, "resample": cfg["resample"]}
     return out

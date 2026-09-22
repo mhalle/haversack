@@ -185,6 +185,7 @@
           "plans": "nnUNetPlans"
         }
       },
+      "step_size": 0.8,
       "label_map": {
         "1": "spleen",
         "2": "kidney_right",
@@ -322,6 +323,7 @@
           "plans": "nnUNetPlans"
         }
       },
+      "step_size": 0.8,
       "label_map": {
         "1": "spleen",
         "2": "kidney_right",
@@ -459,6 +461,7 @@
           "plans": "nnUNetPlans"
         }
       },
+      "step_size": 0.8,
       "label_map": {
         "1": "spleen",
         "2": "kidney_right",

@@ -167,6 +167,8 @@ its `v3.0.0-weights` release) is the `ts.v3` catalog with the same three names -
 unchanged. Its 117 labels are v2's with value 26 `vertebrae_L6` where v2 has `vertebrae_S1`.
 Upstream states no license for the v3 weights yet (its README lists only v2's `total` as
 Apache-2.0, and the release is marked a prerelease); `haversack cite ts.v3:total` says so.
+`ts.v3` tiles its sliding window at step 0.8, as TotalSegmentator does for these tasks;
+`ts.v2` keeps nnU-Net's 0.5, which its existing results were computed with.
 Useful options:
 
 | Option | Meaning |

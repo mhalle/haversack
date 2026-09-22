@@ -350,12 +350,16 @@ def weights_versions_of(segmenter, task) -> list:
     ``_fresh_weights_versions`` wraps it), which is why the engine epoch joins here and
     not at each ``result_key`` call site. An entry that names the model folder it
     resolved (``model``: its task states a trainer/plans choice, as ts.v3's do) adds it,
-    because one dataset's sidecar covers every folder in it (2026-09-21)."""
+    because one dataset's sidecar covers every folder in it (2026-09-21). A task that states
+    its tile step (``step_size``, ts.v3's 0.8) adds ``step=<value>`` the same way."""
     try:
-        entries = segmenter.describe(task).get("weights_installed") or []
+        d = segmenter.describe(task)
+        entries = d.get("weights_installed") or []
         out = [f"{e.get('id')}={e.get('version') or e.get('sha256') or 'unknown'}"
                + (f"/{e['model']}" if e.get("model") else "")
                for e in entries] or ["unknown"]
+        if d.get("step_size") is not None:
+            out.append(f"step={d['step_size']:g}")
     except Exception:
         out = ["unknown"]
     return out + _engine_epoch(segmenter, task)

@@ -243,9 +243,12 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     def load(wid, spc):
         # the stage's own spec states which model folder a shared dataset means
         folder = store.resolve(wid, configuration=configuration, **spc.model_choice(wid))
+        # a task's stated tile step (ts.v3: upstream's 0.8); stated nowhere else, so every
+        # other task's call - and its provenance - is exactly what it was
+        step = {} if spc.step_size is None else {"step_size": spc.step_size}
         m = models.get(folder, folds=folds, device=device, dtype=dtype,
                        accumulate=accumulate, batch_size=batch_size,
-                       allow_transpose=allow_transpose)
+                       allow_transpose=allow_transpose, **step)
         # the folder name does NOT identify the weights version - Dataset297 ships as both
         # v2.0.0 and v2.0.4 and both unpack to the same name - so read what fetch_one recorded
         from .weights_fetch import installed_version
@@ -257,6 +260,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                                "version": rec.get("tag", "unknown"), "sha256": rec.get("sha256"),
                                "folds": list(available_folds(folder, folds)), "K": m.K,
                                "spacing": tuple(round(v, 4) for v in m.spacing_zyx),
+                               **step,
                                **({"transpose_forward": list(m.transpose_forward),
                                    "transpose_validated": False}
                                   if m.transpose_forward != (0, 1, 2) else {})})

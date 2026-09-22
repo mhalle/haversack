@@ -117,6 +117,13 @@ class TaskSpec:
     #: says which one the task means, as upstream's own task config does; the resolver
     #: refuses a dataset it cannot narrow to one folder rather than pick (2026-09-21).
     models: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    #: The sliding window's tile step, when the task states one; None runs nnU-Net's 0.5.
+    #: TotalSegmentator tiles ``total``, ``total_v3`` and ``total_mr`` at 0.8 (nnunet.py:
+    #: faster, "dice 0.001 worse"), and matching it took ts.v3:total from 99.86 % to 99.98 %
+    #: voxel agreement with upstream (2026-09-21). Stated by ts.v3's registry only: ts.v2
+    #: keeps 0.5, which its cached results were computed with. A stated step enters the
+    #: warm-model key and the result key (``serve.weights_versions_of``).
+    step_size: float | None = None
 
     def model_choice(self, weights_id) -> dict:
         """``{"trainer"?, "plans"?}`` this task states for ``weights_id`` - the keyword
@@ -188,6 +195,15 @@ def _model_choices(raw, where: str) -> dict:
     return out
 
 
+def _step_size(raw, where: str) -> float | None:
+    if raw is None:
+        return None
+    step = float(raw)
+    if not 0.0 < step <= 1.0:
+        raise ValueError(f"{where}: step_size {raw!r} is not a tile step in (0, 1]")
+    return step
+
+
 class TaskCatalog:
     """The named tasks of an ecosystem, from its registry JSON."""
 
@@ -223,6 +239,7 @@ class TaskCatalog:
                 shape=d.get("shape", "single"), single=d.get("single"), union=union,
                 cascade=cascade, orientation=d.get("orientation"),
                 models=_model_choices(d.get("models"), f"{Path(path).name}: {d['name']}"),
+                step_size=_step_size(d.get("step_size"), f"{Path(path).name}: {d['name']}"),
                 label_map={int(k): str(v) for k, v in (d.get("label_map") or {}).items()})
 
     def get(self, name) -> TaskSpec:

@@ -292,6 +292,10 @@ class Segmenter:
             installed.append(entry)
         d["weights_installed"] = installed
         d["channel_names"] = channels
+        if spec.step_size is not None:
+            # it changes the output, so the result key carries it (weights_versions_of) - only
+            # where a task states one, so no key of a task that states none moves
+            d["step_size"] = spec.step_size
         # The catalog's record carries facts the spec cannot: the manifest's
         # license, release and description, and the attribution block. They
         # used to reach a client only while the task was NOT installed - this
@@ -328,9 +332,10 @@ class Segmenter:
         for wid in spec.weights_ids:
             folder = store.resolve(wid, configuration=self.policy["configuration"],
                                    **spec.model_choice(wid))
+            step = {} if spec.step_size is None else {"step_size": spec.step_size}
             self.models.get(folder, folds=self.policy["folds"], device=self.policy["device"],
                             dtype=self.policy["dtype"], accumulate=self.policy["accumulate"],
-                            batch_size=self.policy["batch_size"])
+                            batch_size=self.policy["batch_size"], **step)
         return len(self.models)
 
     def fetch(self, task) -> int:

@@ -15,6 +15,14 @@
   Apache-2.0 and does not mention v3; the release is a prerelease), and the attribution
   record says that rather than guess. MR Datasets 870-873 are recorded in the weights manifest
   and offered by no task: no upstream task uses them yet.
+- **`ts.v3` tiles at upstream's step, 0.8.** TotalSegmentator runs `total`, `total_v3` and
+  `total_mr` with a sliding-window step of 0.8 (faster; its own note says 0.001 Dice worse)
+  and everything else at nnU-Net's 0.5, which haversack used everywhere. On a CPTAC-CCRCC CT
+  on Modal, matching it took `ts.v3:total`'s voxel agreement with upstream from 99.86 % to
+  99.98 % (`total_fast` 99.88 % to 99.96 %). A registry entry may now state `step_size`; the
+  generator reads upstream's rule out of nnunet.py, and a stated step enters the warm-model
+  key and the result key (`step=0.8`). `ts.v2` states none and keeps 0.5, so none of its
+  results or keys move.
 - **A dataset holding two models of one configuration is refused, never chosen.** Datasets
   831-836 each ship upstream's default `nnUNetPlans` model and, beside it, the
   `nnUNetResEncUNetLPlans_8` model upstream runs only for `model_size="small"`. The resolver
