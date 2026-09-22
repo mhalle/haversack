@@ -191,7 +191,7 @@ voxtell = { git = "https://github.com/MIC-DKFZ/VoxTell.git", rev = "8ef0332aec5d
 # duckn = the metadata standard the ranked stores are written in (seg extension 0.8 as of
 # 0.4.0). A release tag, not a branch, so a sync is reproducible; to work on duckn itself,
 # `uv pip install -e ../duckn` after the sync puts the sibling checkout in front of it.
-duckn = { git = "https://github.com/mhalle/duckn.git", tag = "v0.4.1" }
+duckn = { git = "https://github.com/mhalle/duckn.git", tag = "v0.5.0" }
 # synthstrip-torch = our standalone SynthStrip inference package (StripModel + surfa conform
 # + SDT; weights fetched from MGH at runtime). Import namespace: synthstrip_torch.
 synthstrip-torch = { git = "https://github.com/mhalle/synthstrip-torch.git", rev = "1b871fb1f98fbe60ed1efe87de34a8703a106b44" }

@@ -1,6 +1,6 @@
-"""Upgrade an existing ranked store's segment metadata to duckn seg extension 0.8, in place.
+"""Upgrade an existing ranked store's segment metadata to the current duckn seg extension, in place.
 
-The builder writes 0.8 for new stores. This is for stores that already exist - the demo
+The builder writes the current version for new stores. This is for stores that already exist - the demo
 packages - where re-emitting to rebuild is not on. It reads the root's `seg` extension
 through duckn's reader, which migrates 0.6 and 0.7 (a group becomes a segment listing its
 members' values, `background: true` becomes the background role, colors become CSS
@@ -27,7 +27,7 @@ from duckn import read_seg_extension
 from haversack.ranked_build import GENERATED_GROUP_IDS, write_readme
 from haversack.ranked_store import open_store, root_attrs, segment, segmentation
 
-STEP = "Segment metadata upgraded to seg 0.8"
+STEP = "Segment metadata upgraded to the current seg extension"
 
 
 def upgrade(store: Path) -> None:
@@ -82,7 +82,7 @@ def _upgrade(st, store: Path) -> None:
     steps = [s for s in pv.get("processing", []) if s.get("name") != STEP]
     steps.append({
         "name": STEP,
-        "description": "root `seg` extension rewritten as duckn seg 0.8: segments listing "
+        "description": "root `seg` extension rewritten as the current duckn seg extension: segments listing "
                        "their label values, a background segment per part, the builder's "
                        "generated groups removed; in place",
         "software": {"name": "ranked_upgrade_seg.py",

@@ -210,7 +210,7 @@ def test_root_attrs_read_back_through_the_standard(tmp_path):
                                            provenance={"version": "1.0", "processing": []}))
     with rs.open_store(tmp_path / "s.zip", "r") as st:
         back = rs.read_segmentation(st.root)
-        assert back.version == "0.8"
+        assert back.version == "0.9"
         assert [(s.id, s.label_values) for s in back.segments] == [
             ("bg", [0]), ("c5", [5]), ("c6", [6])]
         assert back.segments[0].role == "background" and back.segments[1].extent == [0, 3, 0, 4, 0, 5]
@@ -229,8 +229,10 @@ def test_a_store_written_under_seg_0_7_still_reads(tmp_path):
                 {"id": "g_ab", "name": "abdomen", "members": ["c5", "c6"], "disjoint": True}]}}}})
     with rs.open_store(tmp_path / "old.zip", "r") as st:
         back = rs.read_segmentation(st.root)
-    assert [(s.id, s.label_values, s.role) for s in back.segments] == [
+    # seg 0.9 keeps a union of structures as `members`; its values are its members'
+    assert [(s.id, s.sorted_values, s.role) for s in back.segments] == [
         ("bg", [0], "background"), ("g_ab", [5, 6], None), ("c5", [5], None), ("c6", [6], None)]
+    assert back.segments[1].members == ["c5", "c6"] and back.segments[1].label_values is None
 
 
 def test_a_geometry_the_standard_rejects_never_reaches_the_store():
@@ -309,7 +311,7 @@ def test_build_writes_the_same_store_into_a_directory_and_a_zip_and_both_verify(
         # the root went through duckn's model: the seg extension reads back validated -
         # the model's classes and a background segment, and nothing derived from them
         seg = rs.read_segmentation(sb.root)
-        assert seg.version == "0.8"
+        assert seg.version == "0.9"
         assert all(not s.name.startswith("label_") for s in seg.segments)
         by_id = {s.id: s for s in seg.segments}
         assert by_id["background_0"].role == "background"
@@ -453,7 +455,7 @@ def test_the_upgrade_tool_parses_arguments_and_names_a_store_that_is_not_one(tmp
     with pytest.raises(SystemExit):
         up.main(["--no-such-flag", str(out)])
     up.main([str(out)])
-    assert "seg 0.8 -> 0.8" in capsys.readouterr().out
+    assert "seg 0.9 -> 0.9" in capsys.readouterr().out
     with rs.open_store(out) as st:
         assert all(s.layer is None for s in rs.read_segmentation(st.root).segments)
     bare = tmp_path / "bare.duckn"
@@ -496,7 +498,7 @@ def _segments_after_upgrade(path):
     with rs.open_store(path, "r") as st:
         raw = st.root.attrs.asdict()["duckn"]["extensions"]["seg"]
         back = rs.read_segmentation(st.root)
-    assert raw["version"] == "0.8"                     # rewritten, not merely readable
+    assert raw["version"] == "0.9"                     # rewritten, not merely readable
     return {s.id: s for s in back.segments}
 
 
@@ -520,7 +522,7 @@ def test_the_upgrader_keeps_a_group_nothing_ever_generated(tmp_path):
     _legacy_store(store, "monai", extra=[
         {"id": "my_own", "name": "what I care about", "members": ["c0", "c1"]}])
     after = _segments_after_upgrade(store)
-    assert "my_own" in after and after["my_own"].label_values == [1, 2]
+    assert "my_own" in after and after["my_own"].sorted_values == [1, 2]
     assert list(after).index("my_own") < list(after).index("c0")
     assert "g_lungs" not in after and "classes_0" not in after
 

@@ -99,8 +99,9 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
     # The segments as duckn reads them: a store written under an older seg version is
     # migrated on the way in, so everything below sees the 0.8 shape. A class lists exactly
     # one value; a segment listing several is a union someone authored.
-    segs = (seg_model.model_dump(exclude_none=True)["segments"] if seg_model is not None
-            else [])
+    # a `members` segment (seg 0.9) lists nothing; the model resolved its union
+    segs = ([{**s.model_dump(exclude_none=True), "label_values": s.sorted_values}
+             for s in seg_model.segments] if seg_model is not None else [])
     leaves = [s for s in segs if len(s["label_values"]) == 1]
     # a cascade's earlier stages have their own classes, which the task's label map does not
     # name; numbered leaves there are honest, not a degraded lookup
