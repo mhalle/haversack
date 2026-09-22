@@ -6282,7 +6282,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "a0847608c92d6647014d9baca43850c713463468926ad455b8aa38f2be5827da",
+        "registry_sha256": "d9cfb3e4422312e2094eaf574838649a8c94743e3223118f0fa8c85681ea5412",
         "listing": "1"
       },
       "source": {
@@ -6379,8 +6379,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:aortic_sinuses": {
@@ -6391,7 +6391,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "f62372977a09e2a1af669593368be6b5a3729c2b7ed20f5c9da8acc08d0b4477",
+        "registry_sha256": "08d7759a0f255d021b45a050380d308ece26385fc93d4c4c053455661f29d4c9",
         "listing": "1"
       },
       "source": {
@@ -6416,8 +6416,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:appendicular_bones": {
@@ -6687,7 +6687,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "3c1ca922e50bef790b5491d51feb31cc21a76b79725ebb2a7c82c93624dbf7ed",
+        "registry_sha256": "0d6862b1abbd33318b86fcde5400de0b84634a2c9581e72d25b928f3a0e8f6b5",
         "listing": "1"
       },
       "source": {
@@ -6760,8 +6760,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:breasts": {
@@ -6797,7 +6797,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "17207fc925c68a61143f596bcffad90ba57f4be2bef99a4632c7f6d5436dcf9f",
+        "registry_sha256": "41de665cf7f09eac435ddbf85058e4fc4e065ba76f5e7cc17941645bdc426f0d",
         "listing": "1"
       },
       "source": {
@@ -6810,8 +6810,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:coronary_arteries": {
@@ -6971,7 +6971,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "821bc400277002d5d24e4b1c3b757c9f45bb958f0ea987db0b78898d18a1bed4",
+        "registry_sha256": "a4126a51f4b930e41f4030a5842ef8b73cb427d59e7d8b446b1ab1b0f2b37683",
         "listing": "1"
       },
       "source": {
@@ -7056,8 +7056,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:head_muscles": {
@@ -7068,7 +7068,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "bd7a491d0951756a7a64853bbde30aa9764d0193f3b7160cbec75bfb4ca2fe4d",
+        "registry_sha256": "12640b17430cae5a65fa2e4bd1edcaa9bc51959be1b23173708f82cca307b3be",
         "listing": "1"
       },
       "source": {
@@ -7121,8 +7121,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:headneck_bones_vessels": {
@@ -7133,7 +7133,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "a691e47f27aac95a12a113b64789e49864256a04267b9e6cfbbb288e1162ba7a",
+        "registry_sha256": "4ab2f0fefa5fa2ff96355eeafd69c08966d100911a930d6fe8454b5b50105f92",
         "listing": "1"
       },
       "source": {
@@ -7190,8 +7190,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:headneck_muscles": {
@@ -7202,7 +7202,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "da10170e652e4e11c76622c3b21a91edb3a9f2e4238c158705b306784b1c0533",
+        "registry_sha256": "12b85276785ad788b87193622ab522b9d20527a4f21a0a2110d072c8ff0461ca",
         "listing": "1"
       },
       "source": {
@@ -7315,7 +7315,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "0eabef79bfdb42cbf84c0dd46eab2f145152b1fe3b3fa0db6db51bb430f7fbe4",
+        "registry_sha256": "8119624665c59b90827ec80c84c10021dc7508f89efb958173e35e77fba9a9da",
         "listing": "1"
       },
       "source": {
@@ -7352,8 +7352,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:hip_implant": {
@@ -7364,7 +7364,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "9f384fed0bc910cdc5151fab06b631b53747f1ec3dff30f27beda7f6c01e7c51",
+        "registry_sha256": "96242024dafc397da496f8be8577766027edb72e15cee9ffae8ad1ecbca2eb32",
         "listing": "1"
       },
       "source": {
@@ -7377,8 +7377,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:kidney_cysts": {
@@ -7389,7 +7389,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6653583634744ae74fe3a2530bec373a25089771dc65e3b3da4ae42d40861f6d",
+        "registry_sha256": "0b2e2ec81642f6319a7279af1fddcbb473a002e78a94d43d655551e343f9c6bc",
         "listing": "1"
       },
       "source": {
@@ -7406,8 +7406,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:liver_lesions": {
@@ -7418,7 +7418,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "5b74cc4863349468514f2c70dcebc2b609bf870e78698f1fc8350d687f499e16",
+        "registry_sha256": "953d6002a79b666a8765eb1ad22956163c4ff83b5e1cb4a5dc0048c6cd14c4d7",
         "listing": "1"
       },
       "source": {
@@ -7431,8 +7431,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:liver_lesions_mr": {
@@ -7443,7 +7443,7 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "56e9c2e4cc19ebc26be8ae99125ddc8199b4e4169208c9d25a66251ef3de22ed",
+        "registry_sha256": "e048f111e65b086f5f7a09291b9b756973fc69971510e7cf8d933d7499802897",
         "listing": "1"
       },
       "source": {
@@ -7456,8 +7456,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:liver_segments": {
@@ -7468,7 +7468,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "af0278fa0153a9582916639b1e1384b544584679bdc13ef850162e45cd7e172c",
+        "registry_sha256": "a209407a68fb25b58b87b0a628010f70d35ee7323e2c2388bb2c6ad4d337c3fc",
         "listing": "1"
       },
       "source": {
@@ -7509,8 +7509,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:liver_segments_mr": {
@@ -7521,7 +7521,7 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "780884260260649bd9fc65e006506e8405d2ed418c036bd0e7e9d8b96e5b5768",
+        "registry_sha256": "ed405d8a257cb700a56a821fee2d2eecefe50a9a5b561e580095cda3584360fc",
         "listing": "1"
       },
       "source": {
@@ -7562,8 +7562,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:liver_vessels": {
@@ -7603,7 +7603,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "a60725ead92431725d70b24aff090db95c38b2e544438352bd19972f39098075",
+        "registry_sha256": "8e9afaf0167f5d9f42b545f36d8be31b9dc47018612e9a5bf71aacf46b54a91c",
         "listing": "1"
       },
       "source": {
@@ -7620,8 +7620,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:lung_vessels": {
@@ -7632,7 +7632,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "db3b7493892bdc707f27c9ef19c00a023ea8e54bef9c761f6e07d5cde5f10512",
+        "registry_sha256": "59630ee57064dae1112e3fa5544f4a76f8f2be0bc7b8583ae16c7c35072eaf92",
         "listing": "1"
       },
       "source": {
@@ -7657,8 +7657,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:lung_vessels_LEGACY": {
@@ -7669,7 +7669,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6b1f26396602d032accf6d924bcd113e9dfe4b2416c58f5b03d2d53e96fd5f3b",
+        "registry_sha256": "42185df4ece3827764f9ec7e7a5580d9122c7b7d5f81455d9a108291c0a06486",
         "listing": "1"
       },
       "source": {
@@ -7686,8 +7686,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:oculomotor_muscles": {
@@ -7795,7 +7795,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6bc5288616d389473ebe0639ed75ed2ce224fdd134a1a3f68a15d9bfe57602c1",
+        "registry_sha256": "9bd22c814a063e6722ca735b89b33ba18b5890c0848947376b6525f303de6d96",
         "listing": "1"
       },
       "source": {
@@ -7816,8 +7816,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:teeth": {
@@ -10755,7 +10755,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "c0bd946093b4c2b7ae016296f849253feb894508858f1a7445d960a6838cb33b",
+        "registry_sha256": "65c7876c0e9d90f00a665a03957bca075a36b883359443bc9ffc627b6e55761e",
         "listing": "1"
       },
       "source": {
@@ -10812,8 +10812,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:vertebrae_body": {

@@ -351,7 +351,9 @@ def weights_versions_of(segmenter, task) -> list:
     not at each ``result_key`` call site. An entry that names the model folder it
     resolved (``model``: its task states a trainer/plans choice, as ts.v3's do) adds it,
     because one dataset's sidecar covers every folder in it (2026-09-21). A task that states
-    its tile step (``step_size``, ts.v3's 0.8) adds ``step=<value>`` the same way."""
+    its tile step (``step_size``, ts.v3's 0.8) adds ``step=<value>`` the same way, and a cascade
+    its crop rule (``crop=upstream``, 2026-09-22), which moved every cascade's labels and no
+    other task's."""
     try:
         d = segmenter.describe(task)
         entries = d.get("weights_installed") or []
@@ -360,6 +362,8 @@ def weights_versions_of(segmenter, task) -> list:
                for e in entries] or ["unknown"]
         if d.get("step_size") is not None:
             out.append(f"step={d['step_size']:g}")
+        if d.get("crop"):
+            out.append(f"crop={d['crop']}")
     except Exception:
         out = ["unknown"]
     return out + _engine_epoch(segmenter, task)

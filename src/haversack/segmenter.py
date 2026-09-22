@@ -23,6 +23,12 @@ POLICY = ("device", "dtype", "weights", "folds", "accumulate", "batch_size", "al
           "resampling_order", "envelope_mm", "convention", "interp", "grid", "configuration")
 
 
+#: The rule a cascade's crop follows, named in describe() and in its results' key
+#: (``serve.weights_versions_of``). "upstream": TotalSegmentator's own (2026-09-22). A change to it
+#: that moves computed labels names a new rule, and recomputes cascades only.
+CROP_RULE = "upstream"
+
+
 class Segmenter:
     """Segment with a fixed execution policy and warm models.
 
@@ -292,6 +298,11 @@ class Segmenter:
             installed.append(entry)
         d["weights_installed"] = installed
         d["channel_names"] = channels
+        if spec.shape == "cascade":
+            # How a cascade's crop is made, since 2026-09-22 upstream's (the box cut from the input
+            # before the final stage, nothing labelled outside it) - reported so the result key
+            # can say it: every cascade's labels changed that day, and no other task's did.
+            d["crop"] = CROP_RULE
         if spec.step_size is not None:
             # it changes the output, so the result key carries it (weights_versions_of) - only
             # where a task states one, so no key of a task that states none moves

@@ -125,8 +125,13 @@ def normalization_fingerprint(model) -> tuple:
 
 def to_model_grid(data_zyx, geometry, spacing_zyx, *, convention: str = "corner", device="auto",
                   order: int = DEFAULT_RESAMPLING_ORDER, original_orientation: str = "RAS",
-                  crop_to_nonzero: bool = False) -> ResampledGrid:
+                  crop_to_nonzero: bool = False, box=None) -> ResampledGrid:
     """Canonical (RAS) array + geometry -> a ``ResampledGrid`` at ``spacing_zyx``.
+
+    ``box`` - ``((z0, y0, x0), (z1, y1, x1))``, source indices, end exclusive - crops the source
+    to that box before anything else: a TotalSegmentator cascade's final stage sees only the box
+    its crop stage found, as upstream crops the image before resampling it (2026-09-22). It is
+    recorded exactly as the nonzero crop is, so the un-crop stays implicit in the mapping.
 
     Optionally crops to the nonzero box first (``crop_to_nonzero=True``, nnU-Net-native), then
     resamples with the caller's convention (corner = TotalSegmentator's ``change_spacing``,
@@ -146,12 +151,21 @@ def to_model_grid(data_zyx, geometry, spacing_zyx, *, convention: str = "corner"
 
     data_zyx = np.asarray(data_zyx, dtype=np.float32)
     model_source = None
+    offset = (0, 0, 0)
+    if box is not None:
+        lo, hi = (tuple(int(v) for v in box[0]), tuple(int(v) for v in box[1]))
+        if any(not 0 <= l < h <= n for l, h, n in zip(lo, hi, source_shape_zyx)):
+            raise ValueError(f"crop box {lo}..{hi} is empty or leaves the source {source_shape_zyx}")
+        data_zyx = data_zyx[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+        offset = lo
     if crop_to_nonzero:
         lo, hi = nonzero_box(data_zyx)
-        if (lo, hi) != ((0, 0, 0), source_shape_zyx):
+        if (lo, hi) != ((0, 0, 0), tuple(data_zyx.shape)):
             data_zyx = data_zyx[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
-            model_source = Grid(tuple(h - l for l, h in zip(lo, hi)), spacing_src_zyx,
-                                tuple(float(source.index_to_mm(lo)[a]) for a in range(3)))
+            offset = tuple(o + l for o, l in zip(offset, lo))
+    if tuple(data_zyx.shape) != source_shape_zyx:
+        model_source = Grid(tuple(int(s) for s in data_zyx.shape), spacing_src_zyx,
+                            tuple(float(source.index_to_mm(offset)[a]) for a in range(3)))
 
     res_zyx, _ = forward_resample(data_zyx, spacing_src_zyx, tuple(spacing_zyx),
                                   convention=convention, device=device, order=order)

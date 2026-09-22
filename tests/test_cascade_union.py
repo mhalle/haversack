@@ -46,7 +46,8 @@ class TheRegistryEntry(unittest.TestCase):
         self.assertEqual({total[c] for c in crop.crop_to_classes},
                          {"clavicula_left", "clavicula_right", "vertebrae_C1", "vertebrae_C5",
                           "vertebrae_T1", "vertebrae_T4"})
-        self.assertEqual(crop.dilation_mm, 40.0)
+        # upstream's effective margin, not its config's 40 (ts_tasks.json _meta.crop_margin)
+        self.assertEqual(crop.dilation_mm, 20.0)
         self.assertIsNone(final.weights_id)
 
     def test_the_union_is_778_then_779_split_at_eleven(self):
@@ -160,7 +161,7 @@ class _Part(_StubModel):
         return logits
 
 
-def _run(tmp_path, monkeypatch, models, spec):
+def _run(tmp_path, monkeypatch, models, spec, **kw):
     from haversack import pipeline
     folder = tmp_path / "Dataset000_stub" / "trainer__plans__3d_fullres"
     (folder / "fold_0").mkdir(parents=True, exist_ok=True)
@@ -188,7 +189,8 @@ def _run(tmp_path, monkeypatch, models, spec):
     store = _Store()
     shape = (16, 20, 18)
     res = pipeline.segment(str(_write_ct(tmp_path, shape)), spec, models=_Cache(), device="cpu",
-                           envelope_mm=None, convention="corner", folds=(0,), interp="nearest")
+                           envelope_mm=None, convention="corner", folds=(0,),
+                           **{"interp": "nearest", **kw})
     return res, shape
 
 
@@ -226,13 +228,16 @@ def test_the_later_part_paints_over_the_earlier_and_nothing_lands_outside_the_bo
     assert int((lab > 0).sum()) < lab.size
 
 
-def test_nothing_found_runs_every_part_on_the_whole_volume(tmp_path, monkeypatch):
+def test_nothing_found_is_an_empty_result_and_no_part_runs(tmp_path, monkeypatch):
+    """Upstream: "Crop is empty. Returning empty segmentation." Until 2026-09-22 the parts ran on
+    the whole volume instead."""
     crop = _Crop(found=False)
     a = _Part(ORGANS._props, cover=(slice(None),) * 3)
     b = _Part(RIBS._props, cover=(slice(0, 2), slice(None), slice(None)))
-    _run(tmp_path, monkeypatch, [crop, a, b], _spec())
-    full = tuple(crop.received.shape[1:])
-    assert tuple(a.received.shape[1:]) == tuple(b.received.shape[1:]) == full
+    res, _ = _run(tmp_path, monkeypatch, [crop, a, b], _spec())
+    assert a.received is None and b.received is None
+    assert not res.array.any()
+    assert res.provenance["crops"][0]["box"] is None
 
 
 def test_provenance_names_all_three_models(tmp_path, monkeypatch):

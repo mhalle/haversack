@@ -152,7 +152,16 @@ def test_a_cascades_bare_coarse_task_is_looked_up_in_its_own_catalog(tmp_path, m
 def test_an_install_inside_a_cascade_keeps_the_cascades_parts(tmp_path, monkeypatch):
     from haversack import weights_fetch
     from haversack.tasks import CascadeStep, TaskSpec, UnionPart
-    _, store, cache = _two_part_task(tmp_path, [_StubModel(ORGANS._props) for _ in range(2)])
+    class _Finds(_StubModel):
+        """The crop source has to find its class: since 2026-09-22 a cascade whose crop classes
+        are absent returns an empty result, as upstream does, and never reaches its fine stage."""
+
+        def predict_logits(self, crop, report=None):
+            logits = super().predict_logits(crop, report)
+            logits[1] = 2.0
+            return logits
+
+    _, store, cache = _two_part_task(tmp_path, [_Finds(ORGANS._props), _StubModel(ORGANS._props)])
     monkeypatch.setattr(pipeline, "as_store", lambda *a, **k: store)
     monkeypatch.setattr(weights_fetch, "fetch_one", _fetch_one)
     coarse = TaskSpec(name="coarse:task", shape="union", label_map={1: "a"},

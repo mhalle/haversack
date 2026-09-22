@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **TotalSegmentator's crop tasks crop as TotalSegmentator does.** Every ts.v2 task that crops
+  with a coarse model first - head_muscles, headneck_bones_vessels, liver_segments,
+  lung_vessels and 22 more - now cuts the input to the crop classes' box plus the margin and
+  runs its final model on that cut alone, labelling nothing outside it; an empty crop is an empty
+  result. The crop used to be a speed approximation of whole-volume inference, grown to the
+  network's patch with real image and dropped when it saved too little, and it labelled beyond
+  upstream's box: on a neck CT, `headneck_bones_vessels` scored mean Dice 0.738 against upstream,
+  with zygomatic arches only haversack found. The crop stage's labels are restored nearest-
+  neighbour onto the input, as upstream restores them, and the margin is the 20 mm upstream
+  actually applies to every task that crops with its `total`/`body` models, not the value in the
+  task's config (upstream overrides it; teeth keeps its own 10 mm). These tasks' results are keyed
+  anew (`crop=upstream`) and recompute once; no other task's key moves.
 - **`ts.v2:headneck_muscles`: TotalSegmentator's 23 neck muscles.** Sternocleidomastoid, the
   three scalenes, platysma, the three pharyngeal constrictors, the prevertebral muscles,
   sternothyroid, thyrohyoid, levator scapulae and trapezius, each side separately where that
