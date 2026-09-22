@@ -1181,11 +1181,16 @@ def _cmd_tasks(args) -> int:
             # Not installed: the segments index has what the model states, read from its
             # archive at the pinned version. "Install it first" was the answer until the index
             # existed, and a review watched --find list what this said it could not (2026-09-13).
+            # One reading with the server's describe (`before_install`, 2026-09-22), which
+            # also passes over a stale record rather than print what the model no longer says.
             from . import segments
-            segs = (segments.records().get(info["name"]) or {}).get("segments")
-            if not segs:
-                raise InputError(f"{info['name']}: no structure list until its model is "
-                                 f"installed (haversack weights fetch {args.task})")
+            segments.index()                 # a broken index is its own one-line error here
+            known = segments.before_install(cat, args.task)
+            if known is None:
+                raise InputError(f"{info['name']}: no current structure list until its model "
+                                 f"is installed (haversack weights fetch {args.task}); "
+                                 "`haversack catalog check` says why the index has none")
+            segs = known["segments"]
             print(f"{info['name']}: not installed here; from the segments index - the "
                   "installed model's own labels decide a result", file=sys.stderr)
             if args.json:

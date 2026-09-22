@@ -426,7 +426,13 @@ before anything is installed. A segment is one item of a task's segment table, a
 `.seg.nrrd` or a DICOM segmentation: the label `value` it is written with, the `layer` it lives
 in where the output overlaps (no `layer` means layer 0), and its `id` - the model's own token
 for it, a code in that model's class list rather than a display name or an identity across
-models. A task's `structures` in `GET /v1/tasks/{task}` are those ids, in label order. The
+models. A task's `structures` in `GET /v1/tasks/{task}` are those ids, in label order - for a
+task whose weights are not installed here too, answered from the segments index and marked
+`structures_from: {"source": "segments index", "version": ...}` (with the record's `segments`
+table and its `note` where it has one). The index gives no list rather than a wrong one: none
+for a record whose catalog now pins another version, or for a request pinned with `@version`.
+The installed model's own labels decide a result, and a result's key does not depend on any
+of this. The
 search runs over every task's segments as its model states them, limited to the tasks this
 deployment serves (not to be confused with `/v1/segmentations`, which lists cached results).
 `q` is word prefixes in any order by default (`kid left` finds `kidney_left` and

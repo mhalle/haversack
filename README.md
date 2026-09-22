@@ -78,7 +78,8 @@ with your own laid over it where one exists (`HAVERSACK_SEGMENTS`, else
 `~/.config/haversack/segments.json`): every task's segments - label value, layer where the
 output overlaps (none means layer 0), and the id its model gives each - as the model states
 them, with the version that pins each list. A task's `structures` are those ids in label order,
-and `haversack tasks TASK` prints them from the index for a model not installed here.
+and `haversack tasks TASK` (and a server's `GET /v1/tasks/{task}`) gives them from the index
+for a model not installed here, as long as the index record is current.
 `haversack catalog mine` refreshes the index and `haversack catalog check` finds stale
 records. A `--find` answer opens with a `#` line of counts and closes with a `# end:` line that
 gives the next page's `--offset`; `--count` sizes a search before reading it. This

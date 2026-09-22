@@ -34,6 +34,17 @@
   and are combined as `total`'s parts are, a later part over an earlier one - and a cascade
   here could only end in a single model. A cascade's last stage may now be a union; the
   registry refuses a union anywhere else, and a stage stating two things or none.
+
+- **A server describes an uninstalled task's structures.** `GET /v1/tasks/{task}` said
+  "structures are read from the checkpoint once installed" for every task whose weights the
+  server had not fetched - `moose:clin_ct_muscles` showed no structure list on a server whose
+  own `GET /v1/segments` listed its ten muscles. The segments index was mined from that very
+  checkpoint, and `haversack tasks TASK` has read it since the index shipped; describe now
+  reads it too, through one function the CLI shares, marked `structures_from: segments index`
+  with the version that pins it. Neither door shows a record whose catalog has since moved to
+  another version (the CLI used to print it anyway), or a list for a request pinned with
+  `@version`. A result's key reads nothing new: it is the same with the index, without it, and
+  with a broken one.
 - **TotalSegmentator v3 is the `ts.v3` catalog: `ts.v3:total`, `ts.v3:total_fast`,
   `ts.v3:total_fastest`.** Upstream's `total_v3` (Datasets 831-835 at 1.5 mm, 836 at 3 mm,
   837 at 6 mm, release `v3.0.0-weights`) under v2's task names, the catalog carrying the

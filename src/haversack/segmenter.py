@@ -227,10 +227,32 @@ class Segmenter:
             if info is not None and not info.get("materialized", True):
                 # weights not installed yet: report what is knowable without
                 # downloading anything, and how to materialize the rest
-                return self._introspection(
-                    {**info, "folds_default": list(self.policy["folds"]),
+                d = {**info, "folds_default": list(self.policy["folds"]),
                      "hint": "structures are read from the checkpoint once "
-                             "installed; prepare() or first use installs it"})
+                             "installed; prepare() or first use installs it"}
+                if not d.get("structures"):
+                    # The segments index was mined from this very checkpoint at the
+                    # version the catalog pins, so the list is knowable before install -
+                    # the CLI's `tasks TASK` said so from 2026-09-13, the server's
+                    # describe not until 2026-09-22. Only structures and segments are
+                    # added: the key reads `weights_installed` and `step_size`, and
+                    # before_install never raises into weights_versions_of.
+                    from . import segments
+                    known = segments.before_install(self.catalog, task)
+                    if known is not None:
+                        segs = known["segments"]
+                        d.update({
+                            "structures": [s["id"] for s in segs],
+                            "n_structures": len(segs), "segments": segs,
+                            "structures_from": {"source": "segments index",
+                                                "version": known["version"]},
+                            "hint": "structures are from the segments index, read from "
+                                    "this model's archive at the version the catalog "
+                                    "pins; the installed model's own labels decide a "
+                                    "result. prepare() or first use installs it"})
+                        if known.get("note"):
+                            d["structures_from"]["note"] = known["note"]
+                return self._introspection(d)
             if info is not None and info.get("unresolved"):
                 # The weights are installed but this build cannot choose among
                 # the configurations they ship. Report that, with the resolver's
