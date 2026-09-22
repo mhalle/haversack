@@ -29,7 +29,8 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SELF = pathlib.Path(__file__).resolve().relative_to(ROOT).as_posix()
-TEXT = {".py", ".md", ".toml", ".yml", ".yaml", ".json", ".html", ".txt", ".cfg", ".ini", ".sh"}
+TEXT = {".py", ".md", ".toml", ".yml", ".yaml", ".json", ".html", ".txt", ".cfg", ".ini", ".sh",
+        ".js", ".mjs", ".cjs", ".ts", ".tsx"}
 NOT_SCANNED = {SELF: "lists the British forms it detects"}
 
 # -- the British forms, generated from stems -----------------------------------------------------
@@ -45,12 +46,13 @@ _ISE = ("normalis organis recognis optimis minimis maximis visualis summaris gen
         "utilis emphasis realis specialis materialis tokenis quantis discretis binaris randomis regularis "
         "penalis vectoris rasteris digitis memoris apologis criticis localis centralis stabilis neutralis "
         "capitalis canonicalis mobilis polaris symbolis harmonis idealis sanitis anonymis pseudonymis "
-        "reorganis reinitialis unrecognis").split()
+        "reorganis reinitialis uninitialis unrecognis").split()
 _ISE_SUFFIX = ("e", "es", "ed", "ing", "er", "ers", "ation", "ations", "able")
 _YSE = {"analyse": "analyze", "analysed": "analyzed", "analysing": "analyzing", "analyser": "analyzer",
         "analysers": "analyzers", "paralyse": "paralyze", "paralysed": "paralyzed", "catalyse": "catalyze",
         "catalysed": "catalyzed", "catalysing": "catalyzing"}          # never "analyses": a US plural too
-_LL = ("labelled labelling modelled modelling modeller modellers travelled travelling traveller travellers "
+_LL = ("unlabelled relabelled relabelling unmodelled "
+       "labelled labelling modelled modelling modeller modellers travelled travelling traveller travellers "
        "signalled signalling levelled levelling fuelled fuelling channelled channelling tunnelled funnelled "
        "totalled totalling dialled dialling counselled marshalled marshalling cancelled cancelling "
        "jewellery woollen").split()
@@ -58,7 +60,8 @@ _OTHER = {
     "licence": "license", "licences": "licenses", "grey": "gray", "greys": "grays", "greyscale": "grayscale",
     "whilst": "while", "amongst": "among", "artefact": "artifact", "artefacts": "artifacts",
     "programme": "program", "programmes": "programs", "catalogue": "catalog", "catalogues": "catalogs",
-    "catalogued": "cataloged", "defence": "defense", "offence": "offense", "pretence": "pretense",
+    "catalogued": "cataloged", "analogue": "analog",
+    "defence": "defense", "offence": "offense", "pretence": "pretense",
     "judgement": "judgment", "judgements": "judgments", "aluminium": "aluminum", "sceptical": "skeptical",
     "manoeuvre": "maneuver", "manoeuvres": "maneuvers", "learnt": "learned", "spelt": "spelled",
     "fulfil": "fulfill", "fulfilment": "fulfillment", "enrol": "enroll", "enrolment": "enrollment",
@@ -189,7 +192,9 @@ class TestTheDetector(unittest.TestCase):
                            ("in millimetres", "millimetres"), ("its behaviour under load", "behaviour"),
                            ("we analysed it", "analysed"), ("whilst holding the lock", "whilst"),
                            ("CC BY licence", "licence"), ("the oesophagus", "oesophagus"),
-                           ("neighbourhood of radius r", "neighbourhood"), ("summarising", "summarising")):
+                           ("neighbourhood of radius r", "neighbourhood"), ("summarising", "summarising"),
+                           ("voxels left unlabelled", "unlabelled"), ("an analogue of it", "analogue"),
+                           ("pass  # store uninitialised", "uninitialised")):
             self.assertIn(word, [t for t, _ in british_in(line)], line)
 
     def test_spares_american_and_shared_words(self):
