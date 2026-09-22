@@ -348,10 +348,13 @@ def weights_versions_of(segmenter, task) -> list:
 
     The one door every result key's weights pass through (Modal's
     ``_fresh_weights_versions`` wraps it), which is why the engine epoch joins here and
-    not at each ``result_key`` call site."""
+    not at each ``result_key`` call site. An entry that names the model folder it
+    resolved (``model``: its task states a trainer/plans choice, as ts.v3's do) adds it,
+    because one dataset's sidecar covers every folder in it (2026-09-21)."""
     try:
         entries = segmenter.describe(task).get("weights_installed") or []
         out = [f"{e.get('id')}={e.get('version') or e.get('sha256') or 'unknown'}"
+               + (f"/{e['model']}" if e.get("model") else "")
                for e in entries] or ["unknown"]
     except Exception:
         out = ["unknown"]

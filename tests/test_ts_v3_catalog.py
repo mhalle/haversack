@@ -74,17 +74,19 @@ class ARealInstallResolvesTheDefault(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ds = root / "Dataset836_TotalSegmentator_total_3mm_1559subj"
-            for plans, tag in (("nnUNetPlans", "v3.0.0-weights"),
-                               ("nnUNetResEncUNetLPlans_8", "SMALL-RAN")):
+            for plans in ("nnUNetPlans", "nnUNetResEncUNetLPlans_8"):
                 f = ds / f"nnUNetTrainer_4000epochs_NoMirroring__{plans}__3d_fullres"
                 (f / "fold_0").mkdir(parents=True)
                 (f / "dataset.json").write_text(json.dumps({"channel_names": {"0": "CT"}}))
-                (f / ".haversack-version.json").write_text(json.dumps({"tag": tag}))
+            # one sidecar for the dataset, where fetch_one writes it
+            (ds / ".haversack-version.json").write_text(json.dumps({"tag": "v3.0.0-weights"}))
             seg = Segmenter(weights=WeightsStore(root, fetch=False),
                             catalog=EcosystemCatalog(root=root))
             d = seg.describe("ts.v3:total_fast")
-            self.assertEqual([(e["id"], e.get("version")) for e in d["weights_installed"]],
-                             [("836", "v3.0.0-weights")])
+            self.assertEqual([(e["id"], e.get("version"), e.get("model"))
+                              for e in d["weights_installed"]],
+                             [("836", "v3.0.0-weights",
+                               "nnUNetTrainer_4000epochs_NoMirroring__nnUNetPlans__3d_fullres")])
             self.assertEqual(d["structures"][25], "vertebrae_L6")
 
 

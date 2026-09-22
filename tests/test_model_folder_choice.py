@@ -31,9 +31,10 @@ SMALL = f"{T}__nnUNetResEncUNetLPlans_8__3d_fullres"
 
 
 def _dataset(root: Path, folders, *, wid=831, readers=None, tags=None) -> Path:
-    """``Dataset<wid>_x/<folder>/`` for each folder, each holding a dataset.json, a plans.json
-    naming ``readers[folder]`` and a version sidecar tagged ``tags[folder]`` - so a test can
-    tell from what comes back WHICH folder a door resolved."""
+    """``Dataset<wid>_x/<folder>/`` for each folder, each holding a dataset.json and a plans.json
+    naming ``readers[folder]`` - so a test can tell from what comes back WHICH folder a door
+    resolved. The version sidecar is ONE, in the dataset directory, as ``fetch_one`` writes it
+    (unless ``tags`` asks for one per folder)."""
     ds = root / f"Dataset{wid}_TotalSegmentator_part1_organs_1830subj"
     for name in folders:
         f = ds / name
@@ -42,8 +43,12 @@ def _dataset(root: Path, folders, *, wid=831, readers=None, tags=None) -> Path:
             {"labels": {"background": 0, "spleen": 1}, "channel_names": {"0": "CT"}}))
         (f / "plans.json").write_text(json.dumps(
             {"image_reader_writer": (readers or {}).get(name, "NibabelIOWithReorient")}))
-        (f / ".haversack-version.json").write_text(json.dumps(
-            {"id": str(wid), "tag": (tags or {}).get(name, name), "sha256": None}))
+        if tags:
+            (f / ".haversack-version.json").write_text(json.dumps(
+                {"id": str(wid), "tag": tags.get(name, name), "sha256": None}))
+    if not tags:
+        (ds / ".haversack-version.json").write_text(json.dumps(
+            {"id": str(wid), "tag": "v3.0.0-weights", "sha256": None}))
     return ds
 
 
@@ -160,7 +165,6 @@ class EveryDoorCarriesTheChoice(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.ds = _dataset(self.root, [DEFAULT, SMALL],
-                           tags={DEFAULT: "v3.0.0-weights", SMALL: "SMALL-RAN"},
                            readers={DEFAULT: "NibabelIOWithReorient", SMALL: "SimpleITKIO"})
 
     def tearDown(self):
@@ -175,11 +179,32 @@ class EveryDoorCarriesTheChoice(unittest.TestCase):
         return Segmenter(weights=WeightsStore(self.root, fetch=False), catalog=_Catalog())
 
     def test_describe_reports_the_stated_folder_installed(self):
-        # describe() feeds the result key's weights component: an unresolvable id there is
-        # "unknown", and the small model's sidecar would key a result as the default's
+        # describe() feeds the result key's weights component. The one sidecar is shared by
+        # both folders, so the folder that resolved is named beside the version
         entries = self._segmenter().describe(_spec())["weights_installed"]
-        self.assertEqual(entries, [{"id": "831", "installed": True,
+        self.assertEqual(entries, [{"id": "831", "installed": True, "model": DEFAULT,
                                     "version": "v3.0.0-weights", "sha256": None}])
+
+    def test_the_result_key_follows_the_folder_that_runs(self):
+        from haversack.serve import weights_versions_of
+        seg = self._segmenter()
+        default = weights_versions_of(seg, _spec())
+        small = weights_versions_of(seg, _spec(
+            models={"831": {"trainer": T, "plans": "nnUNetResEncUNetLPlans_8"}}))
+        self.assertEqual(default[0], f"831=v3.0.0-weights/{DEFAULT}")
+        self.assertEqual(small[0], f"831=v3.0.0-weights/{SMALL}")
+
+    def test_a_task_stating_no_choice_keys_as_before(self):
+        # every ts.v2 task: one folder per dataset, no `models`, the key component unchanged
+        from haversack.serve import weights_versions_of
+        root = self.root / "one"
+        _dataset(root, [DEFAULT])
+        seg = self._segmenter()
+        seg.weights = WeightsStore(root, fetch=False)
+        entry = seg.describe(_spec(models={}))["weights_installed"]
+        self.assertEqual(entry, [{"id": "831", "installed": True,
+                                  "version": "v3.0.0-weights", "sha256": None}])
+        self.assertEqual(weights_versions_of(seg, _spec(models={}))[0], "831=v3.0.0-weights")
 
     def test_describe_without_a_choice_reports_not_installed_rather_than_guess(self):
         entries = self._segmenter().describe(_spec(models={}))["weights_installed"]

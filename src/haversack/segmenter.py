@@ -265,9 +265,17 @@ class Segmenter:
             entry = {"id": str(wid), "installed": False}
             try:
                 if self.weights.have(wid):
+                    choice = spec.model_choice(wid)
                     folder = self.weights.resolve(wid, configuration=self.policy["configuration"],
-                                                  **spec.model_choice(wid))
+                                                  **choice)
                     entry["installed"] = True
+                    if choice:
+                        # Which folder ran, for the result key: the version sidecar sits in
+                        # the DATASET directory, shared by every model folder in it, so
+                        # `id=tag` alone cannot tell v3's nnUNetPlans model from the small
+                        # ResEnc one beside it. Only where the task states a choice, so no
+                        # key of a task that states none (all of ts.v2) moves.
+                        entry["model"] = Path(folder).name
                     from .weights_fetch import installed_version
                     side = installed_version(folder)
                     if side:
