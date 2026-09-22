@@ -58,7 +58,7 @@
   an entry of `terminologies`, and each class the catalog names carries its name as an exact
   designation in it - which is what lets a hierarchy, a color table or a cross-walk written
   once for a scheme find its segments in every store. For the `ts.v2` catalog the key is the
-  ecosystem-qualified name of the task whose class list it is, the `uri` carries the
+  ecosystem-qualified name of the task whose class list it is, the `system_uri` carries the
   catalog's major version and the task and not the release
   (`https://github.com/wasserth/TotalSegmentator#v2:total`), `version` is the package
   version the registry was generated from, and `url` is that release's tree. Checked
@@ -84,9 +84,9 @@
   none; **`cads`** per task, all nine lists equal to upstream's own label-map module value for
   value (pinned in `tests/fixtures`); **`totalvibe`** with `vibe` and `vibe_sagittal` sharing one
   scheme, none for `body_regions` and `feet_bones` (digit-string names), and the repository
-  spelled `VIBESegmentator` as upstream spells it - the manifest had it wrong, and a uri is
+  spelled `VIBESegmentator` as upstream spells it - the manifest had it wrong, and a `system_uri` is
   compared byte for byte; **`dentalsegmentator`** identified by the weights' Zenodo concept
-  DOI; **`monai`** per bundle, the bundle name in the uri and its version as the release;
+  DOI; **`monai`** per bundle, the bundle name in the `system_uri` and its version as the release;
   **`synthstrip`**, **`voxtell`** and **`custom`** declare none.
 - **FastSurfer stores code their classes by id, and 19 of them carry no code.** FastSurfer's
   identifier for a class is the aparc+aseg number, so `ModelEcosystem.scheme_code` lets a
@@ -101,7 +101,9 @@
   already hands over its pre-argmax field, and the refusal that kept engine tasks out now
   admits the engines whose runner takes a ranked sink. `Segmenter.segment` accepts
   `probabilities=`.
-- duckn is pinned at `v0.4.0`.
+- duckn is pinned at `v0.4.1`, which renames a registry entry's `uri` and `url` to `system_uri`
+  and `definition_url` - a URI *of* the coding system, a URL *of* this version's definition -
+  and the schemes here use those names.
 
 - **`HEAD /v1/jobs/<id>/result`, and a "gone" no cache may keep.** An adversarial pass on
   the artifact routes below found the one file route they left without a `HEAD` - a job's

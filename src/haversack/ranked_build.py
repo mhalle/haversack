@@ -1048,7 +1048,7 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
         # the seg extension goes through duckn's model and consistency validator
         segmentation(segs, labeling_scheme=scheme and scheme["key"],
                      terminologies=scheme and {scheme["key"]: {
-                         k: scheme[k] for k in ("name", "uri", "version", "url")}}),
+                         k: scheme[k] for k in ("name", "system_uri", "version", "definition_url")}}),
         haversack={"haversack_version": dict(items)[order[0]["name"]].get("haversack"),
                    "engine": engine, "task": meta["task"], "case": case,
                    "source_file": Path(meta["image"]).name, "part_order": order},

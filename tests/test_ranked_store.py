@@ -538,8 +538,8 @@ def test_the_fast_variants_declare_the_scheme_of_the_task_whose_classes_they_are
     fast, full = eco.labeling_scheme("total_fast"), eco.labeling_scheme("total")
     assert fast == full == eco.labeling_scheme("total_fastest")
     assert full["key"] == "ts.v2:total"
-    assert full["uri"] == "https://github.com/wasserth/TotalSegmentator#v2:total"
-    assert full["url"].endswith(f"/tree/v{full['version']}") and "v" not in full["version"]
+    assert full["system_uri"] == "https://github.com/wasserth/TotalSegmentator#v2:total"
+    assert full["definition_url"].endswith(f"/tree/v{full['version']}") and "v" not in full["version"]
     assert eco.labeling_scheme("total_mr_fast")["key"] == "ts.v2:total_mr"
     assert eco.labeling_scheme("liver_segments")["key"] == "ts.v2:liver_segments"
     with pytest.raises(LookupError):
@@ -550,7 +550,7 @@ def test_a_build_declares_its_scheme_and_codes_every_class_in_it(tmp_path, monke
     build = _tool("ranked_build_store")
     import haversack.ranked_build as rb
     scheme = {"key": "ts.v2:total", "name": "n", "version": "2.13.0",
-              "uri": "https://github.com/wasserth/TotalSegmentator#v2:total", "url": "u"}
+              "system_uri": "https://github.com/wasserth/TotalSegmentator#v2:total", "definition_url": "u"}
     monkeypatch.setattr(rb, "scheme_for", lambda engine, task: (scheme, lambda v, n: n))
     monkeypatch.setattr(rb, "names_for", lambda *a, **k: {1: "liver", 2: "spleen"})
     emit = _synthetic_emit(tmp_path)
@@ -558,7 +558,7 @@ def test_a_build_declares_its_scheme_and_codes_every_class_in_it(tmp_path, monke
     with rs.open_store(out) as st:
         seg = rs.read_segmentation(st.root)
     assert seg.labeling_scheme == "ts.v2:total"
-    assert seg.terminologies["ts.v2:total"].uri == scheme["uri"]
+    assert seg.terminologies["ts.v2:total"].system_uri == scheme["system_uri"]
     coded = {s.name: s.designations[0].code for s in seg.segments if s.designations}
     assert coded and all(name == code for name, code in coded.items())
     assert not [s for s in seg.segments if s.role and s.designations]   # the background has none
@@ -606,7 +606,7 @@ def test_a_fastsurfer_store_codes_by_id_and_leaves_a_bilateral_channel_uncoded(t
     with rs.open_store(out) as st:
         seg = rs.read_segmentation(st.root)
     assert seg.labeling_scheme == "fastsurfer:asegdkt"
-    assert seg.terminologies["fastsurfer:asegdkt"].uri.endswith("#v2:asegdkt")
+    assert seg.terminologies["fastsurfer:asegdkt"].system_uri.endswith("#v2:asegdkt")
     by = {s.label_values[0]: s for s in seg.segments}
     d = by[17].designations[0]
     assert (d.scheme, d.code, d.meaning) == ("fastsurfer:asegdkt", "17", "Left-Hippocampus")

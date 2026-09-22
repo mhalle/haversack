@@ -333,10 +333,13 @@ class ModelEcosystem:
         """The duckn labeling scheme a store of ``task`` declares, or None when this ecosystem
         has no published class list to name (an operator's own models, free-text prompts).
 
-        ``{"key", "name", "uri", "version", "url"}``. The ``uri`` identifies the CLASS LIST
-        across files and is compared byte for byte, so it carries what changes the list - the
-        catalog's major version, the task - and not the release; ``version`` is the release,
-        which documents written for the scheme list exactly. Tasks that share one class list
+        ``{"key", "name", "system_uri", "version", "definition_url"}`` - duckn's own field
+        names (seg 0.8 `terminologies`), so nothing translates between the two. The
+        ``system_uri`` is a URI OF the class list: it identifies it across files and is
+        compared byte for byte, never fetched, so it carries what changes the list - the
+        catalog's major version, the task - and not the release. ``version`` is the release,
+        which documents written for the scheme list exactly; ``definition_url`` is where a
+        person reads that release's definition. Tasks that share one class list
         share one scheme. Answered offline, like :meth:`label_version`."""
         return None
 
@@ -526,9 +529,9 @@ class TSEcosystem(ModelEcosystem):
         version = str(meta.get("ts_version"))
         return {"key": f"{self.name}:{base}",
                 "name": f"TotalSegmentator {major} class labels, task {base}",
-                "uri": f"{self.UPSTREAM}#{major}:{base}",
+                "system_uri": f"{self.UPSTREAM}#{major}:{base}",
                 "version": version,
-                "url": f"{self.UPSTREAM}/tree/v{version}"}
+                "definition_url": f"{self.UPSTREAM}/tree/v{version}"}
 
     def label_version(self, task: str) -> dict:
         # The labels ARE the registry entry, generated from TotalSegmentator's own source at
@@ -929,10 +932,10 @@ class MooseEcosystem(ZipManifestEcosystem):
         pre, sep, rest = url.partition("/releases/download/")
         return {"key": f"{self.name}:{task}",
                 "name": f"MOOSE class labels, task {task}",
-                "uri": f"{self.UPSTREAM}#{task}",
+                "system_uri": f"{self.UPSTREAM}#{task}",
                 "version": version,
                 # the release page the asset is published on, else the asset itself
-                "url": f"{pre}/releases/tag/{rest.split('/')[0]}" if sep else url}
+                "definition_url": f"{pre}/releases/tag/{rest.split('/')[0]}" if sep else url}
 
 
 class MRSegmentatorEcosystem(ModelEcosystem):
@@ -1002,12 +1005,12 @@ class MRSegmentatorEcosystem(ModelEcosystem):
             return None
         return {"key": f"{self.name}:{task}",
                 "name": f"MRSegmentator class labels, task {task}",
-                "uri": f"{self.UPSTREAM}#{task}",
+                "system_uri": f"{self.UPSTREAM}#{task}",
                 # upstream's own weights_version ("1.2"), which the archive's version.json
                 # and the installer both check - NOT the source release "v1.2.0". Versions
                 # are matched as exact strings, so a document for this scheme lists "1.2".
                 "version": str(entry["tag"]),
-                "url": f"{self.UPSTREAM}/tree/{release}"}
+                "definition_url": f"{self.UPSTREAM}/tree/{release}"}
 
     def _folder(self, task: str, root) -> Path:
         entry = manifest_entry(self._entries, task, what=f"mrsegmentator task {task!r}",
@@ -1189,11 +1192,11 @@ class DentalSegmentatorEcosystem(ZipManifestEcosystem):
             return None
         return {"key": f"{self.name}:{task}",
                 "name": "DentalSegmentator class labels",
-                "uri": f"{self.CONCEPT_DOI}#{task}",
+                "system_uri": f"{self.CONCEPT_DOI}#{task}",
                 # upstream's own token, from the dataset folder's name; Zenodo publishes no
                 # version for the record
                 "version": str(entry["tag"]),
-                "url": f"https://zenodo.org/records/{record}"}
+                "definition_url": f"https://zenodo.org/records/{record}"}
 
 
 
@@ -1288,9 +1291,9 @@ class TotalVibeEcosystem(ZipManifestEcosystem):
         return {"key": f"{self.name}:{base}",
                 "name": f"TotalVibeSegmentator class labels, dataset {dsid} ({base})",
                 # the nnU-Net dataset id is upstream's own identifier of the class list
-                "uri": f"{self.UPSTREAM}#{dsid}:{base}",
+                "system_uri": f"{self.UPSTREAM}#{dsid}:{base}",
                 "version": release,
-                "url": f"{self.UPSTREAM}/tree/{release}"}
+                "definition_url": f"{self.UPSTREAM}/tree/{release}"}
 
     def _unpack_into(self, task: str, root) -> Path:
         # the archive's top level is the configuration folder itself; the
@@ -1392,9 +1395,9 @@ class CADSEcosystem(ZipManifestEcosystem):
             return None
         return {"key": f"{self.name}:{task}",
                 "name": f"CADS class labels, dataset {dsid} ({task})",
-                "uri": f"{self.UPSTREAM}#{dsid}:{task}",
+                "system_uri": f"{self.UPSTREAM}#{dsid}:{task}",
                 "version": release,
-                "url": f"{self.UPSTREAM}/tree/{release}"}
+                "definition_url": f"{self.UPSTREAM}/tree/{release}"}
 
     def spec(self, task: str, root) -> TaskSpec:
         import dataclasses
@@ -1754,9 +1757,9 @@ class FastSurferEcosystem(ImageBakedEcosystem):
         version = str(_registry.ENGINES[self.engine].weights_identity()[0]["version"])
         return {"key": f"{self.name}:{task}",
                 "name": f"FastSurfer {task} class labels",
-                "uri": f"{self.UPSTREAM}#v{version.partition('.')[0]}:{task}",
+                "system_uri": f"{self.UPSTREAM}#v{version.partition('.')[0]}:{task}",
                 "version": version,
-                "url": f"{self.UPSTREAM}/tree/v{version}"}
+                "definition_url": f"{self.UPSTREAM}/tree/v{version}"}
 
     def scheme_code(self, task: str, value: int, name: str) -> str | None:
         # FastSurfer's codes are the numeric aparc+aseg ids, not the names. And a store holds
@@ -1892,9 +1895,9 @@ class MonaiEcosystem(EngineEcosystem):
             return None
         return {"key": f"{self.name}:{task}",
                 "name": f"MONAI model zoo bundle {task} class labels",
-                "uri": f"{self.UPSTREAM}#{task}",
+                "system_uri": f"{self.UPSTREAM}#{task}",
                 "version": version,
-                "url": entry.get("url") or f"https://huggingface.co/MONAI/{task}/tree/{version}"}
+                "definition_url": entry.get("url") or f"https://huggingface.co/MONAI/{task}/tree/{version}"}
     engine = "monai"
     description = "MONAI model zoo bundles (engine)"
 

@@ -416,7 +416,7 @@ def segment(id: str, name: str, label_values, *, layer: int | None = None,
                    designations=designations or None)
 
 
-_SCT = {"name": "SNOMED CT", "uri": "http://snomed.info/sct",
+_SCT = {"name": "SNOMED CT", "system_uri": "http://snomed.info/sct",
         "url_template": "http://snomed.info/id/{code}"}
 
 
