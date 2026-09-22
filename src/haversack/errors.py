@@ -60,6 +60,21 @@ class ModelNotFound(HaversackError, FileNotFoundError):
     """
 
 
+class AmbiguousModel(ModelNotFound):
+    """A dataset holds more than one model folder that fits what was asked, and nothing said
+    which one to run.
+
+    A ``Dataset<id>_*`` directory is ``<trainer>__<plans>__<configuration>/`` folders, and
+    TotalSegmentator's v3 release (2026-09) ships TWO ``3d_fullres`` folders per dataset in
+    831-836: ``nnUNetPlans`` (what upstream runs) and ``nnUNetResEncUNetLPlans_8`` (its
+    ``model_size="small"`` only). Keying the folders by configuration alone made the second
+    replace the first, so the small model ran under the default's name with nothing said.
+    The remedy is to state ``plans=`` (and ``trainer=`` if that too is shared) - never to
+    choose. A subclass of :class:`ModelNotFound` so every door that already reports an
+    installed-but-unresolvable model (``info()``'s ``unresolved``) reports this the same way.
+    """
+
+
 class UnsupportedModel(HaversackError, NotImplementedError):
     """A valid nnU-Net model that haversack cannot run *yet*.
 

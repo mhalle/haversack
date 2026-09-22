@@ -70,7 +70,8 @@ def canonical_orientation_for(spec, store, *, configuration: str | None = None) 
     if spec.orientation is not None:
         return str(spec.orientation)
     if _uses_nnunet_preprocessing(spec) and spec.single is not None:
-        folder = store.resolve(spec.single, configuration=configuration)
+        folder = store.resolve(spec.single, configuration=configuration,
+                               **spec.model_choice(spec.single))
         return nio.CANONICAL if nio.reader_reorients(folder) else None
     return nio.CANONICAL
 
@@ -239,8 +240,9 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     cached = {}                                   # resample key -> ResampledGrid (NOT normalized)
     identity = {}                                 # weights id -> what actually ran, for the store
 
-    def load(wid):
-        folder = store.resolve(wid, configuration=configuration)
+    def load(wid, spc):
+        # the stage's own spec states which model folder a shared dataset means
+        folder = store.resolve(wid, configuration=configuration, **spc.model_choice(wid))
         m = models.get(folder, folds=folds, device=device, dtype=dtype,
                        accumulate=accumulate, batch_size=batch_size,
                        allow_transpose=allow_transpose)
@@ -413,7 +415,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             key = f"{tag}{sfx if sfx is not None else ':' + pname}"
             t = time.perf_counter()
             report.enter_part(i, f"{pname} ({wid})")
-            model = load(wid)
+            model = load(wid, spc)
             T[f"load:{key}"] = time.perf_counter() - t
             t = time.perf_counter()
             x, fr = model_frame(model)
@@ -465,7 +467,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             t = time.perf_counter()
             report.enter_part(i, f"{tag} stage {i + 1}/{len(stages)}: model {step.weights_id}"
                               + ("" if roi_mm is None else " (cropped)"))
-            model = load(step.weights_id)
+            model = load(step.weights_id, spc)
             x, fr = model_frame(model)
             T[f"load:{tag}:s{i}"] = time.perf_counter() - t
             env = crop_on_model_grid(model, x, fr, use_body=not last, roi_mm=roi_mm)

@@ -265,7 +265,8 @@ class Segmenter:
             entry = {"id": str(wid), "installed": False}
             try:
                 if self.weights.have(wid):
-                    folder = self.weights.resolve(wid, configuration=self.policy["configuration"])
+                    folder = self.weights.resolve(wid, configuration=self.policy["configuration"],
+                                                  **spec.model_choice(wid))
                     entry["installed"] = True
                     from .weights_fetch import installed_version
                     side = installed_version(folder)
@@ -317,7 +318,8 @@ class Segmenter:
         store = as_store(self.policy["weights"],
                          layout="nnunetv2" if _uses_nnunet_preprocessing(spec) else "ts")
         for wid in spec.weights_ids:
-            folder = store.resolve(wid, configuration=self.policy["configuration"])
+            folder = store.resolve(wid, configuration=self.policy["configuration"],
+                                   **spec.model_choice(wid))
             self.models.get(folder, folds=self.policy["folds"], device=self.policy["device"],
                             dtype=self.policy["dtype"], accumulate=self.policy["accumulate"],
                             batch_size=self.policy["batch_size"])

@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .errors import ModelNotFound, UnsupportedModel
+from .errors import AmbiguousModel, ModelNotFound, UnsupportedModel
 from typing import Mapping
 
 WeightsId = int | str
@@ -109,6 +109,20 @@ class TaskSpec:
     #: is not the truth. None (the default) follows the declared reader - RAS for
     #: the TotalSegmentator lineage, the stored order for a plain nnU-Net model.
     orientation: str | None = None
+    #: Which model folder to run for a weights id, when its dataset may hold more than one:
+    #: ``{dataset id: {"trainer": ..., "plans": ...}}``, either key optional. A dataset is
+    #: ``<trainer>__<plans>__<configuration>/`` folders, and TotalSegmentator's v3 release
+    #: ships two ``3d_fullres`` folders in each of 831-836 - ``nnUNetPlans`` (upstream's
+    #: default) and ``nnUNetResEncUNetLPlans_8`` (its ``model_size="small"``). The registry
+    #: says which one the task means, as upstream's own task config does; the resolver
+    #: refuses a dataset it cannot narrow to one folder rather than pick (2026-09-21).
+    models: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+
+    def model_choice(self, weights_id) -> dict:
+        """``{"trainer"?, "plans"?}`` this task states for ``weights_id`` - the keyword
+        arguments every resolve of that weights id must carry. Empty when it states none,
+        which is every task whose datasets hold a single model folder."""
+        return dict(self.models.get(_dataset_key(weights_id)) or {})
 
     @classmethod
     def from_model_folder(cls, folder, *, name: str | None = None) -> "TaskSpec":
@@ -148,6 +162,32 @@ class TaskSpec:
         return [st.weights_id for st in self.cascade if st.weights_id is not None]
 
 
+#: What a registry entry's ``models`` may state per dataset: the two name components of a
+#: ``<trainer>__<plans>__<configuration>`` folder that are not the configuration (that one
+#: stays a per-job policy knob). Anything else is refused on load, so a misspelled key
+#: cannot quietly state nothing and let the resolver refuse at run time instead.
+MODEL_CHOICE_KEYS = ("trainer", "plans")
+
+
+def _dataset_key(weights_id) -> str:
+    """Unpadded decimal for a numeric dataset id (8 and 008 are one dataset), else as given -
+    the same canonical form as ``weights_fetch.dataset_key``, restated so this module stays
+    free of the fetcher."""
+    t = str(weights_id).strip()
+    return str(int(t)) if t.isdigit() else t
+
+
+def _model_choices(raw, where: str) -> dict:
+    out = {}
+    for wid, choice in (raw or {}).items():
+        extra = sorted(set(choice) - set(MODEL_CHOICE_KEYS))
+        if extra:
+            raise ValueError(f"{where}: models[{wid!r}] states {extra}; only "
+                             f"{list(MODEL_CHOICE_KEYS)} name a model folder")
+        out[_dataset_key(wid)] = {k: str(v) for k, v in choice.items() if v}
+    return out
+
+
 class TaskCatalog:
     """The named tasks of an ecosystem, from its registry JSON."""
 
@@ -182,6 +222,7 @@ class TaskCatalog:
                 name=d["name"], lineage=d.get("lineage", "ts"), modality=d.get("modality", "CT"),
                 shape=d.get("shape", "single"), single=d.get("single"), union=union,
                 cascade=cascade, orientation=d.get("orientation"),
+                models=_model_choices(d.get("models"), f"{Path(path).name}: {d['name']}"),
                 label_map={int(k): str(v) for k, v in (d.get("label_map") or {}).items()})
 
     def get(self, name) -> TaskSpec:
@@ -247,40 +288,78 @@ def _dataset_dirs(root: Path, weights_id) -> list[Path]:
     return list(seen.values()) or sorted(root.glob(str(weights_id)))
 
 
+def _folder_parts(folder: Path) -> tuple[str, str, str]:
+    """``(trainer, plans, configuration)`` of a ``<trainer>__<plans>__<configuration>`` folder."""
+    trainer, plans, config = folder.name.split("__")
+    return trainer, plans, config
+
+
 def resolve_model_folder(weights_id: WeightsId, *, layout: str = "ts", model_root=None,
-                         configuration: str | None = None) -> Path:
+                         configuration: str | None = None, trainer: str | None = None,
+                         plans: str | None = None) -> Path:
     """``Dataset<id>_*`` under the weights root -> its ``trainer__plans__config`` folder.
 
     A model folder path passes through unchanged, so a caller can point haversack straight at a
     stock nnU-Net result directory. When a dataset ships several configurations (a trained
     nnU-Net commonly has 2d / 3d_lowres / 3d_fullres / 3d_cascade_fullres), ``configuration``
     picks one; otherwise :data:`CONFIG_PREFERENCE` decides, rather than whichever sorts first.
+
+    ``trainer`` and ``plans`` narrow the folders first (a task's ``models`` entry states them).
+    If more than one folder still has the chosen configuration, this raises
+    :class:`~haversack.errors.AmbiguousModel` instead of choosing: until 2026-09-21 the
+    folders were keyed by configuration alone, so of TotalSegmentator v3's two ``3d_fullres``
+    folders in each of Datasets 831-836 the one that sorted last - the small ResEnc model,
+    ``nnUNetResEncUNetLPlans_8`` - ran in place of upstream's default, silently.
     """
     p = Path(str(weights_id)).expanduser()
     if p.is_dir() and p.name.count("__") == 2:
+        t, pl, _ = _folder_parts(p)
+        if (trainer and t != trainer) or (plans and pl != plans):
+            raise ModelNotFound(f"{p.name} is not the {trainer or '*'}__{plans or '*'} model "
+                                "this task states")
         return p
     root = Path(p) if p.is_dir() else weights_root(layout, model_root)
     matches = ([root] if p.is_dir() else _dataset_dirs(root, weights_id))
     if not matches:
         raise ModelNotFound(f"no Dataset{weights_id}_* under {root}")
-    configs = sorted(c for c in matches[0].iterdir()
+    dataset = matches[0]
+    configs = sorted(c for c in dataset.iterdir()
                      if c.is_dir() and not c.name.startswith(".") and c.name.count("__") == 2)
     if not configs:
-        raise ModelNotFound(f"no trainer__plans__config folder in {matches[0]}")
-    by_config = {c.name.rsplit("__", 1)[1]: c for c in configs}
+        raise ModelNotFound(f"no trainer__plans__config folder in {dataset}")
+    wanted = [c for c in configs
+              if (trainer is None or _folder_parts(c)[0] == trainer)
+              and (plans is None or _folder_parts(c)[1] == plans)]
+    if not wanted:
+        raise ModelNotFound(f"no {trainer or '*'}__{plans or '*'}__* model in {dataset.name}; "
+                            f"have {[c.name for c in configs]}")
+    by_config: dict[str, list[Path]] = {}
+    for c in wanted:
+        by_config.setdefault(_folder_parts(c)[2], []).append(c)
+
+    def only(config: str) -> Path:
+        found = by_config[config]
+        if len(found) > 1:
+            raise AmbiguousModel(
+                f"{dataset.name} holds {len(found)} {config!r} models "
+                f"({', '.join(f.name for f in found)}) and nothing states which to run. A "
+                "catalog task states it in its registry entry as models: {id: {plans, "
+                "trainer}}; to run one directly, pass its model folder path.")
+        return found[0]
+
     if configuration is not None:
         if configuration not in by_config:
-            raise ModelNotFound(f"configuration {configuration!r} not in {matches[0].name}; "
-                                    f"have {sorted(by_config)}")
-        return by_config[configuration]
+            raise ModelNotFound(f"configuration {configuration!r} not in {dataset.name}; "
+                                f"have {sorted(by_config)}")
+        return only(configuration)
     for name in CONFIG_PREFERENCE:
         if name in by_config:
-            return by_config[name]
-    if len(configs) == 1:
-        return configs[0]
+            return only(name)
+    if len(wanted) == 1:
+        return wanted[0]
     why = "; ".join(f"{k} ({UNSUPPORTED_CONFIGS[k]})" for k in sorted(by_config) if k in UNSUPPORTED_CONFIGS)
     raise ModelNotFound(
-        f"no runnable configuration in {matches[0].name}; have {sorted(by_config)}"
+        f"no runnable configuration in {dataset.name}; have {sorted(by_config)}"
         + (f" - unsupported: {why}" if why else "") + ". Pass configuration=... to choose.")
 
 
