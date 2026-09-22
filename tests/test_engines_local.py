@@ -74,7 +74,7 @@ def test_segmenter_routes_an_engine_task_to_its_compute(monkeypatch, tmp_path):
 
 def test_a_pinned_engine_task_runs_only_the_version_it_names(monkeypatch, tmp_path):
     """An engine task never reaches catalog.get(), where an nnU-Net task's `@version` is
-    honoured, so `fastsurfer:asegdkt@<anything>` used to run the one build there is. The
+    honored, so `fastsurfer:asegdkt@<anything>` used to run the one build there is. The
     version this build runs is accepted; any other is refused before compute starts."""
     calls = []
     monkeypatch.setitem(registry.ENGINES, "fastsurfer",

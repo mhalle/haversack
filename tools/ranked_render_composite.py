@@ -3,7 +3,7 @@ registered purely from the duckn origins. Lungs as glass, trees opaque inside.
 Glassy lungs with the airway and vessel trees inside - a CROSS-STORE composite.
 
 The lungs come from `total` (1.5 mm); the trees from `lung_vessels` (native 0.703 mm).
-Margins could never do this - they are scoped to one softmax. Millimetres compose: each
+Margins could never do this - they are scoped to one softmax. Millimeters compose: each
 store contributes a signed distance field in the shared world frame, the ray samples both,
 and the vessels render opaque inside the glass. The per-axis world offset between the two
 crops is read from the duckn origins - which is exactly why the centering work had to be
@@ -144,7 +144,7 @@ def load(store, device):
     shade_all = ndimage.gaussian_filter(signed_all, sigma=1.0)
 
     dev = torch.device(device)
-    # colour of the NEAREST lobe everywhere, not of the sample's own voxel: the shell
+    # color of the NEAREST lobe everywhere, not of the sample's own voxel: the shell
     # straddles the surface and the outside half must still know which lobe it wraps.
     colmap = colidx[np.maximum(rk0.astype(np.int64), 0)]
     nz = ndimage.distance_transform_edt(colmap == 0, return_distances=False,
@@ -269,7 +269,7 @@ def render(signed, grad, colid, sp, colors, vess, delta_mm, *, width, height, el
     spt = torch.tensor(sp, dtype=torch.float32, device=device)
     lo = (occ.min(0).values.float() * spt).cpu().numpy()
     hi = (occ.max(0).values.float() * spt).cpu().numpy()
-    centre = torch.tensor((lo + hi) / 2, dtype=torch.float32, device=device)
+    center = torch.tensor((lo + hi) / 2, dtype=torch.float32, device=device)
     span = float(np.linalg.norm(hi - lo)) * 0.42
     depth_mm = float(np.linalg.norm(hi - lo)) * 1.1
 
@@ -317,7 +317,7 @@ def render(signed, grad, colid, sp, colors, vess, delta_mm, *, width, height, el
     band = max(1, int(300_000 / width))
     for y0 in range(0, height, band):
         y1 = min(y0 + band, height)
-        origin = (centre[None, None, :] + uu[y0:y1][..., None] * R
+        origin = (center[None, None, :] + uu[y0:y1][..., None] * R
                   + vv[y0:y1][..., None] * U - F * depth_mm / 2)
         rgb = torch.zeros(y1 - y0, width, 3, device=device)
         trans = torch.ones(y1 - y0, width, device=device)
@@ -379,7 +379,7 @@ def render(signed, grad, colid, sp, colors, vess, delta_mm, *, width, height, el
                     gv = samp(grad_v, mid, vec=True)
                     nrm = -gv / (gv.norm(dim=-1, keepdim=True) + 1e-6)
                     # GLASS: opacity follows Fresnel - nearly clear face-on, strong at
-                    # grazing incidence - so the colour lives on the silhouettes and the
+                    # grazing incidence - so the color lives on the silhouettes and the
                     # faces read as clear material rather than fog.
                     ndv = (nrm * view).sum(-1).abs()
                     fresnel = 0.03 + 0.97 * (1.0 - ndv) ** 3

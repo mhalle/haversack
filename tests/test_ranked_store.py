@@ -169,7 +169,7 @@ def test_grid_attrs_are_duckn_metadata_that_validate_against_the_shape():
         validate_against_shape(m, (10, 20, 30))                 # a list axis is declared
 
 
-def test_brick_attrs_place_the_first_brick_centre_and_scale_the_spacing():
+def test_brick_attrs_place_the_first_brick_center_and_scale_the_spacing():
     a = rs.brick_attrs(D, [3.0, 1.5, 1.5], [0.0, 0.0, 0.0], 32)["duckn"]
     assert a["space_origin"] == [23.25, 23.25, 46.5]            # (32-1)/2 * spacing, xyz
     assert a["axes"][1]["space_direction"] == [0.0, 0.0, 96.0]

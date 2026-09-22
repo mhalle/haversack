@@ -73,7 +73,7 @@ class JobStore:
         try:
             self._open()
         except sqlite3.DatabaseError as e:
-            # Not a defence against sqlite, which is crash-safe with WAL. This
+            # Not a defense against sqlite, which is crash-safe with WAL. This
             # is the general rule that constructing an optional subsystem must
             # not fail startup - a read-only workdir or a full disk reaches
             # here far sooner than a corrupt database would. Records are

@@ -45,7 +45,7 @@ def model_grid_geometry(meta):
     nonzero first (every nnU-Net-native lineage), else `frame.source`, never the full canonical
     grid when a crop happened - and on the convention:
 
-      corner (TotalSegmentator, scipy.zoom)  holds the first and last sample centres, so
+      corner (TotalSegmentator, scipy.zoom)  holds the first and last sample centers, so
           spacing is (n_src-1)*s_src/(n_model-1) and voxel 0 does not move  -> duckn `node`
       center (nnU-Net native, skimage)       holds the field of view, so spacing is
           n_src*s_src/n_model and voxel 0 moves in by half the spacing change -> duckn `cell`
@@ -83,7 +83,7 @@ def model_grid_geometry(meta):
 
 
 def _true_spacing(meta):
-    """The spacing the part actually landed on: a distance stated in millimetres has to use
+    """The spacing the part actually landed on: a distance stated in millimeters has to use
     the grid the samples are really on, not the one that was asked for."""
     return model_grid_geometry(meta)[0]
 

@@ -237,7 +237,7 @@ def stamp(store_name, prov, new_name=None):
     ext = dict(a["extensions"])
     ext["haversack"] = dict(ext["haversack"]) | {"case": prov["case"],
                                         "case_detail": keep_for_store(prov)}
-    # the builder wrote `processing`; add the source and the licence without discarding it
+    # the builder wrote `processing`; add the source and the license without discarding it
     pv = dict(ext.get("provenance") or {"version": "1.0"})
     pv["sources"] = [as_duckn_source(prov)]
     if prov.get("license"):

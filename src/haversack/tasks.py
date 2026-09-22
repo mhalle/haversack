@@ -2,7 +2,7 @@
 
 Reads the same registry JSON the MLX toolkit ships (``ts_tasks.json``), but with no dependency
 on that package - it imports mlx, which does not exist off Apple silicon. Only the parts haversack
-executes are modelled here: single-model tasks and label-union tasks. Cascades are recorded
+executes are modeled here: single-model tasks and label-union tasks. Cascades are recorded
 but not runnable yet, and say so.
 """
 from __future__ import annotations

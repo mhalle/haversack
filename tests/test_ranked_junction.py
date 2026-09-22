@@ -110,8 +110,8 @@ def test_signed_distance_holds_on_both_sides_of_the_cap(field):
     band = present & (np.abs(truth) <= 0.9 * T)      # inside the truncation, off the clamp
     err = np.abs(_decode(jn[band], T) - truth[band])
     # The store quantizes each gap to clip/255 logits; the difference of two gaps over a
-    # gradient of 2k carries that into millimetres, and the gradient itself is differenced
-    # from quantized gaps. Two tenths of a millimetre is a tenth of a voxel here, an order of
+    # gradient of 2k carries that into millimeters, and the gradient itself is differenced
+    # from quantized gaps. Two tenths of a millimeter is a tenth of a voxel here, an order of
     # magnitude under the staircase the layer exists to replace.
     tol = 0.2
     assert err.max() <= tol, f"off by {1e3 * err.max():.0f} um"

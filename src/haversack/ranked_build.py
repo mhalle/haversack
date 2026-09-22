@@ -167,11 +167,11 @@ def geometry(part):
     Two engines record their geometry differently, because their grids arise differently.
     FastSurfer states its conformed grid outright - the logits are native to it, there is no
     crop and the spacing is exactly 1 mm by construction. That grid is an image grid, so its
-    samples are cell centres. The nnU-Net path states a canonical frame plus a requested
+    samples are cell centers. The nnU-Net path states a canonical frame plus a requested
     spacing, so the grid it actually landed on has to be derived, and HOW depends on which
     convention the resample used:
 
-      corner (TotalSegmentator, scipy.zoom)  holds the first and last sample centres, so
+      corner (TotalSegmentator, scipy.zoom)  holds the first and last sample centers, so
           spacing is (n_src-1)*s_src/(n_model-1) and voxel 0 does not move  -> duckn `node`
       center (nnU-Net native, skimage)       holds the field of view, so spacing is
           n_src*s_src/n_model and voxel 0 moves in by half the spacing change -> duckn `cell`
@@ -234,7 +234,7 @@ JUNCTION_SPAN = 127          # byte steps from the interface to the truncation, 
 
 
 def distance_field(ranks, support, clip, spacing, truncation, levels=None):
-    """``(Z, Y, X)`` uint8: how far the nearest surface is, in millimetres.
+    """``(Z, Y, X)`` uint8: how far the nearest surface is, in millimeters.
 
     ONE FIELD, NOT A STACK. It is the distance to the nearest place the argmax changes,
     whichever pair of classes forms it. A second field keyed to the next LOGIT rank was tried
@@ -246,12 +246,12 @@ def distance_field(ranks, support, clip, spacing, truncation, levels=None):
     ignores the divisor. This field is immune, being found from the labelmap rather than a rank.
 
     WHY STORE IT, when it is derivable from `support` sitting beside it. Unlike decoding a
-    margin, which is pointwise, this is NON-LOCAL: it needs a neighbourhood of radius
+    margin, which is pointwise, this is NON-LOCAL: it needs a neighborhood of radius
     `truncation`, so a client deriving it per brick needs halos, and one deriving it whole
     spends ~53 s on a five-part 1.5 mm case before the first frame. It is also easy to get
     wrong in ways that render plausibly rather than raise. It remains a derived VIEW, not a
     replacement - `support` carries confidence, alternatives, and the ability to re-decide,
-    none of which survive the conversion to millimetres.
+    none of which survive the conversion to millimeters.
 
     THE ENCODING COUNTS UP FROM THE TRUNCATION, mirroring `support` counting up from the clip:
     `distance_max` is on the surface, 0 is at or beyond `distance_truncation`. That keeps "zero
@@ -303,7 +303,7 @@ def _crossing_distance(ranks, support, clip, spacing, truncation, lut=None):
 
     WHICH SURFACE IS FOUND BY THE LABELMAP, NOT BY A RANK PAIR. An earlier version watched the
     (winner, runner-up) pair for a sign change, which misses an argmax change whenever the class
-    that overtakes is not the local runner-up - at one voxel l_A > l_B > l_D, at its neighbour
+    that overtakes is not the local runner-up - at one voxel l_A > l_B > l_D, at its neighbor
     l_D > l_A > l_B: the winner changed and that pair never crossed. `win[a] != win[b]` has no
     such gap, and it needs no logits at all.
 
@@ -350,7 +350,7 @@ def _crossing_distance(ranks, support, clip, spacing, truncation, lut=None):
 def _eikonal(d, spacing, truncation):
     """Propagate seeded crossings outward by solving |grad d| = 1.
 
-    NOT a min-plus sweep. `d = min(d, neighbour + h)` along each axis in turn measures a taxicab
+    NOT a min-plus sweep. `d = min(d, neighbor + h)` along each axis in turn measures a taxicab
     distance: a diagonal comes out as dx + dy rather than sqrt(dx^2 + dy^2), up to sqrt(2) too
     large in 2-D and sqrt(3) in 3-D. Shading reads a gradient, so the error appears as facets on
     every surface not aligned with an axis, and as |grad d| clustering near sqrt(2) instead of 1.
@@ -360,7 +360,7 @@ def _eikonal(d, spacing, truncation):
     against its analytic distance -- |grad d| is NOT a discriminating statistic
     here, because a narrow band is mostly clamped at the truncation.
 
-    The Godunov update solves the Eikonal equation: with the smaller neighbour a_i on each axis,
+    The Godunov update solves the Eikonal equation: with the smaller neighbor a_i on each axis,
     find d satisfying sum_i max(d - a_i, 0)^2 / h_i^2 = 1, trying one, two, then three active
     axes. Seeded voxels keep their interpolated sub-voxel values.
 
@@ -368,7 +368,7 @@ def _eikonal(d, spacing, truncation):
     running full-volume iterations to move values on the ~1 % of voxels near a surface. Each
     iteration advances influence by at most one voxel from a finite value, so dilating the seed
     mask by the iteration count (Chebyshev) contains every voxel any iteration could touch, and
-    a band voxel's neighbours outside the band were never updated by the dense version either -
+    a band voxel's neighbors outside the band were never updated by the dense version either -
     they hold the same `big` in both. Bit-identical by construction, and verified against the
     dense implementation on a real 52 Mvoxel part.
     """
@@ -391,7 +391,7 @@ def _eikonal(d, spacing, truncation):
             band[lo] |= band[hi]
             band[hi] |= band[lo]
 
-    # pad by one voxel of `big` so neighbour gathers never leave the array
+    # pad by one voxel of `big` so neighbor gathers never leave the array
     padded = np.full(tuple(n + 2 for n in d.shape), big, np.float32)
     core = tuple(slice(1, -1) for _ in d.shape)
     padded[core] = np.minimum(d, big)
@@ -406,7 +406,7 @@ def _eikonal(d, spacing, truncation):
     cur = r[flat]
     axes = [(np.minimum, s, np.float32(hv)) for s, hv in zip(strides, h)]
     for _ in range(n_iter):
-        # per-axis smaller neighbour, then a 3-element sort network carrying h alongside
+        # per-axis smaller neighbor, then a 3-element sort network carrying h alongside
         # (anisotropic spacing travels with its axis through the swaps)
         trip = [(np.minimum(r[flat - s], r[flat + s]), np.full(flat.shape, hv, np.float32))
                 for _, s, hv in axes]
@@ -456,12 +456,12 @@ def junction_field(ranks, support, clip, spacing, truncation, reach=None, levels
 
     ONE SIGNED FIELD PER VOXEL, FOR ONE PAIR. At each voxel of the tube around a triple line,
     `pair` names the two leading real (non-background) classes in logit order, stored
-    canonically by class index, and `junction` is the signed distance in millimetres to the
+    canonically by class index, and `junction` is the signed distance in millimeters to the
     level set where their logits are equal, positive on the first class's side:
     (l_a - l_b) / |grad (l_a - l_b)|. That is the deficit DIFFERENCE over its own gradient -
     never the winner's margin over its gradient, which is folded. The gradient is a central
-    difference of the same two classes' deficit difference at the six axis neighbours, each read
-    from that neighbour's own rank list (a class absent from a list is floored at the clip), so
+    difference of the same two classes' deficit difference at the six axis neighbors, each read
+    from that neighbor's own rank list (a class absent from a list is floored at the clip), so
     the pair is evaluated consistently across the stencil whoever wins at each tap.
 
     SPARSE BY CONSTRUCTION. Cells whose eight corners carry three or more labels are where a
@@ -610,8 +610,8 @@ def _junction_at(idx, read_planes, shape, clip, h, truncation, slab, lut=None):
         swap = have & (b < a)
         a, b = np.where(swap, b, a), np.where(swap, a, b)
 
-        # m = l_a - l_b = deficit(b) - deficit(a), at the voxel and its axis neighbours; the
-        # halo of one slice holds every neighbour a slab voxel has.
+        # m = l_a - l_b = deficit(b) - deficit(a), at the voxel and its axis neighbors; the
+        # halo of one slice holds every neighbor a slab voxel has.
         def m_at(zz, yy, xx):
             loc = (slice(None), zz - a0, yy, xx)
             return _deficit_at(rk[loc], su[loc], b, clip, lut) - _deficit_at(rk[loc], su[loc], a, clip, lut)
@@ -719,10 +719,10 @@ def occupancy(ranks, support, K, smax, brick=BRICK):
 
 
 def brick_geometry(direction, eff, origin, brick, nb):
-    """duckn block for the coarse grid: cell-centred bricks, one `list` axis for the class.
+    """duckn block for the coarse grid: cell-centered bricks, one `list` axis for the class.
 
     The last brick along an axis is partial when the shape is not a multiple of `brick`, so its
-    true centre is nearer than this uniform grid says. That is left as-is deliberately: the
+    true center is nearer than this uniform grid says. That is left as-is deliberately: the
     array is a conservative index, not a measurement, and declaring a uniform grid keeps it a
     readable duckn array rather than a private layout.
     """

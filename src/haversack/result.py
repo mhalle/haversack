@@ -75,7 +75,7 @@ class Segmentation:
         return {v: n for v, n in sorted(self.schema.names.items()) if int(v) in found}
 
     def volumes_ml(self) -> dict[str, float]:
-        """Physical volume per present structure, in millilitres."""
+        """Physical volume per present structure, in milliliters."""
         arr = self.array
         per_voxel = float(np.prod(self.grid.spacing)) / 1000.0
         counts = np.bincount(arr.reshape(-1))

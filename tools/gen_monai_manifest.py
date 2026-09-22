@@ -84,7 +84,7 @@ def segmentation_facts(meta: dict) -> dict | None:
     inp = (fmt.get("inputs") or {}).get("image") or {}
     channel_def = out.get("channel_def")
     if not isinstance(channel_def, dict) or len(channel_def) < 2:
-        return None                                  # not a labelled segmentation
+        return None                                  # not a labeled segmentation
     shape = inp.get("spatial_shape")
     if not (isinstance(shape, list) and len(shape) == 3):
         return None                                  # not volumetric
@@ -128,7 +128,7 @@ def build(keep_all: bool = False) -> dict:
             continue
         facts = segmentation_facts(meta)
         if facts is None:
-            skipped.append(f"{name}: not a 3D labelled segmentation bundle")
+            skipped.append(f"{name}: not a 3D labeled segmentation bundle")
             continue
         # The zoo has moved hosting: recent entries' "source" is a Hugging Face
         # REPO PAGE, not a downloadable archive (and they publish no checksum), so

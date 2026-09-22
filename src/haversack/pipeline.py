@@ -492,18 +492,18 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
 
     def run_cascade(spc, tag, *, out_grid=None, restore=None):
         """TotalSegmentator's crop, as upstream runs it (2026-09-22). Each stage before the last
-        labels the whole image (inside any box already found), restored nearest-neighbour onto
+        labels the whole image (inside any box already found), restored nearest-neighbor onto
         the input grid as upstream restores its crop model; the box of its crop classes, widened
         by its margin (:func:`upstream_crop_box`), is cut out of the input BEFORE the final
         stage's resample, and the final stage runs on that cut alone - never grown to the patch,
-        never dropped for saving too little - so nothing outside the box is labelled. An empty
+        never dropped for saving too little - so nothing outside the box is labeled. An empty
         crop is an empty result, as upstream returns one.
 
         Until 2026-09-22 the crop was a speed approximation of whole-volume inference instead
         (grown by ``at_least``, collapsed by ``worth_cropping``), tuned against the model run on
         the whole volume (medseg docs/backend-decision.md, "Cascade mode-B") and never compared
         with upstream: on a neck CT headneck_bones_vessels scored mean Dice 0.738 against
-        upstream, zygomatic arches labelled beyond upstream's box."""
+        upstream, zygomatic arches labeled beyond upstream's box."""
         box = None
         stages = spc.cascade
         report.n_parts = max(report.n_parts, len(stages) - 1 + max(1, len(stages[-1].union)))

@@ -150,7 +150,7 @@ def test_ctrl_c_still_ends_the_process_by_sigint(tmp_path):
     CPython acts on a signal at its next check between bytecodes, or when a blocking call it is
     in gets interrupted, so one that arrives in the few instructions between the last check and
     the poll() under `recv` stays pending until that poll ends - here the client's 60 s read
-    timeout. Looped, that timing hung 19 runs in 1500 (signalling just after the request: 7 in
+    timeout. Looped, that timing hung 19 runs in 1500 (signaling just after the request: 7 in
     1600), on 3.12 and 3.14, and every one sat in that recv and died of SIGINT the moment
     another signal woke it: pending, not swallowed. haversack routes it right; every blocking
     Python call has the window, microseconds wide, which a person's Ctrl-C all but never hits

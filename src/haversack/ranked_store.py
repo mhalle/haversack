@@ -376,10 +376,10 @@ def grid_reference(direction_xyz, spacing_zyx, origin_xyz, shape_zyx, *,
 def brick_attrs(direction_xyz, spacing_zyx, origin_xyz, brick: int, *, list_axis: bool = True
                 ) -> dict:
     """Geometry of a brick summary (the occupancy index): a grid ``brick`` times coarser
-    whose samples are cell centres, with a ``list`` axis for the class.
+    whose samples are cell centers, with a ``list`` axis for the class.
 
     The last brick along an axis is partial when the shape is not a multiple of ``brick``,
-    so its true centre is nearer than this uniform grid says; left as-is deliberately - the
+    so its true center is nearer than this uniform grid says; left as-is deliberately - the
     array is a conservative index, not a measurement, and a uniform grid keeps it a readable
     duckn array rather than a private layout.
     """

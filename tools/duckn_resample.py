@@ -10,7 +10,7 @@ author happened to be thinking about. That approach failed three separate ways i
   - `value_transforms` was dropped, so the output declared no meaning for its own numbers and
     air read as 0 HU instead of -1024. The values were right -- an affine transform commutes
     with linear interpolation -- which is exactly why nothing downstream complained.
-  - the true corner-rule spacing was computed and then discarded in favour of the nominal
+  - the true corner-rule spacing was computed and then discarded in favor of the nominal
     target, declaring 1.5 mm for a grid that is actually 1.504063 mm on two axes.
   - `centering: cell` was declared while the sampler used the node rule.
 
@@ -25,13 +25,13 @@ counts, which is how you land on a model's grid (haversack/TotalSegmentator resa
 `round(n * s / target)`, so ask for that shape rather than that spacing).
 
 Centering is the sample-count-to-extent relationship and it decides where the grid lands:
-`cell` holds the field of view and shifts sample centres by half the spacing change; `node`
-holds the first and last sample centres. It is read from the source unless `--centering`
+`cell` holds the field of view and shifts sample centers by half the spacing change; `node`
+holds the first and last sample centers. It is read from the source unless `--centering`
 overrides it. haversack's pipeline is node/corner, so that is what matching its grid wants.
 
 `--no-anti-alias` turns off the downsampling pre-blur, which is what a consumer validated on
 unfiltered resampling needs: see docs/resampler-parity-finding.md, where the blur costs
-sub-centimetre structures 30-66 % of their contrast and TotalSegmentator then misses them.
+sub-centimeter structures 30-66 % of their contrast and TotalSegmentator then misses them.
 """
 
 from __future__ import annotations

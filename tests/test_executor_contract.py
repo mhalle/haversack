@@ -135,7 +135,7 @@ class ExecutorContract(unittest.TestCase):
                                     f"{cls.__name__} claims push but has no {m}")
 
     def test_the_shared_methods_take_the_same_arguments(self):
-        """Generalises the submit-signature check to every method both provide.
+        """Generalizes the submit-signature check to every method both provide.
 
         A parameter added to one side only is a 500 that appears solely on the
         deployed side - how `inputs` first shipped broken. Local is the reference

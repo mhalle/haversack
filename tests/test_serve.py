@@ -3864,7 +3864,7 @@ def test_no_cache_refetches_an_input_whose_bytes_can_change(tmp_path):
     a result from a stale cached input just answers the same wrong thing again.
 
     Driven through the sequence the executor actually uses - `_refresh_input`,
-    then pin, then fetch - because that is where the behaviour lives; an earlier
+    then pin, then fetch - because that is where the behavior lives; an earlier
     version of this test called a `refresh=` argument no production code passed.
     """
     upstream = {"bytes": b"first version"}
@@ -3995,7 +3995,7 @@ def test_an_engines_cache_policy_does_not_force_an_input_refetch(tmp_path, monke
     that as "re-fetch the input" would re-download the series for every prompt and
     evict the copy the other jobs share, so the input refresh follows the CALLER.
 
-    Behavioural on purpose: the same claim as a source-text assertion still passed
+    Behavioral on purpose: the same claim as a source-text assertion still passed
     when the conflation was written back in as a prefix of the captured line.
     """
     from haversack import serve as serve_mod
@@ -4323,7 +4323,7 @@ def test_a_read_only_cache_root_does_not_fail_the_job(tmp_path):
 
 def test_a_no_cache_job_never_uses_a_pre_read_image(tmp_path):
     """Dropping the pre-read image in _refresh_input is not enough: the prefetch
-    thread refills that slot with no synchronisation, so a refill landing after
+    thread refills that slot with no synchronization, so a refill landing after
     the drop reinstalls the stale image and the job segments it - the fetch paid
     for, the stale answer returned. A job that asked for fresh bytes uses none."""
     import ast
@@ -4370,7 +4370,7 @@ def test_provenance_pairs_each_ROLE_with_its_own_digest(tmp_path, monkeypatch):
     assert got == want, (
         "provenance paired roles with the wrong digests: "
         + "; ".join(f"{r}: got {got.get(r)} want {want[r]}" for r in ROLES if got.get(r) != want[r]))
-    # and the identity on each record is that role's, not its neighbour's
+    # and the identity on each record is that role's, not its neighbor's
     assert {rec["role"]: rec["identity"] for rec in s["result"]["provenance"]["inputs"]} == want
 
 
@@ -4483,7 +4483,7 @@ class TestArtifactsBelongToOneGeneration:
                              files={"file": ("v.nii.gz", volume_bytes(), "application/gzip")},
                              headers={"Cache-Control": "no-cache"})
             wait_state(client, r2.json()["id"], ("done",))
-            # the behaviour first, so this fails on what a client would SEE
+            # the behavior first, so this fails on what a client would SEE
             now = ex.cache.get(key)[0].parent
             survivors = [n for n in SERVED_ARTIFACTS
                          if (now / n).exists()

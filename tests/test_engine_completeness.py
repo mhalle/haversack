@@ -280,7 +280,7 @@ class EveryEngineIsCreditedAndReachable(unittest.TestCase):
                     problems.append(f"{name}: points at ecosystem {alias!r}, which has no record")
             elif not ({"license", "cite"} <= set(rec)):
                 problems.append(f"{name}: record has {sorted(rec) or 'nothing'} - needs at "
-                                "least a licence and the citation its makers ask for, READ "
+                                "least a license and the citation its makers ask for, READ "
                                 "from the project's own README/LICENSE")
         self.assertEqual([], problems, "\n  ".join(problems))
 

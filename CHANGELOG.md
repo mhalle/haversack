@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **American spelling everywhere, held by a test.** 105 British spellings (center, neighbor,
+  millimeters, labeled, color and license, among others, in their British forms) are gone from
+  the package, its docs, tests and tools, and `tests/test_american_spelling.py` fails on any new
+  one, in prose or inside an identifier (snake_case and camelCase are split before matching).
+  The reason is drift: each British word
+  in the tree is a template the next edit copies. A line that must quote someone else's spelling
+  says so with `spelling: allow <word>`, and a pragma that no longer matches fails too. The job
+  state `cancelled` is unchanged - it is on the wire. Nothing computed moves; newly written
+  ranked stores carry the respelled format README.
 - **TotalSegmentator results no longer carry classes their task does not name.** Some
   TotalSegmentator models are trained with helper classes the task drops; upstream zeroes them
   after prediction, haversack wrote them as unnamed values. `ts.v2:kidney_cysts` wrote Dataset
@@ -15,12 +24,12 @@
 - **TotalSegmentator's crop tasks crop as TotalSegmentator does.** Every ts.v2 task that crops
   with a coarse model first - head_muscles, headneck_bones_vessels, liver_segments,
   lung_vessels and 22 more - now cuts the input to the crop classes' box plus the margin and
-  runs its final model on that cut alone, labelling nothing outside it; an empty crop is an empty
+  runs its final model on that cut alone, labeling nothing outside it; an empty crop is an empty
   result. The crop used to be a speed approximation of whole-volume inference, grown to the
-  network's patch with real image and dropped when it saved too little, and it labelled beyond
+  network's patch with real image and dropped when it saved too little, and it labeled beyond
   upstream's box: on a neck CT, `headneck_bones_vessels` scored mean Dice 0.738 against upstream,
   with zygomatic arches only haversack found. The crop stage's labels are restored nearest-
-  neighbour onto the input, as upstream restores them, and the margin is the 20 mm upstream
+  neighbor onto the input, as upstream restores them, and the margin is the 20 mm upstream
   actually applies to every task that crops with its `total`/`body` models, not the value in the
   task's config (upstream overrides it; teeth keeps its own 10 mm). These tasks' results are keyed
   anew (`crop=upstream`) and recompute once; no other task's key moves.
@@ -686,7 +695,7 @@
   `synthstrip:mask` meant none; the row now carries `{1: "Brain"}`, and the engine reads its
   mask's label from there too.
 
-- **The server honours `task@version`.** It dropped the pin before a job existed, so
+- **The server honors `task@version`.** It dropped the pin before a job existed, so
   `POST /v1/jobs` with `ts.v2:total@X`, and a pinned GET, ran or served whatever version was
   installed - the silent wrong version the grammar exists to prevent; only `prepare` held it.
   Now a pin the server provably does not run is a 409 naming what it runs, on every route. One
@@ -1117,7 +1126,7 @@ identity - nothing fetched them, and there is nowhere to fetch them from.
   dropping it, which on Modal is the normal case for four of the five engines; and the
   README's engine list is pinned the way `--help` and SERVER.md already were.
 - Guards that could not fail were rewritten: the collection check now asks pytest what it
-  collects instead of modelling one of its four gates, and the upstream pin check no
+  collects instead of modeling one of its four gates, and the upstream pin check no
   longer lets one unreachable repository void the whole thing.
 
 ### Modal
@@ -1410,7 +1419,7 @@ says whose work it is - which model, under what license, from which data, under 
   needing `rm -rf`, and all three accept `--model-root` as well as `--root`. (`weights
   coverage` is still TotalSegmentator-only.)
 - **`tasks <name>` prints label order with the label**, and `--json` carries the mapping. It
-  printed names alphabetically, which for a numerically-labelled model gives 1, 10, 11, 2.
+  printed names alphabetically, which for a numerically-labeled model gives 1, 10, 11, 2.
   `describe()` carries `label_map` for the same reason: a caller reading a result cannot
   assume the labels are 1..N - `feet_bones` uses 1-17 and 99-117 - or that the names sort
   meaningfully, since several checkpoints name their structures with numbers. **This changes

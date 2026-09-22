@@ -213,7 +213,7 @@ r = segment("scan.nii.gz", "ts.v2:total_fast")        # a Segmentation
 r.save("labels.nii.gz")
 liver = r.mask("liver")                          # boolean array (Z, Y, X) on the output grid
 r.present()                                      # {label: name} for what was found, e.g. {5: "liver", ...}
-r.volumes_ml()                                   # {name: millilitres}, e.g. {"liver": 1424.3, ...}
+r.volumes_ml()                                   # {name: milliliters}, e.g. {"liver": 1424.3, ...}
 r.timings, r.provenance                          # per-stage seconds; what ran, with what, and any deviations
 
 seg = Segmenter(cache_models=5)                  # models stay warm across calls

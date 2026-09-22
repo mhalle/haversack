@@ -189,7 +189,7 @@ def test_no_module_restates_the_format_list_rankfield_owns():
     the cause. This asserts the three aliases still defer rather than restate.
 
     It does NOT catch a rankfield format bump (FORMAT_VERSION and KNOWN_VERSIONS move
-    together, so the first two assertions hold by construction); the reader's behaviour
+    together, so the first two assertions hold by construction); the reader's behavior
     against an unknown version is pinned by
     ``test_a_version_this_reader_does_not_know_is_refused_as_an_input_error``.
     """

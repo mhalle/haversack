@@ -847,7 +847,7 @@ class ZipManifestEcosystem(ModelEcosystem):
         out = super().info(task, root)
         entry = self._entries.get(task) or {}
         out["tag"] = entry.get("tag")
-        # The licence travels with the task. These are third-party weights and
+        # The license travels with the task. These are third-party weights and
         # some carry an attribution condition (DentalSegmentator's are CC BY 4.0);
         # a note in a docstring does not discharge that for whoever consumes the
         # output, so whatever the manifest recorded is published here.

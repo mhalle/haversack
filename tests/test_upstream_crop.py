@@ -6,7 +6,7 @@ by ``int(mm / zoom)`` voxels per axis (upper end one past the last voxel, clippe
 to that box, runs the final model on the cut alone and pastes the labels back into zeros; an
 empty mask returns an empty segmentation. haversack's crop was, until this date, a speed
 approximation of whole-volume inference - grown to the patch, collapsed when it saved little -
-and labelled beyond upstream's box: headneck_bones_vessels scored mean Dice 0.738 against
+and labeled beyond upstream's box: headneck_bones_vessels scored mean Dice 0.738 against
 upstream on a neck CT, the zygomatic arches found by haversack only.
 """
 import numpy as np
@@ -90,7 +90,7 @@ def test_the_final_stage_sees_exactly_the_box(tmp_path, monkeypatch):
     assert tuple(h - l for l, h in zip(*box)) == want
 
 
-def test_nothing_is_labelled_outside_the_box(tmp_path, monkeypatch):
+def test_nothing_is_labeled_outside_the_box(tmp_path, monkeypatch):
     a = _Part(ORGANS._props, cover=(slice(None),) * 3)       # everything it sees is class 1
     b = _Part(RIBS._props, cover=(slice(0, 1), slice(None), slice(None)))
     res, _ = _run(tmp_path, monkeypatch, [_Crop(), a, b], _cascade(3.0))
@@ -135,7 +135,7 @@ def test_a_crop_from_another_task_uses_that_tasks_labels_on_the_input(tmp_path, 
 
 class _CoarseCrop(_Crop):
     """A crop model at twice the image's spacing, as 298 (6 mm) is to most CTs. Its class sits
-    in model voxels ``box``; restored nearest-neighbour - upstream's order-0 resample of its
+    in model voxels ``box``; restored nearest-neighbor - upstream's order-0 resample of its
     labels - each covers exactly two image voxels a side (corner convention, factor 2). The
     class wins by a narrow margin (1.1 over 1.0), so a linear restore of the field pulls its
     edges in - (2, 5), (5, 7), (5, 7) where nearest gives (2, 6), (4, 8), (4, 8), measured - and

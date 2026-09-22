@@ -46,7 +46,7 @@ class Job:
     >>> result = job.result()            # re-raises whatever the run raised
 
     ``progress`` is the latest :class:`~haversack.progress.Progress` snapshot, or ``None`` before the
-    first one. Polling it needs no locking or cross-thread signal marshalling, which is what makes
+    first one. Polling it needs no locking or cross-thread signal marshaling, which is what makes
     it easy to drive from a UI timer.
     """
 

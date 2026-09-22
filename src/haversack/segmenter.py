@@ -113,7 +113,7 @@ class Segmenter:
                 f"uv sync --extra {eng.extra} --extra serve, then run haversack from it "
                 f"(or deploy with {eng.enabled_env}=1 to run it on Modal).")
         # An engine task never reaches catalog.get(), where an nnU-Net task's `@version` is
-        # honoured, so a pin was dropped here and the one build there is ran instead.
+        # honored, so a pin was dropped here and the one build there is ran instead.
         # prepare() is the catalog's own door for a pinned version: it refuses one this
         # build does not run (ImageBakedEcosystem.ensure).
         if "@" in str(task) and hasattr(self.catalog, "prepare"):
@@ -324,7 +324,7 @@ class Segmenter:
         d["channel_names"] = channels
         if spec.shape == "cascade":
             # How a cascade's crop is made, since 2026-09-22 upstream's (the box cut from the input
-            # before the final stage, nothing labelled outside it) - reported so the result key
+            # before the final stage, nothing labeled outside it) - reported so the result key
             # can say it: every cascade's labels changed that day, and no other task's did.
             d["crop"] = CROP_RULE
         if spec.auxiliary:

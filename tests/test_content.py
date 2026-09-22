@@ -34,7 +34,7 @@ def test_storing_the_same_bytes_twice_costs_one_entry(tmp_path, store):
     """Three files, one upload: the name is not part of the identity."""
     data = _real_volume(tmp_path, "original.nii.gz").read_bytes()
     a = _file(tmp_path, "patient_A.nii.gz", data)
-    b = _file(tmp_path, "anonymised.nii.gz", data)     # different name, same content
+    b = _file(tmp_path, "anonymized.nii.gz", data)     # different name, same content
     assert store.put_file(a) == store.put_file(b)
 
 

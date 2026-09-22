@@ -10,7 +10,7 @@ This reads the scripts rather than running them: every name imported from rankfi
 still exist, and every call through one must bind against the installed signature. That is
 enough to catch a rename, a moved member, or a changed keyword the day the pin moves, which
 is the whole failure mode. It cannot catch a call whose meaning changed while its shape did
-not - no static check can - and it deliberately says nothing about behaviour.
+not - no static check can - and it deliberately says nothing about behavior.
 
 It checks against whatever rankfield is INSTALLED, not against the tag pyproject pins. In a
 clone with `uv pip install -e ../rankfield` that is the sibling working tree, so drift shows

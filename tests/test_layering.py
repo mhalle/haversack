@@ -122,7 +122,7 @@ class TestLayering(unittest.TestCase):
         and `python_files` is only one of four gates, so dropping `unittest.TestCase`
         from a class silently deleted it - every class in `test_engine_completeness.py`
         is collected ONLY because it subclasses TestCase, none being `Test`-prefixed, so
-        one edit there deletes a whole checklist section. The fix is to stop modelling
+        one edit there deletes a whole checklist section. The fix is to stop modeling
         pytest and ASK it: run a real collection and compare the node ids against the
         functions the files declare.
         """
