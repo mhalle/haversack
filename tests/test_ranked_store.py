@@ -176,39 +176,63 @@ def test_brick_attrs_place_the_first_brick_centre_and_scale_the_spacing():
     assert all(ax["centering"] == "cell" for ax in a["axes"][1:])
 
 
-def test_a_group_of_one_is_a_valid_group():
-    """A named union with one member coincides with its leaf and is still its own
-    statement - identity is the id, not the voxels (duckn seg spec 0.7 §5)."""
-    seg = rs.segmentation([rs.leaf("c5", "liver", 5, layer=0),
-                           rs.group("g_one", "just the liver", ["c5"])])
-    assert [s.id for s in seg.segments] == ["c5", "g_one"]
+def test_two_segments_may_list_one_value_and_the_later_one_answers():
+    """seg 0.8: a value may belong to several segments of a layer - identity is the id, not
+    the voxels - and the topmost, the last listed, answers for it."""
+    from duckn import topmost_for
+    seg = rs.segmentation([rs.segment("c5", "liver", 5), rs.segment("again", "hepar", 5)])
+    assert [s.id for s in seg.segments] == ["c5", "again"]
+    assert topmost_for(seg, 5).id == "again"
 
 
-def test_the_standard_refuses_two_leaves_on_one_value_and_a_false_disjoint_claim():
-    with pytest.raises(ValueError, match="all claim label value 5"):
-        rs.segmentation([rs.leaf("a", "liver", 5), rs.leaf("b", "hepar", 5)])
-    with pytest.raises(ValueError, match="claims disjoint members"):
-        rs.segmentation([rs.leaf("a", "x", 1), rs.group("u", "union", ["a"]),
-                         rs.group("v", "other union", ["a"]),
-                         rs.group("p", "not a partition", ["u", "v"], disjoint=True)])
+def test_the_standard_refuses_what_a_reader_would_refuse():
+    with pytest.raises(ValueError, match="rule-4a"):                  # one id, twice
+        rs.segmentation([rs.segment("a", "liver", 5), rs.segment("a", "hepar", 6)])
+    with pytest.raises(ValueError, match="rule-14"):                  # a structure on the background
+        rs.segmentation([rs.segment("bg", "background", 0, role="background"),
+                         rs.segment("a", "liver", 0)])
+    with pytest.raises(ValueError, match="rule-12"):                  # the containing one goes first
+        rs.segmentation([rs.segment("a", "x", 1), rs.segment("u", "union", [1, 2])])
+
+
+def test_a_color_is_written_as_the_css_string_duckn_gives_it():
+    seg = rs.segmentation([rs.segment("a", "x", 1, color=[1.0, 0.0, 0.0]),
+                           rs.segment("b", "y", 2, color="#00ff00")])
+    assert [s.color for s in seg.segments] == ["#ff0000", "#00ff00"]
 
 
 def test_root_attrs_read_back_through_the_standard(tmp_path):
-    seg = rs.segmentation([rs.leaf("bg", "background", 0, layer=0, background=True),
-                           rs.leaf("c5", "liver", 5, layer=0, extent=[0, 3, 0, 4, 0, 5]),
-                           rs.leaf("c6", "spleen", 6, layer=0),
-                           rs.group("g_ab", "abdomen", ["c5", "c6"], disjoint=True),
-                           rs.group("all", "everything", ["bg", "c5", "c6"],
-                                    disjoint=True, exhaustive=True)])
+    seg = rs.segmentation([rs.segment("bg", "background", 0, role="background"),
+                           rs.segment("c5", "liver", 5, extent=[0, 3, 0, 4, 0, 5]),
+                           rs.segment("c6", "spleen", 6)])
     with rs.open_store(tmp_path / "s.zip", "w") as st:
         st.root.attrs.update(rs.root_attrs(seg, haversack={"engine": "nnunetv2"},
                                            provenance={"version": "1.0", "processing": []}))
     with rs.open_store(tmp_path / "s.zip", "r") as st:
         back = rs.read_segmentation(st.root)
-        assert [s.id for s in back.segments] == ["bg", "c5", "c6", "g_ab", "all"]
-        assert back.segments[3].members == ["c5", "c6"] and back.segments[3].disjoint
-        assert back.segments[0].background and back.segments[4].exhaustive
+        assert back.version == "0.9"
+        assert [(s.id, s.label_values) for s in back.segments] == [
+            ("bg", [0]), ("c5", [5]), ("c6", [6])]
+        assert back.segments[0].role == "background" and back.segments[1].extent == [0, 3, 0, 4, 0, 5]
         assert (rs.read_metadata(st.root).extensions["haversack"]["engine"] == "nnunetv2")
+
+
+def test_a_store_written_under_seg_0_7_still_reads(tmp_path):
+    """Stores already delivered carry leaves, groups and `background: true`. duckn migrates
+    them on read: a group becomes a segment listing its members' values, listed first."""
+    with rs.open_store(tmp_path / "old.zip", "w") as st:
+        st.root.attrs.update({"duckn": {"version": rs.DUCKN_VERSION, "extensions": {"seg": {
+            "version": "0.7", "segments": [
+                {"id": "bg", "name": "background", "label_value": 0, "background": True},
+                {"id": "c5", "name": "liver", "label_value": 5},
+                {"id": "c6", "name": "spleen", "label_value": 6},
+                {"id": "g_ab", "name": "abdomen", "members": ["c5", "c6"], "disjoint": True}]}}}})
+    with rs.open_store(tmp_path / "old.zip", "r") as st:
+        back = rs.read_segmentation(st.root)
+    # seg 0.9 keeps a union of structures as `members`; its values are its members'
+    assert [(s.id, s.sorted_values, s.role) for s in back.segments] == [
+        ("bg", [0], "background"), ("g_ab", [5, 6], None), ("c5", [5], None), ("c6", [6], None)]
+    assert back.segments[1].members == ["c5", "c6"] and back.segments[1].label_values is None
 
 
 def test_a_geometry_the_standard_rejects_never_reaches_the_store():
@@ -284,15 +308,16 @@ def test_build_writes_the_same_store_into_a_directory_and_a_zip_and_both_verify(
                 np.testing.assert_array_equal(xa[k][0], xb[k][0], err_msg=k)
                 assert xa[k][1] == xb[k][1], k
         assert sa.read_text("README.md") == sb.read_text("README.md")
-        # the root went through duckn's model: the seg extension reads back validated,
-        # with the part's partition (background included) stated as a group
+        # the root went through duckn's model: the seg extension reads back validated -
+        # the model's classes and a background segment, and nothing derived from them
         seg = rs.read_segmentation(sb.root)
+        assert seg.version == "0.9"
         assert all(not s.name.startswith("label_") for s in seg.segments)
         by_id = {s.id: s for s in seg.segments}
-        assert by_id["background_0"].background and by_id["background_0"].label_value == 0
-        part = by_id["classes_0"]
-        assert part.disjoint and part.exhaustive
-        assert set(part.members) == {s.id for s in seg.segments if s.label_value is not None}
+        assert by_id["background_0"].role == "background"
+        assert by_id["background_0"].label_values == [0]
+        assert all(len(s.label_values) == 1 for s in seg.segments)      # no unions, no groups
+        assert not [i for i in by_id if i.startswith(("classes_", "g_"))]
 
 
 def test_the_junction_layer_can_be_appended_to_an_existing_zip(tmp_path):
@@ -388,8 +413,8 @@ def _two_part_emit(tmp_path, names, part_names=("total_fast:s0", "total_fast:s1"
 
 
 def test_leaves_are_unique_per_layer_and_value_so_a_cascade_keeps_every_class(tmp_path):
-    """Both stages of a cascade emit channel indices 1..K-1. A dedupe on the value alone gave
-    stage 1 no leaves while `classes_1` still claimed to be exhaustive."""
+    """Both stages of a cascade emit channel indices 1..K-1. A dedupe on the value alone once
+    gave stage 1 no segments at all."""
     build, src = _two_part_emit(tmp_path, None)
     out = build.build(src, tmp_path / "c.duckn", "c", names={1: "segment_1", 2: "segment_2"},
                       quiet=True)
@@ -399,8 +424,8 @@ def test_leaves_are_unique_per_layer_and_value_so_a_cascade_keeps_every_class(tm
     assert {"c1_l0", "c2_l0", "c1_l1", "c2_l1"} <= by.keys()
     assert by["c1_l1"].name == "segment_1" and by["c1_l1"].layer == 1
     assert by["c1_l0"].name == "label_1"                        # stage 0 has its own classes
-    assert set(by["classes_1"].members) == {"background_1", "c1_l1", "c2_l1"}
-    assert set(by["classes_0"].members) == {"background_0", "c1_l0", "c2_l0"}
+    assert {s.id for s in seg.segments if s.layer == 1} == {"background_1", "c1_l1", "c2_l1"}
+    assert {s.id for s in seg.segments if not s.layer} == {"background_0", "c1_l0", "c2_l0"}
     verify = _tool("ranked_verify")
     assert verify.verify(out, deep=True, quiet=True)
 
@@ -413,23 +438,13 @@ def test_a_single_part_store_states_no_layer(tmp_path):
     assert all(s.layer is None for s in seg.segments)
 
 
-def test_the_lungs_claim_needs_the_lobes_not_the_prefix():
+def test_a_build_writes_no_unions_even_over_the_five_lobes(tmp_path):
+    """Until seg 0.8 the builder wrote `g_lungs` over TotalSegmentator's five lobes, claimed
+    exhaustive. That is a fact about the labeling scheme, the same for every store the model
+    produces, and it now lives outside the store."""
     build = _tool("ranked_build_store")
-    def leaves(names):
-        return [rs.leaf(f"c{i + 1}", n, i + 1) for i, n in enumerate(names)]
-    vessels = build.named_groups("nnunetv2", leaves(["lung_vessels", "lung_trachea_bronchia"]))
-    assert not [g for g in vessels if g.id == "g_lungs"]
-    lobes = build.named_groups("nnunetv2", leaves([
-        "lung_upper_lobe_left", "lung_lower_lobe_left", "lung_upper_lobe_right",
-        "lung_middle_lobe_right", "lung_lower_lobe_right", "liver"]))
-    g = {x.id: x for x in lobes}["g_lungs"]
-    assert g.exhaustive and len(g.members) == 5
-    pair = build.named_groups("nnunetv2", leaves(["lung_left", "lung_right"]))
-    assert {x.id for x in pair} == {"g_lungs"}
-    four = build.named_groups("nnunetv2", leaves([
-        "lung_upper_lobe_left", "lung_lower_lobe_left", "lung_upper_lobe_right",
-        "lung_middle_lobe_right"]))
-    assert not [x for x in four if x.id == "g_lungs"]           # a lobe short of the concept
+    assert not hasattr(build, "named_groups") and not hasattr(build, "GROUP_CLAIMS")
+    assert "g_lungs" in build.GENERATED_GROUP_IDS          # still known, so old stores upgrade
 
 
 def test_the_upgrade_tool_parses_arguments_and_names_a_store_that_is_not_one(tmp_path, capsys):
@@ -440,7 +455,7 @@ def test_the_upgrade_tool_parses_arguments_and_names_a_store_that_is_not_one(tmp
     with pytest.raises(SystemExit):
         up.main(["--no-such-flag", str(out)])
     up.main([str(out)])
-    assert "seg 0.7 -> 0.7" in capsys.readouterr().out
+    assert "seg 0.9 -> 0.9" in capsys.readouterr().out
     with rs.open_store(out) as st:
         assert all(s.layer is None for s in rs.read_segmentation(st.root).segments)
     bare = tmp_path / "bare.duckn"
@@ -458,79 +473,159 @@ LOBES = ("lung_upper_lobe_left", "lung_lower_lobe_left", "lung_upper_lobe_right"
          "lung_middle_lobe_right", "lung_lower_lobe_right")
 
 
-def _legacy_store(path, engine):
-    """A store as the builder wrote it BEFORE 2026-09-08: five lung lobes and a
-    generated `g_lungs`, exhaustive, whatever engine produced them - because
-    `named_groups` fell back to nnU-Net's claims for every engine without its own."""
-    segs = [rs.leaf("bg", "background", 0, layer=0, background=True)]
-    segs += [rs.leaf(f"c{i}", n, i + 1, layer=0) for i, n in enumerate(LOBES)]
-    segs.append(rs.group("g_lungs", "lungs", [f"c{i}" for i in range(len(LOBES))],
-                         disjoint=True, exhaustive=True))
+def _legacy_store(path, engine, extra=()):
+    """A store as the builder wrote it under seg 0.7: five lung lobes, a generated
+    `g_lungs` claimed exhaustive, and the part's partition group."""
+    ids = [f"c{i}" for i in range(len(LOBES))]
+    segs = [{"id": "bg", "name": "background", "label_value": 0, "background": True}]
+    segs += [{"id": i, "name": n, "label_value": k + 1} for k, (i, n) in enumerate(zip(ids, LOBES))]
+    segs.append({"id": "g_lungs", "name": "lungs", "members": ids,
+                 "disjoint": True, "exhaustive": True})
+    segs.append({"id": "classes_0", "name": "every class", "members": ["bg", *ids],
+                 "disjoint": True, "exhaustive": True})
+    segs += list(extra)
     with rs.open_store(path, "w") as st:
-        st.root.attrs.update(rs.root_attrs(
-            rs.segmentation(segs),
-            haversack={"engine": engine, "part_order": [{"name": "labels"}]},
-            provenance={"version": "1.0", "processing": []}))
+        st.root.attrs.update({"duckn": {"version": rs.DUCKN_VERSION, "extensions": {
+            "seg": {"version": "0.7", "segments": segs},
+            "haversack": {"engine": engine, "part_order": [{"name": "labels"}]},
+            "provenance": {"version": "1.0", "processing": []}}}})
 
 
-def _groups_after_upgrade(path):
+def _segments_after_upgrade(path):
     upgrader = _tool("ranked_upgrade_seg")
     upgrader.write_readme = lambda st: None            # the README is not what is under test
     upgrader.upgrade(Path(path))
     with rs.open_store(path, "r") as st:
+        raw = st.root.attrs.asdict()["duckn"]["extensions"]["seg"]
         back = rs.read_segmentation(st.root)
-    return {s.id: s for s in back.segments if s.members is not None}
+    assert raw["version"] == "0.9"                     # rewritten, not merely readable
+    return {s.id: s for s in back.segments}
 
 
-def test_the_upgrader_removes_a_generated_group_THIS_engine_no_longer_claims(tmp_path):
-    """The migration the claims fix needed and did not have.
-
-    `named_groups` used to fall back to nnU-Net's claims for any engine without its
-    own, so a MONAI or VoxTell store whose leaves happened to be named like
-    TotalSegmentator's five lobes shipped `g_lungs` with `exhaustive=True` - an
-    assertion that the model defines the lung as exactly those five. Fresh builds stopped
-    making it. The upgrader did not: it asked `claims_for(engine)` which groups it owned,
-    got nothing back for monai, filed the legacy `g_lungs` as a user-authored group and
-    re-emitted it verbatim - while its own provenance step said the named unions had been
-    rewritten. What the builder may rewrite is every id it has EVER generated, which is
-    not the same question as what it generates for this engine today.
-    """
-    store = tmp_path / "monai.duckn.zip"
-    _legacy_store(store, "monai")
-    groups = _groups_after_upgrade(store)
-    assert "g_lungs" not in groups, (
-        "the upgrade kept an exhaustive `lungs` claim that a fresh monai build does not make"
-    )
-    # and a fresh build for this engine agrees there is no such union
-    from haversack.ranked_build import named_groups
-    with rs.open_store(store, "r") as st:
-        leaves = [s for s in rs.read_segmentation(st.root).segments if s.label_value is not None]
-    assert [g.id for g in named_groups("monai", leaves)] == []
-
-
-def test_the_upgrader_keeps_the_group_for_an_engine_that_DOES_claim_it(tmp_path):
-    """The other half, and the reason this is not just "delete every g_ id": for
-    nnU-Net the same five lobes are exactly the claim TotalSegmentator makes, so the
-    upgrade must rebuild it rather than drop it."""
-    store = tmp_path / "ts.duckn.zip"
-    _legacy_store(store, "nnunetv2")
-    groups = _groups_after_upgrade(store)
-    assert "g_lungs" in groups and groups["g_lungs"].exhaustive
+@pytest.mark.parametrize("engine", ["monai", "nnunetv2"])
+def test_the_upgrader_removes_every_group_the_builder_generated(tmp_path, engine):
+    """Whatever engine wrote it: seg 0.8 stores carry the model's classes, and the unions
+    the builder used to derive from them - `g_lungs`, the part's partition - are gone. The
+    question is what the builder EVER generated, not what it generates for this engine."""
+    store = tmp_path / "old.duckn.zip"
+    _legacy_store(store, engine)
+    after = _segments_after_upgrade(store)
+    assert set(after) == {"bg", "c0", "c1", "c2", "c3", "c4"}
+    assert after["bg"].role == "background"
+    assert all(len(s.label_values) == 1 for s in after.values())
 
 
 def test_the_upgrader_keeps_a_group_nothing_ever_generated(tmp_path):
-    """A user-authored group is not the builder's to remove."""
+    """A user-authored group is not the builder's to remove: it stays, as the union segment
+    duckn's migration makes of it, listed before the classes it contains."""
     store = tmp_path / "mine.duckn.zip"
-    _legacy_store(store, "monai")
-    with rs.open_store(store, "a") as st:
+    _legacy_store(store, "monai", extra=[
+        {"id": "my_own", "name": "what I care about", "members": ["c0", "c1"]}])
+    after = _segments_after_upgrade(store)
+    assert "my_own" in after and after["my_own"].sorted_values == [1, 2]
+    assert list(after).index("my_own") < list(after).index("c0")
+    assert "g_lungs" not in after and "classes_0" not in after
+
+
+# ----------------------------------------------------------------------------------------
+# the labeling scheme a store declares (duckn seg 0.8)
+# ----------------------------------------------------------------------------------------
+
+def test_the_fast_variants_declare_the_scheme_of_the_task_whose_classes_they_are():
+    """`total_fast` is not a task upstream and has no class list of its own: it is `total`'s
+    classes from a coarser model. One class list is one scheme, identified by a uri that
+    carries the catalog's major version and the task, and not the release."""
+    from haversack.ecosystems import TSEcosystem
+    eco = TSEcosystem()
+    fast, full = eco.labeling_scheme("total_fast"), eco.labeling_scheme("total")
+    assert fast == full == eco.labeling_scheme("total_fastest")
+    assert full["key"] == "ts.v2:total"
+    assert full["system_uri"] == "https://github.com/wasserth/TotalSegmentator#v2:total"
+    assert full["definition_url"].endswith(f"/tree/v{full['version']}") and "v" not in full["version"]
+    assert eco.labeling_scheme("total_mr_fast")["key"] == "ts.v2:total_mr"
+    assert eco.labeling_scheme("liver_segments")["key"] == "ts.v2:liver_segments"
+    with pytest.raises(LookupError):
+        eco.labeling_scheme("no_such_task")
+
+
+def test_a_build_declares_its_scheme_and_codes_every_class_in_it(tmp_path, monkeypatch):
+    build = _tool("ranked_build_store")
+    import haversack.ranked_build as rb
+    scheme = {"key": "ts.v2:total", "name": "n", "version": "2.13.0",
+              "system_uri": "https://github.com/wasserth/TotalSegmentator#v2:total", "definition_url": "u"}
+    monkeypatch.setattr(rb, "scheme_for", lambda engine, task: (scheme, lambda v, n: n))
+    monkeypatch.setattr(rb, "names_for", lambda *a, **k: {1: "liver", 2: "spleen"})
+    emit = _synthetic_emit(tmp_path)
+    out = build.build(emit, tmp_path / "s.duckn", "s", quiet=True)
+    with rs.open_store(out) as st:
         seg = rs.read_segmentation(st.root)
-        segs = list(seg.segments) + [rs.group("my_own", "what I care about", ["c0", "c1"])]
-        attrs = st.root.attrs.asdict()
-        others = {k: v for k, v in (attrs["duckn"]["extensions"]).items()
-                  if k not in ("seg", "provenance")}
-        st.root.attrs.update(rs.root_attrs(rs.segmentation(segs),
-                                           provenance={"version": "1.0", "processing": []},
-                                           **others))
-    groups = _groups_after_upgrade(store)
-    assert "my_own" in groups, f"a user-authored group was removed: {sorted(groups)}"
-    assert "g_lungs" not in groups, f"the generated group survived: {sorted(groups)}"
+    assert seg.labeling_scheme == "ts.v2:total"
+    assert seg.terminologies["ts.v2:total"].system_uri == scheme["system_uri"]
+    coded = {s.name: s.designations[0].code for s in seg.segments if s.designations}
+    assert coded and all(name == code for name, code in coded.items())
+    assert not [s for s in seg.segments if s.role and s.designations]   # the background has none
+
+    # a caller's own names have left the scheme: none is declared
+    (tmp_path / "again").mkdir()
+    out2 = build.build(_synthetic_emit(tmp_path / "again"), tmp_path / "t.duckn", "t", quiet=True,
+                       names={1: "mine", 2: "also mine"})
+    with rs.open_store(out2) as st:
+        assert rs.read_segmentation(st.root).labeling_scheme is None
+
+
+def _fastsurfer_emit(tmp_path):
+    """A FastSurfer-shaped emit: aparc+aseg ids as values, one of them a channel that
+    `split_cortex_labels` lateralizes only after the network."""
+    labels = [0, 17, 1003, 1012]          # background, Left-Hippocampus, a bilateral channel, an exact one
+    torch.manual_seed(1)
+    logits = torch.randn(len(labels), 12, 12, 12)
+    code = encode(logits, depth=2, clip=8.0)
+    src = tmp_path / "fs-emit"
+    src.mkdir()
+    for nm, arr in (("ranks", code.ranks), ("support", code.support), ("tail", code.tail)):
+        if arr is not None:
+            np.save(src / f"asegdkt_{nm}.npy", arr)
+    part = {**code.meta, "engine": "fastsurfer", "task": "fastsurfer:asegdkt", "part": "asegdkt",
+            "labels": labels,
+            "frame": {"canonical": Geometry(shape_zyx=(12, 12, 12), spacing_zyx=(1.0, 1.0, 1.0),
+                                            origin_xyz=(0.0, 0.0, 0.0),
+                                            direction_xyz=tuple(D)).to_record()},
+            "model_grid": [12, 12, 12], "envelope": {"start": [0, 0, 0], "stop": [12, 12, 12]},
+            "softmax": {"classes": len(labels), "weights": "fastsurfer", "version": "2.5.4"},
+            "haversack": "test"}
+    (src / "meta.json").write_text(json.dumps(
+        {"image": "t1.nii", "task": "fastsurfer:asegdkt", "depth": 2, "clip": 8.0,
+         "envelope_mm": None, "parts": {"asegdkt": part}}, default=str))
+    return src
+
+
+def test_a_fastsurfer_store_codes_by_id_and_leaves_a_bilateral_channel_uncoded(tmp_path):
+    """A ranked store holds the network's channels BEFORE FastSurfer's spatial hemisphere
+    split, so value 1003 is both caudal middle frontal cortices under a left-hemisphere
+    name: not exactly the concept its id names, and a designation must be exact."""
+    build = _tool("ranked_build_store")
+    out = build.build(_fastsurfer_emit(tmp_path), tmp_path / "fs.duckn", "fs", quiet=True)
+    with rs.open_store(out) as st:
+        seg = rs.read_segmentation(st.root)
+    assert seg.labeling_scheme == "fastsurfer:asegdkt"
+    assert seg.terminologies["fastsurfer:asegdkt"].system_uri.endswith("#v2:asegdkt")
+    by = {s.label_values[0]: s for s in seg.segments}
+    d = by[17].designations[0]
+    assert (d.scheme, d.code, d.meaning) == ("fastsurfer:asegdkt", "17", "Left-Hippocampus")
+    assert by[1012].designations[0].code == "1012"
+    assert by[1003].designations is None and by[1003].name.startswith("ctx-lh-")
+    assert by[0].role == "background" and by[0].designations is None
+    assert _tool("ranked_verify").verify(out, deep=True, quiet=True)
+
+
+def test_names_the_run_reported_keep_the_scheme_and_a_callers_own_do_not(tmp_path, monkeypatch):
+    """`segment_to_store` always hands names to the builder - the run's own - which used to
+    switch the scheme off on the one path the product uses. `model_names` says whose they are."""
+    build = _tool("ranked_build_store")
+    emit = _synthetic_emit(tmp_path)
+    names = build.names_for("nnunetv2", "total_fast")
+    for flag, want in ((True, "ts.v2:total"), (False, None)):
+        out = build.build(emit, tmp_path / f"m{flag}.duckn", "m", quiet=True, names=names,
+                          model_names=flag)
+        with rs.open_store(out) as st:
+            assert rs.read_segmentation(st.root).labeling_scheme == want

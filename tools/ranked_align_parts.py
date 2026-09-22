@@ -128,7 +128,9 @@ def _align(s, dst_store, dst):
     out_segs = []
     for seg in seg_["segments"]:
         seg = dict(seg)
-        if "extent" in seg and "label_value" in seg:          # a leaf; groups carry members
+        # every segment with an extent owns voxels of one part (seg 0.8 `label_values`;
+        # `label_value` in a store written before it, whose groups carry no extent)
+        if "extent" in seg and ("label_values" in seg or "label_value" in seg):
             off = starts.get(seg.get("layer", 0), [0, 0, 0])
             if any(off):
                 e = seg["extent"]

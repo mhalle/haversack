@@ -79,6 +79,80 @@
   published as a release asset: Dataset857 (`thigh_shoulder_muscles`, `commercial` upstream)
   appeared in `v3.0.0-weights`, and taking its URL would have made haversack download what
   upstream installs only through its licensed backend. It is reported as `license_gated`.
+- **Ranked stores are written under duckn seg 0.8, and carry the model's classes and nothing
+  derived from them.** duckn 0.4.0 changes what a segment is - it lists `label_values`,
+  always an array; `background: true` is `role: "background"`; a color is a CSS string - and
+  has no groups. The builder used to write two kinds: a `classes_<i>` partition per part,
+  and named unions (`g_lungs` over TotalSegmentator's five lobes, a vertebral column,
+  FastSurfer's subcortical sets) with `disjoint` and `exhaustive` claims. Those unions are
+  ours, not the model's - no TotalSegmentator task emits a "lungs" class - and they are
+  facts about a labeling scheme, the same for every store a model produces, so they move to
+  a document outside the store. The partition needs no statement at all: a part's classes
+  are disjoint because no two list the same value, and the background role means "none of
+  the described structures is here". `GROUP_CLAIMS`, `named_groups` and `part_partition`
+  are gone; `ranked_store.segment()` replaces `leaf()` and `group()`. **Clients that read
+  `label_value`, `members`, or a `g_*` / `classes_*` id from a store's raw attributes must
+  change** (the bundled `preview.html` still reads `label_value`). Stores already delivered
+  keep reading: `read_segmentation`, `ranked_restore` and the tools read both shapes, duckn
+  migrating the older one (a group becomes a segment listing its members' values).
+  `tools/ranked_upgrade_seg.py` now upgrades a store to 0.8 in place: it removes every
+  group the builder ever generated, whatever engine wrote it, and keeps one a user authored.
+- **A store declares the labeling scheme it was produced under.** `labeling_scheme` names
+  an entry of `terminologies`, and each class the catalog names carries its name as an exact
+  designation in it - which is what lets a hierarchy, a color table or a cross-walk written
+  once for a scheme find its segments in every store. For the `ts.v2` catalog the key is the
+  ecosystem-qualified name of the task whose class list it is, the `system_uri` carries the
+  catalog's major version and the task and not the release
+  (`https://github.com/wasserth/TotalSegmentator#v2:total`), `version` is the package
+  version the registry was generated from, and `url` is that release's tree. Checked
+  against upstream at 2.13.0: all 51 label maps equal TotalSegmentator's own `class_map`,
+  and the six `_fast` / `_fastest` variants have no class list of their own - they are their
+  base task's classes from a coarser model - so they declare its scheme
+  (`ts.v2:total_fast` writes `ts.v2:total`). A build handed its own names declares no
+  scheme, and neither does an engine that names its own labels;
+  `ModelEcosystem.labeling_scheme` is where the other catalogs will answer.
+- **Every catalog with a published class list declares its scheme, and the scheme now
+  reaches the stores the product writes.** The first cut never fired on the normal path:
+  `segment_to_store` hands the builder the run's own names, and the builder declared a scheme
+  only when it was handed none - so only `tools/ranked_build_store.py` ever wrote one.
+  `build(model_names=True)` says whose names they are; a caller's own names, or a run that
+  could not name its classes (`labels_unnamed`, a MONAI region head), still declare nothing.
+  Schemes resolve against every catalog this build knows, not the ones a machine serves.
+  Per catalog, each claim checked against upstream on 2026-09-21: **`moose`** per task,
+  versioned by the asset's release stamp, its `fast_*` tasks NOT folded onto their base
+  (separate upstream models whose lists coincide by fact), and `clin_ct_dental` declaring
+  DentalSegmentator's scheme, whose model it is; **`mrsegmentator`** `base` only, versioned
+  by upstream's `weights_version` (`1.2`, not the source tag) - `body_comp` names its classes
+  in German inside its checkpoint while upstream publishes them in English, so it declares
+  none; **`cads`** per task, all nine lists equal to upstream's own label-map module value for
+  value (pinned in `tests/fixtures`); **`totalvibe`** with `vibe` and `vibe_sagittal` sharing one
+  scheme, none for `body_regions` and `feet_bones` (digit-string names), and the repository
+  spelled `VIBESegmentator` as upstream spells it - the manifest had it wrong, and a `system_uri` is
+  compared byte for byte; **`dentalsegmentator`** identified by the weights' Zenodo concept
+  DOI; **`monai`** per bundle, the bundle name in the `system_uri` and its version as the release;
+  **`synthstrip`**, **`voxtell`** and **`custom`** declare none.
+- **FastSurfer stores code their classes by id, and 17 of them carry no code.** FastSurfer's
+  identifier for a class is the aparc+aseg number, so `ModelEcosystem.scheme_code` lets a
+  catalog say how it spells a class - and whether it has an exact code for it at all. A
+  ranked store holds the network's channels BEFORE `split_cortex_labels`, which lateralizes
+  17 lh-numbered cortical ids spatially (it is why the LUT has 31 `ctx-lh-*` ids and 14
+  `ctx-rh-*`): in a store, value 1003 is both caudal middle frontal cortices under a
+  left-hemisphere name. A designation says a segment IS a concept, so those 19 carry none.
+  Measured on a real run (ds000114 sub-01, on Modal): 17 channels moved 38-56% of their
+  voxels to the right under upstream's split, no other channel moved any, and 1025 and
+  1028 - which upstream's list names but which have rh channels of their own - moved none,
+  so those two keep their codes. Their NAMES are still the left-hemisphere ones, which is a
+  separate thing to put right.
+- **A ranked store can be written for `fastsurfer:asegdkt`** (`-o case.duckn`): the engine
+  already hands over its pre-argmax field, and the refusal that kept engine tasks out now
+  admits the engines whose runner takes a ranked sink. `Segmenter.segment` accepts
+  `probabilities=`.
+- duckn is pinned at `v0.4.1`, which renames a registry entry's `uri` and `url` to `system_uri`
+  and `definition_url` - a URI *of* the coding system, a URL *of* this version's definition -
+  and the schemes here use those names.
+- duckn is pinned at `v0.5.1`, seg extension 0.9: a segment may state a union once, as
+  `members`. Stores here list values and are read as 0.9 files unchanged; the builder writes
+  none, since a union belongs in a store only when its scheme defines it.
 
 - **`HEAD /v1/jobs/<id>/result`, and a "gone" no cache may keep.** An adversarial pass on
   the artifact routes below found the one file route they left without a `HEAD` - a job's

@@ -30,102 +30,23 @@ import numpy as np
 from rankfield import levels as rf_levels
 import zarr
 
-from haversack.ranked_store import (brick_attrs, grid_attrs, grid_reference, group, leaf,
-                                    open_store, part_attrs, root_attrs, segmentation)
+from haversack.ranked_store import (brick_attrs, grid_attrs, grid_reference, open_store,
+                                    part_attrs, root_attrs, segment, segmentation)
 
-# The named unions a store carries beyond the model's own classes, per engine: (id, name,
-# member predicate on the leaf name, disjoint, exhaustive). `disjoint` is always true here -
-# members are distinct classes of one softmax. `exhaustive` is claimed only where the model
-# DEFINES the concept as exactly these classes: TotalSegmentator's lung is its five lobes and
-# nothing else. The vertebral column is not exhaustive (discs, and vertebrae outside the field
-# of view) and the FastSurfer groups are subsets of larger systems. Shared with
-# tools/ranked_upgrade_seg.py so an upgraded store carries the same claims as a fresh one.
-GROUP_CLAIMS = {
-    "fastsurfer": [
-        # NO whole-hemisphere group. FastSurfer's network emits 31 lh-numbered cortical
-        # channels and only 14 rh-numbered ones; the missing right-hemisphere regions ride
-        # inside lh-numbered channels and are separated by `split_cortex_labels`, which is
-        # SPATIAL. So laterality is not a property of the stored labels for cortex, and a
-        # `g_rh` union over them would quietly drop 17 regions. The engine says as much in
-        # `labels_note`. The aseg structures below ARE lateralized in channel space (14 each),
-        # so those group honestly - named for what they actually contain.
-        ("g_subcortical_left", "left subcortical structures",
-         lambda n: n.startswith("Left-"), True, False),
-        ("g_subcortical_right", "right subcortical structures",
-         lambda n: n.startswith("Right-"), True, False),
-        ("g_cortex", "cerebral cortex", lambda n: n.startswith("ctx-"), True, False),
-        ("g_cerebellum", "cerebellum", lambda n: "Cerebellum" in n, True, False),
-        ("g_ventricles", "ventricular system",
-         lambda n: "Ventricle" in n or n.endswith("-Vent"), True, False),
-    ],
-    "nnunetv2": [
-        # exhaustive ONLY when the members are exactly the five lobes (or a left/right pair):
-        # `lung_vessels` and `lung_trachea_bronchia` also start with `lung_`, and a task that
-        # has those and no lobes must not ship a "lungs" that is exhaustive of two vessels
-        ("g_lungs", "lungs", lambda n: n.startswith("lung_"), True, True,
-         ({"lung_upper_lobe_left", "lung_lower_lobe_left", "lung_upper_lobe_right",
-           "lung_middle_lobe_right", "lung_lower_lobe_right"},
-          {"lung_left", "lung_right"})),
-        ("g_spine", "vertebral column", lambda n: n.startswith("vertebrae_"), True, False),
-    ],
-}
+# Stores carry the model's classes and nothing derived from them (duckn seg 0.8). Until
+# 0.8 this builder also wrote named unions - "lungs" over TotalSegmentator's five lobes, a
+# vertebral column, FastSurfer's subcortical sets - and a partition group per part, with
+# `disjoint` and `exhaustive` claims. Those are facts about a labeling scheme, the same for
+# every store a model produces, and seg 0.8 moves them to a document outside the store,
+# keyed by the scheme. What 0.8 does not need said at all: a part's classes are disjoint
+# because no two list the same value, and they exhaust the model's domain because the
+# background role means "none of the described structures is here".
 
-
-#: Every group id the builder has EVER generated, across every engine. Not the same
-#: question as `claims_for`, and the difference is a migration: the upgrader decides
-#: which existing groups it owns and may rebuild, and asking `claims_for(engine)` gets
-#: that wrong for exactly the stores the claims fix was written for. A monai store
-#: written before 2026-09-08 carries `g_lungs` from the old nnU-Net fallback; monai
-#: now claims nothing, so the upgrader saw an id it did not recognise, filed it as a
-#: user-authored group and re-emitted it verbatim - `exhaustive=True` and all, which
-#: is the anatomical assertion the fix exists to remove. A generated id belongs to the
-#: builder whether or not this engine still generates it.
-GENERATED_GROUP_IDS = frozenset(
-    gid for claims in GROUP_CLAIMS.values() for gid, *_ in claims)
-
-
-def claims_for(engine):
-    """The named unions ``engine``'s stores carry, or none at all.
-
-    Deliberately NOT defaulting to nnU-Net's. It used to, and the default was wrong rather
-    than merely empty: every engine without its own entry inherited TotalSegmentator's
-    claims, so a store whose leaves happened to be named like TS's five lung lobes shipped
-    `g_lungs` with ``exhaustive=True`` - an anatomical assertion that TotalSegmentator's
-    model DEFINES the lung as exactly those five and nothing else. MONAI bundles and VoxTell
-    prompts can produce those names without making that claim, and an exhaustive union is
-    read as a guarantee by anything consuming the store. An engine that declares no claims
-    now makes none, which is the only honest default.
-
-    Shared with tools/ranked_upgrade_seg.py, which asked the same question and carried its
-    own copy of the same wrong fallback.
-    """
-    return GROUP_CLAIMS.get(str(engine), ())
-
-
-def named_groups(engine, leaves):
-    """The engine's named unions over ``leaves`` (duckn Segments), as group Segments.
-    A group is written whenever it has a member, even one: the set of group ids in a
-    store is a property of the task, not of how much anatomy the field of view held."""
-    out = []
-    for claim in claims_for(engine):
-        gid, name, pred, disjoint, exhaustive = claim[:5]
-        exact = claim[5] if len(claim) > 5 else None
-        hits = [s for s in leaves if s.label_value is not None and not s.background
-                and pred(s.name or "")]
-        if exact is not None and {s.name for s in hits} not in exact:
-            continue                    # the prefix matched, the concept did not
-        if hits:
-            out.append(group(gid, name, [s.id for s in hits], disjoint=disjoint,
-                             exhaustive=exhaustive))
-    return out
-
-
-def part_partition(index, part_name, leaves):
-    """The partition a softmax defines: every class of part ``index``, background
-    included, disjoint and exhaustive of the model's domain (seg spec 0.7 §2)."""
-    members = [s.id for s in leaves if (s.layer or 0) == index]
-    return group(f"classes_{index}", f"{part_name}: every class of the model, background "
-                 "included", members, disjoint=True, exhaustive=True)
+#: Every group id the builder EVER generated, across every engine. Kept so that a tool
+#: reading an older store can tell a generated group from one a user authored.
+GENERATED_GROUP_IDS = frozenset({
+    "g_subcortical_left", "g_subcortical_right", "g_cortex", "g_cerebellum", "g_ventricles",
+    "g_lungs", "g_spine"})
 
 
 #: Catalogs added after 0.11.0 stopped accepting bare task names: no store names a task of
@@ -140,8 +61,14 @@ def _ts_names(task):
     that goes stale silently when the catalog moves, and a wrong name on a segment is the kind
     of error nothing downstream catches.
     """
-    from haversack.ecosystems import RENAMED_ECOSYSTEMS, EcosystemCatalog
     from haversack.tasks import _resolve_spec
+    name, cat = _qualified(task)
+    return dict(_resolve_spec(name, cat).label_map)
+
+
+def _qualified(task):
+    """``(canonical name, catalog)`` for a task as a store's metadata spells it."""
+    from haversack.ecosystems import RENAMED_ECOSYSTEMS, EcosystemCatalog
     from haversack.weights import as_store
     store = as_store(None, layout="ts")
     cat = EcosystemCatalog(root=store.root)
@@ -159,7 +86,30 @@ def _ts_names(task):
                  and n.partition(":")[0] not in CATALOGS_AFTER_BARE_NAMES]
         if len(found) == 1:
             name = found[0]
-    return dict(_resolve_spec(name, cat).label_map)
+    return name, cat
+
+
+def scheme_for(engine, task):
+    """``(scheme, code_of)`` for a store of ``task``: the duckn labeling scheme it declares
+    (``ModelEcosystem.labeling_scheme``) and ``code_of(value, name)``, the scheme's code for a
+    class or None where it has no exact one (``ModelEcosystem.scheme_code``). ``(None, None)``
+    when there is no scheme to declare: an ecosystem with no published class list, or a task
+    the catalog cannot place. That is an honest answer - the store then declares none - so
+    nothing here raises. Which classes a scheme covers, and how it spells them, is the
+    ecosystem's judgment; the builder knows nothing of catalogs."""
+    try:
+        # Every catalog this build KNOWS, not the ones this machine serves: which scheme a
+        # class list belongs to is a fact about the catalog, and a store built where an
+        # engine is switched off must not lose it.
+        from haversack.ecosystems import EcosystemCatalog, known_ecosystems
+        name, _served = _qualified(task)
+        eco, short, _canonical, _version = EcosystemCatalog(known_ecosystems()).resolve(name)
+        scheme = eco.labeling_scheme(short)
+        if scheme is None:
+            return None, None
+        return scheme, lambda value, label: eco.scheme_code(short, value, label)
+    except Exception:                              # noqa: BLE001 - no scheme is a valid store
+        return None, None
 
 
 CASCADE_PART = re.compile(r":s\d+$")      # a cascade stage is named `<task>:s<i>`
@@ -878,7 +828,8 @@ def generator_steps(meta, items, engine, *, parts_kept="all", layers=("occupancy
 
 
 def build(src, out, case, parts="all", allow_unnamed=False,
-          distance_voxels=DISTANCE_VOXELS, names=None, quiet=False, source=None):
+          distance_voxels=DISTANCE_VOXELS, names=None, quiet=False, source=None,
+          model_names=False):
     """Build the store at ``out`` from an emit directory ``src``. ``names`` (label id -> name)
     overrides the catalog lookup, for a caller that already holds the task's label map.
     Progress goes to stderr (``quiet`` silences it). ``source`` is a duckn provenance source
@@ -894,19 +845,27 @@ def build(src, out, case, parts="all", allow_unnamed=False,
     src, out = Path(src), Path(out)
     meta = json.loads((src / "meta.json").read_text(encoding="utf-8"))
     with open_store(out, "w") as st:   # a directory, or a standard zarr zip when OUT ends in .zip
-        _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say, source)
+        _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say,
+                    source, model_names)
     if not quiet:                        # sizing the store walks it: not for a dropped line
         say(f"wrote {out} ({st.size_bytes() / 1e6:.2f} MB)")
     return out
 
 
-def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say, source=None):
+def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say,
+                source=None, model_names=False):
     root = st.root
     segs, order = [], []
 
     engine = next(iter(meta["parts"].values())).get("engine", "nnunetv2")
     NAMES = (dict(names) if names is not None
              else names_for(engine, meta.get("task"), allow_unnamed, say=say))
+
+    # The labeling scheme is declared only when the names ARE the model's: a caller that
+    # hands in its own names has left the scheme, and a code must be the scheme's own word.
+    # `model_names` is how a caller that read the names off the run itself says so.
+    scheme, code_of = (scheme_for(engine, meta.get("task"))
+                       if names is None or model_names else (None, None))
 
     items = list(meta["parts"].items())
     if parts == "last" and len(items) > 1:
@@ -1058,34 +1017,38 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
         wins = rk_all[0].astype(np.int64)
         del rk_all
         boxes = segment_extents(np.asarray(lut)[wins - 1], {int(x) for x in lut} - {0})
-        # The background is a leaf too (seg spec 0.7): the softmax's class 0, so the part's
-        # partition can include it and every value in `ranks[0] - 1` resolves to a segment.
+        # The background is a segment too: the softmax's class 0, with the background role,
+        # so it has a name and every value in `ranks[0] - 1` is listed by a segment.
         # `layer` is a per-part fact in a multi-part store and says nothing in a single-part
-        # one. Leaves are unique per (layer, value): two parts that both emit value 1 are two
-        # leaves - a cascade's stages, whose channels are per-stage indices, collide on every
-        # value below the smaller K, and a dedupe on the value alone once gave stage 1's
-        # classes no leaves at all while its partition still claimed to be exhaustive.
+        # one. Segments are unique per (layer, value): two parts that both emit value 1 are
+        # two segments - a cascade's stages, whose channels are per-stage indices, collide on
+        # every value below the smaller K, and a dedupe on the value alone once gave stage
+        # 1's classes no segments at all.
         lay = i if multi else None
-        segs.append(leaf(f"background_{i}", "background", 0, layer=lay, background=True))
+        segs.append(segment(f"background_{i}", "background", 0, layer=lay, role="background"))
         for v in sorted({int(x) for x in lut} - {0}):
-            if any(s.label_value == v and (s.layer or 0) == i for s in segs):
+            if any(s.label_values == [v] and (s.layer or 0) == i for s in segs):
                 continue
             sid = f"c{v}_l{i}" if v in shared else f"c{v}"
-            segs.append(leaf(sid, part_names.get(v, f"label_{v}"), v, layer=lay,
-                             extent=boxes.get(v)))
+            # a class the scheme names carries its name as an exact designation in it: that
+            # is what lets a document written for the scheme find the segment in any store
+            code = code_of(v, part_names[v]) if scheme and v in part_names else None
+            coded = None if code is None else [{
+                "scheme": scheme["key"], "code": code,
+                # where the code is not the name, the name is the code's meaning
+                **({"meaning": part_names[v]} if code != part_names[v] else {})}]
+            segs.append(segment(sid, part_names.get(v, f"label_{v}"), v, layer=lay,
+                                extent=boxes.get(v), designations=coded))
         del wins
         order.append({"index": i, "name": name})
         say(f"  parts/{i} {name:<12} grid {tuple(grid)} crop {tuple(start)} "
               f"eff {[round(v, 6) for v in eff]}", flush=True)
 
-    # Groups (seg spec 0.7): one partition per part - the softmax's classes, background
-    # included - plus the engine's named unions with their claims (GROUP_CLAIMS).
-    groups = [part_partition(i, o["name"], segs) for i, o in enumerate(order)]
-    groups += named_groups(engine, segs)
-
     root.attrs.update(root_attrs(
         # the seg extension goes through duckn's model and consistency validator
-        segmentation(segs + groups),
+        segmentation(segs, labeling_scheme=scheme and scheme["key"],
+                     terminologies=scheme and {scheme["key"]: {
+                         k: scheme[k] for k in ("name", "system_uri", "version", "definition_url")}}),
         haversack={"haversack_version": dict(items)[order[0]["name"]].get("haversack"),
                    "engine": engine, "task": meta["task"], "case": case,
                    "source_file": Path(meta["image"]).name, "part_order": order},

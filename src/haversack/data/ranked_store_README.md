@@ -352,16 +352,31 @@ story (for example, when a downstream step splits a channel spatially, so latera
 similar attribute is *not* recoverable from the LUT alone).
 
 Human-readable names, when present, are in the root group's
-`attributes.duckn.extensions.seg.segments` (duckn seg extension 0.7). A **leaf** has one
-`label_value` and a `name`; a **group** has `members` (segment ids) instead and is their
-union - it may claim `disjoint` (members share no voxel) and `exhaustive` (members exhaust
-what the group names); both together make a partition. Each part has a background leaf
-(class 0, `background: true`) and a `classes_<i>` group that is the softmax's own partition.
+`attributes.duckn.extensions.seg.segments` (duckn seg extension 0.8). Each segment has an
+`id`, a `name`, and `label_values`: the values of its part that belong to it, always a list. A
+class of the model lists exactly one value. Each part has a background segment (class 0,
+`"role": "background"`). The store carries the model's classes and nothing derived from
+them: unions such as "lungs" over five lobes are facts about the labeling scheme, the same
+for every store a model produces, and are kept outside the store. A part's classes share no
+voxel because no two list the same value, and the background is, by definition, where none
+of them is.
+
+Stores written before seg 0.8 carry `label_value` (one integer), `background: true`, and
+**groups** (`members`, with `disjoint` / `exhaustive` claims), including a `classes_<i>`
+partition per part; duckn's reader migrates them, a group becoming a segment that lists its
+members' values.
 
 A segment may also carry:
 
-- `layer` — which part owns its voxels. Two segments with different `layer` values came from
-  different softmaxes; see §3.1 before comparing or compositing them.
+- `layer` — which part owns its voxels: the index into `part_order` (the root's `haversack`
+  block), and so the array group `parts/<layer>`; absent means part 0. Two segments with
+  different `layer` values came from different softmaxes; see §3.1 before comparing or
+  compositing them. **This is this store's reading of `layer`, not duckn's.** duckn's seg
+  extension describes one array, where `layer` indexes its `list` axis; the parts here have
+  their own grids and crops and cannot share an array, so the `seg` block sits on the root
+  group and `layer` names a member of it. duckn does not define that layout yet (its seg
+  specification records it as open). Read the block without an array's axes: a reader that
+  checks it against one part's axes will refuse it, since no part has a `list` axis.
 - `extent` — `[min_i, max_i, min_j, max_j, min_k, max_k]`, **inclusive**, in the array's storage
   order, non-spatial axes not counted. Absent when the class does not appear. Use it to skip
   straight to a structure, and to test truncation as described in §6.

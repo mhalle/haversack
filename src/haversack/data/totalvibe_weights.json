@@ -1,7 +1,7 @@
 {
- "source": "https://api.github.com/repos/robert-graf/VibeSegmentator/releases/tags/v1.0.0 + each zip's own dataset.json / plans.json (read by Range)",
+ "source": "https://api.github.com/repos/robert-graf/VIBESegmentator/releases/tags/v1.0.0 + each zip's own dataset.json / plans.json (read by Range)",
  "note": "labels and the orientation the model must see are read from each installed checkpoint's own dataset.json, never from here",
- "repository": "https://github.com/robert-graf/VibeSegmentator",
+ "repository": "https://github.com/robert-graf/VIBESegmentator",
  "release_assets": [
   "001",
   "011",
