@@ -7194,6 +7194,119 @@
         "by": "haversack 0.11.0"
       }
     },
+    "ts.v2:headneck_muscles": {
+      "task": "ts.v2:headneck_muscles",
+      "ecosystem": "ts.v2",
+      "engine": "nnunetv2",
+      "kind": "segments",
+      "modality": "CT",
+      "version": {
+        "ts_version": "2.13.0",
+        "registry_sha256": "da10170e652e4e11c76622c3b21a91edb3a9f2e4238c158705b306784b1c0533",
+        "listing": "1"
+      },
+      "source": {
+        "file": "haversack/data/ts_tasks.json"
+      },
+      "segments": [
+        {
+          "id": "sternocleidomastoid_right",
+          "value": 1
+        },
+        {
+          "id": "sternocleidomastoid_left",
+          "value": 2
+        },
+        {
+          "id": "superior_pharyngeal_constrictor",
+          "value": 3
+        },
+        {
+          "id": "middle_pharyngeal_constrictor",
+          "value": 4
+        },
+        {
+          "id": "inferior_pharyngeal_constrictor",
+          "value": 5
+        },
+        {
+          "id": "trapezius_right",
+          "value": 6
+        },
+        {
+          "id": "trapezius_left",
+          "value": 7
+        },
+        {
+          "id": "platysma_right",
+          "value": 8
+        },
+        {
+          "id": "platysma_left",
+          "value": 9
+        },
+        {
+          "id": "levator_scapulae_right",
+          "value": 10
+        },
+        {
+          "id": "levator_scapulae_left",
+          "value": 11
+        },
+        {
+          "id": "anterior_scalene_right",
+          "value": 12
+        },
+        {
+          "id": "anterior_scalene_left",
+          "value": 13
+        },
+        {
+          "id": "middle_scalene_right",
+          "value": 14
+        },
+        {
+          "id": "middle_scalene_left",
+          "value": 15
+        },
+        {
+          "id": "posterior_scalene_right",
+          "value": 16
+        },
+        {
+          "id": "posterior_scalene_left",
+          "value": 17
+        },
+        {
+          "id": "sterno_thyroid_right",
+          "value": 18
+        },
+        {
+          "id": "sterno_thyroid_left",
+          "value": 19
+        },
+        {
+          "id": "thyrohyoid_right",
+          "value": 20
+        },
+        {
+          "id": "thyrohyoid_left",
+          "value": 21
+        },
+        {
+          "id": "prevertebral_right",
+          "value": 22
+        },
+        {
+          "id": "prevertebral_left",
+          "value": 23
+        }
+      ],
+      "mined": {
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
+      }
+    },
     "ts.v2:heartchambers_highres": {
       "task": "ts.v2:heartchambers_highres",
       "ecosystem": "ts.v2",

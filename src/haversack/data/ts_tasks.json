@@ -4,7 +4,10 @@
   "ts_version": "2.13.0",
   "generator": "scripts/refresh_ts_registry.py",
   "generator_version": 1,
-  "task_count": 51
+  "task_count": 52,
+  "added_by_hand": {
+   "headneck_muscles": "2026-09-22: upstream 2.13.0's own task (Datasets 778+779 cropped as headneck_bones_vessels), left out by the generator because it had no shape for a cascade ending in a union; the entry is built from upstream's class_map/class_map_parts_headneck_muscles and headneck_bones_vessels' crop stage, and tests/test_cascade_union.py holds it to them"
+  }
  },
  "tasks": [
   {
@@ -444,6 +447,90 @@
     "10": "internal_carotid_artery_left",
     "11": "internal_jugular_vein_right",
     "12": "internal_jugular_vein_left"
+   },
+   "lineage": "ts"
+  },
+  {
+   "name": "headneck_muscles",
+   "modality": "CT",
+   "shape": "cascade",
+   "cascade": [
+    {
+     "weights_id": 298,
+     "crop_to_classes": [
+      73,
+      74,
+      50,
+      46,
+      43,
+      40
+     ],
+     "dilation_mm": 40.0
+    },
+    {
+     "union": [
+      {
+       "weights_id": 778,
+       "label_remap": {
+        "1": 1,
+        "2": 2,
+        "3": 3,
+        "4": 4,
+        "5": 5,
+        "6": 6,
+        "7": 7,
+        "8": 8,
+        "9": 9,
+        "10": 10,
+        "11": 11
+       },
+       "name": "muscles_1"
+      },
+      {
+       "weights_id": 779,
+       "label_remap": {
+        "1": 12,
+        "2": 13,
+        "3": 14,
+        "4": 15,
+        "5": 16,
+        "6": 17,
+        "7": 18,
+        "8": 19,
+        "9": 20,
+        "10": 21,
+        "11": 22,
+        "12": 23
+       },
+       "name": "muscles_2"
+      }
+     ]
+    }
+   ],
+   "label_map": {
+    "1": "sternocleidomastoid_right",
+    "2": "sternocleidomastoid_left",
+    "3": "superior_pharyngeal_constrictor",
+    "4": "middle_pharyngeal_constrictor",
+    "5": "inferior_pharyngeal_constrictor",
+    "6": "trapezius_right",
+    "7": "trapezius_left",
+    "8": "platysma_right",
+    "9": "platysma_left",
+    "10": "levator_scapulae_right",
+    "11": "levator_scapulae_left",
+    "12": "anterior_scalene_right",
+    "13": "anterior_scalene_left",
+    "14": "middle_scalene_right",
+    "15": "middle_scalene_left",
+    "16": "posterior_scalene_right",
+    "17": "posterior_scalene_left",
+    "18": "sterno_thyroid_right",
+    "19": "sterno_thyroid_left",
+    "20": "thyrohyoid_right",
+    "21": "thyrohyoid_left",
+    "22": "prevertebral_right",
+    "23": "prevertebral_left"
    },
    "lineage": "ts"
   },

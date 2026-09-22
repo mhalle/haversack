@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **`ts.v2:headneck_muscles`: TotalSegmentator's 23 neck muscles.** Sternocleidomastoid, the
+  three scalenes, platysma, the three pharyngeal constrictors, the prevertebral muscles,
+  sternothyroid, thyrohyoid, levator scapulae and trapezius, each side separately where that
+  applies - one of upstream's openly available (Apache-2.0) tasks. The weights (Datasets 778
+  and 779) were in the manifest all along; the task was not, because upstream runs it as a
+  crop followed by a union - the 6 mm `total` model boxes the clavicles and C1/C5/T1/T4 plus
+  40 mm, exactly as for `headneck_bones_vessels`, and both models then run on that one crop
+  and are combined as `total`'s parts are, a later part over an earlier one - and a cascade
+  here could only end in a single model. A cascade's last stage may now be a union; the
+  registry refuses a union anywhere else, and a stage stating two things or none.
 - **TotalSegmentator v3 is the `ts.v3` catalog: `ts.v3:total`, `ts.v3:total_fast`,
   `ts.v3:total_fastest`.** Upstream's `total_v3` (Datasets 831-835 at 1.5 mm, 836 at 3 mm,
   837 at 6 mm, release `v3.0.0-weights`) under v2's task names, the catalog carrying the

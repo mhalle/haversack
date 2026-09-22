@@ -49,12 +49,18 @@ class CascadeStep:
     whose labels become the result.
 
     A stage either runs a model (``weights_id``) or reuses another task's output as the crop
-    source (``crop_from_task``, e.g. teeth cropping from craniofacial_structures)."""
+    source (``crop_from_task``, e.g. teeth cropping from craniofacial_structures). The LAST
+    stage may instead be a label union (``union``): every part runs on the one box the stages
+    before it found, and paints its classes into one output in order, a later part over an
+    earlier one - TotalSegmentator's ``headneck_muscles`` (2026-09-22), which crops like
+    ``headneck_bones_vessels`` and then runs Datasets 778 and 779 on that crop, combining them
+    exactly as it combines ``total``'s five parts."""
 
     weights_id: WeightsId | None = None
     crop_to_classes: tuple[int, ...] = ()
     dilation_mm: float = 10.0
     crop_from_task: str | None = None
+    union: tuple["UnionPart", ...] = ()
 
 
 def dataset_labels(ds: dict, where: str = "dataset.json") -> dict[int, str]:
@@ -166,7 +172,9 @@ class TaskSpec:
             return [self.single]
         if self.union:
             return [p.weights_id for p in self.union]
-        return [st.weights_id for st in self.cascade if st.weights_id is not None]
+        return [w for st in self.cascade
+                for w in ([st.weights_id] if st.weights_id is not None
+                          else [p.weights_id for p in st.union])]
 
 
 #: What a registry entry's ``models`` may state per dataset: the two name components of a
@@ -193,6 +201,29 @@ def _model_choices(raw, where: str) -> dict:
                              f"{list(MODEL_CHOICE_KEYS)} name a model folder")
         out[_dataset_key(wid)] = {k: str(v) for k, v in choice.items() if v}
     return out
+
+
+def _union_parts(raw) -> tuple:
+    return tuple(UnionPart(weights_id=p["weights_id"],
+                           label_remap={int(k): int(v) for k, v in p.get("label_remap", {}).items()},
+                           name=p.get("name", ""))
+                 for p in raw or ())
+
+
+def _check_cascade(stages, where: str) -> None:
+    """A stage does exactly one thing, and only the last may be a union: a union's output is
+    a result, and nothing reads a crop box out of one (2026-09-22). Refused on load, so a
+    registry typo is a message naming the task rather than a stage that runs nothing."""
+    for i, st in enumerate(stages):
+        does = [k for k, v in (("weights_id", st.weights_id is not None),
+                               ("crop_from_task", st.crop_from_task is not None),
+                               ("union", bool(st.union))) if v]
+        if len(does) != 1:
+            raise ValueError(f"{where}: cascade stage {i + 1} states {does or 'nothing'}; "
+                             "a stage runs one model, reuses one task, or is a union")
+        if st.union and i != len(stages) - 1:
+            raise ValueError(f"{where}: cascade stage {i + 1} is a union but not the last "
+                             "stage; only the final stage may combine models")
 
 
 def _step_size(raw, where: str) -> float | None:
@@ -225,15 +256,14 @@ class TaskCatalog:
         items = raw["tasks"] if isinstance(raw, dict) and "tasks" in raw else raw
         items = list(items.values()) if isinstance(items, dict) else items
         for d in items:
-            union = tuple(UnionPart(weights_id=p["weights_id"],
-                                    label_remap={int(k): int(v) for k, v in p.get("label_remap", {}).items()},
-                                    name=p.get("name", ""))
-                          for p in d.get("union") or ())
+            union = _union_parts(d.get("union"))
             cascade = tuple(CascadeStep(weights_id=st.get("weights_id"),
                                         crop_to_classes=tuple(st.get("crop_to_classes") or ()),
                                         dilation_mm=float(st.get("dilation_mm", 10.0)),
-                                        crop_from_task=st.get("crop_from_task"))
+                                        crop_from_task=st.get("crop_from_task"),
+                                        union=_union_parts(st.get("union")))
                             for st in d.get("cascade") or ())
+            _check_cascade(cascade, f"{Path(path).name}: {d['name']}")
             self._specs[d["name"]] = TaskSpec(
                 name=d["name"], lineage=d.get("lineage", "ts"), modality=d.get("modality", "CT"),
                 shape=d.get("shape", "single"), single=d.get("single"), union=union,

@@ -405,9 +405,13 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         if device in ("cuda", "mps"):
             (torch.cuda if device == "cuda" else torch.mps).empty_cache()
 
-    def run_single_or_union(spc, tag):
-        parts = spc.parts
-        report.n_parts = max(report.n_parts, len(parts))
+    def run_single_or_union(spc, tag, *, parts=None, roi_mm=None, use_body=True, first=0):
+        """One model, or a union's models painted in order into one output. A cascade's final
+        union stage (headneck_muscles, 2026-09-22) comes here with its ``parts``, the box the
+        stages before it found as ``roi_mm``, no body envelope - a cascade's last stage never
+        took one - and ``first``, its position in the task's progress."""
+        parts = spc.parts if parts is None else parts
+        report.n_parts = max(report.n_parts, first + len(parts))
         og = None
         out = None
         fr = None
@@ -418,12 +422,13 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         for i, (wid, remap, pname) in enumerate(parts):
             key = f"{tag}{sfx if sfx is not None else ':' + pname}"
             t = time.perf_counter()
-            report.enter_part(i, f"{pname} ({wid})")
+            report.enter_part(first + i, f"{pname} ({wid})"
+                              + ("" if roi_mm is None else " (cropped)"))
             model = load(wid, spc)
             T[f"load:{key}"] = time.perf_counter() - t
             t = time.perf_counter()
             x, fr = model_frame(model)
-            env = crop_on_model_grid(model, x, fr, use_body=True, roi_mm=None)
+            env = crop_on_model_grid(model, x, fr, use_body=use_body, roi_mm=roi_mm)
             if not env.is_whole():
                 report.stage("preprocess", f"envelope {env.fraction * 100:.0f} % of the model grid")
             T[f"preprocess:{key}"] = time.perf_counter() - t
@@ -452,9 +457,14 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         roi_mm = None
         out = fr = og = None
         stages = spc.cascade
-        report.n_parts = max(report.n_parts, len(stages))
+        report.n_parts = max(report.n_parts, len(stages) - 1 + max(1, len(stages[-1].union)))
         for i, step in enumerate(stages):
             last = i == len(stages) - 1
+            if step.union:                 # the final stage, by the registry's own check
+                parts = [(p.weights_id, dict(p.label_remap), p.name or str(p.weights_id))
+                         for p in step.union]
+                return run_single_or_union(spc, tag, parts=parts, roi_mm=roi_mm,
+                                           use_body=False, first=i)
             if step.crop_from_task is not None:
                 report.stage("cascade", f"{tag} stage {i + 1}/{len(stages)}: crop from {step.crop_from_task!r}")
                 crop = step.crop_from_task
