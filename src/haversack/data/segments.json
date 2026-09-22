@@ -6428,7 +6428,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6d278ac0ce8a1a2ce2d70d672d64c9fb3fec2ce2a152eefe5d0a81c5e349325f",
+        "registry_sha256": "eef4b647a3733cf46bc9bb3a0218369b70242691fd40b1f58bb7d4bdefc8e720",
         "listing": "1"
       },
       "source": {
@@ -6481,8 +6481,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:appendicular_bones_mr": {
@@ -6946,7 +6946,7 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "8c9a4d0793f13d41608f2d2f81b235c7f7242d9c67314112d96ed5adbf881366",
+        "registry_sha256": "b85e7b0577ec86ca1d7a86eed385d83e22e746e30f8e627accbd362c1cc0c1a9",
         "listing": "1"
       },
       "source": {
@@ -6959,8 +6959,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:head_glands_cavities": {
@@ -7389,7 +7389,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "0b2e2ec81642f6319a7279af1fddcbb473a002e78a94d43d655551e343f9c6bc",
+        "registry_sha256": "bc4a75b9eaca6559759dfea51b029a2c3af91d40f59a6b691ceb467f8d12446b",
         "listing": "1"
       },
       "source": {

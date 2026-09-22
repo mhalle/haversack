@@ -130,6 +130,14 @@ class TaskSpec:
     #: keeps 0.5, which its cached results were computed with. A stated step enters the
     #: warm-model key and the result key (``serve.weights_versions_of``).
     step_size: float | None = None
+    #: Classes the model is trained with and the task does not report, ``{value: name}`` -
+    #: TotalSegmentator's ``class_map["<task>_auxiliary"]`` (kidney_cysts' whole kidneys,
+    #: appendicular_bones' humerus/femur/liver/spleen, face_mr's brain/liver). A TS-lineage
+    #: result maps every value its label map does not name to 0, as upstream's
+    #: ``remove_auxiliary_labels`` does; this list is what the model is expected to emit beyond
+    #: the label map, and a model emitting anything else is refused (2026-09-22). Stated tasks'
+    #: result keys carry ``auxiliary=0`` (``serve.weights_versions_of``).
+    auxiliary: Mapping[int, str] = field(default_factory=dict)
 
     def model_choice(self, weights_id) -> dict:
         """``{"trainer"?, "plans"?}`` this task states for ``weights_id`` - the keyword
@@ -235,6 +243,15 @@ def _step_size(raw, where: str) -> float | None:
     return step
 
 
+def _auxiliary(d: dict, where: str) -> dict:
+    aux = {int(k): str(v) for k, v in (d.get("auxiliary") or {}).items()}
+    named = {int(k) for k in d.get("label_map") or {}}
+    if aux.keys() & named or 0 in aux:
+        raise ValueError(f"{where}: auxiliary {sorted(aux.keys() & (named | {0}))} "
+                         "are values the task reports, not classes it drops")
+    return aux
+
+
 class TaskCatalog:
     """The named tasks of an ecosystem, from its registry JSON."""
 
@@ -270,7 +287,8 @@ class TaskCatalog:
                 cascade=cascade, orientation=d.get("orientation"),
                 models=_model_choices(d.get("models"), f"{Path(path).name}: {d['name']}"),
                 step_size=_step_size(d.get("step_size"), f"{Path(path).name}: {d['name']}"),
-                label_map={int(k): str(v) for k, v in (d.get("label_map") or {}).items()})
+                label_map={int(k): str(v) for k, v in (d.get("label_map") or {}).items()},
+                auxiliary=_auxiliary(d, f"{Path(path).name}: {d['name']}"))
 
     def get(self, name) -> TaskSpec:
         """A task by name (or the lineage-qualified ``ts:total`` form); a TaskSpec passes through."""

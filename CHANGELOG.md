@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+- **TotalSegmentator results no longer carry classes their task does not name.** Some
+  TotalSegmentator models are trained with helper classes the task drops; upstream zeroes them
+  after prediction, haversack wrote them as unnamed values. `ts.v2:kidney_cysts` wrote Dataset
+  789's whole kidneys as values 3 and 4 - on one abdominal CT 45,234 and 55,244 voxels beside
+  531 of cyst - under a label map naming only 1 and 2. Every value a TotalSegmentator task's
+  label map does not name now becomes background, as upstream does, and the registry states each
+  task's dropped classes (`auxiliary`, upstream's own lists: kidney_cysts, appendicular_bones,
+  face_mr); a model emitting any other unnamed value is refused as not matching its catalog.
+  The named labels are unchanged voxel for voxel. These three tasks' results are keyed anew
+  (`auxiliary=0`) and recompute once; no other task's key moves.
 - **TotalSegmentator's crop tasks crop as TotalSegmentator does.** Every ts.v2 task that crops
   with a coarse model first - head_muscles, headneck_bones_vessels, liver_segments,
   lung_vessels and 22 more - now cuts the input to the crop classes' box plus the margin and

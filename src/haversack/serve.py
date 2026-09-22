@@ -353,7 +353,8 @@ def weights_versions_of(segmenter, task) -> list:
     because one dataset's sidecar covers every folder in it (2026-09-21). A task that states
     its tile step (``step_size``, ts.v3's 0.8) adds ``step=<value>`` the same way, and a cascade
     its crop rule (``crop=upstream``, 2026-09-22), which moved every cascade's labels and no
-    other task's."""
+    other task's. A task stating auxiliary classes adds ``auxiliary=0`` (2026-09-22): its
+    results used to carry them as unnamed values, and now map them to 0 as upstream does."""
     try:
         d = segmenter.describe(task)
         entries = d.get("weights_installed") or []
@@ -364,6 +365,8 @@ def weights_versions_of(segmenter, task) -> list:
             out.append(f"step={d['step_size']:g}")
         if d.get("crop"):
             out.append(f"crop={d['crop']}")
+        if d.get("auxiliary"):
+            out.append("auxiliary=0")
     except Exception:
         out = ["unknown"]
     return out + _engine_epoch(segmenter, task)

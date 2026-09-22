@@ -161,7 +161,10 @@ def test_an_install_inside_a_cascade_keeps_the_cascades_parts(tmp_path, monkeypa
             logits[1] = 2.0
             return logits
 
-    _, store, cache = _two_part_task(tmp_path, [_Finds(ORGANS._props), _StubModel(ORGANS._props)])
+    _, store, cache = _two_part_task(tmp_path, [_Finds(ORGANS._props),
+                                                   # one class, as the task names one: a TS
+                                                   # model's unnamed value is refused (2026-09-22)
+                                                   _StubModel(ORGANS._props, K=2)])
     monkeypatch.setattr(pipeline, "as_store", lambda *a, **k: store)
     monkeypatch.setattr(weights_fetch, "fetch_one", _fetch_one)
     coarse = TaskSpec(name="coarse:task", shape="union", label_map={1: "a"},

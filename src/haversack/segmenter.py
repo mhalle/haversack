@@ -303,6 +303,11 @@ class Segmenter:
             # before the final stage, nothing labelled outside it) - reported so the result key
             # can say it: every cascade's labels changed that day, and no other task's did.
             d["crop"] = CROP_RULE
+        if spec.auxiliary:
+            # the classes a TS model emits that the result maps to 0, as upstream does (2026-09-22)
+            # - reported so the result key can say it: these tasks' labels changed that day, no
+            # other task's did
+            d["auxiliary"] = {str(k): spec.auxiliary[k] for k in sorted(spec.auxiliary)}
         if spec.step_size is not None:
             # it changes the output, so the result key carries it (weights_versions_of) - only
             # where a task states one, so no key of a task that states none moves

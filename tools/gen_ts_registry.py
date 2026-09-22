@@ -194,6 +194,11 @@ def entry_for(up: dict, task: str, mode: str, name: str) -> dict:
     names, special, other = up["_step_rule"]
     out["step_size"] = special if task in names else other
     out["label_map"] = {str(k): v for k, v in sorted(label_map.items())}
+    # classes the model emits and the task drops (upstream's remove_auxiliary_labels);
+    # haversack refuses a TS model whose unnamed values are not exactly these (2026-09-22)
+    aux = up["class_map"].get(f"{task}_auxiliary")
+    if aux:
+        out["auxiliary"] = {str(k): v for k, v in sorted(aux.items())}
     out["upstream"] = {"task": task, "mode": mode, "resample": cfg["resample"]}
     return out
 
@@ -257,7 +262,7 @@ def verify(registry: dict) -> list[str]:
                 problems.append(f"{t['name']}: Dataset{wid} plans spacing {fullres['spacing']} "
                                 f"!= upstream resample {spacing}")
             labels = {int(v): k for k, v in ds["labels"].items() if int(v) != 0}
-            painted = ({int(k): t["label_map"][str(k)] for k in map(int, t["label_map"])}
+            painted = ({int(k): n for k, n in {**t["label_map"], **t.get("auxiliary", {})}.items()}
                        if remap is None else
                        {int(k): t["label_map"][str(v)] for k, v in remap.items()})
             if labels != painted:

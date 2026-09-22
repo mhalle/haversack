@@ -77,6 +77,29 @@ def _lut(K: int, remap: dict | None) -> np.ndarray:
     return lut
 
 
+def _named_lut(K: int, spec) -> np.ndarray:
+    """A TS-lineage model's own values, with every value its task's label map does not name
+    mapped to 0 - upstream's ``remove_auxiliary_labels``, which zeroes the argmax's labels (not
+    the channels before it) at model resolution. Until 2026-09-22 they were written:
+    kidney_cysts' result held Dataset 789's whole kidneys as unnamed values 3 and 4.
+
+    What falls outside the label map must be exactly the auxiliary classes the registry states,
+    so a result can move only where its key says so (``auxiliary=0``); anything else is a
+    catalog that does not match its weights, refused as ``_lut`` refuses a stale remap."""
+    lut = np.arange(K, dtype=np.int64)
+    if spec.lineage != "ts":
+        return lut
+    dropped = sorted(set(range(1, K)) - {int(v) for v in spec.label_map})
+    stated = sorted(int(v) for v in spec.auxiliary)
+    if dropped != stated:
+        raise ModelNotFound(
+            f"{spec.name}: the model emits values {dropped} its label map does not name, and "
+            f"the registry states auxiliary classes {stated} - the task catalog does not "
+            "match the installed weights (stale class map?)")
+    lut[dropped] = 0
+    return lut
+
+
 def canonical_orientation_for(spec, store, *, configuration: str | None = None) -> str | None:
     """The orientation code the model must see, or None to keep the stored axis order.
 
@@ -451,7 +474,8 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                 out = torch.zeros(og.shape, dtype=torch.uint8 if max_label <= 255 else torch.uint16, device=device)
             t = time.perf_counter()
             report.stage("predict", pname)
-            predict_into(model, x, fr, og, env, lut=_lut(model.K, remap), paint=len(parts) > 1,
+            lut = _named_lut(model.K, spc) if remap is None else _lut(model.K, remap)
+            predict_into(model, x, fr, og, env, lut=lut, paint=len(parts) > 1,
                          out=out, part=pname, weights=wid, restore=restore)
             where = "device" if model.accumulate_choice["on_device"] else "host"
             report.stage("restore", f"{where} accumulator")

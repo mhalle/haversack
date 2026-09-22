@@ -35,7 +35,8 @@
    "oculomotor_muscles": 20.0,
    "pleural_pericard_effusion": 50.0,
    "ventricle_parts": 0.0
-  }
+  },
+  "auxiliary": "2026-09-22: each entry's `auxiliary` is upstream's class_map[\"<task>_auxiliary\"] (map_to_binary.py, 2.13.0 and 2.18.0 alike): classes the model is trained with and the task does not report. Upstream zeroes them after prediction (postprocessing.remove_auxiliary_labels, from nnunet.py); haversack maps every value a TS task's label map does not name to 0 and refuses a model whose unnamed values are not exactly this list. Checked against the checkpoints' dataset.json by range request for every public final-stage model on 2026-09-22: only Dataset 789 (kidney_cysts) has classes beyond its task's label map. appendicular_bones (304) and face_mr (856) are licensed and were not read; renal_arteries_auxiliary has no ts.v2 task."
  },
  "tasks": [
   {
@@ -125,6 +126,12 @@
     "9": "carpal",
     "10": "metacarpal",
     "11": "phalanges_hand"
+   },
+   "auxiliary": {
+    "12": "humerus",
+    "13": "femur",
+    "14": "liver",
+    "15": "spleen"
    },
    "lineage": "ts"
   },
@@ -362,6 +369,10 @@
    "single": 856,
    "label_map": {
     "1": "face"
+   },
+   "auxiliary": {
+    "2": "brain",
+    "3": "liver"
    },
    "lineage": "ts"
   },
@@ -642,6 +653,10 @@
    "label_map": {
     "1": "kidney_cyst_left",
     "2": "kidney_cyst_right"
+   },
+   "auxiliary": {
+    "3": "kidney_left",
+    "4": "kidney_right"
    },
    "lineage": "ts"
   },
