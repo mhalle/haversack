@@ -104,7 +104,7 @@
 - duckn is pinned at `v0.4.1`, which renames a registry entry's `uri` and `url` to `system_uri`
   and `definition_url` - a URI *of* the coding system, a URL *of* this version's definition -
   and the schemes here use those names.
-- duckn is pinned at `v0.5.0`, seg extension 0.9: a segment may state a union once, as
+- duckn is pinned at `v0.5.1`, seg extension 0.9: a segment may state a union once, as
   `members`. Stores here list values and are read as 0.9 files unchanged; the builder writes
   none, since a union belongs in a store only when its scheme defines it.
 
