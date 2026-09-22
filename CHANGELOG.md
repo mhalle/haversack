@@ -88,15 +88,18 @@
   compared byte for byte; **`dentalsegmentator`** identified by the weights' Zenodo concept
   DOI; **`monai`** per bundle, the bundle name in the `system_uri` and its version as the release;
   **`synthstrip`**, **`voxtell`** and **`custom`** declare none.
-- **FastSurfer stores code their classes by id, and 19 of them carry no code.** FastSurfer's
+- **FastSurfer stores code their classes by id, and 17 of them carry no code.** FastSurfer's
   identifier for a class is the aparc+aseg number, so `ModelEcosystem.scheme_code` lets a
   catalog say how it spells a class - and whether it has an exact code for it at all. A
   ranked store holds the network's channels BEFORE `split_cortex_labels`, which lateralizes
-  19 lh-numbered cortical ids spatially (it is why the LUT has 31 `ctx-lh-*` ids and 14
+  17 lh-numbered cortical ids spatially (it is why the LUT has 31 `ctx-lh-*` ids and 14
   `ctx-rh-*`): in a store, value 1003 is both caudal middle frontal cortices under a
   left-hemisphere name. A designation says a segment IS a concept, so those 19 carry none.
-  Read from upstream's source at v2.5.4, not measured on a case. Their NAMES are still the
-  left-hemisphere ones, which is a separate thing to put right.
+  Measured on a real run (ds000114 sub-01, on Modal): 17 channels moved 38-56% of their
+  voxels to the right under upstream's split, no other channel moved any, and 1025 and
+  1028 - which upstream's list names but which have rh channels of their own - moved none,
+  so those two keep their codes. Their NAMES are still the left-hemisphere ones, which is a
+  separate thing to put right.
 - **A ranked store can be written for `fastsurfer:asegdkt`** (`-o case.duckn`): the engine
   already hands over its pre-argmax field, and the refusal that kept engine tasks out now
   admits the engines whose runner takes a ranked sink. `Segmenter.segment` accepts

@@ -146,11 +146,13 @@ def test_fastsurfer_codes_are_the_ids_and_a_bilateral_channel_has_none():
     assert s["version"] == ENGINES["fastsurfer"].weights_identity()[0]["version"]
     assert s["definition_url"].endswith(f"/tree/v{s['version']}")
     lut = load_lut()
-    assert len(SPLIT_AFTER_THE_NETWORK) == 19 and SPLIT_AFTER_THE_NETWORK <= set(lut)
+    assert len(SPLIT_AFTER_THE_NETWORK) == 17 and SPLIT_AFTER_THE_NETWORK <= set(lut)
     assert all(lut[v]["name"].startswith("ctx-lh-") for v in SPLIT_AFTER_THE_NETWORK)
-    # the LUT's own asymmetry is the evidence: every lh id that is NOT split has an rh twin
+    # the LUT's own asymmetry agrees: every lh id that is NOT split has an rh twin, and
+    # every split id has none (measured on a real run; see the constant's comment)
     lh = {v for v in lut if 1000 <= v < 2000}
     assert {v + 1000 for v in lh - SPLIT_AFTER_THE_NETWORK} <= set(lut)
+    assert not ({v + 1000 for v in SPLIT_AFTER_THE_NETWORK} & set(lut))
     coded = {v: eco.scheme_code("asegdkt", v, lut[v]["name"]) for v in lut}
     assert coded[17] == "17"
     assert {v for v, c in coded.items() if c is None} == SPLIT_AFTER_THE_NETWORK
