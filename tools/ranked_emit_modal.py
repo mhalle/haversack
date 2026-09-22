@@ -44,7 +44,6 @@ image = (
     .uv_sync(extras=["torch", "duckn", "cuda"], frozen=False,
              extra_options="--no-sources-package nnunetv2")
     .add_local_dir(str(PKG), remote_path="/root/pkg/haversack")
-    .add_local_file(str(TOOLS / "ranked_emit.py"), remote_path="/root/ranked_emit.py")
 )
 
 # FastSurfer needs its own image: it pins numpy/torch ranges that conflict with the torch
@@ -133,7 +132,10 @@ def emit(identifier: str, tasks: list[str], depth: int = 6, clip: float = 8.0,
                            "is not reachable from this worker")
     print(f"fetched {n} file(s) in {time.perf_counter() - t:.0f}s", flush=True)
 
-    import ranked_emit
+    # The emit is the package's (haversack.ranked_output since 2026-09-03); tools/ranked_emit.py
+    # is only its command line and has no `main` - calling that broke every emit here until
+    # 2026-09-22, found by the first smoke after.
+    from haversack.ranked_output import main as emit_one
     root = work / "out"
     root.mkdir()
     done, failed = [], []
@@ -144,7 +146,7 @@ def emit(identifier: str, tasks: list[str], depth: int = 6, clip: float = 8.0,
         try:
             EcosystemCatalog(root=WEIGHTS_ROOT).prepare(task)
             weights_vol.commit()
-            ranked_emit.main(str(series), task, str(out), depth, clip,
+            emit_one(str(series), task, str(out), depth, clip,
                              "none" if envelope_mm is None else envelope_mm)
         except Exception as exc:                       # noqa: BLE001
             # one task failing must not lose the others - they are the expensive part
