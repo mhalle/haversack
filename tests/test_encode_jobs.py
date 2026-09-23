@@ -119,7 +119,7 @@ def test_an_encode_job_publishes_and_serves_a_field(tmp_path):
     got = client.get(links["result"])
     assert got.status_code == 200
     assert got.headers["content-type"] == "application/zip"
-    assert got.headers["content-disposition"].endswith('.zarr.zip"')
+    assert got.headers["content-disposition"].endswith(f'filename="radar_pretrain_{s["id"]}.zarr.zip"')
     assert got.headers["etag"] == f'"{out["sha256"]}"'
     assert "sha256:" + hashlib.sha256(got.content).hexdigest() == out["sha256"]
     assert zipfile.ZipFile(io.BytesIO(got.content)).namelist() == ["zarr.json"]
@@ -129,7 +129,9 @@ def test_an_encode_job_publishes_and_serves_a_field(tmp_path):
     assert client.get(links["result"] + "?format=nii.gz").status_code == 422
     # the field records the job's identity, not the scratch path its bytes were staged at
     ident = enc.calls[0]["identity"]
-    assert ident["digest"].startswith("sha256:") and ident["input"] == s["input_identity"][0]
+    # an upload is named by its digest, and that is what the field records - never a hash of
+    # what staging made of the bytes (a stored DICOM tree arrives decoded)
+    assert ident == {"input": s["input_identity"][0], "digest": s["input_identity"][0]}
     # the cache entry holds the field under its own name, and its meta says what it is
     entry = ex.cache.get(s["key"])
     assert entry is not None and entry[0].name == FIELD_NAME
@@ -207,6 +209,7 @@ def test_the_server_lists_its_encoders(tmp_path):
     rows = {e["name"]: e for e in client.get("/v1/encoders").json()["encoders"]}
     from haversack.encoders import ENCODERS
     assert set(rows) == set(ENCODERS)
+    assert client.get("/v1/encoders").json()["encodes"] is True
     r = rows["radar:pretrain"]
     assert r["license"] == "CC-BY-NC-SA-4.0" and r["options"] == {"int8": "bool"}
     assert r["attribution"]["cite"][0]["doi"] == "10.1126/science.aec6129"
@@ -295,4 +298,81 @@ def test_a_hosted_inputs_field_gets_no_label_paths(tmp_path, monkeypatch):
     assert set(s["links"]) == {"self", "events", "result", "meta"}, s["links"]
     assert all(v.startswith("/v1/jobs/") for v in s["links"].values())
     assert enc.calls[0]["identity"]["source"] == "idc"
+    ex.close()
+
+
+def _idc_executor(tmp_path, monkeypatch, workdir="w", encode_fn=None):
+    monkeypatch.setattr(serve_mod, "_idc_enabled", lambda: True)
+
+    def fake_fetch(series, jobdir):
+        d = jobdir / "series"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "s.nii.gz").write_bytes(volume_bytes(13))
+        return d
+    return LocalExecutor(FakeSegmenter(steps=1), workdir=tmp_path / workdir, cache_dir=tmp_path / "c",
+                         encode_fn=encode_fn or FakeEncoder(), fetch_idc_fn=fake_fetch)
+
+
+def test_an_evicted_or_restarted_encode_job_is_still_a_field(tmp_path, monkeypatch):
+    """The status built from the STORED record (after a restart, or once the record leaves
+    memory) says `kind` as the live one does; without it the links door read the field as a
+    segmentation and minted a task-named encoder's label paths (review, 2026-09-23)."""
+    ex = _idc_executor(tmp_path, monkeypatch)
+    client = TestClient(create_app(ex))
+    u = "0be27d1c-9410-47ff-9c9f-a44b26a4bd55"
+    r = client.post("/v1/jobs", data={"task": "ts.v2:total_fast", "kind": "encode",
+                                      "source": json.dumps([{"kind": "idc", "crdc_series_uuid": u}])})
+    jid = wait_state(client, r.json()["id"], ("done",))["id"]
+    ex.close()
+    ex2 = _idc_executor(tmp_path, monkeypatch)
+    client2 = TestClient(create_app(ex2))
+    s = client2.get(f"/v1/jobs/{jid}").json()
+    assert s.get("evicted") is True and s["kind"] == "encode", s
+    assert set(s["links"]) == {"self", "events", "result", "meta"}, s["links"]
+    assert client2.get(s["links"]["result"]).headers["content-type"] == "application/zip"
+    ex2.close()
+
+
+def test_the_listing_refuses_a_field_by_what_it_is(tmp_path, monkeypatch):
+    """Not by its key failing to recompute as a segmentation's: that check fails open, and a
+    field came back as a segmentation row when key derivation raised (review, 2026-09-23)."""
+    seg, _, ex, client = make(tmp_path)
+    # a server whose catalog serves the task an encoder is named after, as a real one does
+    real_describe = seg.describe
+    seg.tasks = lambda: ["ts.v2:total_fast", "total"]
+    seg.describe = lambda t: ({"name": t, "structures": ["spleen"]} if t in seg.tasks() else real_describe(t))
+    wait_state(client, post(client, task="ts.v2:total_fast").json()["id"], ("done",))
+
+    def broken(*a, **k):
+        raise RuntimeError("no describe today")
+    monkeypatch.setattr(serve_mod, "weights_versions_of", broken)
+    body = client.get("/v1/segmentations").json()
+    assert body.get("segmentations", []) == [], body
+    ex.close()
+
+
+def test_an_artifact_cannot_take_a_primary_outputs_name(tmp_path):
+    _, _, ex, client = make(tmp_path)
+    s = wait_state(client, post(client).json()["id"], ("done",))
+    src = tmp_path / "x"
+    src.write_bytes(b"x")
+    for name in ("labels.seg.nrrd", FIELD_NAME):
+        with pytest.raises(ValueError):
+            ex.cache.add_artifact(s["key"], name, src)
+    ex.close()
+
+
+def test_the_cli_and_the_server_state_one_record(tmp_path, monkeypatch, capsys):
+    """`haversack encoders --json` is `/v1/encoders`' record per encoder plus its aliases."""
+    from haversack import cli
+    monkeypatch.setenv("HAVERSACK_ENCODER_WEIGHTS", str(tmp_path / "ew"))
+    assert cli.main(["encoders", "--json"]) == 0
+    local = {r["name"]: r for r in json.loads(capsys.readouterr().out)["encoders"]}
+    _, _, ex, client = make(tmp_path)
+    served = {r["name"]: r for r in client.get("/v1/encoders").json()["encoders"]}
+    for name, row in served.items():
+        mine = {k: v for k, v in local[name].items() if k != "aliases"}
+        assert set(mine) == set(row), name
+        assert {k: v for k, v in mine.items() if k != "installed"} == {k: v for k, v in row.items() if k != "installed"}
+        assert isinstance(mine["installed"], bool), (name, mine["installed"])
     ex.close()

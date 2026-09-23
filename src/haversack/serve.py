@@ -1670,6 +1670,8 @@ class ResultCache:
         if not isinstance(meta, dict):
             return None
         fields = {k: meta.get(k) for k in ("task", "identity", "options", "computed")}
+        if meta.get("kind") not in (None, "segment"):
+            fields["kind"] = meta["kind"]      # a field says what it is; a segmentation's fields are as they were
         # Remembered under the stamp the CALLER saw. If a publication landed between that
         # stat and this read, what was read belongs to the new pointer and is filed under
         # the old one's stamp - which no stat will ever return again, so it is never
@@ -1702,6 +1704,9 @@ class ResultCache:
         task, identity, options = fields.get("task"), fields.get("identity"), fields.get("options")
         row = {"key": key, "task": task, "identity": identity, "options": options,
                "computed": fields.get("computed"), "published": stamp / 1e9, "bytes": size}
+        if fields.get("kind") not in (None, "segment"):
+            row["kind"] = fields["kind"]       # an encode job's field: said, and never linked as labels
+            return row
         if resource_links(task, identity, options):    # asked first: two stats saved a row
             row["links"] = resource_links(task, identity, options,
                                           preview=(where / "preview.png").exists(),
@@ -2014,6 +2019,10 @@ class ResultCache:
         unguarded in one direction and, once a check was added after the rename, let a
         late worker delete the artifact its successor had already placed.
         """
+        if name in PRIMARY_NAMES:
+            # a primary output is placed by `put` alone: an artifact of that name would give a
+            # generation two, and `get` would answer with whichever it asks for first
+            raise ValueError(f"{name!r} is a primary output, not an artifact")
         import os
         import shutil
         g = (self._generation_dir(key, generation) if generation
@@ -2683,8 +2692,9 @@ class LocalExecutor:
                             version=r.get("version"),
                             # held to what THIS process renders; a record from before
                             # the list has none and gets the deployment's set
-                            deliverables=wanted_deliverables(r.get("deliverables"),
-                                                             self.artifacts))
+                            deliverables=(() if r.get("kind") == "encode" else
+                                          wanted_deliverables(r.get("deliverables"),
+                                                              self.artifacts)))
             self._jobs[rec.id] = rec
             self._pending.append(rec.id)
             # the single-flight marker, oldest first: without it a re-ask for the same
@@ -3187,7 +3197,13 @@ class LocalExecutor:
         take_pre_read(self.read_ahead, rec.id, fresh_bytes_wanted=True)   # nothing lingers pinned
         path = Path(rec.input_path)
         ident = rec.input_identity[0] if rec.input_identity else "upload"
-        identity = _identity(ident, path)
+        if is_digest(ident):
+            # the input IS named by its digest (an upload, a stored file or DICOM tree): record
+            # that, not a hash of what staging made of it - a stored tree reaches here as its
+            # decoded copy, whose digest is of bytes nobody sent (review, 2026-09-23)
+            identity = {"input": ident, "digest": ident}
+        else:
+            identity = _identity(ident, path)
         reporter.stage("encode", rec.task)
         work = self._encode or encode_file
         report = work(rec.task, path, rec.dir / FIELD_NAME, identity=identity,
@@ -3530,6 +3546,10 @@ class LocalExecutor:
              "finished": r.get("finished"), "input_identity": r.get("input_identity") or [],
              "options": r.get("options") or {}, "cached": bool(r.get("cached")),
              "evicted": True, "result_available": not gone}
+        if r.get("kind") == "encode":
+            # as the live status says it: without it the links door read an evicted field as a
+            # segmentation and minted a task-named encoder's LABEL paths (review, 2026-09-23)
+            d["kind"] = "encode"
         if r.get("input_refresh_skipped"):
             d["input_refresh_skipped"] = True
         if r.get("error"):
@@ -4366,7 +4386,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 except Exception:
                     installed = None
             rows.append(describe_encoder(spec, installed))
-        return {"encoders": rows}
+        # whether a `kind=encode` job runs HERE at all: a deployment with no encoder worker still
+        # lists what the encoders are, and says so rather than letting a submit find out (501)
+        return {"encodes": bool(getattr(executor, "encodes", False)), "encoders": rows}
 
     @app.post("/v1/tasks/{task}/prepare", status_code=202, tags=["tasks"])
     def prepare_task(request: Request, task: str):
@@ -4585,6 +4607,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             return want is None or (t is not None and canonical_of(t) == want)
 
         def accept(e: dict) -> bool:       # advertise only links that resolve
+            if e.get("kind") not in (None, "segment"):
+                # a field is not a segmentation: refused by what its meta SAYS, not by its key
+                # failing to recompute as a segmentation's - that check sits in a `try` that
+                # fails open, and a field came back as a segmentation row when it raised
+                # (review, 2026-09-23)
+                return False
             idents = e.get("identity") if isinstance(e.get("identity"), list) else []
             ident0 = str((idents or [""])[0])          # on THIS app's mounted sources
             pfx = ident0.split(":", 1)[0] if ":" in ident0 else None
@@ -5230,6 +5258,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # the job's own copy): an encode job's field is a zip, named and typed as one, and has
         # no NIfTI form - refused, where converting it used to be SimpleITK's 500 (2026-09-23).
         is_field = Path(path).name == FIELD_NAME
+        if is_field:                           # radar:pretrain -> radar_pretrain: the family says which model
+            stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(task_name))
         suffix, media = (".zarr.zip", "application/zip") if is_field else (".seg.nrrd", "application/octet-stream")
         if is_field and format is not None:
             raise HTTPException(422, f"format={format!r}: an embedding field is served only as itself "

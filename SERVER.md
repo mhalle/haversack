@@ -419,7 +419,8 @@ default. A field has no deliverables, and asking for any is a 422.
 
 Everything else is a segmentation's: the same queue, single flight, result cache and
 lifetimes, and the same job routes. `GET /v1/jobs/{id}/result` sends the field as
-`application/zip`, named `<encoder>_<id>.zarr.zip`, with its content digest as `ETag`;
+`application/zip`, named after the encoder and the job (`radar_pretrain_<id>.zarr.zip`), with its
+content digest as `ETag`;
 `?format=` is refused with a 422, since a field has no other form. Its status says `"kind":
 "encode"`, and its `result.outputs[0]` is `{"name": "field", "kind": "field", ...}`: a
 `result:` reference to it cannot be bound where an image or labels belong. A field's key
@@ -430,7 +431,7 @@ listed by `/v1/segmentations`; reach it through its job, whose `links` name `res
 <encoder>` on the machine that computes (`GET /v1/encoders` says whether they are
 installed); an nnU-Net encoder uses its task's weights, which a segmentation of that task
 installs. Encode jobs run on the local server; the Modal deployment has no encoder worker
-yet.
+yet, and says so: `GET /v1/encoders` carries `"encodes": false` there, and a submit is a 501.
 
 ## Tasks and options
 

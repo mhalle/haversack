@@ -362,7 +362,7 @@ class TestCommands(_WeightsRoot):
         rows = {r["name"]: r for r in json.loads(out)["encoders"]}
         self.assertEqual(set(rows), set(ENCODERS))
         self.assertIs(rows["radar:pretrain"]["installed"], False)
-        self.assertIsNone(rows["ts.v2:total_fast"]["installed"])
+        self.assertIsInstance(rows["ts.v2:total_fast"]["installed"], bool)   # its task's weights, here or not
         self.assertIn("radar", rows["radar:pretrain"]["aliases"])
         self.assertEqual(rows["radar:pretrain"]["attribution"]["title"], "RADAR")
         dois = [c["doi"] for c in rows["ts.v2:total"]["attribution"]["cite"]]

@@ -1724,9 +1724,10 @@ def _cmd_encoders(args) -> int:
     """`haversack encoders`."""
     import json as _json
     from .encoders import ENCODERS, ALIASES, weights as ew
-    from .encoders.serving import describe as describe_encoder
-    # one record, the one `GET /v1/encoders` serves, plus the names fields were once written under
-    rows = [{**describe_encoder(spec, ew.installed(spec) if spec.weights else None),
+    from .encoders.serving import describe as describe_encoder, installed_locally
+    # the record `GET /v1/encoders` serves per encoder, plus the names fields were once written
+    # under; `installed` answers for THIS machine, as the server's does for its own
+    rows = [{**describe_encoder(spec, installed_locally(spec)),
              "aliases": sorted(a for a, t in ALIASES.items() if t == spec.name)}
             for spec in ENCODERS.values()]
     if args.as_json:
@@ -1735,7 +1736,8 @@ def _cmd_encoders(args) -> int:
     for r in rows:
         size = sum(w["bytes"] for w in r["weights"]) / 1e9
         state = ("installed" if r["installed"] else f"not installed ({size:.1f} GB): haversack weights fetch {r['name']}") \
-            if r["weights"] else f"weights of {r['uses_task']}"
+            if r["weights"] else (f"installed (the weights of {r['uses_task']})" if r["installed"]
+                                  else f"not installed: haversack weights fetch {r['uses_task']}")
         print(f"{r['name']:24s} {r['license']:18s} {state}")
         print(f"  {r['description']}")
         cite = "; ".join(f"doi:{c['doi']}" for c in r["attribution"]["cite"] if c.get("doi"))

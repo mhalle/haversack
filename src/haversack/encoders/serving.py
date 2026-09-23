@@ -49,6 +49,21 @@ def field_versions(segmenter, name) -> list:
     return out + [f"encode@epoch={ENCODE_EPOCH}"]
 
 
+def installed_locally(spec: EncoderSpec, task_weights=None) -> bool:
+    """Whether ``spec`` can encode on THIS machine: its downloaded weights verified, or an
+    nnU-Net encoder's model folder resolvable under ``task_weights`` (default: the default
+    root). The CLI's answer; a server answers from its own Segmenter's describe."""
+    from . import weights as W
+    if spec.weights:
+        return W.installed(spec)
+    try:
+        from ..tasks import resolve_model_folder, weights_root
+        resolve_model_folder(spec.options["dataset"], model_root=task_weights or weights_root("ts"))
+        return True
+    except Exception:
+        return False
+
+
 def validate_options(options: dict) -> dict:
     """The options of an encode job, checked against :data:`OPTIONS`; raises ``RequestError``."""
     from ..errors import RequestError
