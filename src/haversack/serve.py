@@ -130,6 +130,23 @@ ARTIFACT_PENDING_TTL = 900.0   # a pending marker older than this is a dead
 #: Defined in jobpolicy; imported here so the wire vocabulary has one source.
 from .jobpolicy import TERMINAL  # noqa: E402
 RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default artifact
+#: An encode job's output (2026-09-23): an embedding field, written by feldglas. A generation
+#: holds exactly ONE primary output, labels or a field; the key keeps them apart (``result_key``'s
+#: ``kind``), and every "is this entry there" question asks ``primary_output`` rather than
+#: naming the labels file, so the lifetime code (leases, claims, pruning) is one code for both.
+FIELD_NAME = "field.zarr.zip"
+PRIMARY_NAMES = (RESULT_NAME, FIELD_NAME)
+#: What each kind of job publishes, and the suffix a download of it is named with.
+OUTPUT_OF_KIND = {"segment": RESULT_NAME, "encode": FIELD_NAME}
+
+
+def primary_output(where) -> "Path | None":
+    """The primary output a generation directory holds (labels or a field), or None."""
+    for name in PRIMARY_NAMES:
+        p = Path(where) / name
+        if p.exists():
+            return p
+    return None
 #: The eventually-consistent artifacts, rendered after "done" is already served.
 #: Named once: `put` has to know which files belong to the generation it replaces.
 #: They are the files of `jobpolicy.DELIVERABLES` - the names a request asks for them
@@ -198,19 +215,27 @@ _ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack 
 CACHE_EPOCH = "3"
 
 
-def result_key(identity, task, options, weights_versions, epoch=None) -> str:
+def result_key(identity, task, options, weights_versions, epoch=None, kind: str = "segment") -> str:
     """The result-cache key: everything that determines the output bytes.
 
     (input identity) x (task + options) x (weights versions) x (cache epoch) - the
     design's cache contract. Over-keying on an option that turns out inert only
     costs hits; under-keying would serve wrong bytes, so all options count. See
     :data:`CACHE_EPOCH` for the last component and when it moves.
+
+    ``kind`` is what the job makes (2026-09-23): ``segment`` (labels, every key before that
+    day) or ``encode`` (an embedding field). It joins the payload only when it is not
+    ``segment``, so no existing key moves - and it must join then: ``ts.v2:total_fast`` is a
+    task AND an encoder, and one key for both would hand a label map to a field's reader.
     """
     import hashlib
-    payload = json.dumps({"identity": list(identity), "task": str(task),
-                          "options": {k: options[k] for k in sorted(options)},
-                          "weights": list(weights_versions),
-                          "haversack": epoch or CACHE_EPOCH}, sort_keys=True)
+    body = {"identity": list(identity), "task": str(task),
+            "options": {k: options[k] for k in sorted(options)},
+            "weights": list(weights_versions),
+            "haversack": epoch or CACHE_EPOCH}
+    if kind != "segment":
+        body["kind"] = str(kind)
+    payload = json.dumps(body, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -370,6 +395,18 @@ def weights_versions_of(segmenter, task) -> list:
     except Exception:
         out = ["unknown"]
     return out + _engine_epoch(segmenter, task)
+
+
+def versions_for(segmenter, task, kind: str = "segment") -> list:
+    """The key's weights component for a job of ``kind``: ``weights_versions_of`` for a
+    segmentation, the encoder's own (``encoders.serving.field_versions``) for an encode job.
+    The ONE place the choice is made, so submit, publication's re-key and every executor key
+    an encode job alike (a re-key through the segmentation's door would publish the field
+    under a key nobody asks for - the _EngineShim lesson of 2026-09-12)."""
+    if kind == "encode":
+        from .encoders.serving import field_versions
+        return field_versions(segmenter, task)
+    return weights_versions_of(segmenter, task)
 
 
 def installed_versions(segmenter, task) -> list | None:
@@ -1267,13 +1304,13 @@ class ResultCache:
                     where = d                  # a legacy flat entry, or nothing at all
                 else:
                     where = self._generation_dir(key, gen)
-                if not (where / RESULT_NAME).exists():
+                if primary_output(where) is None:
                     if where == d:
                         return None
                     continue                   # the pointer moved on, or dangles: ask again
                 if lease and not self._take_lease(where):
                     continue                   # reclaimed before the lease could land
-                if (where / RESULT_NAME).exists():
+                if primary_output(where) is not None:
                     return where
             return None
 
@@ -1659,7 +1696,7 @@ class ResultCache:
         content. None when the labels are gone."""
         import os
         try:
-            size = os.stat(where / RESULT_NAME).st_size
+            size = os.stat(primary_output(where) or where / RESULT_NAME).st_size
         except OSError:
             return None
         task, identity, options = fields.get("task"), fields.get("identity"), fields.get("options")
@@ -1823,7 +1860,7 @@ class ResultCache:
             result = json.loads((g / "result.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):          # ValueError: JSONDecodeError, UnicodeDecodeError
             result = {}
-        return g / RESULT_NAME, result if isinstance(result, dict) else {}
+        return primary_output(g) or g / RESULT_NAME, result if isinstance(result, dict) else {}
 
     def generation(self, key: str) -> str | None:
         """Which publication the entry at ``key`` currently holds, or None."""
@@ -1833,7 +1870,7 @@ class ResultCache:
             return None
 
     def put(self, key: str, labels_path, result: dict, meta: dict,
-            preview_path=None, statistics_path=None) -> str:
+            preview_path=None, statistics_path=None, output_name: str = RESULT_NAME) -> str:
         """Publish one generation of a result, returning its generation token.
 
         The generation is assembled COMPLETE in a directory of its own and becomes
@@ -1871,7 +1908,9 @@ class ResultCache:
                 src = supplied.get(name)
                 if src and Path(src).exists():
                     _place(name, lambda t, s=src: shutil.copy2(s, t))
-            _place(RESULT_NAME, lambda t: shutil.copy2(labels_path, t))
+            if output_name not in PRIMARY_NAMES:
+                raise ValueError(f"{output_name!r} is not a primary output ({', '.join(PRIMARY_NAMES)})")
+            _place(output_name, lambda t: shutil.copy2(labels_path, t))
 
             # complete: the staging directory becomes a generation, and then one rename of
             # the pointer makes it the entry. Nothing between those two is observable.
@@ -1979,7 +2018,7 @@ class ResultCache:
         import shutil
         g = (self._generation_dir(key, generation) if generation
              else self._resolve(key, lease=False))    # a writer, not a reader: no lease
-        if g is None or not (g / RESULT_NAME).exists():
+        if g is None or primary_output(g) is None:
             return False
         tmp = g / f"{name}.{uuid.uuid4().hex[:8]}.tmp"   # unique per writer
         shutil.copy2(src_path, tmp)
@@ -2338,7 +2377,7 @@ def not_modified(request, etag: str, headers=None):
 def publish_completion(*, segmenter, task, identity, options, cache_key,
                        labels_path, input_image, artifacts, cache_enabled,
                        migrate_key, set_pending, clear_pending, put,
-                       mark_done, start_worker):
+                       mark_done, start_worker, kind: str = "segment"):
     """The one correct publication order for a finished segmentation, shared
     by both executors so ordering fixes cannot drift apart (in the 2026-08-25
     review, C7 and C8 each had to be written twice):
@@ -2362,8 +2401,9 @@ def publish_completion(*, segmenter, task, identity, options, cache_key,
     here. Returns (cache_key, pair)."""
     if cache_key:
         try:
-            fresh = result_key(identity, task, options,
-                               weights_versions_of(segmenter, task))
+            # the kind only when it is not a segmentation: that call stays exactly as it was
+            fresh = result_key(identity, task, options, versions_for(segmenter, task, kind),
+                               **({"kind": kind} if kind != "segment" else {}))
             if fresh != cache_key:
                 migrate_key(cache_key, fresh)
                 cache_key = fresh
@@ -2507,17 +2547,22 @@ class LocalExecutor:
     ``keep_finished`` more finish after them.
     """
 
+    #: ``kind=encode`` jobs run here (2026-09-23): in-process, on this server's device.
+    encodes = True
+
     def __init__(self, segmenter, *, workdir, max_pending: int = 16,
                  keep_finished: int = 50, segment_fn=None, fetch_idc_fn=None,
                  cache_dir=None, keep_cached: int = 500,
                  input_cache_bytes: int = 8 << 30, read_fn=None, sources=None,
-                 artifacts=("preview", "statistics"), jobs_ttl_h: float = 24.0):
+                 artifacts=("preview", "statistics"), jobs_ttl_h: float = 24.0, encode_fn=None):
         self.segmenter = segmenter
         self.workdir = Path(workdir)
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.max_pending = int(max_pending)
         self.keep_finished = int(keep_finished)
         self._segment = segment_fn or segmenter.segment
+        #: the encode job's work (``encoders.pipeline.encode_file``'s signature); tests inject one
+        self._encode = encode_fn
         self._fetch_idc = fetch_idc_fn or _fetch_idc_series
         self.sources = _source_registry(sources)
         self.series_cache = SeriesCache(self.workdir / "series_cache", self._fetch_source,
@@ -2685,18 +2730,20 @@ class LocalExecutor:
                *, source=None, identity: tuple = (), no_cache: bool = False,
                source_tokens: dict | None = None, inputs: tuple = (),
                refresh_input: bool = False, version: str | None = None,
-               deliverables=None) -> JobRecord:
+               deliverables=None, kind: str = "segment") -> JobRecord:
         # `deliverables`: the request's list (None: it named none). It goes on the
         # record and is never seen by `result_key` below - rendering a preview, or
-        # declining one, is not a different result (2026-09-20).
+        # declining one, is not a different result (2026-09-20). An encode job renders
+        # none: a preview and statistics are of labels (2026-09-23).
         rec = JobRecord(id=jid, task=task, options=options, dir=jdir, input_path=input_path,
                         source=list(source or [{"kind": "upload"}]), input_identity=tuple(identity),
                         input_paths=tuple(inputs), source_tokens=source_tokens or None,
-                        refresh_input=bool(refresh_input), version=version,
-                        deliverables=wanted_deliverables(deliverables, self.artifacts))
+                        refresh_input=bool(refresh_input), version=version, kind=kind,
+                        deliverables=(() if kind == "encode"
+                                      else wanted_deliverables(deliverables, self.artifacts)))
         if self.cache is not None and identity:
-            rec.cache_key = result_key(identity, task, options,
-                                       weights_versions_of(self.segmenter, task))
+            rec.cache_key = result_key(identity, task, options, versions_for(self.segmenter, task, kind),
+                                       **({"kind": kind} if kind != "segment" else {}))
             if not no_cache:
                 hit = self.cache.get(rec.cache_key)
                 if hit is not None:
@@ -3130,6 +3177,26 @@ class LocalExecutor:
         rec.input_path = staged[rec.input_paths[0][0]]
         return staged
 
+    def _run_encode(self, rec: JobRecord, reporter) -> tuple:
+        """An encode job's compute: the staged input FILE (the encoder reads it itself, by its
+        own convention - a pre-read image is dropped, never used), the field written into the
+        job's directory, and its published record. The field records the job's identity - the
+        source identifier and the bytes' digest - not the scratch path the bytes sat at."""
+        from .encoders.pipeline import _identity, encode_file
+        from .encoders.serving import field_payload
+        take_pre_read(self.read_ahead, rec.id, fresh_bytes_wanted=True)   # nothing lingers pinned
+        path = Path(rec.input_path)
+        ident = rec.input_identity[0] if rec.input_identity else "upload"
+        identity = _identity(ident, path)
+        reporter.stage("encode", rec.task)
+        work = self._encode or encode_file
+        report = work(rec.task, path, rec.dir / FIELD_NAME, identity=identity,
+                      device=self.segmenter.policy.get("device", "auto"),
+                      int8=bool(rec.options.get("int8")), cancel=rec.cancel_token,
+                      task_weights=getattr(getattr(self.segmenter, "weights", None), "root", None))
+        out = Path(report["field"])
+        return out, field_payload(report, out)
+
     def _dispatch(self) -> None:
         while True:
             with self._cv:
@@ -3205,14 +3272,17 @@ class LocalExecutor:
                             inp = preread
                         else:
                             inp = rec.input_path
-                seg = self._segment(inp, run_name(rec.task, rec.version), progress=reporter,
-                                    cancel=rec.cancel_token, **rec.options)
-                # what the result was computed FROM, and under what terms - the
-                # rights each fetch recorded beside its bytes, or "not
-                # determined" for an upload; the same rule the Modal worker applies
-                record_inputs(seg, entries, rec.input_identity, self.series_cache)
-                rec.labels_path = Path(seg.save(rec.dir / RESULT_NAME))
-                rec.result = result_payload(seg, rec.labels_path)
+                if rec.kind == "encode":
+                    rec.labels_path, rec.result = self._run_encode(rec, reporter)
+                else:
+                    seg = self._segment(inp, run_name(rec.task, rec.version), progress=reporter,
+                                        cancel=rec.cancel_token, **rec.options)
+                    # what the result was computed FROM, and under what terms - the
+                    # rights each fetch recorded beside its bytes, or "not
+                    # determined" for an upload; the same rule the Modal worker applies
+                    record_inputs(seg, entries, rec.input_identity, self.series_cache)
+                    rec.labels_path = Path(seg.save(rec.dir / RESULT_NAME))
+                    rec.result = result_payload(seg, rec.labels_path)
                 (rec.dir / "result.json").write_text(json.dumps(rec.result), encoding="utf-8")
 
                 def _migrate(old_key: str, new_key: str) -> None:
@@ -3277,8 +3347,9 @@ class LocalExecutor:
                         key, rec.labels_path, rec.result,
                         {"identity": list(rec.input_identity), "task": rec.task,
                          "options": rec.options, "computed": rec.started,
-                         "job": rec.id}),
-                    mark_done=_mark_done, start_worker=_start)
+                         "job": rec.id, **({"kind": rec.kind} if rec.kind == "encode" else {})},
+                        output_name=OUTPUT_OF_KIND.get(rec.kind, RESULT_NAME)),
+                    mark_done=_mark_done, start_worker=_start, kind=rec.kind)
             except _PrepareDone:
                 pass
             except Cancelled:
@@ -3534,6 +3605,8 @@ class LocalExecutor:
                 d["deliverables"] = list(rec.deliverables)
                 if rec.deliverables_unavailable:
                     d["deliverables_unavailable"] = dict(rec.deliverables_unavailable)
+        if rec.kind == "encode":
+            d["kind"] = "encode"           # said only when it is not a segmentation: no status moves
         if rec.cached:
             d["cached"] = True
         if not brief and rec.state == "done" and rec.result is not None:
@@ -4273,6 +4346,28 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             out["detail"] = detail
         return out
 
+    @app.get("/v1/encoders", tags=["tasks"])
+    def encoders():
+        """What this server encodes with (``POST /v1/jobs`` with ``kind=encode``): each
+        encoder's lattices, license, citation, and whether its weights are installed HERE -
+        a downloaded checkpoint by its digest, an nnU-Net encoder by its task's install;
+        None where this process cannot see the weights (an API that does not compute)."""
+        from .encoders import ENCODERS
+        from .encoders import weights as ew
+        from .encoders.serving import describe as describe_encoder
+        see = getattr(executor, "encoder_weights_visible", True)
+        rows = []
+        for spec in ENCODERS.values():
+            installed = None
+            if see:
+                try:
+                    installed = (ew.installed(spec) if spec.weights
+                                 else bool((seg.describe(spec.uses_task) or {}).get("weights_installed")))
+                except Exception:
+                    installed = None
+            rows.append(describe_encoder(spec, installed))
+        return {"encoders": rows}
+
     @app.post("/v1/tasks/{task}/prepare", status_code=202, tags=["tasks"])
     def prepare_task(request: Request, task: str):
         """Install a task's weights now (authorized): the deliberate form of
@@ -4547,8 +4642,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
     @app.post("/v1/jobs", status_code=202, tags=["jobs"])
     async def submit(request: Request, file: UploadFile | None = File(None),
                      task: str = Form(...), options: str = Form("{}"),
-                     source: str = Form(None), deliverables: str = Form(None)):
+                     source: str = Form(None), deliverables: str = Form(None),
+                     job_kind: str = Form("segment", alias="kind")):
         require_auth(request)
+        if job_kind not in ("segment", "encode"):
+            raise HTTPException(422, f"unknown job kind {job_kind!r}; a job is segment (the default) or encode")
         try:
             opts = json.loads(options)
             if not isinstance(opts, dict):
@@ -4609,6 +4707,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 raise HTTPException(422, f"source kind {kind!r} is not enabled on this "
                                          "server (missing dependency)")
         kind = src[0].get("kind", "upload") if src else "upload"
+        if job_kind == "encode":
+            return await _submit_encode(request, task, opts, src, asked, file, no_cache,
+                                        caller_asked_no_cache)
         written = task
         canonical = canon_task(task, unverified_ok=True)
         if canonical is None:              # catalog names only at the wire boundary
@@ -4679,9 +4780,56 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 _discard(jdir)
             raise
 
+    async def _submit_encode(request, task, opts, src, asked, file, no_cache, caller_asked_no_cache):
+        """``POST /v1/jobs`` with ``kind=encode`` (2026-09-23): an embedding field of ONE image.
+
+        The name is an ENCODER, resolved by the encoder registry and never by the task catalog
+        (``ts.v2:total_fast`` is both, and the kind decides). A pin (``@revision``) must be the
+        revision this server runs - an encoder has one at a time - so it is checked here and
+        not carried. Options are the encoder's (``int8``); a field has no deliverables. From
+        there it is the segmentation's door: the same staging, identity, cache and links."""
+        from .encoders.registry import resolve as resolve_encoder
+        from .encoders.serving import validate_options as encode_options
+        from .errors import InputError, RequestError
+        from .schemas import bind_sources, declared_inputs
+        try:
+            spec = resolve_encoder(task)
+        except InputError as e:
+            raise HTTPException(404, str(e)) from None
+        if not getattr(executor, "encodes", False):
+            raise HTTPException(501, "this server runs no encode jobs (no encoder worker is deployed); "
+                                     "encode locally with `haversack encode`")
+        if asked:
+            raise HTTPException(422, {"code": "no_deliverables",
+                                      "message": "an encode job renders no deliverables: a preview "
+                                                 "and statistics are of labels"})
+        try:
+            opts = encode_options(opts)
+            binding = bind_sources(src, declared_inputs({}), multi_input=False, task=spec.name)
+        except RequestError as e:
+            raise HTTPException(e.status, e.detail) from None
+        if not executor.accepting:
+            raise HTTPException(429, "queue is full, retry later", headers={"Retry-After": "30"})
+        jid, jdir = executor.new_job_dir()
+        handed: list = []
+        try:
+            return await _accept(request, jid, jdir, binding, spec.name, opts, src, file,
+                                 no_cache, executor, seg, caller_asked_no_cache,
+                                 handed=handed, role_specs={}, wanted=None, job_kind="encode")
+        except QueueFull as e:
+            _discard(jdir)
+            raise HTTPException(429, str(e), headers={"Retry-After": "30"}) from e
+        except content.UnidentifiedContent as e:
+            _discard(jdir)
+            raise HTTPException(422, {"code": "unknown_format", "message": str(e)}) from e
+        except BaseException:
+            if not handed:
+                _discard(jdir)
+            raise
+
     async def _accept(request, jid, jdir, binding, task, opts, src, file,
                       no_cache, executor, seg, caller_asked_no_cache=False,
-                      version=None, handed=None, role_specs=None, wanted=None):
+                      version=None, handed=None, role_specs=None, wanted=None, job_kind="segment"):
         # `wanted`: the request's deliverables, already checked (None: it named none).
         # It rides beside `opts` to the executor and never into them - `opts` is keyed.
         # `role_specs`: role -> what the task declares it takes (_validate_request's
@@ -4879,6 +5027,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                 # likewise: a request that named no list is the
                                 # executor's own default
                                 **({"deliverables": wanted} if wanted is not None else {}),
+                                # and the kind only when it is not a segmentation
+                                **({"kind": job_kind} if job_kind != "segment" else {}),
                                 refresh_input=caller_asked_no_cache,
                                 source_tokens=tokens,
                                 inputs=tuple(staged) if multi else ())
@@ -4937,9 +5087,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             asked = out.get("deliverables")
             kinds = set(getattr(executor, "artifacts", ()) or ()) if asked is None else set(asked)
             kinds -= set(out.get("deliverables_unavailable") or ())
-            by_path = resource_links(
+            # A field has no path form yet (its URL grammar is its own; phase 2's path
+            # surface), and `resource_links` would mint the LABELS' urls for a task-named
+            # encoder such as ts.v2:total_fast - so an encode job is reached through itself.
+            by_path = ({} if out.get("kind") == "encode" else resource_links(
                 out.get("task"), out.get("input_identity"), out.get("options"),
-                preview="preview" in kinds, statistics="statistics" in kinds)
+                preview="preview" in kinds, statistics="statistics" in kinds))
             if not by_path and "result" in links:
                 # A result with NO PATH - an upload, a `result:` reference, a
                 # multi-input job, options off the grid menu - reaches its artifacts
@@ -5073,6 +5226,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         task_name = (executor.status_of(jid) or {}).get("task", "labels")
         stem = _task_stem(task_name)           # canonical eco:name is not filename-safe
         head = request.method == "HEAD"
+        # What the bytes ARE, from the file the lookup handed back (either executor, entry or
+        # the job's own copy): an encode job's field is a zip, named and typed as one, and has
+        # no NIfTI form - refused, where converting it used to be SimpleITK's 500 (2026-09-23).
+        is_field = Path(path).name == FIELD_NAME
+        suffix, media = (".zarr.zip", "application/zip") if is_field else (".seg.nrrd", "application/octet-stream")
+        if is_field and format is not None:
+            raise HTTPException(422, f"format={format!r}: an embedding field is served only as itself "
+                                     "(a .zarr.zip); `feldglas` reads it")
         if head and format in ("nii.gz", "nii"):
             from fastapi import Response
             probe = Response(status_code=200, media_type="application/gzip")
@@ -5116,10 +5277,10 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             from fastapi import Response
             with fh:
                 size = os.fstat(fh.fileno()).st_size
-            return Response(status_code=200, media_type="application/octet-stream",
+            return Response(status_code=200, media_type=media,
                             headers={"ETag": etag, "Content-Length": str(size),
                                      "Content-Disposition":
-                                         f'attachment; filename="{stem}_{jid}.seg.nrrd"'})
+                                         f'attachment; filename="{stem}_{jid}{suffix}"'})
         from starlette.background import BackgroundTask
         from starlette.responses import StreamingResponse
 
@@ -5134,9 +5295,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             finally:
                 fh.close()
 
-        name = f"{stem}_{jid}.seg.nrrd"
+        name = f"{stem}_{jid}{suffix}"
         return StreamingResponse(
-            chunks(), media_type="application/octet-stream",
+            chunks(), media_type=media,
             headers={"ETag": etag, "Content-Length": str(os.fstat(fh.fileno()).st_size),
                      "Content-Disposition": f'attachment; filename="{name}"'},
             background=BackgroundTask(fh.close))

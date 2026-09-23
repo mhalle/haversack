@@ -802,6 +802,29 @@ def _command_line() -> click.Group:
             click.Option(['--no-wait'], is_flag=True, help='print the job id and return'),
         ])
     remote.add_command(remote_submit)
+    remote_encode = _Command(
+        'encode', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+        short_help='an embedding field of an image, computed by the server',
+        help=('Submit an encode job (POST /v1/jobs, kind=encode), follow it, and download the '
+              'field (<name>.zarr.zip). The server fetches, runs and caches it like a '
+              'segmentation; `haversack remote encoders` lists what it encodes with.'),
+        params=[
+            click.Argument(['input'],
+                           help=('a local image file, or <source>:<identifier> for a source the '
+                                 'server lists, e.g. idc:<crdc_series_uuid>')),
+            click.Option(['--encoder', '-e'], required=True,
+                         help='an encoder the server lists (`haversack remote encoders`)'),
+            click.Option(['-o', '--output'],
+                         help='where to save the field (default: <input>_<encoder>.zarr.zip)'),
+            click.Option(['--int8'], is_flag=True,
+                         help='store tokens as int8 with a per-channel scale (another result than fp16)'),
+            click.Option(['--no-wait'], is_flag=True, help='print the job id and return'),
+        ])
+    remote.add_command(remote_encode)
+    remote_encoders = _Command(
+        'encoders', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+        short_help='what the server can encode with')
+    remote.add_command(remote_encoders)
     remote_status = _Command(
         'status', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
         short_help="one job's status, as JSON",
@@ -990,6 +1013,24 @@ def _cmd_remote(args) -> int:
     if args.rcmd == "tasks":
         for t in c.tasks():
             print(t)
+    elif args.rcmd == "encoders":
+        for e in c.encoders().get("encoders") or []:
+            state = {True: "installed", False: "not installed", None: "-"}.get(e.get("installed"), "-")
+            print("\t".join([str(e.get("name")), str(e.get("license")), state]))
+    elif args.rcmd == "encode":
+        opts = {"int8": True} if args.int8 else {}
+        if args.no_wait:
+            print(c.submit(args.input, args.encoder, kind="encode", **opts))
+            return 0
+        stem = args.input[4:16] if args.input.startswith("idc:") else args.input.rsplit(".nii", 1)[0].rstrip("/")
+        out = args.output or f"{stem}_{_file_stem(args.encoder)}.zarr.zip"
+        final = c.encode(args.input, args.encoder, out, int8=args.int8,
+                         on_status=lambda st: print(f"  {st['state']}", file=sys.stderr, flush=True))
+        if final["state"] != "done":
+            print(f"job ended {final['state']}", file=sys.stderr)
+            return 1
+        print(f"wrote {out}", file=sys.stderr, flush=True)
+        print(out)
     elif args.rcmd == "results":
         import datetime
         import itertools
@@ -1044,6 +1085,12 @@ def _cmd_remote(args) -> int:
             print(f"job ended {final['state']}", file=sys.stderr)
             return 1
     return 0
+
+
+def _file_stem(name: str) -> str:
+    """A name as a file-name fragment: ``radar:pretrain`` -> ``radar_pretrain``."""
+    import re
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(name))
 
 
 def _cmd_rights(args) -> int:
@@ -1677,19 +1724,11 @@ def _cmd_encoders(args) -> int:
     """`haversack encoders`."""
     import json as _json
     from .encoders import ENCODERS, ALIASES, weights as ew
-    from .encoders.pipeline import attribution_of
-    rows = []
-    for spec in ENCODERS.values():
-        rows.append({"name": spec.name, "family": spec.family, "description": spec.description,
-                     "revision": spec.revision, "license": spec.license,
-                     "weights": [{"name": wf.name, "bytes": wf.size, "source": wf.source, "sha256": wf.sha256}
-                                 for wf in spec.weights],
-                     "uses_task": spec.uses_task,
-                     "installed": ew.installed(spec) if spec.weights else None,
-                     "lattices": [{"layer": l.layer, "kernel": list(l.kernel), "channels": l.width,
-                                   "reach_mm": l.receptive_mm} for l in spec.lattices],
-                     "aliases": sorted(a for a, t in ALIASES.items() if t == spec.name),
-                     "attribution": attribution_of(spec)})
+    from .encoders.serving import describe as describe_encoder
+    # one record, the one `GET /v1/encoders` serves, plus the names fields were once written under
+    rows = [{**describe_encoder(spec, ew.installed(spec) if spec.weights else None),
+             "aliases": sorted(a for a, t in ALIASES.items() if t == spec.name)}
+            for spec in ENCODERS.values()]
     if args.as_json:
         print(_json.dumps({"encoders": rows}, indent=1))
         return 0

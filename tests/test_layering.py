@@ -36,7 +36,7 @@ PIPELINE = {"io", "preprocess", "frame", "network", "pipeline", "cli", "tasks", 
             # the encoders subpackage (2026-09-23): each family module is pipeline - it reads images
             # and loads weights - and a new one must be classified here like any other module
             "encoders", "encoders.registry", "encoders.weights", "encoders.pipeline", "encoders.radar",
-            "encoders.nnunet"}
+            "encoders.nnunet", "encoders.serving"}
 # errors.py is deliberately dependency-free (stdlib only) so either layer may raise from it.
 SHARED = {"errors"}
 FORBIDDEN_FOR_KERNEL = {"nnunetv2", "SimpleITK", "nibabel", "scipy", "mlx", "totalsegmentator",

@@ -29,7 +29,7 @@ class Prepared:
         self.tensor, self.grid, self.data_box, self.extra = tensor, grid, data_box, extra
 
 
-def load(spec, weights_dir, device, dtype):
+def load(spec, weights_dir, device, dtype, task_weights=None):
     """The vision encoder and its projections, from the checkpoint - loaded with
     ``weights_only=True`` (no pickle executed), every key accounted for."""
     import torch

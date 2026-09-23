@@ -1976,6 +1976,12 @@ def _spawn_worker(task: str, jid: str, source_tokens=None):
 class ModalExecutor:
     """The :func:`haversack.serve.create_app` executor protocol over Modal primitives."""
 
+    #: Whether ``kind=encode`` jobs run here: not yet - no encoder worker is deployed
+    #: (2026-09-23). The submit door asks this and refuses with 501 before any job exists.
+    encodes = False
+    #: The api container holds no encoder weights: ``/v1/encoders`` says None, not False.
+    encoder_weights_visible = False
+
     #: Supplied by :func:`api` after construction - the API container builds a
     #: catalog-only Segmenter (device is cosmetic there; jobs run on the Worker).
     #: Declared here because `submit` reads it through `weights_versions_of`, so
@@ -2159,7 +2165,11 @@ class ModalExecutor:
     def submit(self, jid, jdir, input_path, task, options, *, source=None,
                identity=(), no_cache: bool = False, source_tokens=None,
                inputs: tuple = (), refresh_input: bool = False,
-               version: str | None = None, deliverables=None):
+               version: str | None = None, deliverables=None, kind: str = "segment"):
+        if kind != "segment":
+            # no encoder worker is deployed yet (2026-09-23); the route asks `encodes` first,
+            # so this is the second line, for a caller that did not
+            raise ValueError(f"this deployment runs no {kind!r} jobs")
         # `deliverables` is the request's list (None: it named none). It is written on
         # the job's record - which the worker reads ONCE, when the job starts, so the
         # list reaches it with no Dict read of its own - and it never reaches

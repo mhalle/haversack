@@ -14,6 +14,7 @@ another lineage is refused by name until its convention is added here as spec da
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 
@@ -21,25 +22,27 @@ from ..errors import InputError, ModelNotFound
 from .radar import Prepared
 
 
-def _task_spec(spec):
+def _task_spec(spec, root):
     """The TaskSpec of the segmentation task whose network this encoder is."""
     from ..ecosystems import EcosystemCatalog
-    from ..tasks import weights_root
-    eco, short, _, _ = EcosystemCatalog().resolve(spec.uses_task)
-    return eco.spec(short, weights_root("ts"))
+    eco, short, _, _ = EcosystemCatalog(root=root).resolve(spec.uses_task)
+    return eco.spec(short, root)
 
 
-def load(spec, weights_dir, device, dtype):
+def load(spec, weights_dir, device, dtype, task_weights=None):
     """haversack's TorchModel for the encoder's dataset, from weights ALREADY installed (the
-    task's, fetched by ``haversack weights fetch <task>``)."""
+    task's, fetched by ``haversack weights fetch <task>``) under ``task_weights`` - the root a
+    server's Segmenter reads, so the key (its describe) and the compute read ONE install - or
+    the default root."""
     from ..network import TorchModel
     from ..tasks import resolve_model_folder, weights_root
-    task = _task_spec(spec)
+    root = Path(task_weights) if task_weights is not None else weights_root("ts")
+    task = _task_spec(spec, root)
     if getattr(task, "lineage", "ts") != "ts":
         raise InputError(f"{spec.name}: an nnU-Net encoder of the {task.lineage!r} lineage is not supported yet")
     ds = spec.options["dataset"]
     try:
-        folder = resolve_model_folder(ds, model_root=weights_root("ts"), **task.model_choice(ds))
+        folder = resolve_model_folder(ds, model_root=root, **task.model_choice(ds))
     except ModelNotFound:
         raise InputError(f"{spec.name}: its task's weights are not installed - run `haversack weights fetch "
                          f"{spec.uses_task}`") from None

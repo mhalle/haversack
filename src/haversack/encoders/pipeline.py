@@ -69,25 +69,52 @@ def field_of(spec: EncoderSpec, tokens, prepared, identity: dict):
 def encode(name: str, input_spec, out, *, device: str = "auto", dtype: str | None = None, int8: bool = False,
            slab: int = 16, progress=None) -> dict:
     """Encode one input with encoder ``name`` into ``out`` (``<name>.zarr.zip``). Returns what was done."""
-    import numpy as np
+    _check_out(out)
+    spec = _ready(name)
+    from ..sources import materialize
+    t0 = time.time()
+    path = Path(materialize(str(input_spec), progress=progress))
+    return encode_file(spec.name, path, out, identity=_identity(input_spec, path), device=device, dtype=dtype,
+                       int8=int8, slab=slab, progress=progress, started=t0)
+
+
+def _check_out(out) -> Path:
     out = Path(out)
     if not str(out).endswith(".zarr.zip"):
         raise InputError(f"-o {out}: a field is written as <name>.zarr.zip")
+    return out
+
+
+def _ready(name: str) -> EncoderSpec:
+    """The spec, once its weights and the writer are known to be there - before minutes of work."""
     spec = resolve(name)
     if spec.weights and not W.installed(spec):
         total = sum(wf.size for wf in spec.weights) / 1e9
         raise InputError(f"{spec.name}: its weights are not installed ({total:.1f} GB) - run `haversack weights fetch "
                          f"{spec.name}` (or `--from FILE` for a copy you have)")
     try:
-        import feldglas.store  # noqa: F401 - the writer, before minutes of work
+        import feldglas.store  # noqa: F401 - the writer
     except ImportError:
         raise InputError("encoding writes through feldglas: install haversack[encode]") from None
+    return spec
+
+
+def encode_file(name: str, path, out, *, identity: dict, device: str = "auto", dtype: str | None = None,
+                int8: bool = False, slab: int = 16, progress=None, cancel=None, started: float | None = None,
+                task_weights=None) -> dict:
+    """Encode an input ALREADY on disk (a file or a DICOM folder) into ``out``. ``identity`` is what
+    the field records of its input - a server passes the job's (source, identifier, digest), not
+    the scratch path it staged the bytes at. ``cancel``, when given, is checked between steps.
+    ``task_weights``: where an nnU-Net encoder's task weights are installed (a server's own root)."""
+    import numpy as np
+    out = _check_out(out)
+    spec = _ready(name)
     from .. import io
     from ..resample import resolve_device
-    from ..sources import materialize
     say = progress or (lambda m: None)
-    t0 = time.time()
-    path = Path(materialize(str(input_spec), progress=progress))
+    check = (lambda: cancel.check()) if cancel is not None and hasattr(cancel, "check") else (lambda: None)
+    t0 = started if started is not None else time.time()
+    path = Path(path)
     image = io.read_image(path)
     family = importlib.import_module(f".{spec.family}", __package__)
     dev = resolve_device(device)
@@ -98,15 +125,19 @@ def encode(name: str, input_spec, out, *, device: str = "auto", dtype: str | Non
         raise InputError("fp16 on the CPU is refused: its Conv3d has no fast fp16 kernel - use --dtype fp32")
     tdt = {"fp16": torch.float16, "fp32": torch.float32}[dtype]
     t1 = time.time()
-    model = family.load(spec, W.directory(spec), dev, tdt)             # before prepare: an nnU-Net input depends on it
+    check()
+    model = family.load(spec, W.directory(spec), dev, tdt, task_weights=task_weights)             # before prepare: an nnU-Net input depends on it
     say(f"{spec.name}: preparing {path.name}")
     prepared = family.prepare(spec, image, model)
+    check()
     say(f"{spec.name}: encoding on {dev.type} ({dtype}), model grid {tuple(prepared.grid['shape'])}")
     t2 = time.time()
     tokens = family.run(spec, model, prepared, dev, tdt, slab=slab)
     t3 = time.time()
-    field = field_of(spec, tokens, prepared, _identity(input_spec, path))
+    check()
+    field = field_of(spec, tokens, prepared, identity)
     from feldglas.store import write_field
+    out.parent.mkdir(parents=True, exist_ok=True)
     write_field(out, field, token_dtype=np.int8 if int8 else np.float16)
     return {"field": str(out), "bytes": out.stat().st_size, "encoder": spec.name, "revision": spec.revision,
             "license": spec.license, "device": dev.type, "dtype": dtype, "int8": int8,

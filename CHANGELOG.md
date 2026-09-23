@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **Encode jobs on the server.** `POST /v1/jobs` takes `kind=encode` and an encoder name, and
+  the job's result is an embedding field (`.zarr.zip`) where a segmentation's is labels: the
+  same queue, single flight, result cache and job routes, with `GET /v1/encoders`,
+  `RemoteClient.encode`, and `haversack remote encode` / `remote encoders` beside them. A
+  field's result key includes its kind, because `ts.v2:total_fast` is a task and an encoder
+  and one key for both would serve a label map to a field reader; a segmentation's key
+  leaves the kind out, so no existing result recomputes. On the sample CT, both encoders
+  served by a local server gave tokens identical to `haversack encode`, and a repeat ask
+  was a cache hit with the same bytes. The local server only: Modal has no encoder worker yet.
+  The nnU-Net encoders now read their task's weights from the root the server's own
+  `Segmenter` reads, where they used to read the default root whatever the server used.
+
 - **`haversack encode`: embedding fields, with the weights managed here.** An encoder's token
   lattices are written as a feldglas embedding field (`.zarr.zip`, the `encode` extra), so the
   weights an encoder needs are fetched, pinned and verified by the same program that manages

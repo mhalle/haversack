@@ -520,8 +520,13 @@ Encoders are named like tasks, `family[.version]:name[@revision]`:
 Inputs are anything `segment` takes, local files and remote sources alike. `--int8` stores
 tokens as int8 with a per-channel scale (about half the size of the fp16 default); `--json`
 prints what was done, with timings. The names used before encoding moved into haversack
-(`radar`, `null-totalsegmentator`, `null-totalsegmentator-1.5mm`) still resolve. Encoding is
-local today; the server has no encode job yet.
+(`radar`, `null-totalsegmentator`, `null-totalsegmentator-1.5mm`) still resolve. A server
+encodes too (see SERVER.md, "Embedding fields"):
+
+```bash
+haversack remote encoders
+haversack remote encode idc:<uuid> -e radar:pretrain -o ct.radar.zarr.zip
+```
 
 ## What haversack does not do yet
 
