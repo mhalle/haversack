@@ -477,6 +477,12 @@
 - rankfield is pinned at `v0.3.3`, in `pyproject.toml` and CI's hand-written list. It is
   v0.3.2's code with duckn pinned at `v0.5.1`, so the two siblings' tags now agree on duckn;
   no encoder or decoder change and no bytes move.
+- rankfield is pinned at `v0.3.5` and feldglas at `v0.1.2`, in `pyproject.toml` and CI's
+  list. rankfield 0.3.5 sizes the encoders' slabs from `memory_budget` (1 GiB default) and
+  reads fields straight from a store; no bytes move. feldglas moves with it only because uv
+  resolves a git dependency's own `[tool.uv.sources]`: 0.1.1 pinned rankfield `v0.3.3`, and
+  two URLs for one package leave `haversack[encode]` unresolvable. 0.1.2 is the same code
+  with the new pin.
 
 - **`HEAD /v1/jobs/<id>/result`, and a "gone" no cache may keep.** An adversarial pass on
   the artifact routes below found the one file route they left without a `HEAD` - a job's
