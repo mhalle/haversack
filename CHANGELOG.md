@@ -31,6 +31,15 @@
   differently oriented; `tools/ranked_upgrade_seg.py` no longer drops `labeling_scheme`.
   **Cascade stores written before this are misnamed in layer 0: rebuild them.** No format
   version moves; emit directories that predate the field are still named correctly.
+- **`haversack view` opens current stores again.** Its bundled `data/preview.html` dated from
+  2026-09-05 and accepted only seg 0.6/0.7 and ranked 0.2/0.3, so it refused every store
+  written since the seg 0.8 work above. Rebuilt from sdfview `1983b26` (byte-identical to a
+  rebuild from that commit): it reads seg 0.9 segments by (layer, value) and ranked format
+  0.4, and a cascade whose parts sit on different grids - a 3 mm whole-body crop stage under
+  a 0.7 mm fine stage - is composed as haversack composes parts: each grid restored on its
+  own, painted in `part_order`, later over earlier. Parts sharing a grid still share an atlas
+  (a five-part `total` store renders as before, 7.0 s to load instead of 8.3 s). The lite
+  viewer and the margin renderer still refuse stores on several grids.
 - **`haversack serve --result-store s3://bucket/prefix` shares the result cache between
   servers through an object store** (also `gs://`, `az://`; `HAVERSACK_RESULT_STORE`). The
   POSIX cache's guarantees rest on rename and `flock`, which an object store does not have
