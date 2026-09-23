@@ -75,6 +75,36 @@ Against the pointer on main:
 - **Delete is a tombstone manifest** (`"deleted": true`, with `replaces`), so a deletion is
   a publication and travels like one.
 
+**As built (step 3, 2026-09-23)** - where the implementation differs from the sketch above,
+and why:
+
+- **The generation token is the PUBLICATION's, not the manifest's digest.** A manifest
+  carries `"publication": "<uuid hex>"`, and a late artifact's AMENDING manifest
+  (`"amends": true`) keeps it. With the digest as the token, every preview would have
+  changed it: every other host's local copy would stop being current, and the
+  `add_artifact(generation=)` for the statistics - named after the preview's - would be
+  refused. The manifest digest identifies a manifest (ancestry, sync); the token identifies
+  a publication (history, local copies, `find_generation`). An artifact lands iff the ref's
+  current manifest is the SAME publication, which is also simpler than comparing primary
+  outputs.
+- **The ref stays at `results/<key>.json`** and is `{"format": 2, "manifest": "sha256:…",
+  "body": "<the manifest's exact bytes>"}`. The inline copy, checked against the digest,
+  keeps a read of the present at ONE request; a copy that does not hash to the name is
+  ignored and the object read. The manifest objects live in the blob store.
+- **The format number is 2**, and format 1 - every pointer written before this - is still
+  read. The first write to a format 1 key converts its inline history to a chain, oldest
+  first, KEEPING the old tokens (a local copy of it stays current, a `result:` pin still
+  resolves); a generation it cannot date is dropped, as format 1's own writer did.
+- **A manifest is bound to its key** (`"key"` inside it, checked): a ref naming another
+  key's manifest is unreadable, not that key's result.
+- **Tombstones do not expire yet.** Removing a ref needs a conditional delete, which S3 does
+  not offer, and an unconditional one can remove a publication that landed a moment
+  earlier. A tombstone is a few hundred bytes and keeps nothing else alive; expiry comes
+  with sync, which is what needs a bound on it.
+- **The sweep marks every manifest the history walk read** - amending ones included, since
+  each is a link - but none past the bound, so a chain's tail is collected with the bytes it
+  named.
+
 ### 2. One storage interface, backends behind it
 
 Six operations: get an object; put an object if absent; read a ref with its version;
@@ -226,8 +256,19 @@ The proposed order - each step behind a flag, with deployments untouched until t
    switch. The soak (3 publishers, 3 readers, a zero-grace sweeper, a deleter, a publisher
    killed mid-flight) passed on APFS - 575 publications, ~1,970 hits, no torn read - and on
    exFAT, ending with a correct hit on a fresh host both times.
-3. **Manifests, `replaces`, tombstones**, replacing the inline history - with the pointers
-   already written (format 1) still read, as the time-limited shim of decision 1.
+3. ~~**Manifests, `replaces`, tombstones**~~ **DONE 2026-09-23** (see "As built" in
+   section 1). Format 2 is what every host now writes; format 1 is read and converted on
+   first write. New tests pin the ref, the manifest's binding to its key, the inline copy's
+   check, amendments, tombstones, the conversion and the sweep's chain marking; fourteen
+   guarantees mutation-checked. Writing it found two things beyond the format: a host
+   holding the current publication re-downloaded the LABELS whenever a late artifact was
+   missing (`_fill` asked "is every file here" where it meant "is this publication here") -
+   fixed; and a generation token was only checked to be a non-empty string although it
+   becomes a local path - not exploitable as built (every path from it starts with a
+   prefixed name that does not exist), now validated anyway. The soak passed on a
+   directory and on R2. **Version skew:** an older haversack reads a format 2 ref as a newer
+   format - a miss, a refused publication, a sweep that deletes nothing - so every host
+   sharing a store upgrades together.
 4. **Sync, and the read-only app over a bucket** (`refs/tasks`, no write probe).
 5. **One development server on the disk store behind a flag**, and a soak.
 6. **Inputs** onto the same store (the older step 4 below, unchanged in intent).

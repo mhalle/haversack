@@ -223,6 +223,19 @@
   the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
   be written no longer fails a publication that already succeeded; and `list` reads at most
   `limit` pointers rather than one per entry in the bucket.
+- **The result store's format 2: a ref naming an immutable manifest.** Each key's ref
+  (`results/<key>.json`) names a manifest stored as a blob - files by digest, result, meta,
+  the publication's token, and `replaces`, the manifest it superseded - and carries its
+  exact bytes, checked against the digest, so the present is still one read. History is the
+  `replaces` chain instead of a list copied into every pointer (a read no longer grows with
+  history); a late artifact is an amending manifest of the same publication; a deletion is a
+  tombstone, which the coming sync can carry where a removed ref could not. Format 1 is
+  still read and is converted, tokens kept, by the first write to its key. **Every host
+  sharing a store must upgrade together:** an older haversack reads format 2 as a newer
+  format - a miss, a refused publication, a sweep that deletes nothing. Also fixed on the
+  way: a host holding a result re-downloaded its labels whenever a late artifact had not
+  reached it yet, and a generation token read from the store is now validated before it
+  becomes part of a local path.
 - **The result store runs on a directory too: `--result-store file:///path`.** provender
   0.1.6 adds `DiskStore`, a directory that honors both conditional writes (obstore's own
   local store honors only one, so `file://` used to be refused at startup), and

@@ -14,11 +14,17 @@ protocol, the one build caches use (Bazel's ActionCache over a CAS):
   and two copies of one protocol is how this repo's defects have always started. What is
   haversack's here is the POINTER and the policy around it - including, for the sweep, the
   live set, which is the only part that knows what a result is.
-- **One pointer per key**, ``results/<key>.json``: the files by digest plus the result and
-  meta documents inline. Publication is uploading the blobs and then ONE conditional write
-  of the pointer (create-if-absent, or replace-if-unchanged against the etag read), so the
-  pointer IS the generation - no staging, no rename, no writer claim. A lost race rereads
-  and writes again: last writer wins, as the rename did.
+- **One ref per key**, ``results/<key>.json``, naming an immutable MANIFEST (format 2,
+  2026-09-23): the files by digest, the result and meta documents, the publication's token,
+  and ``replaces`` - the manifest it superseded. Manifests are stored as blobs, so they are
+  content-addressed like everything else; the ref also carries its manifest's exact bytes,
+  checked against the digest, so reading the present is still one request. Publication is
+  uploading the blobs and the manifest and then ONE conditional write of the ref
+  (create-if-absent, or replace-if-unchanged against the etag read) - no staging, no rename,
+  no writer claim. A lost race rereads and writes again: last writer wins, as the rename did.
+  History is the ``replaces`` chain; a late artifact is an AMENDING manifest of the same
+  publication (its token kept); a deletion is a TOMBSTONE manifest. Format 1 - one pointer
+  with its history inline - is still read, and converted by the first write to its key.
 - **Cleanup is dumb on purpose.** ``sweep`` deletes blobs no pointer references once they
   are older than a grace period. Age is not liveness, and this does judge by age - but what
   it can get wrong is now a MISS (a pointer naming a swept blob reads as absent and the next
@@ -57,7 +63,19 @@ from .errors import InputError
 
 #: Bump if the pointer document changes shape incompatibly; a reader refuses (reads as a
 #: miss) any pointer whose format it does not know, rather than guessing at its fields.
-POINTER_FORMAT = 1
+#: 2 (2026-09-23): a REF naming an immutable MANIFEST, history as the manifests' `replaces`
+#: chain, deletion as a tombstone manifest (docs/cache-consolidation.md, "The design from
+#: scratch", step 3).
+POINTER_FORMAT = 2
+#: The inline-history pointer every host wrote before format 2. Still READ - a time-limited
+#: shim (decision 1 of the design) - and converted to a manifest chain, old generation
+#: tokens kept, by the first write to its key. Never written.
+LEGACY_FORMAT = 1
+#: How many manifests a history walk reads before it stops, whatever it has found. Each
+#: publication is one manifest plus one per late artifact (a preview, statistics), so this
+#: is generous for HISTORY_KEEP publications and bounds what a damaged or malicious chain
+#: can cost a reader.
+CHAIN_STEPS_MAX = 64
 #: How old an unreferenced blob must be before ``sweep`` may delete it - provender's
 #: default, and for the same reason: a blob is unreferenced for the few seconds between its
 #: upload and its pointer's write, and a too-short grace costs a republication while a long
@@ -174,9 +192,9 @@ def _well_formed(ptr) -> bool:
     (review, 2026-09-19). A digest is checked here too, where it is DATA; ``provender.Blobs.path``
     keeps its own check for the bytes this process supplies.
     """
-    if not isinstance(ptr, dict) or ptr.get("format") != POINTER_FORMAT:
+    if not isinstance(ptr, dict) or ptr.get("format") != LEGACY_FORMAT:
         return False
-    if not isinstance(ptr.get("generation"), str) or not ptr["generation"]:
+    if not _token_ok(ptr.get("generation")):
         return False
     if not _well_formed_files(ptr.get("files")):
         return False
@@ -188,6 +206,26 @@ def _well_formed(ptr) -> bool:
     return True
 
 
+def _token_ok(token) -> bool:
+    """A generation token this host may use as part of a directory name (``g-<token>``).
+
+    It comes from a document another host wrote, and it becomes part of a PATH. Format 1
+    checked only that it was a non-empty string. A ``../`` in it was not exploitable in
+    practice - every path built from a token starts with a prefixed name (``g-..``,
+    ``.staging-..``) that does not exist, so resolution fails before anything is written
+    (measured, 2026-09-23) - but that is luck, not a rule. The rule is this module's: no name
+    read from the store decides a local path. Only ``[0-9A-Za-z_-]``; every token haversack
+    has written is a uuid4's hex."""
+    return (isinstance(token, str) and 0 < len(token) <= 128
+            and all(c.isascii() and (c.isalnum() or c in "_-") for c in token))
+
+
+def _digest_ok(digest) -> bool:
+    return (isinstance(digest, str) and digest.startswith("sha256:")
+            and len(digest) == len("sha256:") + 64
+            and all(c in "0123456789abcdef" for c in digest[len("sha256:"):]))
+
+
 def _well_formed_files(files) -> bool:
     if not isinstance(files, dict):
         return False
@@ -196,12 +234,56 @@ def _well_formed_files(files) -> bool:
             return False
         if not isinstance(blob.get("size"), int):
             return False
-        digest = blob.get("digest")
-        if (not isinstance(digest, str) or not digest.startswith("sha256:")
-                or len(digest) != len("sha256:") + 64
-                or any(c not in "0123456789abcdef" for c in digest[len("sha256:"):])):
+        if not _digest_ok(blob.get("digest")):
             return False
     return True
+
+
+def _canonical(doc) -> bytes:
+    """The one serialization of a document whose bytes are hashed: a manifest's digest
+    must not depend on which host wrote it."""
+    return json.dumps(doc, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _digest_of(data: bytes) -> str:
+    import hashlib
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def _dated(when) -> bool:
+    return isinstance(when, (int, float)) and not isinstance(when, bool)
+
+
+def _manifest_ok(m, key: str) -> bool:
+    """Is this manifest one this code may act on - checked field by field, as a pointer is,
+    and bound to its KEY: a ref naming another key's manifest would otherwise serve that
+    key's result under this one."""
+    if not isinstance(m, dict) or m.get("format") != POINTER_FORMAT or m.get("key") != key:
+        return False
+    if not _dated(m.get("published")):
+        return False
+    replaces = m.get("replaces")
+    if not isinstance(replaces, list) or not all(_digest_ok(d) for d in replaces):
+        return False
+    if m.get("deleted") is True:
+        return True                            # a tombstone names nothing else
+    return _token_ok(m.get("publication")) and _well_formed_files(m.get("files"))
+
+
+def _view(m: dict, digest: str) -> dict:
+    """A manifest as every reader in this module sees an entry: the fields format 1's
+    pointer had (``generation`` is the publication's token), plus where it came from."""
+    return {"format": POINTER_FORMAT, "key": m["key"], "generation": m.get("publication"),
+            "published": m["published"], "files": m.get("files") or {},
+            "result": m.get("result"), "meta": m.get("meta"),
+            "replaces": list(m.get("replaces") or []), "amends": m.get("amends") is True,
+            "deleted": m.get("deleted") is True, "_manifest": digest, "_doc": m}
+
+
+def _manifest_of(entry: dict) -> dict:
+    """The manifest document an entry was read from - kept whole, because rebuilding it
+    from the view could serialize differently and so name a different digest."""
+    return entry["_doc"]
 
 
 def _primary_name(files) -> str | None:
@@ -233,9 +315,9 @@ def _usable(past, *, now: float, keep_undated: bool = False) -> bool:
     An entry that cannot be DATED is not kept: an undatable or future-dated generation was
     immune to ``HISTORY_MAX_AGE_S`` forever, which is the opposite of a bounded history.
     """
-    if not isinstance(past, dict) or not isinstance(past.get("generation"), str):
+    if not isinstance(past, dict) or not _token_ok(past.get("generation")):
         return False
-    if not past["generation"] or not _well_formed_files(past.get("files")):
+    if not _well_formed_files(past.get("files")):
         return False
     when = past.get("published")
     if not isinstance(when, (int, float)) or isinstance(when, bool):
@@ -244,7 +326,8 @@ def _usable(past, *, now: float, keep_undated: bool = False) -> bool:
 
 
 def _generations(ptr, *, now: float | None = None, keep_undated: bool = False) -> list:
-    """The current publication and every kept predecessor, newest first.
+    """The current publication and every kept predecessor, newest first - of a FORMAT 1
+    pointer, whose history is inline. Format 2's is a chain: ``SharedResultCache._chain``.
 
     The age bound is applied HERE as well as at write time. It used to be applied only
     when a key was republished, so a key published three times and then left alone kept
@@ -310,38 +393,159 @@ class SharedResultCache:
         return isinstance(fmt, int) and not isinstance(fmt, bool) and fmt > POINTER_FORMAT
 
     def _read_pointer(self, key: str, *, raise_faults: bool = False):
-        """``(pointer, update mode)`` or ``(None, None)``. A pointer this code cannot read
-        - unknown format, not JSON - is reported as absent: a miss, never a guess.
+        """``(entry, update mode)``, or ``(None, mode)`` when there is no LIVE entry - absent,
+        deleted (a tombstone), or unreadable: a miss, never a guess. The entry is a
+        :func:`_view`, or a format 1 pointer as it was written.
 
         A store FAULT (credentials, network, a 503) is a miss here, and is RAISED for a
         caller that passes ``raise_faults`` - every writer, because reporting a fault as
         "absent" would have it publish over a pointer it could not read, and `get`, which
         falls back to this host's own copy rather than losing it.
         """
+        kind, entry, mode = self._read_ref(key, raise_faults=raise_faults)
+        return (entry if kind == "live" else None), mode
+
+    def _read_ref(self, key: str, *, raise_faults: bool = False):
+        """``(kind, entry, update mode)``: kind is ``"absent"``, ``"live"``, ``"tombstone"``
+        or ``"unreadable"``. What callers that must tell those apart use - the sweep, which
+        may not count a deletion as an unreadable entry, and `delete`, which may not count
+        garbage as nothing.
+
+        A format 2 ref carries its manifest's exact bytes beside the digest: checked against
+        the digest, they make a current read ONE request, as format 1's was. The manifest
+        OBJECT is the authority, and is read when the copy is missing or wrong.
+        """
         try:
             got = ops.get(self.store, self._pointer_path(key))
         except FileNotFoundError:
-            return None, None
+            return "absent", None, None
         except Exception as e:                 # noqa: BLE001 - a read degrades, see _miss
             if raise_faults:
                 raise
             _miss(f"reading the pointer for {key[:12]}", e)
-            return None, None
+            return "absent", None, None
         mode = update_mode(got.meta)
         try:
-            ptr = json.loads(bytes(got.bytes()))
+            doc = json.loads(bytes(got.bytes()))
         except (ValueError, UnicodeDecodeError):
-            return None, mode
-        return (ptr if _well_formed(ptr) else None), mode
+            return "unreadable", None, mode
+        if isinstance(doc, dict) and doc.get("format") == LEGACY_FORMAT:
+            return ("live", doc, mode) if _well_formed(doc) else ("unreadable", None, mode)
+        if (not isinstance(doc, dict) or doc.get("format") != POINTER_FORMAT
+                or not _digest_ok(doc.get("manifest"))):
+            return "unreadable", None, mode
+        m = self._manifest(key, doc["manifest"], inline=doc.get("body"),
+                           raise_faults=raise_faults)
+        if m is None:
+            return "unreadable", None, mode
+        return ("tombstone" if m.get("deleted") is True else "live"), \
+            _view(m, doc["manifest"]), mode
+
+    def _manifest(self, key: str, digest: str, *, inline=None, raise_faults: bool = False):
+        """The manifest ``digest`` names, verified against its name and bound to ``key``;
+        None when it is gone, wrong, or not one of this key's."""
+        data = inline.encode("utf-8") if isinstance(inline, str) else None
+        if data is None or _digest_of(data) != digest:
+            try:
+                data = bytes(ops.get(self.store, self.blobs.path(digest)).bytes())
+            except FileNotFoundError:
+                return None
+            except Exception as e:             # noqa: BLE001 - a read degrades, see _miss
+                if raise_faults:
+                    raise
+                _miss(f"reading a manifest of {key[:12]}", e)
+                return None
+            if _digest_of(data) != digest:
+                return None
+        try:
+            m = json.loads(data)
+        except (ValueError, UnicodeDecodeError):
+            return None
+        return m if _manifest_ok(m, key) else None
+
+    def _chain(self, entry, *, now: float | None = None, raise_faults: bool = False,
+               manifests: set | None = None) -> list:
+        """The current publication and every kept predecessor, newest first - one element
+        per PUBLICATION, in the shape `_generations` gives a format 1 pointer.
+
+        Walks ``replaces`` from the current manifest. A late artifact is an AMENDING
+        manifest of the same publication, so a walk meets a publication's newest (most
+        complete) manifest first and skips its earlier ones. It stops at HISTORY_KEEP
+        predecessors, at the first one older than HISTORY_MAX_AGE_S, at a deletion (history
+        does not survive one), at a manifest that is gone - the sweep takes a chain's tail
+        once it falls out of these bounds, so a gone manifest is simply where history ends -
+        and after CHAIN_STEPS_MAX reads whatever it found.
+
+        ``manifests`` collects every manifest digest the walk READ, amending ones included:
+        the sweep must keep the links, or the next walk ends early.
+        """
+        now = time.time() if now is None else now
+        if entry.get("format") == LEGACY_FORMAT:
+            return _generations(entry, now=now)
+        key = entry["key"]
+        if manifests is not None:
+            manifests.add(entry["_manifest"])
+        out = [{"generation": entry["generation"], "published": entry["published"],
+                "files": entry["files"], "result": entry["result"], "meta": entry["meta"],
+                "current": True}]
+        seen = {entry["generation"]}
+        nxt = entry["replaces"][0] if entry["replaces"] else None
+        for _ in range(CHAIN_STEPS_MAX):
+            if nxt is None or len(out) > HISTORY_KEEP:
+                break
+            m = self._manifest(key, nxt, raise_faults=raise_faults)
+            if m is None or m.get("deleted") is True:
+                break
+            if m["publication"] not in seen:
+                if m["published"] <= now - HISTORY_MAX_AGE_S:
+                    break                      # and its manifest is not kept: the tail goes
+                seen.add(m["publication"])
+                out.append({"generation": m["publication"], "published": m["published"],
+                            "files": m.get("files") or {}, "result": m.get("result"),
+                            "meta": m.get("meta"), "current": False})
+            if manifests is not None:
+                manifests.add(nxt)             # a kept publication's, amending ones included
+            nxt = m["replaces"][0] if m["replaces"] else None
+        return out
+
+    def _write_manifest(self, m: dict) -> str:
+        data = _canonical(m)
+        self.blobs.put_bytes(data)
+        return _digest_of(data)
+
+    def _predecessor(self, key: str, kind: str, entry, new: dict) -> list:
+        """What a new manifest ``replaces``: the current one; for a format 1 entry, its
+        whole history converted into a chain first (old tokens kept, so a local copy of it
+        stays current); nothing for a first publication - or for a deletion of a format 1
+        entry, whose history a tombstone would only have to keep alive to throw away."""
+        if kind in ("live", "tombstone") and entry.get("format") == POINTER_FORMAT:
+            return [entry["_manifest"]]
+        if kind != "live" or new.get("deleted") is True:
+            return []
+        prev: list = []
+        for g in reversed(_generations(entry)):        # oldest first
+            if not _dated(g["published"]):
+                # format 1's writer dropped a generation it could not date rather than keep
+                # it forever; stamping it "now" here would have given it 30 more days
+                continue
+            prev = [self._write_manifest({
+                "format": POINTER_FORMAT, "key": key, "publication": g["generation"],
+                "published": g["published"], "files": g["files"], "result": g.get("result"),
+                "meta": g.get("meta") or {}, "replaces": prev})]
+        return prev
 
     def _swap(self, key: str, update):
-        """Replace the pointer with ``update(current)`` by conditional write, rereading on
-        every lost race; ``update`` returning None abandons the swap. Returns what was
-        written, or None."""
+        """Publish ``update(current)`` as a new manifest and point the ref at it by
+        conditional write, rereading on every lost race; ``update`` returning None abandons
+        the swap. Returns the written entry (a :func:`_view`), or None.
+
+        ``update`` is given the LIVE entry or None, and returns the manifest's content:
+        ``publication``, ``published``, ``files``, ``result``, ``meta`` (and ``amends``), or
+        ``deleted``. ``replaces`` is this method's: it is what makes the history."""
         from obstore.exceptions import AlreadyExistsError, PreconditionError
         for _ in range(SWAP_ATTEMPTS):
-            ptr, mode = self._read_pointer(key, raise_faults=True)
-            if ptr is None and mode is not None and self._is_newer_format(key):
+            kind, entry, mode = self._read_ref(key, raise_faults=True)
+            if kind == "unreadable" and self._is_newer_format(key):
                 # an object is there that this version cannot read - most likely a newer
                 # POINTER_FORMAT. Writing over it would take another host's current result
                 # and its whole history out of the index in one write (review, 2026-09-20).
@@ -349,16 +553,22 @@ class SharedResultCache:
                     f"result {key[:12]}...: the store holds an entry this version cannot "
                     "read (a newer haversack wrote it); refusing to overwrite it. Upgrade "
                     "this host, or use a different --result-store prefix")
-            new = update(ptr)
+            new = update(entry if kind == "live" else None)
             if new is None:
                 return None
-            body = json.dumps(new, sort_keys=True).encode("utf-8")
+            manifest = {"format": POINTER_FORMAT, "key": key, **new,
+                        "replaces": self._predecessor(key, kind, entry, new)}
+            data = _canonical(manifest)
+            digest = _digest_of(data)
+            self.blobs.put_bytes(data)
+            ref = _canonical({"format": POINTER_FORMAT, "manifest": digest,
+                              "body": data.decode("utf-8")})
             try:
-                ops.put(self.store, self._pointer_path(key), body,
+                ops.put(self.store, self._pointer_path(key), ref,
                         mode=mode if mode is not None else "create")
             except (AlreadyExistsError, PreconditionError):
                 continue                       # another writer moved it: read again
-            return new
+            return _view(manifest, digest)
         raise RuntimeError(f"result {key}: {SWAP_ATTEMPTS} publications raced this one; "
                            "the pointer was not written")
 
@@ -388,7 +598,7 @@ class SharedResultCache:
                  "current": g["current"], "result": g.get("result"),
                  "bytes": sum(b["size"] for b in g["files"].values()),
                  "files": sorted(g["files"])}
-                for g in _generations(ptr)]
+                for g in self._chain(ptr)]
 
     def find_generation(self, key: str, digest: str) -> str | None:
         """Which kept generation of ``key`` published a primary output (labels, or a field)
@@ -410,7 +620,7 @@ class SharedResultCache:
         ptr, _ = self._read_pointer(key)
         if ptr is None:
             return None
-        for gen in _generations(ptr):
+        for gen in self._chain(ptr):
             blob = (gen["files"] or {}).get(_primary_name(gen["files"]))
             if isinstance(blob, dict) and blob.get("digest") == digest:
                 return gen["generation"]
@@ -427,7 +637,7 @@ class SharedResultCache:
         ptr, _ = self._read_pointer(key)
         if ptr is None:
             return None
-        for g in _generations(ptr):
+        for g in self._chain(ptr):
             if g["generation"] != generation:
                 continue
             primary = _primary_name(g["files"])
@@ -492,7 +702,13 @@ class SharedResultCache:
             return False
         with self._fill_lock(key):
             local_dir = self.local._generation_dir(key, gen)
-            have_gen = self._holds(key, ptr)
+            # the PUBLICATION is here - its token current, its primary output and both
+            # documents present - even if a late artifact is not. Asking `_holds` (every
+            # file) instead re-downloaded the labels whenever a preview landed after this
+            # host's copy, which with amending manifests is every result (step 3, 2026-09-23)
+            have_gen = self._holds(key, ptr) or (
+                self.local.generation(key) == gen
+                and all((local_dir / n).exists() for n in (primary, "result.json", "meta.json")))
             # ONLY these names, and they are spelled out here rather than taken from the
             # pointer: a pointer is written by another host, and a name of its choosing
             # ("../..", an absolute path) would decide where these bytes land.
@@ -703,13 +919,12 @@ class SharedResultCache:
                      if src and Path(src).exists()}
 
         def publish(current):
-            # what is being replaced joins the history, and the oldest falls off it
-            return {"format": POINTER_FORMAT, "generation": gen, "published": now,
-                    "files": files, "result": result, "meta": meta,
-                    "history": _kept_history(current, now, gen)}
+            # what is being replaced becomes this manifest's `replaces` (in _swap)
+            return {"publication": gen, "published": now, "files": files,
+                    "result": result, "meta": meta}
         with keep_the_work():
             pointer = self._swap(key, publish)
-        self._verify(pointer["files"], sources)
+        self._verify(pointer["files"], sources, manifest=pointer)
         try:
             self.local.put(key, labels_path, result, meta, preview_path=preview_path,
                            statistics_path=statistics_path, output_name=output_name,
@@ -724,16 +939,25 @@ class SharedResultCache:
             self._confirm(key, gen)            # it saw the entry current: it wrote it
         return gen
 
-    def _verify(self, files: dict, sources: dict) -> None:
+    def _verify(self, files: dict, sources: dict, *, manifest=None) -> None:
         """Put back any blob that was not uploaded because it already existed and has since
         been swept - the window between that check and the pointer write. The pointer now
-        references them, so this is the last moment anything may quietly remove them."""
+        references them, so this is the last moment anything may quietly remove them.
+
+        ``manifest`` (a written entry) is checked too: the ref carries a copy, so the
+        present never needs the object - but the NEXT publication's history walk does."""
         for name, blob in files.items():
             try:
                 if not self.blobs.has(blob["digest"]):
                     self.blobs.put_file(sources[name])
             except Exception as e:             # noqa: BLE001 - the pointer is already out
                 _miss(f"re-checking {name}", e)
+        if manifest is not None and manifest.get("format") == POINTER_FORMAT:
+            try:
+                if not self.blobs.has(manifest["_manifest"]):
+                    self._write_manifest(_manifest_of(manifest))
+            except Exception as e:             # noqa: BLE001
+                _miss("re-checking a manifest", e)
 
     def add_artifact(self, key: str, name: str, src_path, generation=None) -> bool:
         """Add an artifact to the publication it was rendered for; False when that
@@ -755,13 +979,19 @@ class SharedResultCache:
                 return None
             files = dict(ptr.get("files") or {})
             files[name] = blob
-            return {**ptr, "files": files}
+            # an AMENDING manifest of the same publication: its token and date stay, so
+            # the local copy is still current and history counts it once
+            return {"publication": ptr["generation"],
+                    "published": ptr["published"] if _dated(ptr.get("published"))
+                    else time.time(),
+                    "files": files, "result": ptr.get("result"), "meta": ptr.get("meta"),
+                    "amends": True}
         try:
             blob = self.blobs.put_file(src_path)
             written = self._swap(key, update)
             if written is None:
                 return False
-            self._verify({name: blob}, {name: src_path})   # the sweep window, as in `put`
+            self._verify({name: blob}, {name: src_path}, manifest=written)
         except Exception as e:                 # noqa: BLE001
             _miss(f"placing {name} on {key[:12]}", e)
             return False
@@ -787,23 +1017,33 @@ class SharedResultCache:
         removing it would leave its blobs with nothing naming them, and this version's own
         sweep - which spares nothing it cannot account for only while that pointer is
         THERE - would then collect another host's live data.
+
+        A live entry is replaced by a TOMBSTONE (format 2), not removed: a manifest saying
+        "deleted", written by the same conditional write as a publication. It keeps nothing
+        alive - the sweep marks no blob a tombstone's predecessors named, so the result's
+        bytes and its whole history go at the next sweep - and it is what a SYNC will carry
+        to a copy of this store, where a removed ref would be indistinguishable from one
+        never copied. Garbage under the ref's name is nobody's data and is removed outright.
         """
         if self._is_newer_format(key):
             raise ObjectStoreUnsuitable(
                 f"result {key[:12]}...: this entry was written by a newer haversack. "
                 "Removing it here would leave its bytes with nothing naming them, and a "
                 "later sweep would collect them - upgrade this host and delete it there")
+        # anything the store raises comes out: a delete must not report success on doubt
+        kind, _entry, _mode = self._read_ref(key, raise_faults=True)
         existed = False
-        try:
-            ops.head(self.store, self._pointer_path(key))
+        if kind == "unreadable":
+            try:
+                ops.delete(self.store, self._pointer_path(key))
+            except FileNotFoundError:
+                pass
             existed = True
-        except FileNotFoundError:
-            pass                               # anything else the store raises comes out:
-                                               # a delete must not report success on doubt
-        try:
-            ops.delete(self.store, self._pointer_path(key))
-        except FileNotFoundError:
-            pass
+        elif kind == "live":
+            def tombstone(current):
+                return (None if current is None
+                        else {"deleted": True, "published": time.time()})
+            existed = self._swap(key, tombstone) is not None
         local = self.local.delete(key)
         return existed or local
 
@@ -987,7 +1227,8 @@ class SharedResultCache:
 
     # -- store maintenance ---------------------------------------------------------------
 
-    def _scan_pointers(self, *, newest_first: bool = False, limit: int | None = None):
+    def _scan_pointers(self, *, newest_first: bool = False, limit: int | None = None,
+                       tombstones: list | None = None):
         """``(pointers this code can read, how many it could NOT)``.
 
         An object under ``results/`` that is not a
@@ -1014,10 +1255,16 @@ class SharedResultCache:
             if limit is not None and len(out) >= limit:
                 break
             try:
-                ptr, _mode = self._read_pointer(key)
+                kind, ptr, _mode = self._read_ref(key)
             except ValueError:                 # not a key this code would ever write
-                ptr = None
-            if ptr is None:
+                kind, ptr = "unreadable", None
+            if kind == "tombstone":
+                # a deletion is READ, not unreadable: counting it would freeze the sweep
+                # for as long as the tombstone stands
+                if tombstones is not None:
+                    tombstones.append(ptr)
+                continue
+            if kind != "live":
                 unreadable += 1
                 continue
             out.append({**ptr, "_key": key})
@@ -1051,8 +1298,12 @@ class SharedResultCache:
         from provender import EmptyKeepSet
         now = time.time() if now is None else now
         candidates = self.blobs.entries(older_than=now - grace_s)   # BEFORE the pointers
-        referenced, expired = set(), 0
-        pointers, unreadable = self._scan_pointers()
+        referenced, expired, tombstones = set(), 0, []
+        pointers, unreadable = self._scan_pointers(tombstones=tombstones)
+        for tomb in tombstones:
+            # the tombstone itself only: what it replaced - the result and its history -
+            # is exactly what a deletion is for reclaiming
+            referenced.add(tomb["_manifest"])
         for ptr in pointers:
             published = ptr.get("published")
             datable = isinstance(published, (int, float)) and not isinstance(published, bool)
@@ -1066,8 +1317,19 @@ class SharedResultCache:
                 expired += 1
                 continue
             # a margin past the listing bound: hosts do not share a clock, and one
-            # running fast must not collect what the others still list
-            for gen in _generations(ptr, now=now - HISTORY_GC_MARGIN_S):
+            # running fast must not collect what the others still list. Every manifest the
+            # walk READ is kept too - an amending one included - or the next walk would end
+            # at the gap and the history behind it would be collected a sweep later.
+            try:
+                chain = self._chain(ptr, now=now - HISTORY_GC_MARGIN_S, raise_faults=True,
+                                    manifests=referenced)
+            except Exception as e:             # noqa: BLE001
+                # a walk that faulted marked less than is live: that is an unreadable
+                # entry for this sweep's purposes, and no blob is deleted (below)
+                _miss(f"walking the history of {ptr['_key'][:12]}", e)
+                unreadable += 1
+                continue
+            for gen in chain:
                 for blob in gen["files"].values():
                     referenced.add(blob["digest"])
         if unreadable:
@@ -1288,9 +1550,10 @@ def _migrating(conflict: str, gen: str, files: dict, result: dict, meta: dict):
         # existing key discarded what it replaced - and let a non-numeric `computed` from
         # a local meta.json reach `sweep`, where it raised for every host (review,
         # 2026-09-20).
-        return {"format": POINTER_FORMAT, "generation": gen, "published": now,
-                "files": files, "result": result, "meta": meta,
-                "history": _kept_history(current, now, gen)}
+        # a re-push of the generation already current is the same publication: the history
+        # walk counts it once, which `_kept_history` had to special-case in format 1
+        return {"publication": gen, "published": now, "files": files, "result": result,
+                "meta": meta}
     return update
 
 
@@ -1338,29 +1601,6 @@ def _keeping_the_work(cache, key, labels_path, result, meta, preview_path, stati
         except Exception:                      # noqa: BLE001
             pass
         raise
-
-
-def _kept_history(current, now: float, gen: str | None = None) -> list:
-    """The history a publication replacing ``current`` should carry: what it replaces,
-    then that pointer's own history, bounded by ``HISTORY_KEEP`` and ``HISTORY_MAX_AGE_S``.
-
-    Bounded by both on purpose. Count alone lets a key that is republished constantly hold
-    four copies of a large result forever; age alone lets a key republished hourly for a
-    month hold seven hundred.
-    """
-    if current is None:
-        return []
-    if current.get("generation") == gen:
-        # a re-push of the same generation (`cache push --conflict force` over an entry
-        # this host already published): it is not its own predecessor
-        return [p for p in _history_of(current) if _usable(p, now=now)][:HISTORY_KEEP]
-    older = [p for p in _history_of(current) if _usable(p, now=now)]
-    kept = [{"generation": current["generation"], "published": current.get("published"),
-             "files": current.get("files") or {},
-             # `meta` is deliberately NOT carried: no reader has ever looked at a history
-             # entry's meta, and each copy cost a full document in every pointer read
-             "result": current.get("result")}, *older]
-    return [p for p in kept if _usable(p, now=now)][:HISTORY_KEEP]
 
 
 def _warn_if_corrupt(blobs, digest: str) -> None:
