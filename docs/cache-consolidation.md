@@ -1,9 +1,237 @@
 # One cache, three deployments — the consolidation, and how to get there safely
 
-**Status (2026-09-20): the shared result store, its bounded history, `cache push`/`pull`/`sweep` and the provender extraction are built and reviewed three times; steps 3-6 below are still design.**
+**Status (2026-09-23): the shared result store, its bounded history, `cache push`/`pull`/`sweep` and the provender extraction are built, reviewed, and on local main (opt-in, `--result-store`; nothing changes without it). The design was then redrawn from scratch - [the next section](#the-design-from-scratch-2026-09-23) - and that is the PROPOSED direction; where it differs from the older sections below, it says so. Nothing in it is built yet.**
 This document is the handoff: what exists, what is proposed, what must not break, and the
 order to do it in. Read it with `AGENTS.md` ("Result-cache lifetimes", "The 2026-09-10 review
 round — lifetimes") — the defects listed there are the evidence this design is answering.
+
+## The design from scratch (2026-09-23)
+
+Asked "if you had to start from scratch today, what would be the design?", after the
+store had been built, reviewed five times, and merged. This is the answer, with the three
+architectures considered on the way to it. It is a PROPOSAL: it revises parts of
+[the target](#the-target), [the order of work](#order-of-work) and
+[decision 3](#decided-2026-09-19-by-the-user), and none of those is changed until the user
+decides.
+
+### The three architectures weighed first
+
+| | hybrid (on main) | one layer | local authority + copy to S3 |
+|---|---|---|---|
+| authority | the store | the store | the local cache |
+| store in the request path | yes: a pointer read per hit | yes, and the only copy | **no** |
+| servers see each other's results live | yes | yes | no - only after a `pull` |
+| a store outage | a bounded fallback (15 min) | the cache is off | **nothing** - serving never reads it |
+| backup, seeding a new host | yes | yes | yes |
+| the code that held most defects | the read-through fill and its seam: all of it | gone | gone from the serving path |
+
+What decided it: the **hybrid** stacks two protocols, and the seam between them - `_fill`,
+adopt, stale-claim repair, work directories, the outage fallback - is ~400 of the ~950
+lines of `SharedResultCache` (measured 2026-09-23) and held most of its defects. **One layer** removes the seam but makes a bucket
+necessary, which [decision 2](#decided-2026-09-19-by-the-user) forbids. **Local authority
+plus a copy** keeps the hardened local cache and puts S3 where it cannot hurt a request -
+and with read-only servers over the bucket (below) it recovers most of what sharing was
+for. The design that follows is what that third option becomes once the local cache and
+the bucket share ONE format, at which point one layer and "local plus copy" stop being
+different things: a disk store and a bucket store, and a sync between them.
+
+**Meanwhile, `--result-store` (the hybrid) should not be enabled on real servers.** Its two
+unrun gates - a cache directory shared by two hosts over one store, and Modal - were never
+closed, and it is the design being moved away from. `haversack cache push --conflict newer`
+from cron is the copy that works today (limits: an artifact that lands after its entry was
+pushed does not follow it, and a local delete does not reach the bucket).
+
+### 1. The data model: objects and refs
+
+git's object model - also the shape of OCI registries and of Bazel's remote cache.
+
+**Objects** are immutable and named by their SHA-256 (`sha256/<hex>`):
+
+- **blobs** - labels, a field, a preview, statistics;
+- **manifests** - one publication, itself an object:
+
+  ```json
+  {"format": 1, "key": "…", "published": 1790000000.0,
+   "files": {"labels.seg.nrrd": {"digest": "sha256:…", "size": 123},
+             "preview.png": {"digest": "sha256:…", "size": 4567}},
+   "result": {…}, "meta": {…},
+   "replaces": ["sha256:<the manifest this one replaced>"]}
+  ```
+
+  The manifest's digest IS the generation token - no UUIDs. `replaces` is a list because a
+  sync that meets two independent computations of one key replaces both (section 4); it
+  names one manifest otherwise, and none for a key's first publication.
+
+**Refs** are the only mutable thing: `refs/<key>` holds one manifest digest, changed by
+compare-and-swap and nothing else.
+
+Against the pointer on main:
+
+- **History is the `replaces` chain**, not a list copied into every pointer.
+- **A late artifact is a new manifest** - the same primary output plus the preview -
+  replacing the old one. The artifact race becomes an ordinary compare-and-swap: if the ref
+  has moved to a manifest with a DIFFERENT primary output, the render was for another result
+  and is dropped.
+- **Delete is a tombstone manifest** (`"deleted": true`, with `replaces`), so a deletion is
+  a publication and travels like one.
+
+### 2. One storage interface, backends behind it
+
+Six operations: get an object; put an object if absent; read a ref with its version;
+compare-and-swap a ref; list refs with their modification times; delete an object.
+
+- **Disk** - objects are files; a ref's compare-and-swap is a per-key `flock` plus an atomic
+  rename. Correct on ONE host; not trusted on a network filesystem. obstore's own local
+  store fails the conditional-write probe (measured), so this backend is written, not
+  borrowed - the half of provender deliberately deferred until it could be cut against a
+  local backend.
+- **S3-compatible** (R2, S3, GCS) - conditional writes, probed at startup, as today.
+- **Modal** uses the S3 backend, not the volume. A volume cannot compare-and-swap across
+  containers, and its reload hides it from other threads (the 410s and FileNotFoundErrors of
+  2026-09-19). With the results in a bucket, the volume keeps weights only.
+
+In front of any remote backend, an optional **local cache of objects keyed by digest** is
+safe by construction: a file named by its hash is either right or absent. It needs no
+invalidation, can never be stale, and can be evicted by access time at will.
+
+### 3. Operations
+
+- **Publish**: blobs, then the manifest, then compare-and-swap the ref. A lost race rereads
+  the ref and decides again.
+- **Read**: ref → manifest → blobs, and it WRITES NOTHING - no lease, no LRU touch (the
+  touch refused on a read-only cache root once cost a result: `f9b6881`). On disk the server
+  hands out blob files directly, `ETag` = the digest, `Cache-Control: immutable`. On a
+  bucket, a presigned redirect or a stream.
+- **GC**: mark everything reachable from refs - the current manifest and its `replaces`
+  chain within the bounds (N entries, D days) - and sweep unmarked objects older than a
+  grace period. A write that deduplicates onto an existing blob refreshes its timestamp,
+  and GC refuses to run while any ref is unreadable. This is `provender.Blobs.sweep` today.
+- **Evict ≠ delete.** EVICT drops a ref to save room on one replica; it is local and never
+  synced. DELETE writes a tombstone, which is.
+- **Listing**: list refs with their times, read manifests for the page asked for - the same
+  `(rows, position)` contract and cursor as main's listing.
+
+### 4. The sync protocol
+
+One function, any store to any store: disk → R2, R2 → disk, R2 → another bucket. For one
+key K, from A to B:
+
+```
+1. read A's ref -> manifest MA
+2. read B's ref -> manifest MB, with the ref's version
+3. decide (below); "nothing to do" ends here
+4. every object reachable from the chosen manifest (its blobs, the manifest, the kept
+   part of its replaces chain):  absent on B -> copy (put if absent)
+                                  present on B -> touch (so B's sweep spares it)
+5. compare-and-swap B's ref against the version read in 2 (create-if-absent when B had
+   none); a lost race goes back to 2
+6. re-check the objects on B; put back any a sweep took in the window
+```
+
+**Objects before the ref** is the invariant: a reader of B never meets a ref to bytes B does
+not hold, except in the sweep window that step 6 closes.
+
+The decision, by ancestry - the same generation is the same manifest digest, and the
+`replaces` chain says who came from whom:
+
+| situation | action |
+|---|---|
+| B has no ref | copy A's |
+| same manifest | nothing |
+| MB is in MA's chain | A is newer: fast-forward B |
+| MA is in MB's chain | B is newer: skip |
+| neither - K was computed independently on both | the later `published` wins (ties by digest); B gets a MERGE manifest - the winner's files and documents, `replaces` naming both - so the loser stays in the history rather than vanishing |
+
+The rules do not depend on the order syncs happen in, so A → B and B → A converge; one-way
+(writer to bucket) is all the topology below needs.
+
+**Tombstones expire** after a stated time (30 days, the history bound). A replica that goes
+unsynced longer than that could resurrect a deleted result - the bound to state and to
+monitor, because some of these results carry patient data.
+
+**Which keys**: a full pass (every ref of A; always correct, one ref read per key), or
+incremental - refs modified since a watermark kept on B (`sync/<source-id>.json`), less a
+margin for clock skew, with an occasional full pass to catch what the watermark missed.
+
+### 5. Keys, and readers that have no weights
+
+The result key stays `hash(identity, task, options, versions)` - the contract this document
+has always left alone. Writers also maintain `refs/tasks/<task>`: the task's current
+weights versions. A read-only server anywhere derives the key a writer would have, WITHOUT
+the weights installed. That removes the one real obstacle to a bucket-only reader: today
+Modal's public twin gets its versions from the weights volume it shares with the writer.
+
+### 6. Not the cache's job
+
+**Keeping two hosts from computing one key at once** belongs to the job queue (its in-flight
+markers, as today). For the cache a duplicate computation is wasted work, never an
+incorrectness - the compare-and-swap and the ancestry rules settle it. A good deal of
+today's claim machinery exists because the cache was doing the queue's job.
+
+### 7. The topology
+
+```
+writer host:   compute -> disk store (the authority) --sync--> R2
+reader hosts:  read-only app over R2 (+ a local digest cache)
+Modal:         the R2 store directly (+ a local digest cache); no volume for results
+no network:    the disk store alone, and nothing else changes
+```
+
+The read-only app already exists: `create_public_app` over a `CacheOnlyExecutor` is Modal's
+public twin - the same routes as the writer, no compute path, so it cannot spend GPU by
+construction. Pointed at a bucket, it needs `refs/tasks/*` (section 5), a mode that skips the
+startup write-probe and never writes, and so can run on a READ-ONLY bucket token - a
+compromised reader cannot alter or delete a result.
+
+### 8. What disappears
+
+Leases, writer claims, tomb directories, generation directories, `CURRENT` files,
+adopt/fill/repair, the outage fallback, per-host confirmation files, LRU touches on read,
+volume reload waits for results, and the hybrid seam - which is, near enough, the list of
+this subsystem's past defects.
+
+### 9. What stays hard
+
+- **Clock skew**, in "the later publication wins" and in tombstone expiry. Bounded by the
+  grace margins, not removed.
+- **A disk ref's compare-and-swap is per host.** Two servers sharing one cache directory
+  over NFS is unsupported; they share through a bucket instead.
+- **Deletion is ordered, not instant**: gone after the next sweep, and a deleted result can
+  come back only through a replica unsynced for longer than a tombstone lives.
+
+### 10. How far this is from main
+
+A reshaping, not a restart. Built and reviewed already: the blobs, the sweep, backend
+probing (provender), the pointer's compare-and-swap, `find_generation`, the listing
+contract, push and pull. New: the manifest as an object with `replaces` in place of the
+pointer's inline history, the disk backend's compare-and-swap, tombstones, `refs/tasks`,
+and sync.
+
+The proposed order - each step behind a flag, with deployments untouched until the last:
+
+1. **provender gains the disk backend**, with its own conditional-write tests, through the
+   same probe that refused obstore's local store.
+2. **The store protocol runs on it**: the whole cache suite and the soak harness pointed at
+   the disk backend. The protocol is already reviewed, so this mostly tests the backend.
+3. **Manifests, `replaces`, tombstones**, replacing the inline history - with the pointers
+   already written (format 1) still read, as the time-limited shim of decision 1.
+4. **Sync, and the read-only app over a bucket** (`refs/tasks`, no write probe).
+5. **One development server on the disk store behind a flag**, and a soak.
+6. **Inputs** onto the same store (the older step 4 below, unchanged in intent).
+7. **Modal last**, onto R2 directly.
+8. **Delete the old protocols** - `ResultCache`'s and the hybrid's - in one commit, as the
+   older step 6 said.
+
+### What this asks the user to decide
+
+- **Decision 3's "the local copy keeps no history"** falls away: the disk store is an
+  authority, so it keeps the same bounded chain as a bucket.
+- **The hybrid (`--result-store`)** would be deprecated once sync and the reader exist, and
+  removed with the old protocols.
+- **Whether live sharing between writers is needed at all.** This design shares by sync,
+  with a lag of one sync interval. If two writers must see each other's results at once, they
+  share one bucket as their store - which the design allows, but which puts the bucket back
+  in their request path.
 
 ## Where things stand
 
