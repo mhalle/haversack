@@ -585,7 +585,9 @@ def _fastsurfer_emit(tmp_path):
     for nm, arr in (("ranks", code.ranks), ("support", code.support), ("tail", code.tail)):
         if arr is not None:
             np.save(src / f"asegdkt_{nm}.npy", arr)
-    part = {**code.meta, "engine": "fastsurfer", "task": "fastsurfer:asegdkt", "part": "asegdkt",
+    # no "task" in the part: engines/fastsurfer.py's emit states it only at the top level, and a
+    # fixture that added it here hid a builder that read the part alone (review, 2026-09-23)
+    part = {**code.meta, "engine": "fastsurfer", "part": "asegdkt",
             "labels": labels,
             "frame": {"canonical": Geometry(shape_zyx=(12, 12, 12), spacing_zyx=(1.0, 1.0, 1.0),
                                             origin_xyz=(0.0, 0.0, 0.0),

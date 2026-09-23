@@ -66,6 +66,29 @@ def test_a_task_that_is_not_a_cascade_has_no_stages():
     assert cat.stage_task("ts.v2:total_fast", 0) is None
 
 
+def _with_twin(tmp_path, label_map):
+    """The shipped registry plus ``total_fast_twin``, a second task running Dataset297 alone."""
+    from haversack.tasks import TaskCatalog
+    raw = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    twin = dict(next(t for t in raw["tasks"] if t["name"] == "total_fast"),
+                name="total_fast_twin", label_map=label_map)
+    raw["tasks"].append(twin)
+    path = tmp_path / "ts_tasks.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return TaskCatalog("ts", path=path)
+
+
+def test_two_tasks_that_run_the_stage_model_alone_name_it_only_if_they_agree(tmp_path):
+    """No single task names the stage when two run its model alone under different class
+    lists: the stage is left unnamed, never named by whichever sorts first (review, 2026-09-23:
+    no test reached this branch, and removing it survived)."""
+    raw = json.loads(REGISTRY.read_text(encoding="utf-8"))
+    same = next(t for t in raw["tasks"] if t["name"] == "total_fast")["label_map"]
+    assert _with_twin(tmp_path, same).stage_task("lung_vessels", 0) == "total_fast"
+    other = dict(same, **{"1": "not_the_spleen"})
+    assert _with_twin(tmp_path, other).stage_task("lung_vessels", 0) is None
+
+
 # ----------------------------------------------------------------------------------------
 # the store, end to end
 # ----------------------------------------------------------------------------------------
@@ -256,6 +279,32 @@ def test_the_verifier_refuses_a_crop_stage_named_from_the_task(tmp_path, monkeyp
                 s["name"], s["designations"] = f["name"], f["designations"]
         st.root.attrs.put(attrs)
     assert not _verify(out)
+
+
+def _set_direction(out, part, change):
+    with rs.open_store(out, "a") as st:
+        arr = st.root[f"parts/{part}/ranks"]
+        attrs = arr.attrs.asdict()
+        for a in attrs["duckn"]["axes"]:
+            if a.get("kind") == "space":
+                a["space_direction"] = change(a["space_direction"])
+        arr.attrs.put(attrs)
+
+
+def test_the_verifier_compares_orientations_not_spacings(tmp_path, monkeypatch):
+    """A cascade's stages sit at different spacings (3 mm under 0.7 mm): the same orientation.
+    The verifier compared whole direction vectors, spacing included, and failed every real
+    cascade store; the stub stores share one spacing, so no test saw it (review, 2026-09-23).
+    A flipped axis must still fail."""
+    spec = importlib.util.spec_from_file_location("ranked_verify", TOOLS / "ranked_verify.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    out, _seg, _blocks = _store(tmp_path, monkeypatch, "ts.v2:lung_vessels",
+                                [_Found(118, 10), _Found(5, 1)])
+    _set_direction(out, 0, lambda d: [4.0 * float(x) for x in d])
+    assert mod.verify(out, quiet=True)
+    _set_direction(out, 0, lambda d: [-float(x) for x in d])
+    assert not mod.verify(out, quiet=True)
 
 
 def test_upgrading_the_segment_metadata_keeps_every_scheme(tmp_path, monkeypatch):

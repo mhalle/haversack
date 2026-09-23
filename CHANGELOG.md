@@ -196,7 +196,10 @@ seg 0.9, below). A server started without `--result-store` runs as before.
   stores as merely unnamed) and no longer reports parts on a 3 mm and a 0.7 mm grid as
   differently oriented; `tools/ranked_upgrade_seg.py` no longer drops `labeling_scheme`.
   **Cascade stores written before this are misnamed in layer 0: rebuild them.** No format
-  version moves; emit directories that predate the field are still named correctly.
+  version moves. An emit directory that predates the field is named from its `<task>:s<i>`
+  part names, which covers every cascade but `ts.v2:teeth`: its middle part, cropped from
+  `craniofacial_structures`' result, is still named from teeth's label map, and
+  `ranked_verify` does not catch it. Emit teeth again rather than rebuilding an old emit.
 - **The ranked encoder's slab is sized from the device's free memory** (rankfield 0.3.5's
   `memory_budget`, pinned below). `network.encode_budget` takes half of `device_budget_bytes` -
   on MPS the allocator's pool grew in ~1 GiB heaps to 1.5-2.2x rankfield's `slab_bytes` bound -

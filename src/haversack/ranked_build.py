@@ -128,8 +128,8 @@ def stage_task(task, stage):
         return None
 
 
-def label_task_of(name, part, last):
-    """The task whose label map names part ``name``'s label values.
+def label_task_of(name, part, last, task=None):
+    """The task whose label map names part ``name``'s label values; ``task`` is the run's.
 
     A task's own parts carry its classes, but a cascade's crop stage carries its own model's -
     stage 0 of ``lung_vessels`` is ``total_fast``'s 118 classes, not the 5 the task's label
@@ -143,7 +143,9 @@ def label_task_of(name, part, last):
     m = CASCADE_STAGE.fullmatch(name)
     if m and not last:
         return stage_task(m["task"], m["stage"])
-    return part.get("task")
+    # the run's task when the part does not restate it: FastSurfer's emit never does, and
+    # reading the part alone left every FastSurfer store unnamed (review, 2026-09-23)
+    return part.get("task", task)
 
 
 def names_for(engine, task, allow_unnamed=False, say=None):
@@ -902,7 +904,7 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
     # whose label map names each part's values: the task's own, or - for a cascade's crop
     # stages - the task that runs the stage's model alone
     own = {n: p.get("task", meta.get("task")) for n, p in items}
-    label_task = {n: label_task_of(n, p, k == len(items) - 1)
+    label_task = {n: label_task_of(n, p, k == len(items) - 1, meta.get("task"))
                   for k, (n, p) in enumerate(items)}
     crop = [n for n, _ in items if label_task[n] != own[n]]
     if parts == "last" and len(items) > 1:
