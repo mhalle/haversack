@@ -223,6 +223,16 @@
   the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
   be written no longer fails a publication that already succeeded; and `list` reads at most
   `limit` pointers rather than one per entry in the bucket.
+- **Result store sync: a merge no longer repeats, and a sync costs a fifteenth of the time.**
+  Found by soaking two real servers on one directory store for 35 minutes with syncs into
+  R2 (`tools/soak_server_store.py`). A merge - what sync writes when it cannot see how two
+  versions of a result are related - exists only at the destination, and every later sync
+  took it for a new version and merged the key again; it now counts as the version it
+  carries. And a sync walked the destination's history and refreshed every object in it on
+  every run: it now learns what the destination holds from the source's copy of the same
+  history, uploads a new object with one request, and syncs 8 results at once
+  (`--workers`). On R2, 16 results: 73.7 s to 4.9 s for an update, 200 s to 19 s for a
+  first copy.
 - **`haversack serve-store URL`: a read-only server over a result store.** Every read
   route of `haversack serve` - results by path, meta, preview, statistics, the listing - and
   nothing else: no jobs, no computation, and not one write to the store, so it runs on a

@@ -2519,6 +2519,97 @@ class TestSync(_Hosts):
         new = self.publish(self.c, b"after the merge")
         self.assertEqual([new, a_gen, b_gen], [h["generation"] for h in self.c.history(KEY)])
 
+    def make_a_gap(self):
+        """What the step 5 soak did: the source republishes past its history bound between
+        two syncs, and its sweep takes the links, so the next sync cannot see that the
+        destination's version is an ancestor - and merges (2026-09-23)."""
+        self.publish(self.a, b"v0")
+        self.sync()
+        for i in range(1, objectcache.HISTORY_KEEP + 3):
+            self.publish(self.a, f"v{i}".encode())
+        later = time.time() + objectcache.BLOB_GRACE_S + 60
+        self.a.sweep(now=later, grace_s=0)
+        return self.only(self.sync())
+
+    def test_a_merge_is_not_repeated_by_every_later_sync(self):
+        """A merge manifest exists only at the destination, so the source's history can
+        never hold it. Taken as a new version, it made every later sync of the key merge
+        AGAIN - 1, 2, 5, 9 of 16 keys in successive syncs of the soak, each one slower."""
+        self.assertEqual("merged", self.make_a_gap(), "the gap itself is a merge")
+        self.assertEqual("current", self.only(self.sync()),
+                         "the source has not changed: the merge carries its content")
+        self.publish(self.a, b"after the merge")
+        self.assertEqual("fast_forwarded", self.only(self.sync()))
+        self.assertEqual("current", self.only(self.sync()))
+        self.assertEqual(b"after the merge", self.on_b())
+
+    def test_a_merge_the_destination_won_still_reads_as_newer_there(self):
+        self.publish(self.a, b"at A")
+        time.sleep(0.01)
+        self.publish(self.c, b"at B, later")
+        self.assertEqual("merged", self.only(self.sync()))
+        self.assertEqual("newer_there", self.only(self.sync()))
+
+    def test_a_sync_asks_nothing_about_what_the_destination_already_references(self):
+        """The soak's syncs took 6 s a key on R2 and grew: every object of every key's kept
+        history was refreshed (a server-side copy each) on every run, although the
+        destination's own ref already kept each one alive."""
+        for i in range(3):
+            gen = self.publish(self.a, f"v{i}".encode())
+            self.a.add_artifact(KEY, "preview.png", self.file(f"p{i}", f"png{i}".encode()),
+                                generation=gen)
+        self.sync()
+        self.publish(self.a, b"one more")
+        touched = []
+        real = BlobStore.touch
+
+        def counting(blobs, digest):
+            touched.append(digest)
+            return real(blobs, digest)
+        with unittest.mock.patch.object(BlobStore, "touch", counting):
+            self.assertEqual("fast_forwarded", self.only(self.sync()))
+        new = self.pointer()
+        self.assertEqual({new["_manifest"], new["files"][RESULT_NAME]["digest"]}, set(touched),
+                         "the new publication's labels and manifest, and nothing older")
+        self.assertEqual(b"one more", self.on_b())
+        self.assertEqual(objectcache.HISTORY_KEEP, len(self.c.history(KEY)),
+                         "and the history is whole at the destination")
+
+    def test_a_fast_forward_reads_nothing_at_the_destination_but_its_ref(self):
+        """Profiled on R2 (step 5): a one-publication fast-forward cost 33 requests a key -
+        13 reads walking the destination's history, 12 server-side copies (each new object
+        refreshed twice), 7 writes. What the destination holds is learned from the source's
+        copy of the same history, and a new object is ONE create."""
+        for i in range(3):
+            gen = self.publish(self.a, f"v{i}".encode())
+            self.a.add_artifact(KEY, "preview.png", self.file(f"p{i}", f"png{i}".encode()),
+                                generation=gen)
+        self.sync()
+        self.publish(self.a, b"one more")
+        calls = []
+        real = {name: getattr(ops, name) for name in ("get", "put", "head", "copy")}
+
+        def watch(name):
+            def f(store, *a, **kw):
+                if store is self.other:
+                    calls.append(name)
+                return real[name](store, *a, **kw)
+            return f
+        with unittest.mock.patch.multiple(ops, **{n: watch(n) for n in real}):
+            self.assertEqual("fast_forwarded", self.only(self.sync()))
+        self.assertEqual(1, calls.count("get"), calls)
+        self.assertEqual(2, calls.count("copy"), "one refresh-or-404 per new object")
+        self.assertEqual(3, calls.count("put"), "the two new objects and the ref")
+
+    def test_many_keys_sync_in_parallel_and_all_land(self):
+        keys = [f"{i:02x}" * 32 for i in range(20)]
+        for k in keys:
+            self.publish(self.a, k.encode(), key=k)
+        got = self.sync(workers=6)
+        self.assertEqual(20, got["copied"])
+        for k in keys:
+            self.assertEqual(k.encode(), self.on_b(k))
+
     def test_a_deletion_travels(self):
         self.publish(self.a, b"one")
         self.sync()

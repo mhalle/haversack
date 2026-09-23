@@ -1658,13 +1658,15 @@ class SharedResultCache:
         return [d.name for d in dirs[:limit]], True
 
 
+#: Keys a sync works on at once.
+SYNC_WORKERS = 8
 #: What `sync` answers per key.
 SYNC_OUTCOMES = ("copied", "fast_forwarded", "merged", "current", "newer_there", "absent",
                  "legacy", "unreadable", "failed")
 
 
 def sync(src: "SharedResultCache", dst: "SharedResultCache", *, keys=None,
-         report=None) -> dict:
+         report=None, workers: int = SYNC_WORKERS) -> dict:
     """Make ``dst`` hold what ``src`` holds, key by key; counts by outcome
     (:data:`SYNC_OUTCOMES`). Step 4 of the from-scratch design (docs/cache-consolidation.md,
     section 4): the copy a writer's disk store makes to a bucket, or any store to any store.
@@ -1690,22 +1692,28 @@ def sync(src: "SharedResultCache", dst: "SharedResultCache", *, keys=None,
     ``dst`` never meets a ref to bytes it lacks. Rules that do not depend on the order syncs
     run in make ``src -> dst`` and ``dst -> src`` converge.
     """
+    from concurrent.futures import ThreadPoolExecutor
     dst._writable("syncing into it")
     out = dict.fromkeys(SYNC_OUTCOMES, 0)
     if keys is None:
         keys = [k for _, k in sorted(src._stamps())]           # oldest first
-    for key in keys:
+
+    def one(key):
         try:
-            outcome = _sync_key(src, dst, key)
+            return key, _sync_key(src, dst, key), None
         except ObjectStoreUnsuitable:
             raise                              # a newer format at dst: stop, do not guess
         except Exception as e:                 # noqa: BLE001 - one key is not the run
-            outcome = "failed"
+            return key, "failed", e
+    # Keys are independent - each is decided and written by its own conditional write - and
+    # a sync is bound by the destination's latency, not by work: in parallel (step 5, where
+    # one at a time on R2 took 4.6 s a key)
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
+        for key, outcome, e in pool.map(one, keys):
+            out[outcome] += 1
             if report:
-                report(key, f"failed: {type(e).__name__}: {e}")
-        out[outcome] += 1
-        if report and outcome != "failed":
-            report(key, outcome.replace("_", " "))
+                report(key, f"failed: {type(e).__name__}: {e}" if e is not None
+                       else outcome.replace("_", " "))
     return out
 
 
@@ -1726,11 +1734,16 @@ def _sync_key(src, dst, key: str) -> str:
             converted = dst._predecessor(key, "live", d, {})
             d = (_view(dst._manifest(key, converted[0], raise_faults=True), converted[0])
                  if converted else None)
+        # what the destination's entry IS, content-wise: itself, and - for a merge a sync
+        # wrote, which exists only there - the winner it carries. Taking a merge as a new
+        # version made every later sync of the key merge again, since the source's history
+        # can never hold it (step 5's soak: 1, 2, 5, 9 of 16 keys in successive syncs)
+        same = _merged_winners(dst, key, d) if d is not None else set()
         if d is None:
             action, doc, digest = "copied", _manifest_of(s), s["_manifest"]
-        elif d["_manifest"] == s["_manifest"]:
+        elif s["_manifest"] in same:
             return "current"
-        elif d["_manifest"] in _ancestors(src, key, s):
+        elif same & _ancestors(src, key, s):
             action, doc, digest = "fast_forwarded", _manifest_of(s), s["_manifest"]
         elif s["_manifest"] in _ancestors(dst, key, d):
             return "newer_there"
@@ -1740,11 +1753,13 @@ def _sync_key(src, dst, key: str) -> str:
                                reverse=True)
             doc = {**_manifest_of(win), "replaces": [win["_manifest"], lose["_manifest"]]}
             digest = None
-        _copy_reachable(src, dst, key, s)
+        there = _copy_reachable(src, dst, key, s,
+                                held=_held(src, dst, key, d) if d is not None else set())
         data = (_canonical(doc) if digest is None
                 else _manifest_bytes(src, digest, doc))
         digest = _digest_of(data)
-        dst.blobs.put_bytes(data)
+        if digest not in there:                # a merge's own manifest is new; a copied
+            dst.blobs.put_bytes(data)          # one arrived with the rest
         ref = _canonical({"format": POINTER_FORMAT, "manifest": digest,
                           "body": data.decode("utf-8")})
         try:
@@ -1756,6 +1771,52 @@ def _sync_key(src, dst, key: str) -> str:
             dst.blobs.put_bytes(data)
         return action
     raise RuntimeError(f"result {key}: {SWAP_ATTEMPTS} writes raced this sync")
+
+
+def _merged_winners(index, key: str, entry) -> set:
+    """``entry``'s digest, and - if it is a merge a sync wrote (``replaces`` names two) - the
+    winner it carries (its first parent), and that one's winner if it too is a merge. A
+    merge adds no content: it is the winner with the loser kept in history."""
+    out = {entry["_manifest"]}
+    parents = entry["replaces"]
+    for _ in range(CHAIN_STEPS_MAX):
+        if len(parents) < 2:
+            break
+        out.add(parents[0])
+        m = index._manifest(key, parents[0], raise_faults=True)
+        if m is None:
+            break
+        parents = m["replaces"]
+    return out
+
+
+def _reachable(index, entry) -> set:
+    """Every object ``entry``'s kept history names at ``index`` - its manifests and blobs.
+    While the ref names ``entry``, the sweep there keeps all of them, and a sync that moves
+    the ref to a version sharing them keeps them referenced across the move: they need no
+    request at all (step 5, where refreshing them was most of a sync's time)."""
+    if entry.get("format") != POINTER_FORMAT:
+        return set()
+    if entry["deleted"]:
+        return {entry["_manifest"]}
+    manifests: set = set()
+    chain = index._chain(entry, raise_faults=True, manifests=manifests)
+    return manifests | {b["digest"] for g in chain for b in g["files"].values()}
+
+
+def _held(src, dst, key: str, d) -> set:
+    """What ``dst``'s current entry keeps alive there, learned from ``src`` when ``src``
+    still has that manifest - the destination's history is a copy of the source's, and on a
+    bucket each manifest of it is a request, where the source is usually a directory
+    (step 5: most of a sync's reads). Where ``src`` has lost part of that history the answer
+    comes out SMALLER, which only costs a refresh or two; a merge manifest, which exists only
+    at ``dst``, is walked there."""
+    if d.get("format") != POINTER_FORMAT:
+        return set()
+    m = src._manifest(key, d["_manifest"], raise_faults=True)
+    if m is not None:
+        return _reachable(src, _view(m, d["_manifest"]))
+    return _reachable(dst, d)
 
 
 def _ancestors(index, key: str, entry, *, limit: int = CHAIN_STEPS_MAX * 4) -> set:
@@ -1791,12 +1852,15 @@ def _manifest_bytes(index, digest: str, doc: dict) -> bytes:
     return data
 
 
-def _copy_reachable(src, dst, key: str, entry) -> None:
+def _copy_reachable(src, dst, key: str, entry, *, held: set = frozenset()) -> set:
     """Copy into ``dst`` every object ``entry``'s kept history reaches at ``src``: the blobs
     of each kept publication and every manifest the walk read. An object already at ``dst``
     is refreshed instead (``Blobs.touch``), so ``dst``'s sweep - which may be running - sees
-    it as young until the ref naming it is written. An object ``src`` no longer holds is
-    skipped: ``dst`` then mirrors ``src``, a miss where ``src`` has one."""
+    it as young until the ref naming it is written - except one in ``held``, what ``dst``'s
+    current entry already references (:func:`_reachable`), which is kept alive by that and
+    costs nothing. An object ``src`` no longer holds is skipped: ``dst`` then mirrors
+    ``src``, a miss where ``src`` has one."""
+    from obstore.exceptions import AlreadyExistsError
     if entry["deleted"]:
         digests = [entry["_manifest"]]
     else:
@@ -1804,13 +1868,22 @@ def _copy_reachable(src, dst, key: str, entry) -> None:
         chain = src._chain(entry, raise_faults=True, manifests=manifests)
         digests = [b["digest"] for g in chain for b in g["files"].values()]
         digests += sorted(manifests)
+    there = set()
     for digest in dict.fromkeys(digests):
-        if dst.blobs.touch(digest):
+        if digest in held or dst.blobs.touch(digest):
+            there.add(digest)
             continue
         with tempfile.TemporaryDirectory(prefix="haversack-sync-") as tmp:
             here = Path(tmp) / "blob"
-            if src.blobs.fetch(digest, here):
-                dst.blobs.put_file(here)
+            if src.blobs.fetch(digest, here):  # verified against its name
+                # ONE create-if-absent: `Blobs.put_file` would refresh first, a second
+                # request for an object the touch above just found absent
+                try:
+                    ops.put(dst.store, dst.blobs.path(digest), here, mode="create")
+                except AlreadyExistsError:     # a concurrent writer of the same bytes
+                    dst.blobs.touch(digest)
+                there.add(digest)
+    return there
 
 
 def read_only_app(store, *, local_dir, prefix: str = "", segmenter=None,

@@ -1047,6 +1047,8 @@ def _command_line() -> click.Group:
             click.Argument(['destination'], help='the store to copy into'),
             click.Option(['--key', 'keys'], multiple=True,
                          help='only this result key (repeatable); default every key'),
+            click.Option(['--workers'], type=int, default=8,
+                         help='results synced at once (a sync waits on the store, not on work)'),
             click.Option(['--quiet'], is_flag=True, help='counts only, no per-entry lines'),
         ]))
     return root
@@ -1696,7 +1698,8 @@ def _cmd_cache_sync(args) -> int:
 
     def say(key, what):
         print(f"  {key[:12]}... {what}", file=sys.stderr, flush=True)
-    got = sync(src, dst, keys=list(args.keys) or None, report=None if args.quiet else say)
+    got = sync(src, dst, keys=list(args.keys) or None, report=None if args.quiet else say,
+               workers=args.workers)
     print(f"copied {got['copied']}, fast-forwarded {got['fast_forwarded']}, merged "
           f"{got['merged']}, already current {got['current']}, newer at the destination "
           f"{got['newer_there']}, failed {got['failed']}"

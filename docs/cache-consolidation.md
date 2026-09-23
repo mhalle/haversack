@@ -295,7 +295,38 @@ The proposed order - each step behind a flag, with deployments untouched until t
      guarantee it does not have. Ten guarantees mutation-checked. Run for real: a writer
      published into R2 and a `serve-store` process with the real catalogs and no weights
      served it, 565 ms cold and 115 ms warm, and refused a job.
-5. **One development server on the disk store behind a flag**, and a soak.
+5. ~~**One development server on the disk store behind a flag**, and a soak.~~ **DONE
+   2026-09-23**, as `tools/soak_server_store.py`: two real `haversack serve --result-store
+   file://` processes sharing one directory store, a real engine (`ts.v2:total_fast` on
+   TotalSegmentator's small test CTs, one voxel changed per variant, 16 results), clients
+   submitting to either server with one submit in ten saying `Cache-Control: no-cache`,
+   `haversack cache sweep` every 2 minutes and `haversack cache sync` into R2 every 90 s
+   while it ran, a `serve-store` reader over the directory, and one writer SIGKILLed
+   5 minutes in and restarted. Checked: no 5xx; every job not on the killed writer done; a
+   job's bytes hash to its reported digest; every cache hit serves bytes a publication
+   produced; the reader lists every key; at the end both stores serve every key the same.
+   - **Run 1 (20 min) passed** - 4,089 jobs, 3,632 cache hits across the two writers (median
+     22 ms), 438 republications, 16 jobs lost to the kill and nothing else - and its sync
+     lines showed a defect the tests had not: merges grew 1, 2, 5, 9 of 16 keys in
+     successive syncs, each sync slower. A merge manifest exists only at the destination,
+     so the source's history can never hold it, and a sync that took it as a version merged
+     the key again every time. Fixed: a merge counts as the winner it carries
+     (`_merged_winners`). The first merge of each such key is itself the expected cost of
+     republishing past the history bound between syncs - the source's sweep takes the
+     link that showed ancestry - and its outcome is still the right one: the later version
+     wins and the earlier stays in history.
+   - **Run 2 deadlocked - in the soak tool, not haversack**: it reported a suspicious hit
+     while holding its own lock. The hit was the tool's race (a hit can serve bytes another
+     client's job published a moment before that client recorded them); hits are now
+     judged at the end.
+   - **Run 3 (15 min) passed** - 2,825 jobs, 2,510 hits, 297 republications, no stray hit,
+     merges 1, 3, 2, 0 and never compounding.
+   - **Then a sync was profiled, not guessed at**: 4.6 s a key on R2 - 33 requests for a
+     one-publication fast-forward: 13 reads walking the destination's history, 12
+     server-side copies (each new object refreshed twice), 7 writes. Now what the
+     destination holds is learned from the SOURCE's copy of the same history, a new object
+     is one create-if-absent, and keys sync 8 at a time: an incremental sync of 16 keys went
+     from 73.7 s to 4.9 s (15 requests a key), and a first copy of them from 200 s to 19 s.
 6. **Inputs** onto the same store (the older step 4 below, unchanged in intent).
 7. **Modal last**, onto R2 directly.
 8. **Delete the old protocols** - `ResultCache`'s and the hybrid's - in one commit, as the
