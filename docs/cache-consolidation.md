@@ -209,10 +209,23 @@ and sync.
 
 The proposed order - each step behind a flag, with deployments untouched until the last:
 
-1. **provender gains the disk backend**, with its own conditional-write tests, through the
-   same probe that refused obstore's local store.
-2. **The store protocol runs on it**: the whole cache suite and the soak harness pointed at
-   the disk backend. The protocol is already reviewed, so this mostly tests the backend.
+1. ~~**provender gains the disk backend**~~ **DONE 2026-09-23, provender 0.1.6.**
+   `DiskStore` (temp file + fsync + rename; conditional writes decided under a striped
+   `flock`; the ETag is the content's SHA-256) and `provender.ops` (obstore's six calls,
+   answered by either backend). It passes the probe that refuses obstore's `LocalStore`;
+   six processes or threads contending on one compare-and-swap lose no update; a process
+   killed holding the lock wedges nothing; ten guarantees mutation-checked. Run whole on a
+   REAL exFAT volume, which found the one defect: macOS writes `._<name>` beside every file
+   there, and listed as objects a `._<key>.json` was an unreadable pointer - which freezes
+   the sweep. The same run showed `LocalStore` cannot create-if-absent on exFAT at all.
+2. ~~**The store protocol runs on it**~~ **DONE 2026-09-23.** `objectcache`, the tools and
+   the config sweep talk to their store through `provender.ops`; `--result-store
+   file:///path` is accepted. Every `_Hosts` test class in `test_objectcache.py` runs a
+   second time on a `DiskStore`, fault tests included (they inject through `ops` now, so
+   they reach either backend) - 390 tests, and not one needed a code change beyond the
+   switch. The soak (3 publishers, 3 readers, a zero-grace sweeper, a deleter, a publisher
+   killed mid-flight) passed on APFS - 575 publications, ~1,970 hits, no torn read - and on
+   exFAT, ending with a correct hit on a fresh host both times.
 3. **Manifests, `replaces`, tombstones**, replacing the inline history - with the pointers
    already written (format 1) still read, as the time-limited shim of decision 1.
 4. **Sync, and the read-only app over a bucket** (`refs/tasks`, no write probe).

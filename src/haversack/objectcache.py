@@ -49,7 +49,7 @@ import uuid
 import weakref
 from pathlib import Path
 
-from provender import Blobs, GRACE_S, check_store, update_mode
+from provender import Blobs, GRACE_S, check_store, ops, update_mode
 from provender import StoreUnsuitable as _StoreUnsuitable
 from provender import open_store as _open_store
 
@@ -131,8 +131,8 @@ def check_conditional_writes(store, prefix: str = "") -> None:
         check_store(store, prefix)
     except _StoreUnsuitable as e:
         raise ObjectStoreUnsuitable(
-            f"{e}; use S3, GCS, Azure or R2, or drop --result-store for a local-only "
-            "cache") from None
+            f"{e}; use S3, GCS, Azure, R2 or a directory (file:///path), or drop "
+            "--result-store for a local-only cache") from None
 
 
 def _warn_once(message: str) -> None:
@@ -302,9 +302,8 @@ class SharedResultCache:
         object - is nobody's data, and refusing to publish over it would strand the key
         for ever.
         """
-        import obstore
         try:
-            raw = json.loads(bytes(obstore.get(self.store, self._pointer_path(key)).bytes()))
+            raw = json.loads(bytes(ops.get(self.store, self._pointer_path(key)).bytes()))
         except Exception:                      # noqa: BLE001 - unreadable is not "newer"
             return False
         fmt = raw.get("format") if isinstance(raw, dict) else None
@@ -319,9 +318,8 @@ class SharedResultCache:
         "absent" would have it publish over a pointer it could not read, and `get`, which
         falls back to this host's own copy rather than losing it.
         """
-        import obstore
         try:
-            got = obstore.get(self.store, self._pointer_path(key))
+            got = ops.get(self.store, self._pointer_path(key))
         except FileNotFoundError:
             return None, None
         except Exception as e:                 # noqa: BLE001 - a read degrades, see _miss
@@ -340,7 +338,6 @@ class SharedResultCache:
         """Replace the pointer with ``update(current)`` by conditional write, rereading on
         every lost race; ``update`` returning None abandons the swap. Returns what was
         written, or None."""
-        import obstore
         from obstore.exceptions import AlreadyExistsError, PreconditionError
         for _ in range(SWAP_ATTEMPTS):
             ptr, mode = self._read_pointer(key, raise_faults=True)
@@ -357,8 +354,8 @@ class SharedResultCache:
                 return None
             body = json.dumps(new, sort_keys=True).encode("utf-8")
             try:
-                obstore.put(self.store, self._pointer_path(key), body,
-                            mode=mode if mode is not None else "create")
+                ops.put(self.store, self._pointer_path(key), body,
+                        mode=mode if mode is not None else "create")
             except (AlreadyExistsError, PreconditionError):
                 continue                       # another writer moved it: read again
             return new
@@ -791,7 +788,6 @@ class SharedResultCache:
         sweep - which spares nothing it cannot account for only while that pointer is
         THERE - would then collect another host's live data.
         """
-        import obstore
         if self._is_newer_format(key):
             raise ObjectStoreUnsuitable(
                 f"result {key[:12]}...: this entry was written by a newer haversack. "
@@ -799,13 +795,13 @@ class SharedResultCache:
                 "later sweep would collect them - upgrade this host and delete it there")
         existed = False
         try:
-            obstore.head(self.store, self._pointer_path(key))
+            ops.head(self.store, self._pointer_path(key))
             existed = True
         except FileNotFoundError:
             pass                               # anything else the store raises comes out:
                                                # a delete must not report success on doubt
         try:
-            obstore.delete(self.store, self._pointer_path(key))
+            ops.delete(self.store, self._pointer_path(key))
         except FileNotFoundError:
             pass
         local = self.local.delete(key)
@@ -953,10 +949,9 @@ class SharedResultCache:
         entries and no read at all."""
         import datetime as _dt
 
-        import obstore
         base = f"{self.prefix}results/"
         out = []
-        for batch in obstore.list(self.store, base):
+        for batch in ops.list(self.store, base):
             for obj in batch:
                 name = obj["path"][len(base):]
                 if "/" in name or not name.endswith(".json"):
@@ -972,9 +967,8 @@ class SharedResultCache:
         """When this key was published, in ns, or None - one HEAD of its pointer."""
         import datetime as _dt
 
-        import obstore
         try:
-            meta = obstore.head(self.store, self._pointer_path(key))
+            meta = ops.head(self.store, self._pointer_path(key))
         except FileNotFoundError:
             return None
         except Exception as e:                 # noqa: BLE001 - a read degrades, see _miss
@@ -1005,10 +999,9 @@ class SharedResultCache:
         ``newest_first`` orders by the pointers' own last-modified before reading any of
         them, so ``limit`` costs that many reads instead of one per entry in the bucket.
         """
-        import obstore
         base = f"{self.prefix}results/"
         entries = []
-        for batch in obstore.list(self.store, base):
+        for batch in ops.list(self.store, base):
             for obj in batch:
                 name = obj["path"][len(base):]
                 if "/" in name or not name.endswith(".json"):
@@ -1055,7 +1048,6 @@ class SharedResultCache:
         same answer - no pointers - and only one of them means the bytes are garbage. After
         deleting the last entry in a store, that is the flag to pass.
         """
-        import obstore
         from provender import EmptyKeepSet
         now = time.time() if now is None else now
         candidates = self.blobs.entries(older_than=now - grace_s)   # BEFORE the pointers
@@ -1068,7 +1060,7 @@ class SharedResultCache:
             # must be one it can read, or it is not evidence (review, 2026-09-20)
             if max_age_s is not None and datable and published < now - max_age_s:
                 try:
-                    obstore.delete(self.store, self._pointer_path(ptr["_key"]))
+                    ops.delete(self.store, self._pointer_path(ptr["_key"]))
                 except FileNotFoundError:
                     pass
                 expired += 1

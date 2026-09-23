@@ -93,7 +93,7 @@ def reader(url, seconds, out):
 if __name__ == "__main__":
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 40.0
     url = store_url("cfg7")
-    import obstore
+    from provender import ops
 
     from haversack.objectcache import open_store
     store, prefix = open_store(url)
@@ -131,8 +131,8 @@ if __name__ == "__main__":
         print("CFG7", "PASSED" if (ok and not torn) else "FAILED")
     finally:
         n = 0
-        for batch in obstore.list(store, prefix):
+        for batch in ops.list(store, prefix):
             for obj in batch:
-                obstore.delete(store, obj["path"])
+                ops.delete(store, obj["path"])
                 n += 1
         print(f"  cleaned {n} object(s)")

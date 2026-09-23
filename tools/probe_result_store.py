@@ -18,7 +18,7 @@ from pathlib import Path
 
 
 def main(url: str) -> int:
-    import obstore
+    from provender import ops
 
     from haversack.objectcache import (SharedResultCache, check_conditional_writes,
                                        open_store)
@@ -59,9 +59,9 @@ def main(url: str) -> int:
         return 0
     finally:
         n = 0
-        for batch in obstore.list(store, prefix):
+        for batch in ops.list(store, prefix):
             for obj in batch:
-                obstore.delete(store, obj["path"])
+                ops.delete(store, obj["path"])
                 n += 1
         print(f"cleaned {n} object(s) under {prefix}")
 

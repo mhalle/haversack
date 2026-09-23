@@ -51,7 +51,7 @@ def doomed_reader(url, cache_dir):
 if __name__ == "__main__":
     url = store_url("cfg3")
     shared = tempfile.mkdtemp(prefix="cfg3-")
-    import obstore
+    from provender import ops
 
     from haversack.objectcache import open_store
     store, prefix = open_store(url)
@@ -92,8 +92,8 @@ if __name__ == "__main__":
         print("CFG3", "PASSED" if (ok and ok2 and not left) else "FAILED")
     finally:
         n = 0
-        for batch in obstore.list(store, prefix):
+        for batch in ops.list(store, prefix):
             for obj in batch:
-                obstore.delete(store, obj["path"])
+                ops.delete(store, obj["path"])
                 n += 1
         print(f"cleaned {n} object(s)")

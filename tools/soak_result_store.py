@@ -183,7 +183,7 @@ def main() -> int:
                     help="the sweeper's grace in seconds (0, the default here, is hostile)")
     a = ap.parse_args()
 
-    import obstore
+    from provender import ops
 
     from haversack.objectcache import open_store
     url = f"{a.url.rstrip('/')}/run-{uuid.uuid4().hex[:8]}"
@@ -240,9 +240,9 @@ def main() -> int:
         if killed is not None and killed.poll() is None:
             killed.kill()
         n = 0
-        for batch in obstore.list(store, prefix):
+        for batch in ops.list(store, prefix):
             for obj in batch:
-                obstore.delete(store, obj["path"])
+                ops.delete(store, obj["path"])
                 n += 1
         print(f"cleaned {n} object(s) under {prefix}")
 

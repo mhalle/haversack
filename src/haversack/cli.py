@@ -721,8 +721,9 @@ def _command_line() -> click.Group:
                          help='compute every request; keep nothing durable'),
             click.Option(['--result-store'], envvar='HAVERSACK_RESULT_STORE',
                          help=('share the result cache through an object store '
-                               '(s3://bucket/prefix, gs://..., az://...; credentials from '
-                               'the environment); --cache-dir becomes its local copy')),
+                               '(s3://bucket/prefix, gs://..., az://..., or a directory '
+                               'as file:///path; credentials from the environment); '
+                               '--cache-dir becomes its local copy')),
             click.Option(['--sweep-interval-hours'], type=float, default=24.0,
                          help=('how often this server reclaims bytes in the shared store '
                                'that no result refers to any more (0 turns it off). Only '

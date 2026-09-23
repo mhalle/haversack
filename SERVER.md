@@ -530,6 +530,9 @@ options is the same as the header.
   server naming the same store serves every result any of them computed. The store is the
   authority and `--cache-dir` becomes this server's local copy of it. The store must honor
   conditional writes; the server checks at startup and refuses one that does not.
+  `file:///path` is a directory holding the same layout as a bucket (provender's
+  `DiskStore`), for servers on ONE machine: it needs no network, and a copy between it and
+  a bucket is the same format. Not over a network filesystem - machines share a bucket.
   Cannot be combined with `--no-result-cache`: the store needs a local copy in front of
   it. Unreferenced bytes are removed by `haversack cache sweep <store>`, which nothing runs
   on a schedule; `haversack cache push`/`pull` move results between a machine and a store.

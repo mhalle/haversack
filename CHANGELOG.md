@@ -223,6 +223,15 @@
   the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
   be written no longer fails a publication that already succeeded; and `list` reads at most
   `limit` pointers rather than one per entry in the bucket.
+- **The result store runs on a directory too: `--result-store file:///path`.** provender
+  0.1.6 adds `DiskStore`, a directory that honors both conditional writes (obstore's own
+  local store honors only one, so `file://` used to be refused at startup), and
+  `objectcache` now talks to its store through `provender.ops`, which answers for a bucket
+  and a directory alike. Same layout, same protocol, no network. Every store test runs
+  twice - in memory and on a directory - with the fault tests included, and the
+  multi-process soak passed on APFS and on a real exFAT volume. One host only: machines
+  share a bucket, never a directory over a network filesystem. Step 2 of
+  `docs/cache-consolidation.md`'s from-scratch design; nothing changes without the flag.
 - **The result store knows an encode job's field.** A pointer names its one primary output -
   labels or `field.zarr.zip` - and `put(output_name=)`, the listing (a field row says its
   `kind` and carries no label links), `find_generation` and `fetch_generation` answer for a

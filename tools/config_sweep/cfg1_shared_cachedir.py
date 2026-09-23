@@ -78,7 +78,7 @@ if __name__ == "__main__":
     url = store_url("cfg1")
     shared = tempfile.mkdtemp(prefix="cfg1-shared-")
     print(f"one cache dir: {shared}")
-    import obstore
+    from provender import ops
 
     from haversack.objectcache import open_store
     store, prefix = open_store(url)
@@ -117,8 +117,8 @@ if __name__ == "__main__":
         print("CFG1", "PASSED" if not bad else f"FAILED ({bad})")
     finally:
         n = 0
-        for batch in obstore.list(store, prefix):
+        for batch in ops.list(store, prefix):
             for obj in batch:
-                obstore.delete(store, obj["path"])
+                ops.delete(store, obj["path"])
                 n += 1
         print(f"cleaned {n} object(s)")

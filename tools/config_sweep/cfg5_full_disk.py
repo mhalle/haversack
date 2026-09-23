@@ -7,7 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
-import obstore
+from provender import ops
 
 from haversack.objectcache import SharedResultCache, open_store
 from haversack.serve import ResultCache
@@ -86,8 +86,8 @@ try:
     print("CFG5", "PASSED" if (ok_read and published and ok_heal) else "FAILED")
 finally:
     n = 0
-    for batch in obstore.list(store, prefix):
+    for batch in ops.list(store, prefix):
         for obj in batch:
-            obstore.delete(store, obj["path"])
+            ops.delete(store, obj["path"])
             n += 1
     print(f"  cleaned {n} object(s)")

@@ -86,7 +86,7 @@ def older_host(url, out):
 
 if __name__ == "__main__":
     url = store_url("cfg2")
-    import obstore
+    from provender import ops
 
     from haversack.objectcache import open_store
     store, prefix = open_store(url)
@@ -107,8 +107,8 @@ if __name__ == "__main__":
               f"({len(results)} checks)")
     finally:
         n = 0
-        for batch in obstore.list(store, prefix):
+        for batch in ops.list(store, prefix):
             for obj in batch:
-                obstore.delete(store, obj["path"])
+                ops.delete(store, obj["path"])
                 n += 1
         print(f"cleaned {n} object(s)")
