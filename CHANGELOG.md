@@ -227,9 +227,9 @@
   labels or `field.zarr.zip` - and `put(output_name=)`, the listing (a field row says its
   `kind` and carries no label links), `find_generation` and `fetch_generation` answer for a
   field as for labels; a name that is not a primary output is refused before anything is
-  uploaded, and a pointer naming two is served as neither. The local-tier fill, `push` and
-  `pull` still know labels only, so with `--result-store` a field is published but read back
-  as a miss - deliberately, pending the one-layer decision that would delete that code.
+  uploaded, and a pointer naming two is served as neither. The local copy follows too - the
+  fill, `pull` and `push` - so a field computed on one server is a hit on another sharing the
+  store, without its encoder running.
 - **Encode jobs on the server.** `POST /v1/jobs` takes `kind=encode` and an encoder name, and
   the job's result is an embedding field (`.zarr.zip`) where a segmentation's is labels: the
   same queue, single flight, result cache and job routes, with `GET /v1/encoders`,

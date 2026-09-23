@@ -2246,6 +2246,76 @@ class TestAnEncodeJobsField(_Hosts):
         digest = ptr["files"][RESULT_NAME]["digest"]
         self.assertIsNone(self.b.find_generation(KEY, digest))
 
-    def test_get_of_a_field_is_a_clean_miss_until_the_fill_learns_fields(self):
+    def test_another_host_is_served_the_field(self):
+        """It was published and then read back as a miss - the fill knew labels only - so
+        with a store on, every repeat of an encode job re-ran the encoder (2026-09-23)."""
+        from haversack.serve import FIELD_NAME
         self.publish_field(self.a)
-        self.assertIsNone(self.b.get(KEY))
+        hit = self.b.get(KEY)
+        self.assertIsNotNone(hit)
+        self.assertEqual(FIELD_NAME, Path(hit[0]).name)
+        self.assertEqual(b"a field", Path(hit[0]).read_bytes())
+        self.assertFalse((Path(hit[0]).parent / RESULT_NAME).exists())
+
+    def test_a_republished_field_replaces_the_copy_on_another_host(self):
+        self.publish_field(self.a, b"first")
+        self.b.get(KEY)
+        self.publish_field(self.a, b"second")
+        self.assertEqual(b"second", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_pull_places_a_field_and_then_calls_it_current(self):
+        from haversack.serve import FIELD_NAME
+        self.publish_field(self.a)
+        self.assertEqual(1, self.b.pull()["pulled"])
+        self.assertEqual(FIELD_NAME, Path(self.b.local.get(KEY)[0]).name)
+        self.assertEqual({"pulled": 0, "current": 1}, {k: v for k, v in self.b.pull().items()
+                                                        if k in ("pulled", "current")})
+
+    def test_a_copy_that_lost_its_field_is_not_current(self):
+        """``_holds`` is the one definition of "this host has it whole": a copy asked about
+        its artifacts and documents but not its field would be reported current by `pull`
+        and never repaired."""
+        self.publish_field(self.a)
+        self.b.pull()
+        field = Path(self.b.local.get(KEY)[0])
+        field.unlink()
+        self.assertEqual(0, self.b.pull()["current"])
+        self.assertEqual(b"a field", field.read_bytes())
+
+    def test_push_carries_a_local_field_into_the_store(self):
+        from haversack.serve import FIELD_NAME
+        self.a.local.put(KEY, self.file("f", b"local field"), {"outputs": []},
+                         dict(self.FIELD_META), output_name=FIELD_NAME)
+        self.assertEqual(1, self.a.push()["pushed"])
+        self.assertIn(FIELD_NAME, self.pointer()["files"])
+        self.assertEqual(b"local field", Path(self.b.get(KEY)[0]).read_bytes())
+
+
+def test_an_encode_job_on_one_server_is_a_hit_on_another(tmp_path):
+    """The whole path: a field computed on one server is served by another sharing the
+    store, without its encoder running, and byte for byte."""
+    from fastapi.testclient import TestClient
+
+    from haversack.serve import LocalExecutor, create_app
+    from test_encode_jobs import FakeEncoder, post
+    from test_serve import FakeSegmenter, wait_state
+
+    store = MemoryStore()
+    enc_a, enc_b = FakeEncoder(), FakeEncoder()
+    ex_a = LocalExecutor(FakeSegmenter(steps=1), workdir=tmp_path / "wa", cache_dir=tmp_path / "ca",
+                         encode_fn=enc_a, result_store=store)
+    ex_b = LocalExecutor(FakeSegmenter(steps=1), workdir=tmp_path / "wb", cache_dir=tmp_path / "cb",
+                         encode_fn=enc_b, result_store=store)
+    try:
+        client_a, client_b = TestClient(create_app(ex_a)), TestClient(create_app(ex_b))
+        a = wait_state(client_a, post(client_a).json()["id"], ("done",))
+        b = wait_state(client_b, post(client_b).json()["id"], ("done", "failed"))
+        assert b["state"] == "done" and b["key"] == a["key"], b
+        assert b.get("cached") is True and enc_b.calls == []
+        assert client_b.get(b["links"]["result"]).content == \
+            client_a.get(a["links"]["result"]).content
+        rows = client_b.get("/v1/segmentations").json()
+        assert rows.get("results", rows.get("rows", [])) == [], "a field is not a segmentation"
+    finally:
+        ex_a.close()
+        ex_b.close()

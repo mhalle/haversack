@@ -488,9 +488,10 @@ class SharedResultCache:
         import tempfile
         import time as _time
 
-        from .serve import ARTIFACT_NAMES, RESULT_NAME
+        from .serve import ARTIFACT_NAMES
         gen, files = ptr["generation"], ptr.get("files") or {}
-        if RESULT_NAME not in files:
+        primary = _primary_name(files)         # labels, or an encode job's field
+        if primary is None:
             return False
         with self._fill_lock(key):
             local_dir = self.local._generation_dir(key, gen)
@@ -498,7 +499,7 @@ class SharedResultCache:
             # ONLY these names, and they are spelled out here rather than taken from the
             # pointer: a pointer is written by another host, and a name of its choosing
             # ("../..", an absolute path) would decide where these bytes land.
-            wanted = [n for n in (RESULT_NAME, *ARTIFACT_NAMES) if n in files]
+            wanted = [n for n in (primary, *ARTIFACT_NAMES) if n in files]
             file_sizes = {n: b["size"] for n, b in (ptr.get("files") or {}).items()
                           if isinstance(b, dict) and isinstance(b.get("size"), int)}
             if not have_gen and self.local.adopt(key, gen, names=wanted, sizes=file_sizes):
@@ -524,18 +525,18 @@ class SharedResultCache:
                         _warn_if_corrupt(self.blobs, files[name]["digest"])
                     if here:
                         got.append(name)
-                    elif name == RESULT_NAME:
+                    elif name == primary:
                         return False           # swept: a miss, and the next compute heals it
                     # an artifact that is gone is not a reason to lose the labels: a missing
                     # preview used to make the whole entry a miss, and a lost thumbnail is
                     # not worth a GPU recompute (review, 2026-09-19)
                 if not have_gen:
                     try:
-                        self.local.put(key, work / RESULT_NAME, ptr.get("result") or {},
+                        self.local.put(key, work / primary, ptr.get("result") or {},
                                        ptr.get("meta") or {},
                                        preview_path=_present(work / "preview.png"),
                                        statistics_path=_present(work / "statistics.json"),
-                                       generation=gen,
+                                       output_name=primary, generation=gen,
                                        # the work directory is inside this cache root, so
                                        # the files are handed over rather than copied: a
                                        # fill needed twice the result's size free
@@ -624,12 +625,13 @@ class SharedResultCache:
         documents? One definition, because two disagreed: `pull` asked only about the
         pointer's files, so a copy whose `result.json` had gone was reported current and
         served as an empty result document (review, 2026-09-20)."""
-        from .serve import ARTIFACT_NAMES, RESULT_NAME
-        gen = ptr["generation"]
-        if self.local.generation(key) != gen:
+        from .serve import ARTIFACT_NAMES
+        gen, files = ptr["generation"], ptr.get("files") or {}
+        primary = _primary_name(files)
+        if primary is None or self.local.generation(key) != gen:
             return False
         where = self.local._generation_dir(key, gen)
-        wanted = [n for n in (RESULT_NAME, *ARTIFACT_NAMES) if n in (ptr.get("files") or {})]
+        wanted = [n for n in (primary, *ARTIFACT_NAMES) if n in files]
         return all((where / n).exists() for n in (*wanted, "result.json", "meta.json"))
 
     def _fill_lock(self, key: str) -> threading.Lock:
@@ -1139,7 +1141,7 @@ class SharedResultCache:
         ``"skip"`` (the default: it may be newer than ours), ``"newer"`` (compare the
         ``computed`` timestamps and replace only when ours is newer), or ``"force"``.
         """
-        from .serve import ARTIFACT_NAMES, RESULT_NAME
+        from .serve import ARTIFACT_NAMES, PRIMARY_NAMES
         if conflict not in ("skip", "newer", "force"):
             raise InputError(f"conflict {conflict!r}: expected skip, newer or force")
         out = {"pushed": 0, "skipped": 0, "replaced": 0, "failed": 0, "unreadable": 0}
@@ -1167,9 +1169,9 @@ class SharedResultCache:
             if not isinstance(result, dict) or not isinstance(meta, dict):
                 out["unreadable"] += 1                 # a pointer carries documents, and
                 continue                               # every reader indexes them
-            sources = {n: where / n for n in (RESULT_NAME, *ARTIFACT_NAMES)
+            sources = {n: where / n for n in (*PRIMARY_NAMES, *ARTIFACT_NAMES)
                        if (where / n).exists()}
-            if RESULT_NAME not in sources:
+            if _primary_name(sources) is None:         # none, or two: nothing to serve
                 out["unreadable"] += 1
                 continue
             # Asked BEFORE the bytes are touched, for every policy that can refuse: a rerun
@@ -1221,7 +1223,6 @@ class SharedResultCache:
         entries than the local bound cannot fit, and what would not fit is REPORTED rather
         than counted as pulled.
         """
-        from .serve import ARTIFACT_NAMES, RESULT_NAME
         out = {"pulled": 0, "current": 0, "failed": 0, "unreadable": 0, "evicted": 0}
         placed: list = []
         pointers, unreadable = self._scan_pointers(newest_first=True, limit=limit)
