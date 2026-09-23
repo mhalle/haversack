@@ -2043,13 +2043,29 @@ class TestTheServerSweepsItsStore(_Hosts):
         finally:
             off.close()
 
+    def test_it_never_takes_a_wakeup_meant_for_the_dispatcher(self):
+        """The sweeper once waited on the executor's `_cv`, and `submit` notifies ONE
+        waiter: after the first job the dispatcher re-waits behind the sweeper, so the
+        second submit woke the sweeper and the job stayed queued for a day (found by the
+        feldglas-integration session, 2026-09-23)."""
+        from fastapi.testclient import TestClient
+        from haversack.serve import create_app
+        from test_serve import submit, wait_state
+        ex = self.executor(sweep_interval_h=24)
+        try:
+            client = TestClient(create_app(ex))
+            for _ in range(3):
+                wait_state(client, submit(client), ("done",), timeout=10)
+        finally:
+            ex.close()
+
     def test_closing_the_server_stops_it_promptly(self):
         ex = self.executor(sweep_interval_h=24)
         sweeper = ex._sweeper
         self.assertTrue(sweeper.is_alive())
         ex.close()
         sweeper.join(10)
-        self.assertFalse(sweeper.is_alive(), "it waits on the server's own condition")
+        self.assertFalse(sweeper.is_alive(), "close() never reached the sweeper")
 
 
 class TestFindingAGenerationByItsBytes(_Hosts):

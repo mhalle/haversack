@@ -2746,7 +2746,7 @@ class LocalExecutor:
         self._restore()
         self._thread = threading.Thread(target=self._dispatch, name="haversack-serve", daemon=True)
         self._thread.start()
-        # last, because it waits on `_cv` and sweeps `cache`: both have to exist first
+        # last, because it sweeps `cache`, which has to exist first
         if result_store is not None and getattr(self, "_sweep_every", 0) > 0:
             self._start_sweeper()
 
@@ -3224,12 +3224,15 @@ class LocalExecutor:
         """
         import random
 
+        # Its own event, never `_cv`: `submit` notifies ONE waiter on `_cv`, and a sweeper
+        # waiting there could take the wakeup meant for the dispatcher, leaving a job
+        # queued until the next submit (2026-09-23). close() sets it.
+        self._sweep_stop = threading.Event()
+
         def loop():
             while True:
-                with self._cv:                 # wakes at once when the server closes
-                    self._cv.wait(self._sweep_every * random.uniform(0.9, 1.1))
-                    if self._stop:
-                        return
+                if self._sweep_stop.wait(self._sweep_every * random.uniform(0.9, 1.1)):
+                    return
                 try:
                     got = self.cache.sweep()
                     if got["deleted_blobs"] or got["expired_pointers"]:
@@ -3245,6 +3248,8 @@ class LocalExecutor:
         with self._cv:
             self._stop = True
             self._cv.notify_all()
+        if getattr(self, "_sweep_stop", None) is not None:
+            self._sweep_stop.set()
 
     # -- SSE plumbing --------------------------------------------------------
     def subscribe(self, jid: str, loop, q) -> bool:
