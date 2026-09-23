@@ -125,6 +125,36 @@ def device_budget_bytes(device: torch.device, *, host_headroom_gb: float = 3.0,
     return int(min(device_left, max(0.0, (host - host_headroom_gb * 1e9) * unified_fraction)))
 
 
+#: The share of a device's measured free memory the ranked encoder sizes its slab to. The
+#: encode runs where the logits are, beside the resident model, and its working-set bound
+#: (``rankfield.slab_bytes``) counts live tensors, not what the allocator keeps: on MPS the
+#: pool grew in ~1 GiB heaps to 1.5-2.2x the bound (2026-09-23, K=118 and K=25 fields, slabs
+#: of 0.46-2.95 GiB bound). Half the measurement keeps the pool inside it.
+ENCODE_BUDGET_FRACTION = 0.5
+#: ...and no more than rankfield's own small default (None = ``DEFAULT_MEMORY_BUDGET``, 1 GiB),
+#: because more bought nothing. Same process, conditions alternated, warm-up discarded, M2
+#: 16 GB: K=118 at 236x167x167 took 5.6 / 5.5 / 5.7 s at 7 / 15 / 30 planes and 8.1 s at 45
+#: (memory pressure); K=25 at 472x334x334 took 32.7 / 34.7 / 40.8 s at 5 / 11 / 22 planes.
+#: The per-slab launches are noise beside the per-voxel selection work. So the measurement
+#: only ever SHRINKS the slab, on a device too full for the default. Unmeasured on CUDA,
+#: where launches are relatively dearer: this is the number to lift there if one says so.
+ENCODE_BUDGET_CEILING: int | None = None
+
+
+def encode_budget(device) -> int:
+    """Bytes the ranked encoder may size its slab to on ``device``: a share of what the device
+    has free right now, capped at rankfield's own default, which is also the answer where the
+    budget is unknown (cpu, or no backend). Adapts to the machine and never changes a byte of
+    the field, so a caller records it beside the accumulator placement, not as a deviation."""
+    from .ranked import DEFAULT_MEMORY_BUDGET
+    ceiling = DEFAULT_MEMORY_BUDGET if ENCODE_BUDGET_CEILING is None else ENCODE_BUDGET_CEILING
+    free = device_budget_bytes(torch.device(device))
+    if free is None:
+        return DEFAULT_MEMORY_BUDGET
+    # a full device still encodes, a plane at a time (rankfield's floor), rather than refusing
+    return max(1, min(ceiling, int(free * ENCODE_BUDGET_FRACTION)))
+
+
 CUDA_AUTO_BATCH = 4
 
 

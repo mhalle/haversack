@@ -20,6 +20,7 @@ try:
                            deficit, encode, encode_regions, levels, margin, probabilities, settle_ties,
                            to_device)
     from rankfield import SUPPORT_MAX, TAIL_MAX, ZERO_LEVEL  # noqa: F401 - re-exported for tools and tests
+    from rankfield import DEFAULT_MEMORY_BUDGET  # noqa: F401 - the ceiling network.encode_budget caps at
 except ModuleNotFoundError as _e:
     if _e.name != "rankfield":
         raise
@@ -57,7 +58,7 @@ class RankedSpec:
     clip: float = CLIP
 
 
-def emit(spec, part, logits, /, **meta) -> "RankedCode | None":
+def emit(spec, part, logits, /, *, memory_budget: int | None = None, **meta) -> "RankedCode | None":
     """Encode ``logits`` into ``spec``'s sink, stamping ``meta`` onto the code.
 
     The one seam every engine hands its output distribution through. It exists because the
@@ -76,10 +77,16 @@ def emit(spec, part, logits, /, **meta) -> "RankedCode | None":
     was computed on, the grid it restores onto, and channel -> label. Without that the
     arrays are only a picture of one run. Stamp ``engine`` too; with more than one engine
     emitting, a reader cannot otherwise tell what produced the file.
+
+    ``memory_budget`` is the bytes the encoder sizes its slab to; None is rankfield's small
+    default. Measuring the device is the pipeline's business (``network.encode_budget``),
+    so the caller measures once, passes it here and records what it passed. It is
+    keyword-only and never lands in ``meta``: it moves no byte of the code, and a store
+    that recorded the machine it was written on would differ between two runs that agree.
     """
     if spec is None:
         return None
-    code = encode(logits, depth=spec.depth, clip=spec.clip)
+    code = encode(logits, depth=spec.depth, clip=spec.clip, memory_budget=memory_budget)
     code.meta.update(meta)
     spec.sink(str(part), code)
     return code

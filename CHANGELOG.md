@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **The ranked encoder's slab is sized from the device's free memory** (rankfield 0.3.5's
+  `memory_budget`, pinned below). `network.encode_budget` takes half of `device_budget_bytes` -
+  on MPS the allocator's pool grew in ~1 GiB heaps to
+  1.5-2.2x rankfield's `slab_bytes` bound - capped at rankfield's 1 GiB default, which is also
+  the answer on cpu. The cap is measured, not caution: on an M2, same process, conditions
+  alternated, K=118 at 236x167x167 encoded in 5.6 / 5.5 / 5.7 s at 7 / 15 / 30 planes and
+  8.1 s at 45, K=25 at 472x334x334 in 32.7 / 34.7 / 40.8 s at 5 / 11 / 22 - a thicker slab buys
+  nothing, so the measurement only ever shrinks it on a device too full for the default. CUDA
+  is unmeasured; `ENCODE_BUDGET_CEILING` is the number to lift there. `ranked.emit` takes
+  `memory_budget=` (keyword-only, never in the code's meta - it moves no byte) and the
+  nnU-Net and FastSurfer paths pass it; the nnU-Net path records it per model as
+  `encode_memory_budget_bytes`, beside `accumulate`, not as a deviation.
 - **`haversack serve --result-store s3://bucket/prefix` shares the result cache between
   servers through an object store** (also `gs://`, `az://`; `HAVERSACK_RESULT_STORE`). The
   POSIX cache's guarantees rest on rename and `flock`, which an object store does not have

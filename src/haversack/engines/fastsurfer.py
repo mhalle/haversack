@@ -574,6 +574,7 @@ def emit_probabilities(spec, logits, source_ref, target_ref, class_labels) -> No
     import torch
 
     from .. import __version__, ranked
+    from ..network import encode_budget
     from .geometry import grid_record
 
     lg = logits if isinstance(logits, torch.Tensor) else torch.from_numpy(
@@ -583,7 +584,7 @@ def emit_probabilities(spec, logits, source_ref, target_ref, class_labels) -> No
     # rather than an install sidecar.
     ident = weights_installed()
     ranked.emit(
-        spec, "asegdkt", lg,
+        spec, "asegdkt", lg, memory_budget=encode_budget(lg.device),
         softmax={"engine": "fastsurfer", "classes": int(lg.shape[0]),
                  "weights": ident[0].get("id", "fastsurfer") if ident else "fastsurfer",
                  "version": ident[0].get("version") if ident else None},
