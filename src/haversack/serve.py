@@ -3521,12 +3521,7 @@ class LocalExecutor:
                     migrate_key=_migrate,
                     set_pending=_set_pending,
                     clear_pending=_clear_pending,
-                    put=lambda key: self.cache.put(
-                        key, rec.labels_path, rec.result,
-                        {"identity": list(rec.input_identity), "task": rec.task,
-                         "options": rec.options, "computed": rec.started,
-                         "job": rec.id, **({"kind": rec.kind} if rec.kind == "encode" else {})},
-                        output_name=OUTPUT_OF_KIND.get(rec.kind, RESULT_NAME)),
+                    put=lambda key: self._publish(rec, key),
                     mark_done=_mark_done, start_worker=_start, kind=rec.kind)
             except _PrepareDone:
                 pass
@@ -3728,6 +3723,29 @@ class LocalExecutor:
 
     def statuses(self) -> list[dict]:
         return [self.status(r, brief=True) for r in self.jobs()]
+
+    def _publish(self, rec: JobRecord, key: str):
+        """The cache put for a finished job; the publication's generation token.
+
+        With a result STORE, a segmentation's task versions are recorded there too
+        (``note_task``, step 4b): a read-only server with no weights installed derives the
+        same key from them. After the put, and never at its expense - a job whose result is
+        published is done whether or not the note could be written."""
+        generation = self.cache.put(
+            key, rec.labels_path, rec.result,
+            {"identity": list(rec.input_identity), "task": rec.task,
+             "options": rec.options, "computed": rec.started,
+             "job": rec.id, **({"kind": rec.kind} if rec.kind == "encode" else {})},
+            output_name=OUTPUT_OF_KIND.get(rec.kind, RESULT_NAME))
+        if rec.kind == "segment" and hasattr(self.cache, "note_task"):
+            try:
+                self.cache.note_task(rec.task, versions_for(self.segmenter, rec.task),
+                                     installed_versions(self.segmenter, rec.task))
+            except Exception as e:             # noqa: BLE001
+                print(f"warning: could not record {rec.task}'s versions in the result "
+                      f"store ({type(e).__name__}: {e}); read-only servers will miss it "
+                      "until the next publication records them", file=sys.stderr, flush=True)
+        return generation
 
     def _entry_holds(self, key: str, result) -> bool:
         """Whether the entry at ``key`` holds this job's bytes - the result route's own

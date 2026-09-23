@@ -223,6 +223,15 @@
   the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
   be written no longer fails a publication that already succeeded; and `list` reads at most
   `limit` pointers rather than one per entry in the bucket.
+- **`haversack serve-store URL`: a read-only server over a result store.** Every read
+  route of `haversack serve` - results by path, meta, preview, statistics, the listing - and
+  nothing else: no jobs, no computation, and not one write to the store, so it runs on a
+  read-only credential, with no GPU, no weights and no torch. It is the Modal deployment's
+  public twin over a bucket instead of a volume. The one thing a bucket did not hold was the
+  result KEY, which is a digest of the task's weights versions; writers now record those
+  (`tasks/<task>.json`, rewritten only when they change) as they publish, and the reader
+  keys from them. A task no writer recorded, or a writer on another cache epoch, is a miss,
+  never a wrong result. Served from R2 in a real run: 565 ms for a first read, 115 ms after.
 - **`haversack cache sync SOURCE DESTINATION`: one result store into another.** A
   server's directory store (`file:///path`) into a bucket, a bucket into a directory, or
   any store into any other. Each result is decided by its history, not by clocks: copied

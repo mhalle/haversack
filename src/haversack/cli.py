@@ -743,6 +743,33 @@ def _command_line() -> click.Group:
                                'kind - a machine you trust end to end')),
         ])
     root.add_command(serve)
+    serve_store = _Command(
+        'serve-store', callback=_dispatch(_cmd_serve_store, 'serve-store'),
+        short_help='serve the results in a result store, read-only (needs the serve extra)',
+        help=('Every read route of `haversack serve` - results by path or key, their meta, '
+              'preview and statistics, the listing - over a result store that writers publish '
+              'into, and nothing else: no jobs, no computation, and not one write to the '
+              'store, so it runs on a read-only credential, with no GPU and no weights '
+              'installed. Keys come from what the writers recorded about their weights, so '
+              'run the same haversack version as they do.'),
+        epilog=_verbatim("""examples:
+  haversack serve-store s3://bucket/results --host 0.0.0.0
+  haversack serve-store file:///srv/haversack/store                  (a writer's directory store)"""),
+        params=[
+            click.Argument(['store'], required=False,
+                           help='the result store, e.g. s3://bucket/prefix or file:///path'),
+            click.Option(['--result-store'], envvar='HAVERSACK_RESULT_STORE',
+                         help='the store, if not given as the argument'),
+            click.Option(['--host'], default='127.0.0.1',
+                         help='interface to listen on (0.0.0.0 for the whole network)'),
+            click.Option(['--port'], type=int, default=8791, help='port to listen on'),
+            click.Option(['--cache-dir'],
+                         help=('where hits are copied to be served (default: a temporary '
+                               'directory; disposable - every read asks the store)')),
+            click.Option(['--no-listing'], is_flag=True,
+                         help='do not serve /v1/segmentations (the store\'s index stays private)'),
+        ])
+    root.add_command(serve_store)
 
     modal = _Group(
         'modal', short_help='deploy the server to your Modal account (needs the modal extra)',
@@ -1067,6 +1094,45 @@ def _cmd_serve(args) -> int:
     _need_inference_stack()          # the local server runs models in-process
     from .serve import main_serve
     return main_serve(args)
+
+
+def _cmd_serve_store(args) -> int:
+    """`haversack serve-store`: the read-only server over a result store (no torch needed)."""
+    import tempfile
+    from pathlib import Path
+    from .errors import InputError
+    url = args.store or args.result_store
+    if not url:
+        raise InputError("serve-store: name the store, e.g. `haversack serve-store "
+                         "s3://bucket/prefix` (or set HAVERSACK_RESULT_STORE)")
+    try:
+        import uvicorn
+    except ImportError as e:
+        raise InputError("the server needs the serve extra: uv sync --extra serve "
+                         "(or pip install 'haversack[serve]')") from e
+    from .objectcache import read_only_app
+    from .serve import _version
+    local = Path(args.cache_dir or tempfile.mkdtemp(prefix="haversack-serve-store-"))
+    try:
+        local.mkdir(parents=True, exist_ok=True)
+        app = read_only_app(url, local_dir=local, listing=not args.no_listing)
+    except InputError:
+        raise
+    except OSError as e:
+        raise InputError(f"--cache-dir {local}: {e.strerror or e}") from None
+    except Exception as e:                     # noqa: BLE001
+        raise InputError(f"serve-store {url}: {type(e).__name__}: {e}; check the bucket name "
+                         "and that credentials are in the environment") from None
+    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
+    server = uvicorn.Server(config)
+    try:
+        sock = config.bind_socket()
+    except OSError as e:
+        raise InputError(f"cannot listen on {args.host}:{args.port}: {e}") from e
+    print(f"haversack {_version()} serving {url} read-only on http://{args.host}:{args.port}",
+          flush=True)
+    server.run(sockets=[sock])
+    return 0
 
 
 def _deliverables_arg(value):

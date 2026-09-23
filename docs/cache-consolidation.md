@@ -283,6 +283,18 @@ The proposed order - each step behind a flag, with deployments untouched until t
      loser two levels down. Run for real: a directory store synced to R2 through the
      command (three keys with history, an artifact and a deletion, 9 s), served from R2,
      and a second sync found everything current.
+   - ~~**4b, the read-only server**~~ **DONE 2026-09-23.** `haversack serve-store URL` is
+     `create_public_app` over `SharedResultCache(read_only=True)`: every writing method
+     refuses before its first byte (a `put` uploads blobs before its conditional write, so a
+     refusal only there would still have written), and the startup write-probe is skipped,
+     so it runs on a read-only credential. Writers record each task's key versions, installed
+     versions and cache epoch at `tasks/<percent-encoded task>.json` when they publish a
+     segmentation - only when those changed - and the reader keys from them, rereading at
+     most once a minute. As built, `tasks/` rather than the sketch's `refs/tasks/`: it is
+     not a ref (not compare-and-swapped, last writer wins), and naming it one would claim a
+     guarantee it does not have. Ten guarantees mutation-checked. Run for real: a writer
+     published into R2 and a `serve-store` process with the real catalogs and no weights
+     served it, 565 ms cold and 115 ms warm, and refused a job.
 5. **One development server on the disk store behind a flag**, and a soak.
 6. **Inputs** onto the same store (the older step 4 below, unchanged in intent).
 7. **Modal last**, onto R2 directly.

@@ -71,6 +71,10 @@ POINTER_FORMAT = 2
 #: shim (decision 1 of the design) - and converted to a manifest chain, old generation
 #: tokens kept, by the first write to its key. Never written.
 LEGACY_FORMAT = 1
+#: Where writers record each task's key versions for read-only servers (step 4b).
+TASKS_DIR = "tasks/"
+#: How long a reader trusts a task's recorded versions before asking the store again.
+TASK_DOC_TTL_S = 60.0
 #: How long a deletion's tombstone stands before the sweep removes it. A sync carries a
 #: deletion only while its tombstone exists, so a copy of this store that goes unsynced for
 #: longer than this can bring a deleted result back - the bound to state and to monitor.
@@ -353,12 +357,18 @@ class SharedResultCache:
     """``ResultCache``'s interface, with the object store as the authority and a local
     ``ResultCache`` as the copy requests are served from. See the module docstring."""
 
-    def __init__(self, store, local, *, prefix: str = "", check: bool = True):
-        if check:
+    def __init__(self, store, local, *, prefix: str = "", check: bool = True,
+                 read_only: bool = False):
+        # a read-only view never writes the store - not even the startup probe, which is
+        # two writes and a delete - so it can run on a credential that allows nothing else
+        if check and not read_only:
             check_conditional_writes(store, prefix)
         self.store = store
         self.prefix = prefix
         self.local = local
+        self.read_only = read_only
+        self._noted: dict = {}                 # task -> the versions this process recorded
+        self._task_docs: dict = {}             # task -> (read at, versions document)
         self.blobs = Blobs(store, prefix)
         # weak: a lock lives while a filler holds it and is forgotten after. A plain dict
         # keeps one entry per key forever, in a process that runs for weeks (review).
@@ -384,6 +394,62 @@ class SharedResultCache:
     @property
     def root(self) -> Path:
         return self.local.root
+
+    def _writable(self, what: str) -> None:
+        if self.read_only:
+            raise InputError(f"{what}: this is a read-only view of the result store")
+
+    # -- task versions (step 4b) -----------------------------------------------------------
+
+    def _task_path(self, task: str) -> str:
+        from urllib.parse import quote
+        # percent-encoded: a task name holds ':' (ts.v2:total), which exFAT and FAT32 -
+        # supported cache roots - cannot hold in a file name
+        return f"{self.prefix}{TASKS_DIR}{quote(str(task), safe='')}.json"
+
+    def note_task(self, task: str, weights, installed=None) -> None:
+        """Record the weights versions ``task``'s result keys are made from, the installed
+        versions a pin is checked against, and this haversack's cache epoch - at
+        ``tasks/<task>.json`` - so a READ-ONLY server with no weights installed can derive
+        the key a writer would (step 4b). Written only when it changed since this process
+        last wrote it: one small write per task per upgrade, not one per publication.
+
+        Last writer wins. Writers sharing a store are expected to run the same weights; two
+        that do not make readers key on whichever recorded last - a miss for the other's
+        results, never a wrong answer, since the key is a digest of the versions."""
+        from .serve import CACHE_EPOCH
+        self._writable(f"recording {task}'s versions")
+        doc = {"format": 1, "task": str(task), "weights": [str(w) for w in weights],
+               "installed": list(installed) if installed else None, "epoch": CACHE_EPOCH}
+        if self._noted.get(task) == doc:
+            return
+        ops.put(self.store, self._task_path(task), _canonical({**doc, "updated": time.time()}))
+        self._noted[task] = doc
+
+    def task_versions(self, task: str, *, max_age_s: float | None = None):
+        """What `note_task` recorded for ``task``, or None - remembered for ``max_age_s``,
+        so a reader asks the store once a minute per task rather than once a request. A
+        document this code cannot read is None (every key from it would be a guess)."""
+        now = time.time()
+        max_age_s = TASK_DOC_TTL_S if max_age_s is None else max_age_s
+        held = self._task_docs.get(task)
+        if held is not None and now - held[0] < max_age_s:
+            return held[1]
+        try:
+            doc = json.loads(bytes(ops.get(self.store, self._task_path(task)).bytes()))
+        except FileNotFoundError:
+            doc = None
+        except (ValueError, UnicodeDecodeError):
+            doc = None
+        except Exception as e:                 # noqa: BLE001 - a read degrades, see _miss
+            _miss(f"reading {task}'s versions", e)
+            return held[1] if held is not None else None
+        if not (isinstance(doc, dict) and doc.get("format") == 1 and doc.get("task") == task
+                and isinstance(doc.get("weights"), list)
+                and all(isinstance(w, str) for w in doc["weights"])):
+            doc = None
+        self._task_docs[task] = (now, doc)
+        return doc
 
     # -- the pointer ---------------------------------------------------------------------
 
@@ -571,6 +637,7 @@ class SharedResultCache:
         ``publication``, ``published``, ``files``, ``result``, ``meta`` (and ``amends``), or
         ``deleted``. ``replaces`` is this method's: it is what makes the history."""
         from obstore.exceptions import AlreadyExistsError, PreconditionError
+        self._writable("publishing")
         for _ in range(SWAP_ATTEMPTS):
             kind, entry, mode = self._read_ref(key, raise_faults=True)
             if kind == "unreadable" and self._is_newer_format(key):
@@ -933,6 +1000,7 @@ class SharedResultCache:
         (main, 2026-09-23) - checked BEFORE anything is uploaded, so a wrong name costs no
         blob and no pointer."""
         from .serve import PRIMARY_NAMES, RESULT_NAME
+        self._writable("publishing")
         output_name = output_name or RESULT_NAME
         if output_name not in PRIMARY_NAMES:
             raise ValueError(f"{output_name!r} is not a primary output ({', '.join(PRIMARY_NAMES)})")
@@ -1015,6 +1083,7 @@ class SharedResultCache:
                     "files": files, "result": ptr.get("result"), "meta": ptr.get("meta"),
                     "amends": True}
         try:
+            self._writable(f"placing {name}")
             blob = self.blobs.put_file(src_path)
             written = self._swap(key, update)
             if written is None:
@@ -1053,6 +1122,7 @@ class SharedResultCache:
         to a copy of this store, where a removed ref would be indistinguishable from one
         never copied. Garbage under the ref's name is nobody's data and is removed outright.
         """
+        self._writable(f"deleting {key[:12]}...")
         if self._is_newer_format(key):
             raise ObjectStoreUnsuitable(
                 f"result {key[:12]}...: this entry was written by a newer haversack. "
@@ -1348,6 +1418,7 @@ class SharedResultCache:
         deleting the last entry in a store, that is the flag to pass.
         """
         from provender import EmptyKeepSet
+        self._writable("sweeping")
         now = time.time() if now is None else now
         candidates = self.blobs.entries(older_than=now - grace_s)   # BEFORE the pointers
         referenced, expired, tombstones = set(), 0, []
@@ -1451,6 +1522,7 @@ class SharedResultCache:
         ``computed`` timestamps and replace only when ours is newer), or ``"force"``.
         """
         from .serve import ARTIFACT_NAMES, PRIMARY_NAMES
+        self._writable("pushing")
         if conflict not in ("skip", "newer", "force"):
             raise InputError(f"conflict {conflict!r}: expected skip, newer or force")
         out = {"pushed": 0, "skipped": 0, "replaced": 0, "failed": 0, "unreadable": 0}
@@ -1618,6 +1690,7 @@ def sync(src: "SharedResultCache", dst: "SharedResultCache", *, keys=None,
     ``dst`` never meets a ref to bytes it lacks. Rules that do not depend on the order syncs
     run in make ``src -> dst`` and ``dst -> src`` converge.
     """
+    dst._writable("syncing into it")
     out = dict.fromkeys(SYNC_OUTCOMES, 0)
     if keys is None:
         keys = [k for _, k in sorted(src._stamps())]           # oldest first
@@ -1738,6 +1811,70 @@ def _copy_reachable(src, dst, key: str, entry) -> None:
             here = Path(tmp) / "blob"
             if src.blobs.fetch(digest, here):
                 dst.blobs.put_file(here)
+
+
+def read_only_app(store, *, local_dir, prefix: str = "", segmenter=None,
+                  listing: bool = True):
+    """The HTTP app of a READ-ONLY server over a result store (step 4b): every read route
+    the writer has, no compute path, and not one write to the store - so it can run on a
+    read-only credential, anywhere, with no GPU and no weights installed.
+
+    It is Modal's public twin (``serve.create_public_app`` over a ``CacheOnlyExecutor``),
+    pointed at a bucket instead of a volume. What the twin needs that a bucket did not hold
+    was the key: a result key is a digest of the task's WEIGHTS versions, which Modal's
+    twin reads off the weights volume it shares with its writer. Here they come from what
+    writers record (``note_task``); a task no writer recorded, or one recorded by a
+    haversack with a different cache epoch, keys on nothing a writer could have published
+    - a miss, never a wrong result.
+
+    ``store`` is a URL or an opened store; ``local_dir`` holds the local copies hits are
+    served from (disposable: every one is checked against the store per request).
+    """
+    from .serve import CACHE_EPOCH, ResultCache, create_public_app, result_key
+    if isinstance(store, str):
+        store, prefix = open_store(store)
+    if segmenter is None:
+        from .segmenter import Segmenter
+        # names and aliases only: the catalogs need no weights (and no torch) for those
+        segmenter = Segmenter(device="cpu",
+                              weights=tempfile.mkdtemp(prefix="haversack-reader-weights-"))
+    cache = SharedResultCache(store, ResultCache(local_dir), prefix=prefix, check=False,
+                              read_only=True)
+    told: set = set()
+
+    def recorded(task):
+        doc = cache.task_versions(task)
+        if doc is None:
+            return None
+        if doc.get("epoch") != CACHE_EPOCH:
+            if task not in told:
+                told.add(task)
+                print(f"warning: {task}'s results were written by a haversack with cache "
+                      f"epoch {doc.get('epoch')!r}, and this one is {CACHE_EPOCH!r}: its "
+                      "keys cannot match, so every read of it is a miss. Run the writer's "
+                      "version here.", file=sys.stderr, flush=True)
+            return None
+        return doc
+
+    def weights_fn(task):
+        doc = recorded(task)
+        # a component no writer could have used: the key names nothing, the read is a miss
+        return doc["weights"] if doc else ["not-recorded-in-this-store"]
+
+    def key_fn(identity, task, opts=None):
+        ids = (identity,) if isinstance(identity, str) else tuple(identity)
+        return result_key(ids, task, opts or {}, weights_fn(task))
+
+    def versions_fn(task):
+        doc = recorded(task)
+        return doc.get("installed") if doc else None
+
+    app = create_public_app(key_fn, cache.get, segmenter.tasks,
+                            list_fn=cache.list if listing else None,
+                            resolve_fn=segmenter.resolve_task, versions_fn=versions_fn,
+                            weights_fn=weights_fn)
+    app.state.result_store = cache             # for the tests, and an operator's shell
+    return app
 
 
 def _migrating(conflict: str, gen: str, files: dict, result: dict, meta: dict):

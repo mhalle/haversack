@@ -2637,6 +2637,187 @@ class TestSync(_Hosts):
         self.assertEqual(b"one", self.on_b())
 
 
+class _TaskNames:
+    """What a reader's segmenter is asked: names and aliases, no weights."""
+    TASK = "ts.v2:total_fast"
+
+    def tasks(self):
+        return [self.TASK]
+
+    def resolve_task(self, t):
+        if t in (self.TASK, "total_fast"):
+            return self.TASK
+        raise LookupError(f"unknown task {t!r}")
+
+
+class TestReadOnlyServer(_Hosts):
+    """Step 4b: every read route of the server over a result store, and not one write to
+    it; keys from the versions writers record."""
+
+    U = "0be27d1c-9410-47ff-9c9f-a44b26a4bd55"
+    VERSIONS = ["297=v2.0.0"]
+
+    def key(self, versions=None):
+        from haversack.serve import result_key
+        return result_key((f"idc:{self.U}",), _TaskNames.TASK, {}, versions or self.VERSIONS)
+
+    def publish_labels(self, *, note=True):
+        from test_serve import volume_bytes
+        src = self.file("labels.seg.nrrd", volume_bytes())
+        self.a.put(self.key(), src, {"volumes_ml": {"spleen": 1.0}},
+                   {"task": _TaskNames.TASK, "identity": [f"idc:{self.U}"], "options": {},
+                    "computed": 1.0})
+        if note:
+            self.a.note_task(_TaskNames.TASK, self.VERSIONS, ["v2.0.0"])
+        return src.read_bytes()
+
+    def reader(self, **kw):
+        from fastapi.testclient import TestClient
+        app = objectcache.read_only_app(self.store, local_dir=self.tmp / "reader",
+                                        prefix="pre/", segmenter=_TaskNames(), **kw)
+        return TestClient(app)
+
+    def labels_url(self, task="total_fast"):
+        return f"/v1/idc/{self.U}/{task}/labels.seg.nrrd"
+
+    def test_a_result_a_writer_published_is_served(self):
+        want = self.publish_labels()
+        client = self.reader()
+        self.assertEqual("public-cache", client.get("/v1/health").json()["mode"])
+        got = client.get(self.labels_url())
+        self.assertEqual(200, got.status_code, got.text)
+        self.assertEqual(want, got.content)
+        self.assertEqual(200, client.get(self.labels_url(_TaskNames.TASK)).status_code)
+
+    def test_a_task_no_writer_recorded_is_a_miss(self):
+        self.publish_labels(note=False)
+        self.assertEqual(404, self.reader().get(self.labels_url()).status_code)
+
+    def test_versions_from_another_cache_epoch_are_a_miss(self):
+        self.publish_labels()
+        path = self.a._task_path(_TaskNames.TASK)
+        doc = json.loads(bytes(ops.get(self.store, path).bytes()))
+        ops.put(self.store, path, json.dumps({**doc, "epoch": "another"}).encode())
+        self.assertEqual(404, self.reader().get(self.labels_url()).status_code)
+
+    def test_new_versions_are_picked_up_within_the_ttl(self):
+        self.publish_labels(note=False)
+        with unittest.mock.patch.object(objectcache, "TASK_DOC_TTL_S", 0.0):
+            client = self.reader()
+            self.assertEqual(404, client.get(self.labels_url()).status_code)
+            self.a.note_task(_TaskNames.TASK, self.VERSIONS)
+            self.assertEqual(200, client.get(self.labels_url()).status_code)
+
+    def test_it_cannot_compute_and_never_writes_the_store(self):
+        self.publish_labels()
+        writes = []
+        real = {name: getattr(ops, name) for name in ("put", "delete", "copy")}
+
+        def watch(name):
+            def f(store, *a, **kw):
+                if store is self.store:
+                    writes.append((name, a[0] if a else None))
+                return real[name](store, *a, **kw)
+            return f
+        with unittest.mock.patch.multiple(ops, **{n: watch(n) for n in real}):
+            client = self.reader()
+            # no route writes today; the view refusing is what keeps it so if one ever did
+            self.assertTrue(client.app.state.result_store.read_only)
+            self.assertEqual(200, client.get(self.labels_url()).status_code)
+            client.get("/v1/segmentations")
+            client.get(f"/v1/idc/{self.U}/total_fast/meta.json")
+            self.assertIn(client.post("/v1/jobs").status_code, (404, 405))
+            self.assertIn(client.delete(self.labels_url()).status_code, (404, 405))
+        self.assertEqual([], writes, "a read-only server wrote to the store")
+
+    def test_the_listing_can_be_kept_private(self):
+        self.publish_labels()
+        rows = self.reader().get("/v1/segmentations").json()["segmentations"]
+        self.assertEqual([self.key()], [r["key"] for r in rows])
+        self.assertIn(self.reader(listing=False).get("/v1/segmentations").status_code,
+                      (403, 404, 405, 501))
+
+    def test_a_read_only_view_refuses_every_write_before_writing_anything(self):
+        """Refused BEFORE the first byte: `put` uploads blobs before its conditional write,
+        so a refusal only at the write would still have written - and constructing one,
+        which runs the write probe on an ordinary view, must not probe either."""
+        from haversack.errors import InputError
+        self.publish_labels()
+        self.a.local.put(KEY, self.file("l", b"local"), {}, {"computed": 1.0})
+        writes = []
+        real = {name: getattr(ops, name) for name in ("put", "delete", "copy")}
+
+        def watch(name):
+            def f(store, *a, **kw):
+                writes.append((name, a[0] if a else None))
+                return real[name](store, *a, **kw)
+            return f
+        with unittest.mock.patch.multiple(ops, **{n: watch(n) for n in real}):
+            ro = SharedResultCache(self.store, ResultCache(self.tmp / "ro"), prefix="pre/",
+                                   read_only=True)
+            ro_push = SharedResultCache(self.store, self.a.local, prefix="pre/",
+                                        read_only=True)
+            for what, call in (
+                    ("put", lambda: ro.put("ab" * 32, self.file("x", b"x"), {}, {})),
+                    ("delete", lambda: ro.delete(self.key())),
+                    ("sweep", lambda: ro.sweep(grace_s=0)),
+                    ("push", lambda: ro_push.push()),
+                    ("note_task", lambda: ro.note_task("t", ["v"])),
+                    ("sync into it", lambda: objectcache.sync(self.a, ro))):
+                with self.subTest(what=what), self.assertRaises(InputError):
+                    call()
+            self.assertFalse(ro.add_artifact(self.key(), "preview.png",
+                                             self.file("p", b"png")))
+            self.assertIsNotNone(ro.get(self.key()), "and reads")
+        self.assertEqual([], writes)
+
+    def test_a_task_name_is_safe_as_a_file_name(self):
+        """':' is not allowed in a file name on exFAT or FAT32, both supported roots."""
+        self.assertNotIn(":", self.a._task_path(_TaskNames.TASK).split("/")[-1])
+
+    def test_the_versions_are_written_only_when_they_change(self):
+        writes = []
+        real = ops.put
+
+        def counting(store, path, *a, **kw):
+            if "tasks/" in str(path):
+                writes.append(path)
+            return real(store, path, *a, **kw)
+        with unittest.mock.patch.object(ops, "put", counting):
+            for _ in range(3):
+                self.a.note_task(_TaskNames.TASK, self.VERSIONS, ["v2.0.0"])
+            self.a.note_task(_TaskNames.TASK, ["297=v2.1.0"], ["v2.1.0"])
+        self.assertEqual(2, len(writes))
+
+    def test_the_cli_needs_a_store(self):
+        from haversack import cli
+        self.assertEqual(2, cli.main(["serve-store"]))
+
+
+def test_a_writer_server_records_its_task_versions(tmp_path):
+    """A segmentation published through a store records the versions its key was made
+    from - the very list `versions_for` gives - so a reader derives the same key."""
+    from fastapi.testclient import TestClient
+
+    from haversack.serve import LocalExecutor, create_app, versions_for
+    from test_job_result_cache import _Segmenter
+    from test_serve import submit, wait_state
+
+    store = MemoryStore()
+    ex = LocalExecutor(_Segmenter(steps=1), workdir=tmp_path / "w", cache_dir=tmp_path / "c",
+                       result_store=store)
+    try:
+        s = wait_state(TestClient(create_app(ex)), submit(TestClient(create_app(ex))),
+                       ("done",))
+        doc = SharedResultCache.index(store, check=False).task_versions(s["task"])
+        assert doc is not None
+        assert doc["weights"] == versions_for(ex.segmenter, s["task"])
+        from haversack.serve import CACHE_EPOCH
+        assert doc["epoch"] == CACHE_EPOCH
+    finally:
+        ex.close()
+
+
 class TestFormat1IsReadAndConverted(_Hosts):
     """The time-limited shim of decision 1: every entry written before 2026-09-23 is a
     format 1 pointer with its history inline. It is read as it is, and the first write to

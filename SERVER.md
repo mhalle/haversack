@@ -535,7 +535,17 @@ options is the same as the header.
   a bucket is the same format. Not over a network filesystem - machines share a bucket.
   Cannot be combined with `--no-result-cache`: the store needs a local copy in front of
   it. Unreferenced bytes are removed by `haversack cache sweep <store>`, which nothing runs
-  on a schedule; `haversack cache push`/`pull` move results between a machine and a store.
+  on a schedule; `haversack cache push`/`pull` move results between a machine and a store,
+  and `haversack cache sync SOURCE DESTINATION` one store into another - a writer's
+  `file://` store into a bucket, say - deciding each result by its history, deletions
+  included. Hosts sharing a store run the same haversack version.
+- **A read-only server over a store** (`haversack serve-store s3://bucket/prefix`): every
+  read route - results by path, meta, preview, statistics, the listing (`--no-listing` to
+  keep it private) - and no jobs, no computation, and no writes to the store at all, so it
+  runs on a read-only credential with no GPU and no weights. Result keys come from the
+  weights versions writers record in the store as they publish (`tasks/<task>.json`): a task
+  no writer recorded is a miss, and so is every result when the reader's haversack has a
+  different cache epoch from the writers' - run the writers' version.
 - **Weights** (`--model-root`, or the same default as the command line): shared with
   `haversack segment`, so a model either side downloaded is warm for both.
 - **Not shared with the command line:** `haversack segment` neither reads nor writes the
