@@ -119,14 +119,25 @@ def test_segment_records_each_models_encode_budget(tmp_path, monkeypatch):
     from test_cascade_union import ORGANS, RIBS, _Crop, _Part, _run, _spec
     seen = []
     real = network.encode_budget
-    monkeypatch.setattr(network, "encode_budget", lambda device: seen.append(real(device)) or 4321)
+    handed = iter([4321, 5432, 6543])        # one reading per model, each different
+    monkeypatch.setattr(network, "encode_budget", lambda device: seen.append(real(device))
+                        or next(handed))
+    passed = []                              # what each emit actually handed the encoder
+    real_emit = ranked.emit
+
+    def spy(spec, part, logits, /, *, memory_budget=None, **meta):
+        passed.append(memory_budget)
+        return real_emit(spec, part, logits, memory_budget=memory_budget, **meta)
+    monkeypatch.setattr(ranked, "emit", spy)
     got = []
     spec = ranked.RankedSpec(sink=lambda part, code: got.append(part))
     models = [_Crop(), _Part(ORGANS._props, cover=(slice(None),) * 3),
               _Part(RIBS._props, cover=(slice(0, 2), slice(None), slice(None)))]
     res, _ = _run(tmp_path, monkeypatch, models, _spec(), probabilities=spec)
     assert len(got) == 3 and seen == [rf.DEFAULT_MEMORY_BUDGET] * 3      # cpu: rankfield's default
-    assert [m["encode_memory_budget_bytes"] for m in res.provenance["models"]] == [4321] * 3
+    # the value recorded for each model is the one its encode was given, and only its own
+    assert passed == [4321, 5432, 6543]
+    assert [m["encode_memory_budget_bytes"] for m in res.provenance["models"]] == passed
     res, _ = _run(tmp_path, monkeypatch, [_Crop(), _Part(ORGANS._props, cover=(slice(None),) * 3),
                                           _Part(RIBS._props, cover=(slice(None),) * 3)], _spec())
     assert all("encode_memory_budget_bytes" not in m for m in res.provenance["models"])

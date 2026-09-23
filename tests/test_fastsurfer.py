@@ -425,6 +425,30 @@ def test_emit_probabilities_hands_over_the_field_with_both_grids():
     assert code.meta["source_grid"]["shape_zyx"] != code.meta["target_grid"]["shape_zyx"]
 
 
+def test_emit_probabilities_sizes_the_encode_from_the_logits_device(monkeypatch):
+    """FastSurfer's field is the largest a run encodes (79 classes at 1 mm): its slab is sized
+    from the device the logits are on, and the encoder is handed that number (review,
+    2026-09-23: no test reached this call, and dropping the budget survived)."""
+    from haversack import network, ranked
+
+    torch = pytest.importorskip("torch")
+    K, Z, Y, X = 4, 3, 4, 5
+    lg = torch.randn(K, Z, Y, X)
+    ref = sitk.GetImageFromArray(np.zeros((Z, Y, X), np.float32))
+    asked = []
+    monkeypatch.setattr(network, "encode_budget", lambda device: asked.append(device) or 7777)
+    passed = []
+    real_emit = ranked.emit
+
+    def spy(spec, part, logits, /, *, memory_budget=None, **meta):
+        passed.append(memory_budget)
+        return real_emit(spec, part, logits, memory_budget=memory_budget, **meta)
+    monkeypatch.setattr(ranked, "emit", spy)
+    fs.emit_probabilities(ranked.RankedSpec(sink=lambda part, code: None), lg, ref, ref,
+                          list(range(K)))
+    assert asked == [lg.device] and passed == [7777]
+
+
 def test_emit_probabilities_accepts_the_cpu_paths_axis_order():
     """_capture_logits returns (K,Z,Y,X) torch on every identity path (on the device, or an
     fp16 view on the host since 2026-09-11) but still (Z,Y,X,K) numpy after a non-identity

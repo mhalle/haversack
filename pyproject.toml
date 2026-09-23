@@ -120,13 +120,13 @@ monai = ["monai>=1.4", "torch>=2.7", "nibabel", "itk", "pytorch-ignite", "einops
 # beside the torch extra. The dev env adds it: `uv sync --extra torch ... --extra duckn`.
 # zarr 3.3 and duckn need Python 3.12, which is the project's floor (0.6.1: one floor, no
 # per-package markers - the extra was empty on 3.10 and rankfield-only on 3.11).
-duckn = ["duckn", "zarr>=3.3", "rankfield"]      # the ranked encoding + restore (github, a tag)
+duckn = ["duckn", "zarr>=3.3", "rankfield>=0.3.5"]      # the ranked encoding + restore (github, a tag)
 # `haversack encode` (2026-09-23): an encoder's token lattices written as an embedding field. The
 # field format is feldglas's, and feldglas is its one author - haversack hands it the tokens and
 # writes through `feldglas.store` (zarr + duckn's own models, like the ranked stores). The networks
 # need the torch extra (RADAR's encoder is built from nnU-Net's dynamic_network_architectures);
 # RADAR's input convention reorients through nibabel, as upstream's DataFolder does.
-encode = ["feldglas", "duckn", "zarr>=3.3", "rankfield", "nibabel"]
+encode = ["feldglas", "duckn", "zarr>=3.3", "rankfield>=0.3.5", "nibabel"]
 
 [build-system]
 requires = ["hatchling"]
