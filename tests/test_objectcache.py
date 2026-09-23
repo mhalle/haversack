@@ -2617,6 +2617,17 @@ class TestAnEncodeJobsField(_Hosts):
         self.assertEqual({"pulled": 0, "current": 1}, {k: v for k, v in self.b.pull().items()
                                                         if k in ("pulled", "current")})
 
+    def test_an_orphaned_field_generation_is_adopted_without_downloading(self):
+        """`ResultCache.adopt` always demanded the LABELS, so the repair a crash between
+        the rename and the pointer write needs could never finish for a field."""
+        gen = self.publish_field(self.a)
+        self.b.get(KEY)
+        (self.b.local.root / KEY / CURRENT_NAME).unlink()
+        with unittest.mock.patch.object(BlobStore, "fetch",
+                                        side_effect=AssertionError("downloaded")):
+            self.assertEqual(b"a field", Path(self.b.get(KEY)[0]).read_bytes())
+        self.assertEqual(gen, self.b.local.generation(KEY))
+
     def test_a_copy_that_lost_its_field_is_not_current(self):
         """``_holds`` is the one definition of "this host has it whole": a copy asked about
         its artifacts and documents but not its field would be reported current by `pull`

@@ -1888,7 +1888,13 @@ class ResultCache:
         """
         import os
         where = self._generation_dir(key, gen)
-        wanted = {RESULT_NAME, "result.json", "meta.json", *names}
+        # the publication's ONE primary output (labels or an encode job's field), named by
+        # the caller: always demanding the labels made a field entry un-adoptable, so the
+        # repair this method exists for could never finish for one (2026-09-23)
+        primaries = [n for n in names if n in PRIMARY_NAMES]
+        if len(primaries) != 1:
+            return False
+        wanted = {"result.json", "meta.json", *names}
         sizes = sizes or {}
         for n in wanted:
             try:
