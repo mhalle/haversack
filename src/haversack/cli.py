@@ -1005,6 +1005,23 @@ def _command_line() -> click.Group:
                                'it an empty index stops the run, because "everything was '
                                'deleted" and "wrong prefix" look identical from here')),
         ])))
+    cache.add_command(_Command(
+        'sync', callback=_dispatch(_cmd_cache, 'cache', 'ccmd'),
+        short_help='copy one result store into another',
+        help=('Makes DESTINATION hold what SOURCE holds - a server\'s directory store '
+              '(file:///path) into a bucket, or any store into any other. Each result is '
+              'decided by its history, not by clocks: a result the destination lacks or '
+              'holds an older version of is copied; one the destination holds a NEWER '
+              'version of is left alone; one computed independently on both keeps the later, '
+              'with the other in its history. Deletions travel too. Safe to interrupt and '
+              'rerun: nothing is copied twice.'),
+        params=[
+            click.Argument(['source'], help='the store to copy from'),
+            click.Argument(['destination'], help='the store to copy into'),
+            click.Option(['--key', 'keys'], multiple=True,
+                         help='only this result key (repeatable); default every key'),
+            click.Option(['--quiet'], is_flag=True, help='counts only, no per-entry lines'),
+        ]))
     return root
 
 
@@ -1590,7 +1607,37 @@ def _cmd_cache(args) -> int:
         return 0
     if args.ccmd in ("push", "pull", "sweep"):
         return _cmd_cache_move(args)
+    if args.ccmd == "sync":
+        return _cmd_cache_sync(args)
     return 0
+
+
+def _cmd_cache_sync(args) -> int:
+    """`haversack cache sync SOURCE DESTINATION`."""
+    from .errors import InputError
+    from .objectcache import SharedResultCache, sync
+
+    def opened(url, check):
+        try:
+            return SharedResultCache.index(url, check=check)
+        except InputError:
+            raise
+        except Exception as e:                 # noqa: BLE001
+            raise InputError(f"cache sync {url}: {type(e).__name__}: {e}; check the bucket "
+                             "name and that credentials are in the environment") from None
+    # the source is only READ: it needs no write probe, and may be a read-only credential
+    src, dst = opened(args.source, False), opened(args.destination, True)
+
+    def say(key, what):
+        print(f"  {key[:12]}... {what}", file=sys.stderr, flush=True)
+    got = sync(src, dst, keys=list(args.keys) or None, report=None if args.quiet else say)
+    print(f"copied {got['copied']}, fast-forwarded {got['fast_forwarded']}, merged "
+          f"{got['merged']}, already current {got['current']}, newer at the destination "
+          f"{got['newer_there']}, failed {got['failed']}"
+          + (f", format 1 left for its first write {got['legacy']}" if got["legacy"] else "")
+          + (f", unreadable {got['unreadable']}" if got["unreadable"] else ""),
+          file=sys.stderr)
+    return 1 if got["failed"] or got["unreadable"] else 0
 
 
 def _cmd_cache_move(args) -> int:

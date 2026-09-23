@@ -71,6 +71,11 @@ POINTER_FORMAT = 2
 #: shim (decision 1 of the design) - and converted to a manifest chain, old generation
 #: tokens kept, by the first write to its key. Never written.
 LEGACY_FORMAT = 1
+#: How long a deletion's tombstone stands before the sweep removes it. A sync carries a
+#: deletion only while its tombstone exists, so a copy of this store that goes unsynced for
+#: longer than this can bring a deleted result back - the bound to state and to monitor.
+#: The same as the history bound: past it, nothing about the key's past is kept anyway.
+TOMBSTONE_KEEP_S = 30 * 24 * 3600
 #: How many manifests a history walk reads before it stops, whatever it has found. Each
 #: publication is one manifest plus one per late artifact (a preview, statistics), so this
 #: is generous for HISTORY_KEEP publications and bounds what a damaged or malicious chain
@@ -366,6 +371,16 @@ class SharedResultCache:
         store, prefix = open_store(url)
         return cls(store, local, prefix=prefix)
 
+    @classmethod
+    def index(cls, store, prefix: str = "", *, check: bool = True) -> "SharedResultCache":
+        """The STORE half alone - refs, manifests, blobs - with no local copy: what `sync`
+        reads and writes. Only the store-level methods may be called on it (`_read_ref`,
+        `_chain`, `history`, `find_generation`, `sweep`); anything that serves a request
+        needs a local copy, and would fail on this one."""
+        if isinstance(store, str):
+            store, prefix = open_store(store)
+        return cls(store, None, prefix=prefix, check=check)
+
     @property
     def root(self) -> Path:
         return self.local.root
@@ -468,44 +483,57 @@ class SharedResultCache:
         """The current publication and every kept predecessor, newest first - one element
         per PUBLICATION, in the shape `_generations` gives a format 1 pointer.
 
-        Walks ``replaces`` from the current manifest. A late artifact is an AMENDING
-        manifest of the same publication, so a walk meets a publication's newest (most
-        complete) manifest first and skips its earlier ones. It stops at HISTORY_KEEP
-        predecessors, at the first one older than HISTORY_MAX_AGE_S, at a deletion (history
-        does not survive one), at a manifest that is gone - the sweep takes a chain's tail
-        once it falls out of these bounds, so a gone manifest is simply where history ends -
-        and after CHAIN_STEPS_MAX reads whatever it found.
+        Walks ``replaces`` from the current manifest, breadth first: a MERGE manifest (a sync
+        that met two independent computations of one key, step 4) replaces two, and the
+        loser must stay in history. A late artifact is an AMENDING manifest of the same
+        publication, so a walk meets a publication's newest (most complete) manifest first;
+        where a merge offers two manifests of one publication, the one with more files
+        stands for it. A branch ends at a manifest older than HISTORY_MAX_AGE_S, at a
+        deletion (history does not survive one), and at a manifest that is gone - the sweep
+        takes a chain's tail once it falls out of these bounds, so a gone manifest is simply
+        where history ends. The walk stops at HISTORY_KEEP predecessors, and after
+        CHAIN_STEPS_MAX reads whatever it found.
 
-        ``manifests`` collects every manifest digest the walk READ, amending ones included:
-        the sweep must keep the links, or the next walk ends early.
+        ``manifests`` collects every manifest digest the walk read of a KEPT publication,
+        amending ones included: the sweep must keep the links, or the next walk ends early.
         """
+        from collections import deque
         now = time.time() if now is None else now
         if entry.get("format") == LEGACY_FORMAT:
             return _generations(entry, now=now)
         key = entry["key"]
         if manifests is not None:
             manifests.add(entry["_manifest"])
-        out = [{"generation": entry["generation"], "published": entry["published"],
-                "files": entry["files"], "result": entry["result"], "meta": entry["meta"],
-                "current": True}]
-        seen = {entry["generation"]}
-        nxt = entry["replaces"][0] if entry["replaces"] else None
-        for _ in range(CHAIN_STEPS_MAX):
-            if nxt is None or len(out) > HISTORY_KEEP:
-                break
-            m = self._manifest(key, nxt, raise_faults=raise_faults)
+
+        def as_entry(m, current):
+            return {"generation": m.get("publication"), "published": m["published"],
+                    "files": m.get("files") or {}, "result": m.get("result"),
+                    "meta": m.get("meta"), "current": current}
+        out = [as_entry(_manifest_of(entry), True)]
+        at = {entry["generation"]: 0}          # publication -> its place in `out`
+        queue, visited = deque(entry["replaces"]), set()
+        while queue and len(visited) < CHAIN_STEPS_MAX and len(out) <= HISTORY_KEEP:
+            digest = queue.popleft()
+            if digest in visited:
+                continue
+            visited.add(digest)
+            m = self._manifest(key, digest, raise_faults=raise_faults)
             if m is None or m.get("deleted") is True:
-                break
-            if m["publication"] not in seen:
-                if m["published"] <= now - HISTORY_MAX_AGE_S:
-                    break                      # and its manifest is not kept: the tail goes
-                seen.add(m["publication"])
-                out.append({"generation": m["publication"], "published": m["published"],
-                            "files": m.get("files") or {}, "result": m.get("result"),
-                            "meta": m.get("meta"), "current": False})
+                continue
+            pub = m["publication"]
+            if pub in at:
+                i = at[pub]
+                if i and len(m.get("files") or {}) > len(out[i]["files"]):
+                    out[i] = as_entry(m, False)
+            elif m["published"] <= now - HISTORY_MAX_AGE_S:
+                continue                       # not kept, not followed: the tail goes
+            else:
+                at[pub] = len(out)
+                out.append(as_entry(m, False))
             if manifests is not None:
-                manifests.add(nxt)             # a kept publication's, amending ones included
-            nxt = m["replaces"][0] if m["replaces"] else None
+                manifests.add(digest)          # a kept publication's, amending ones included
+            queue.extend(m["replaces"])
+        out[1:] = sorted(out[1:], key=lambda g: g["published"], reverse=True)
         return out
 
     def _write_manifest(self, m: dict) -> str:
@@ -1270,6 +1298,30 @@ class SharedResultCache:
             out.append({**ptr, "_key": key})
         return out, unreadable
 
+    def _expire_tombstone(self, tomb: dict) -> bool:
+        """Remove a tombstone older than TOMBSTONE_KEEP_S; True if it went.
+
+        An object store has no conditional DELETE, so this rereads the ref immediately
+        before removing it and removes it only if it is still that same tombstone. A
+        publication landing in the gap between the two requests is lost - a miss, and the
+        next computation republishes it - which is the same window, for the same reason, as
+        `sweep(max_age_s=)` has always had; and a tombstone thirty days old is a key nobody
+        has published since.
+        """
+        key = tomb["key"]
+        try:
+            kind, now_there, _mode = self._read_ref(key, raise_faults=True)
+        except Exception as e:                 # noqa: BLE001 - keep it: doubt is not expiry
+            _miss(f"re-reading the tombstone of {key[:12]}", e)
+            return False
+        if kind != "tombstone" or now_there["_manifest"] != tomb["_manifest"]:
+            return False
+        try:
+            ops.delete(self.store, self._pointer_path(key))
+        except FileNotFoundError:
+            pass
+        return True
+
     def sweep(self, *, max_age_s: float | None = None, grace_s: float = BLOB_GRACE_S,
               now: float | None = None, allow_empty: bool = False) -> dict:
         """Delete what no pointer needs: pointers published more than ``max_age_s`` ago
@@ -1301,6 +1353,9 @@ class SharedResultCache:
         referenced, expired, tombstones = set(), 0, []
         pointers, unreadable = self._scan_pointers(tombstones=tombstones)
         for tomb in tombstones:
+            if tomb["published"] < now - TOMBSTONE_KEEP_S and self._expire_tombstone(tomb):
+                expired += 1                   # its manifest goes with the blobs below
+                continue
             # the tombstone itself only: what it replaced - the result and its history -
             # is exactly what a deletion is for reclaiming
             referenced.add(tomb["_manifest"])
@@ -1349,10 +1404,10 @@ class SharedResultCache:
         # answer is to refuse and say so, not to empty the bucket (review, 2026-09-20).
         # "the index is empty" and "the index is not where I looked" are the two cases,
         # and only the first may sweep: pointers that were FOUND and then expired are an
-        # index that was read
+        # index that was read - and so are tombstones, which are entries too
         try:
-            got = self.blobs.sweep(keep=referenced, candidates=candidates, grace_s=0,
-                                   now=now, allow_empty=bool(pointers) or allow_empty)
+            got = self.blobs.sweep(keep=referenced, candidates=candidates, grace_s=0, now=now,
+                                   allow_empty=bool(pointers or tombstones) or allow_empty)
         except EmptyKeepSet:
             if candidates:
                 print(f"warning: no entries under {self.prefix}results/, but "
@@ -1529,6 +1584,160 @@ class SharedResultCache:
                 return 0.0
         dirs.sort(key=_mtime, reverse=True)
         return [d.name for d in dirs[:limit]], True
+
+
+#: What `sync` answers per key.
+SYNC_OUTCOMES = ("copied", "fast_forwarded", "merged", "current", "newer_there", "absent",
+                 "legacy", "unreadable", "failed")
+
+
+def sync(src: "SharedResultCache", dst: "SharedResultCache", *, keys=None,
+         report=None) -> dict:
+    """Make ``dst`` hold what ``src`` holds, key by key; counts by outcome
+    (:data:`SYNC_OUTCOMES`). Step 4 of the from-scratch design (docs/cache-consolidation.md,
+    section 4): the copy a writer's disk store makes to a bucket, or any store to any store.
+
+    Per key, decided by ANCESTRY - the ``replaces`` links - not by clocks:
+
+    - ``dst`` has nothing: copy.
+    - the same manifest: nothing to do (``current``).
+    - ``dst``'s manifest is an ancestor of ``src``'s: ``src`` is newer - FAST-FORWARD.
+    - ``src``'s is an ancestor of ``dst``'s: ``dst`` is newer (``newer_there``) - untouched.
+    - neither - the key was computed independently on both: MERGE. The later ``published``
+      wins (ties by digest), and ``dst`` gets a merge manifest: the winner's content,
+      replacing BOTH, so the loser stays in history instead of vanishing.
+
+    A deletion is a tombstone manifest and syncs by the same rules: it beats every
+    publication it replaced. An ABSENT key is not synced - absence carries no ancestry, which
+    is why deletion writes a tombstone. A format 1 entry at ``src`` is reported (``legacy``)
+    and skipped: its first write there converts it. One at ``dst`` is converted first.
+
+    Objects before the ref, as in a publication: every blob and manifest the new ``dst``
+    entry's kept history reaches is copied (or, already there, refreshed so ``dst``'s sweep
+    spares it) BEFORE the ref is written, by the same conditional write, so a reader of
+    ``dst`` never meets a ref to bytes it lacks. Rules that do not depend on the order syncs
+    run in make ``src -> dst`` and ``dst -> src`` converge.
+    """
+    out = dict.fromkeys(SYNC_OUTCOMES, 0)
+    if keys is None:
+        keys = [k for _, k in sorted(src._stamps())]           # oldest first
+    for key in keys:
+        try:
+            outcome = _sync_key(src, dst, key)
+        except ObjectStoreUnsuitable:
+            raise                              # a newer format at dst: stop, do not guess
+        except Exception as e:                 # noqa: BLE001 - one key is not the run
+            outcome = "failed"
+            if report:
+                report(key, f"failed: {type(e).__name__}: {e}")
+        out[outcome] += 1
+        if report and outcome != "failed":
+            report(key, outcome.replace("_", " "))
+    return out
+
+
+def _sync_key(src, dst, key: str) -> str:
+    from obstore.exceptions import AlreadyExistsError, PreconditionError
+    kind_s, s, _ = src._read_ref(key, raise_faults=True)
+    if kind_s in ("absent", "unreadable"):
+        return kind_s
+    if s["format"] == LEGACY_FORMAT:
+        return "legacy"
+    for _ in range(SWAP_ATTEMPTS):
+        kind_d, d, mode = dst._read_ref(key, raise_faults=True)
+        if kind_d == "unreadable" and dst._is_newer_format(key):
+            raise ObjectStoreUnsuitable(
+                f"result {key[:12]}...: the destination holds an entry this version cannot "
+                "read (a newer haversack wrote it); refusing to sync over it")
+        if d is not None and d["format"] == LEGACY_FORMAT:
+            converted = dst._predecessor(key, "live", d, {})
+            d = (_view(dst._manifest(key, converted[0], raise_faults=True), converted[0])
+                 if converted else None)
+        if d is None:
+            action, doc, digest = "copied", _manifest_of(s), s["_manifest"]
+        elif d["_manifest"] == s["_manifest"]:
+            return "current"
+        elif d["_manifest"] in _ancestors(src, key, s):
+            action, doc, digest = "fast_forwarded", _manifest_of(s), s["_manifest"]
+        elif s["_manifest"] in _ancestors(dst, key, d):
+            return "newer_there"
+        else:
+            action = "merged"
+            win, lose = sorted((s, d), key=lambda e: (e["published"], e["_manifest"]),
+                               reverse=True)
+            doc = {**_manifest_of(win), "replaces": [win["_manifest"], lose["_manifest"]]}
+            digest = None
+        _copy_reachable(src, dst, key, s)
+        data = (_canonical(doc) if digest is None
+                else _manifest_bytes(src, digest, doc))
+        digest = _digest_of(data)
+        dst.blobs.put_bytes(data)
+        ref = _canonical({"format": POINTER_FORMAT, "manifest": digest,
+                          "body": data.decode("utf-8")})
+        try:
+            ops.put(dst.store, dst._pointer_path(key), ref,
+                    mode=mode if mode is not None else "create")
+        except (AlreadyExistsError, PreconditionError):
+            continue                           # dst moved under us: decide again
+        if not dst.blobs.has(digest):          # the sweep window, as in a publication
+            dst.blobs.put_bytes(data)
+        return action
+    raise RuntimeError(f"result {key}: {SWAP_ATTEMPTS} writes raced this sync")
+
+
+def _ancestors(index, key: str, entry, *, limit: int = CHAIN_STEPS_MAX * 4) -> set:
+    """Every manifest digest reachable from ``entry`` through ``replaces`` - ancestry, NOT
+    history: no age bound, and a digest counts once it is NAMED, whether or not its
+    manifest is still stored. Faults are raised: a sync must not guess an ordering."""
+    from collections import deque
+    seen: set = set()
+    queue = deque(entry["replaces"])
+    reads = 0
+    while queue and reads < limit:
+        digest = queue.popleft()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        reads += 1
+        m = index._manifest(key, digest, raise_faults=True)
+        if m is not None:
+            queue.extend(m["replaces"])
+    return seen
+
+
+def _manifest_bytes(index, digest: str, doc: dict) -> bytes:
+    """The exact bytes a manifest was stored as. Re-serializing gives them back for any
+    manifest haversack wrote; another writer's might serialize differently, and then only
+    its stored object has the bytes its digest names."""
+    data = _canonical(doc)
+    if _digest_of(data) == digest:
+        return data
+    data = bytes(ops.get(index.store, index.blobs.path(digest)).bytes())
+    if _digest_of(data) != digest:
+        raise ValueError(f"manifest {digest} does not hash to its name at the source")
+    return data
+
+
+def _copy_reachable(src, dst, key: str, entry) -> None:
+    """Copy into ``dst`` every object ``entry``'s kept history reaches at ``src``: the blobs
+    of each kept publication and every manifest the walk read. An object already at ``dst``
+    is refreshed instead (``Blobs.touch``), so ``dst``'s sweep - which may be running - sees
+    it as young until the ref naming it is written. An object ``src`` no longer holds is
+    skipped: ``dst`` then mirrors ``src``, a miss where ``src`` has one."""
+    if entry["deleted"]:
+        digests = [entry["_manifest"]]
+    else:
+        manifests: set = set()
+        chain = src._chain(entry, raise_faults=True, manifests=manifests)
+        digests = [b["digest"] for g in chain for b in g["files"].values()]
+        digests += sorted(manifests)
+    for digest in dict.fromkeys(digests):
+        if dst.blobs.touch(digest):
+            continue
+        with tempfile.TemporaryDirectory(prefix="haversack-sync-") as tmp:
+            here = Path(tmp) / "blob"
+            if src.blobs.fetch(digest, here):
+                dst.blobs.put_file(here)
 
 
 def _migrating(conflict: str, gen: str, files: dict, result: dict, meta: dict):

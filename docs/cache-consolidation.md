@@ -270,6 +270,19 @@ The proposed order - each step behind a flag, with deployments untouched until t
    format - a miss, a refused publication, a sweep that deletes nothing - so every host
    sharing a store upgrades together.
 4. **Sync, and the read-only app over a bucket** (`refs/tasks`, no write probe).
+   - ~~**4a, sync**~~ **DONE 2026-09-23.** `objectcache.sync(src, dst)` and `haversack
+     cache sync SOURCE DESTINATION`, as section 4 describes: copy, fast-forward, leave a
+     newer destination alone, or merge with the later computation winning and the loser in
+     history; objects before the ref; a deletion travels as its tombstone. Two things had
+     to change to make that true. History walks EVERY parent (breadth first), since a merge
+     has two and the loser must stay reachable; and tombstones now expire - the sweep
+     removes one older than `TOMBSTONE_KEEP_S` (30 days) after rereading the ref and
+     finding the SAME tombstone, the nearest an object store comes to a conditional
+     delete. Thirteen guarantees mutation-checked; two first-parent-only mutants survived
+     the first tests, which checked merges only one level deep, until the tests put the
+     loser two levels down. Run for real: a directory store synced to R2 through the
+     command (three keys with history, an artifact and a deletion, 9 s), served from R2,
+     and a second sync found everything current.
 5. **One development server on the disk store behind a flag**, and a soak.
 6. **Inputs** onto the same store (the older step 4 below, unchanged in intent).
 7. **Modal last**, onto R2 directly.

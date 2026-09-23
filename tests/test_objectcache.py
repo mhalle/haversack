@@ -2424,6 +2424,219 @@ class TestRefsAndManifests(_Hosts):
             ops.head(self.store, f"pre/results/{KEY}.json")
 
 
+class TestSync(_Hosts):
+    """Step 4: `sync` makes one store hold what another holds, decided by ancestry. The
+    other store is the same backend as ``self.store``, so the class runs memory-to-memory
+    here and directory-to-directory in its OnDisk twin."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = (DiskStore(self.tmp / "other-store") if isinstance(self.store, DiskStore)
+                      else MemoryStore())
+        self.c = SharedResultCache(self.other, ResultCache(self.tmp / "local-c"), prefix="pre/")
+        self.A = SharedResultCache.index(self.store, "pre/", check=False)
+        self.B = SharedResultCache.index(self.other, "pre/", check=False)
+
+    def sync(self, src=None, dst=None, **kw):
+        return objectcache.sync(src or self.A, dst or self.B, **kw)
+
+    def only(self, got):
+        """The one outcome a single-key sync had."""
+        (what,) = [k for k, v in got.items() if v]
+        return what
+
+    def on_b(self, key=KEY):
+        hit = self.c.get(key)
+        return Path(hit[0]).read_bytes() if hit else None
+
+    def test_a_key_the_destination_lacks_is_copied_with_its_history(self):
+        gens = [self.publish(self.a, f"v{i}".encode()) for i in range(3)]
+        self.assertEqual("copied", self.only(self.sync()))
+        self.assertEqual(b"v2", self.on_b())
+        self.assertEqual(gens[::-1], [h["generation"] for h in self.c.history(KEY)])
+        dest = self.tmp / "v0-on-b"
+        self.assertIsNotNone(self.c.fetch_generation(KEY, gens[0], dest))
+        self.assertEqual(b"v0", (dest / RESULT_NAME).read_bytes())
+
+    def test_a_second_sync_copies_nothing(self):
+        self.publish(self.a, b"one")
+        self.sync()
+        before = {o["path"] for o in ops.list(self.other).collect()}
+        self.assertEqual("current", self.only(self.sync()))
+        self.assertEqual(before, {o["path"] for o in ops.list(self.other).collect()})
+
+    def test_a_newer_source_fast_forwards(self):
+        self.publish(self.a, b"one")
+        self.sync()
+        self.publish(self.a, b"two")
+        self.assertEqual("fast_forwarded", self.only(self.sync()))
+        self.assertEqual(b"two", self.on_b())
+        self.assertEqual(2, len(self.c.history(KEY)))
+
+    def test_a_newer_destination_is_left_alone(self):
+        self.publish(self.a, b"one")
+        self.sync()
+        self.publish(self.c, b"newer there")
+        self.assertEqual("newer_there", self.only(self.sync()))
+        self.assertEqual(b"newer there", self.on_b())
+
+    def test_independent_computations_merge_and_the_later_wins(self):
+        b_gen = self.publish(self.c, b"computed at B")
+        time.sleep(0.01)
+        a_gen = self.publish(self.a, b"computed at A, later")
+        self.assertEqual("merged", self.only(self.sync()))
+        self.assertEqual(b"computed at A, later", self.on_b())
+        self.assertEqual([a_gen, b_gen], [h["generation"] for h in self.c.history(KEY)],
+                         "the winner is current and the loser stays in history")
+
+    def test_syncing_both_ways_converges(self):
+        self.publish(self.c, b"at B")
+        self.publish(self.a, b"at A")
+        self.sync()                                            # merge at B
+        self.assertEqual("fast_forwarded", self.only(self.sync(self.B, self.A)))
+        self.assertEqual("current", self.only(self.sync()))
+        self.assertEqual(self.A._read_ref(KEY)[1]["_manifest"],
+                         self.B._read_ref(KEY)[1]["_manifest"])
+
+    def test_converges_when_the_destination_won_the_merge(self):
+        """The loser is a merge's SECOND parent; ancestry must follow every parent, or the
+        sync back sees no relation and merges again instead of fast-forwarding."""
+        self.publish(self.a, b"at A")
+        time.sleep(0.01)
+        self.publish(self.c, b"at B, later")
+        self.assertEqual("merged", self.only(self.sync()))
+        self.publish(self.c, b"at B, after the merge")   # A's manifest is now TWO levels down
+        self.assertEqual("fast_forwarded", self.only(self.sync(self.B, self.A)))
+        self.assertEqual(b"at B, after the merge", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_history_through_a_merge_keeps_both_branches(self):
+        """A publication on top of a merge reaches the loser only through the merge's
+        second parent."""
+        b_gen = self.publish(self.c, b"at B")
+        time.sleep(0.01)
+        a_gen = self.publish(self.a, b"at A, later")
+        self.sync()
+        new = self.publish(self.c, b"after the merge")
+        self.assertEqual([new, a_gen, b_gen], [h["generation"] for h in self.c.history(KEY)])
+
+    def test_a_deletion_travels(self):
+        self.publish(self.a, b"one")
+        self.sync()
+        self.assertEqual(b"one", self.on_b())
+        self.a.delete(KEY)
+        self.assertEqual("fast_forwarded", self.only(self.sync()))
+        self.c.local.delete(KEY)
+        self.assertIsNone(self.c.get(KEY))
+        self.assertEqual("tombstone", self.B._read_ref(KEY)[0])
+        later = time.time() + objectcache.BLOB_GRACE_S + 60
+        self.c.sweep(now=later, grace_s=0)
+        self.assertEqual([], [o for o in ops.list(self.other, "pre/blobs/").collect()
+                              if not self._is_manifest(self.other, o["path"])])
+
+    def _is_manifest(self, store, path):
+        try:
+            doc = json.loads(bytes(ops.get(store, path).bytes()))
+        except (ValueError, UnicodeDecodeError):
+            return False
+        return isinstance(doc, dict) and "key" in doc
+
+    def test_objects_are_there_before_the_ref_names_them(self):
+        for i in range(2):
+            self.publish(self.a, f"v{i}".encode())
+        self.a.add_artifact(KEY, "preview.png", self.file("p", b"png"),
+                            generation=self.pointer()["generation"])
+        real, seen = ops.put, []
+
+        def watching(store, path, *a, **kw):
+            if store is self.other and "results/" in str(path):
+                body = json.loads(bytes(a[0]) if a else kw["file"])
+                m = json.loads(body["body"])
+                seen.append(all(self.B.blobs.has(b["digest"]) for b in m["files"].values())
+                            and all(self.B.blobs.has(d) for d in m["replaces"]))
+            return real(store, path, *a, **kw)
+        with unittest.mock.patch.object(ops, "put", watching):
+            self.sync()
+        self.assertEqual([True], seen)
+
+    def test_a_ref_write_that_fails_leaves_the_destination_as_it_was(self):
+        from obstore.exceptions import GenericError
+        self.publish(self.a, b"one")
+        real = ops.put
+
+        def refuse(store, path, *a, **kw):
+            if store is self.other and "results/" in str(path):
+                raise GenericError("the destination hiccuped")
+            return real(store, path, *a, **kw)
+        with unittest.mock.patch.object(ops, "put", refuse):
+            self.assertEqual("failed", self.only(self.sync()))
+        self.assertEqual("absent", self.B._read_ref(KEY)[0])
+        self.assertEqual("copied", self.only(self.sync()), "and a rerun finishes it")
+
+    def test_only_the_keys_asked_for(self):
+        self.publish(self.a, b"one")
+        self.publish(self.a, b"two", key="cd" * 32)
+        self.assertEqual(1, self.sync(keys=["cd" * 32])["copied"])
+        self.assertEqual("absent", self.B._read_ref(KEY)[0])
+
+    def test_a_format_1_source_is_left_for_its_first_write(self):
+        self.publish(self.a, b"one")
+        self.as_legacy()
+        self.assertEqual("legacy", self.only(self.sync()))
+
+    def test_a_format_1_destination_is_converted_then_decided(self):
+        self.publish(self.c, b"old at B")
+        p = self.c._read_ref(KEY)[1]           # rewritten as format 1, AT THE DESTINATION
+        ops.put(self.other, f"pre/results/{KEY}.json", json.dumps(
+            {"format": 1, "generation": p["generation"], "published": p["published"],
+             "files": p["files"], "result": p["result"], "meta": p["meta"],
+             "history": []}).encode())
+        self.publish(self.a, b"new at A")
+        self.assertEqual("merged", self.only(self.sync()))
+        self.assertEqual(b"new at A", self.on_b())
+        self.assertIn(p["generation"], [h["generation"] for h in self.c.history(KEY)])
+
+    def test_a_newer_format_at_the_destination_stops_the_sync(self):
+        self.publish(self.a, b"one")
+        ops.put(self.other, f"pre/results/{KEY}.json",
+                json.dumps({"format": objectcache.POINTER_FORMAT + 1}).encode())
+        with self.assertRaises(ObjectStoreUnsuitable):
+            self.sync()
+
+    def test_an_old_tombstone_is_removed_by_the_sweep(self):
+        self.publish(self.a, b"one")
+        self.a.delete(KEY)
+        later = time.time() + objectcache.TOMBSTONE_KEEP_S + 60
+        got = self.a.sweep(now=later, grace_s=0)
+        self.assertEqual(1, got["expired_pointers"])
+        self.assertEqual("absent", self.A._read_ref(KEY)[0])
+        self.assertEqual([], ops.list(self.store, "pre/blobs/").collect())
+
+    def test_a_young_tombstone_stays(self):
+        self.publish(self.a, b"one")
+        self.a.delete(KEY)
+        self.a.sweep(grace_s=0)
+        self.assertEqual("tombstone", self.A._read_ref(KEY)[0])
+
+    def test_a_tombstone_replaced_since_it_was_read_is_not_removed(self):
+        """No conditional delete: the sweep rereads the ref and removes only the SAME
+        tombstone it judged."""
+        self.publish(self.a, b"one")
+        self.a.delete(KEY)
+        tomb = self.A._read_ref(KEY)[1]
+        self.publish(self.a, b"republished")
+        self.assertFalse(self.A._expire_tombstone(tomb))
+        self.assertEqual(b"republished", Path(self.b.get(KEY)[0]).read_bytes())
+
+    def test_the_cli_syncs_one_store_into_another(self):
+        from haversack import cli
+        self.publish(self.a, b"one")
+        stores = {"memory://a": (self.store, "pre/"), "memory://b": (self.other, "pre/")}
+        with unittest.mock.patch.object(objectcache, "open_store", lambda u: stores[u]):
+            self.assertEqual(0, cli.main(["cache", "sync", "memory://a", "memory://b",
+                                          "--quiet"]))
+        self.assertEqual(b"one", self.on_b())
+
+
 class TestFormat1IsReadAndConverted(_Hosts):
     """The time-limited shim of decision 1: every entry written before 2026-09-23 is a
     format 1 pointer with its history inline. It is read as it is, and the first write to

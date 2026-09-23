@@ -223,6 +223,16 @@
   the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
   be written no longer fails a publication that already succeeded; and `list` reads at most
   `limit` pointers rather than one per entry in the bucket.
+- **`haversack cache sync SOURCE DESTINATION`: one result store into another.** A
+  server's directory store (`file:///path`) into a bucket, a bucket into a directory, or
+  any store into any other. Each result is decided by its history, not by clocks: copied
+  when the destination lacks it, fast-forwarded when the destination holds an older
+  version, left alone when the destination's is newer, and merged when both computed it
+  independently - the later computation wins and the other stays in its history. Every
+  object a result's kept history needs is copied before the destination's index names it,
+  and deletions travel as tombstones, which the sweep now removes after 30 days (a copy
+  that goes unsynced longer than that can bring a deleted result back). Rerunning is
+  cheap: a key already current costs two small reads.
 - **The result store's format 2: a ref naming an immutable manifest.** Each key's ref
   (`results/<key>.json`) names a manifest stored as a blob - files by digest, result, meta,
   the publication's token, and `replaces`, the manifest it superseded - and carries its
