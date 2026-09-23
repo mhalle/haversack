@@ -34,9 +34,14 @@ jobs:
         # disabled and the allowlist tests get "missing dependency" where they expect a refusal.
         # click is CORE too, since the command line moved onto it (2026-09-11); modal would
         # bring it anyway, but a dependency CI only has by accident is one it can lose.
+        # --no-sources: this list pins every sibling itself. Without it uv also reads each git
+        # dependency's own [tool.uv.sources], and feldglas's `rankfield = {tag = "v0.3.5"}` and
+        # the `rankfield @ ...@v0.3.5` URL below are "conflicting URLs" to uv 0.12 though they
+        # name one commit - a tag source and a URL ref are different kinds of reference
+        # (found 2026-09-23, the first time this list carried feldglas).
         run: |
           uv venv
-          uv pip install --index-strategy unsafe-best-match \
+          uv pip install --no-sources --index-strategy unsafe-best-match \
             --extra-index-url https://download.pytorch.org/whl/cpu \
             torch nnunetv2 scipy scikit-image 'SimpleITK>=2.3' obstore 'click>=8.5' pytest \
             fastapi httpx python-multipart matplotlib modal pydicom 'zarr>=3' \
