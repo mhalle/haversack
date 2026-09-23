@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **`haversack encode`: embedding fields, with the weights managed here.** An encoder's token
+  lattices are written as a feldglas embedding field (`.zarr.zip`, the `encode` extra), so the
+  weights an encoder needs are fetched, pinned and verified by the same program that manages
+  segmentation weights, instead of by a second tool. Encoders are named in the task grammar
+  (`radar:pretrain`, `ts.v2:total_fast`, `ts.v2:total`; `haversack encoders` lists them), one
+  generic path does reading, provenance and writing, and each algorithm family is one small
+  module. RADAR's weights (1.6 GB, CC BY-NC-SA 4.0) are pinned to a Hugging Face revision and
+  sha256: `weights fetch radar:pretrain` downloads them and `--from FILE` adopts a copy, both
+  refusing any other bytes. On a sample CT the tokens are identical to the fields feldglas's
+  tools made for the RADAR study, for all three encoders, lattice for lattice. The nnU-Net
+  encoders run the encoder only, so `ts.v2:total` encodes in 18 s where the old tool took 55 s.
+  RADAR joins the attribution record (its Science 2026 paper, DOI only until PubMed indexes it).
+
 - **American spelling everywhere, held by a test.** 105 British spellings (center, neighbor,
   millimeters, labeled, color and license, among others, in their British forms) are gone from
   the package, its docs, tests and tools, and `tests/test_american_spelling.py` fails on any new

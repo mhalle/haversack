@@ -32,7 +32,11 @@ PIPELINE = {"io", "preprocess", "frame", "network", "pipeline", "cli", "tasks", 
             "weights_fetch", "trainers", "result", "cache", "segmenter", "weights", "progress", "job",
             "serve", "client", "modal_app", "sources", "ecosystems", "preview", "statistics",
             "schemas", "content", "jobstore", "jobpolicy", "filelock", "fetchlib", "attribution", "cache_admin", "ranked_store", "ranked_build",
-            "ranked_output", "view", "ranked_restore", "duckn_io", "segments", "labelmap"}
+            "ranked_output", "view", "ranked_restore", "duckn_io", "segments", "labelmap",
+            # the encoders subpackage (2026-09-23): each family module is pipeline - it reads images
+            # and loads weights - and a new one must be classified here like any other module
+            "encoders", "encoders.registry", "encoders.weights", "encoders.pipeline", "encoders.radar",
+            "encoders.nnunet"}
 # errors.py is deliberately dependency-free (stdlib only) so either layer may raise from it.
 SHARED = {"errors"}
 FORBIDDEN_FOR_KERNEL = {"nnunetv2", "SimpleITK", "nibabel", "scipy", "mlx", "totalsegmentator",
@@ -178,6 +182,8 @@ class TestLayering(unittest.TestCase):
         found = {p.stem for p in SRC.glob("*.py") if p.stem not in ("__init__", "__main__")}
         found |= {f"backends.{p.stem}" for p in (SRC / "backends").glob("*.py") if p.stem != "__init__"}
         found |= {"backends"} if (SRC / "backends").is_dir() else set()
+        found |= {f"encoders.{p.stem}" for p in (SRC / "encoders").glob("*.py") if p.stem != "__init__"}
+        found |= {"encoders"} if (SRC / "encoders").is_dir() else set()
         self.assertEqual(found, KERNEL | PIPELINE | SHARED,
                          "a module was added without deciding which layer it belongs to")
 

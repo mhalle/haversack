@@ -388,6 +388,37 @@ def _command_line() -> click.Group:
         ])
     root.add_command(segment)
 
+    encode = _Command(
+        'encode', callback=_dispatch(_cmd_encode, 'encode'),
+        short_help='encode an image into an embedding field (token lattices placed in the patient)',
+        help=('Run an encoder - a model whose output is an embedding FIELD, not labels - on one '
+              'image, and write the field as <name>.zarr.zip (read it with feldglas). The input is '
+              'anything `segment` takes. The encoder\'s weights must be installed first: '
+              '`haversack weights fetch <encoder>`. The field inherits the weights\' license.'),
+        epilog=_verbatim("""examples:
+  haversack encoders                                       what can be encoded
+  haversack weights fetch radar:pretrain                   its weights (1.6 GB, CC BY-NC-SA 4.0)
+  haversack encode scan.nii.gz --encoder radar:pretrain -o scan.zarr.zip
+  haversack encode idc:<crdc_series_uuid> --encoder radar:pretrain -o scan.zarr.zip --int8"""),
+        params=[
+            click.Argument(['input'], help='an image file or folder, or a remote input (idc:, s3:, ...) as `segment` takes'),
+            click.Option(['--encoder', '-e'], required=True, help='an encoder from `haversack encoders`'),
+            click.Option(['-o', '--output'], required=True, help='the field to write (<name>.zarr.zip)'),
+            click.Option(['--int8'], is_flag=True, help='store tokens as int8 with a per-channel scale (about half the size)'),
+            click.Option(['--device'], default='auto', show_default=True, help='auto, mps, cuda or cpu'),
+            click.Option(['--dtype'], type=click.Choice(['fp16', 'fp32']), help='default: fp16 on a GPU, fp32 on the CPU'),
+            click.Option(['--slab'], type=click.IntRange(min=0), default=16, show_default=True,
+                         help='slices at a time through the full-resolution stages (0: whole volume); exact either way'),
+            click.Option(['--json', 'as_json'], is_flag=True, help='print what was done as JSON'),
+            click.Option(['--quiet', '-q'], is_flag=True, help='no progress lines on stderr'),
+        ])
+    root.add_command(encode)
+    encoders = _Command(
+        'encoders', callback=_dispatch(_cmd_encoders, 'encoders'),
+        short_help='list the encoders: what each is, its weights, license and whether they are installed',
+        params=[click.Option(['--json', 'as_json'], is_flag=True, help='the list as JSON, with weights and attribution')])
+    root.add_command(encoders)
+
     get = _Command(
         'get', callback=_dispatch(_cmd_get, 'get'),
         short_help='fetch source data (idc:/zenodo:/http...) into the cache, or out to a file',
@@ -600,10 +631,13 @@ def _command_line() -> click.Group:
         short_help='download everything a task needs',
         params=[
             click.Argument(['task'], shell_complete=_complete_task,
-                           help=('a task name from `haversack tasks`; every model it needs is '
-                                 'fetched')),
+                           help=('a task name from `haversack tasks`, or an encoder from '
+                                 '`haversack encoders`; every model it needs is fetched')),
             click.Option(['--root', '--model-root'],
                          help="weights root (default: the ecosystem's location)"),
+            click.Option(['--from', 'from_path'],
+                         help=('an encoder only: install a copy you already have (a file, or a '
+                               'directory holding its files), verified against the pinned digest')),
         ])
     weights.add_command(weights_fetch)
     weights_coverage = _Command(
@@ -622,7 +656,7 @@ def _command_line() -> click.Group:
         'remove', callback=_dispatch(_cmd_weights, 'weights', 'wcmd'),
         short_help="delete one dataset's installed weights",
         params=[
-            click.Argument(['weights_id'], help='a dataset id, e.g. 297 (see `weights list`)'),
+            click.Argument(['weights_id'], help='a dataset id, e.g. 297, or an encoder name (see `weights list`)'),
             click.Option(['--root', '--model-root'],
                          help='weights root (default: the ecosystem location)'),
             click.Option(['--yes'], is_flag=True, help='do not prompt'),
@@ -1615,11 +1649,102 @@ def _cmd_catalog(args) -> int:
     return 0 if set(counts) <= {"ok"} else 1
 
 
+def _encoder_owning_weights(name):
+    """The encoder ``name`` resolves to, when that encoder downloads weights of its own (an
+    nnU-Net encoder uses its task's, and ``weights`` treats its name as the task)."""
+    if not name:
+        return None
+    from .encoders import resolve
+    from .errors import InputError
+    try:
+        spec = resolve(str(name))
+    except InputError:
+        return None
+    return spec if spec.weights else None
+
+
+def _list_encoder_weights():
+    from .cache_admin import _human
+    from .encoders import ENCODERS, weights as ew
+    for spec in ENCODERS.values():
+        for wf in spec.weights:
+            p = ew.path(spec, wf)
+            if p.is_file():
+                print(f"  {spec.name + ' / ' + wf.name:52s} {_human(p.stat().st_size):>10s}  {spec.revision[:12]}")
+
+
+def _cmd_encoders(args) -> int:
+    """`haversack encoders`."""
+    import json as _json
+    from .encoders import ENCODERS, ALIASES, weights as ew
+    from .encoders.pipeline import attribution_of
+    rows = []
+    for spec in ENCODERS.values():
+        rows.append({"name": spec.name, "family": spec.family, "description": spec.description,
+                     "revision": spec.revision, "license": spec.license,
+                     "weights": [{"name": wf.name, "bytes": wf.size, "source": wf.source, "sha256": wf.sha256}
+                                 for wf in spec.weights],
+                     "uses_task": spec.uses_task,
+                     "installed": ew.installed(spec) if spec.weights else None,
+                     "lattices": [{"layer": l.layer, "kernel": list(l.kernel), "channels": l.width,
+                                   "reach_mm": l.receptive_mm} for l in spec.lattices],
+                     "aliases": sorted(a for a, t in ALIASES.items() if t == spec.name),
+                     "attribution": attribution_of(spec)})
+    if args.as_json:
+        print(_json.dumps({"encoders": rows}, indent=1))
+        return 0
+    for r in rows:
+        size = sum(w["bytes"] for w in r["weights"]) / 1e9
+        state = ("installed" if r["installed"] else f"not installed ({size:.1f} GB): haversack weights fetch {r['name']}") \
+            if r["weights"] else f"weights of {r['uses_task']}"
+        print(f"{r['name']:24s} {r['license']:18s} {state}")
+        print(f"  {r['description']}")
+        cite = "; ".join(f"doi:{c['doi']}" for c in r["attribution"]["cite"] if c.get("doi"))
+        if cite:
+            print(f"  cite: {cite}")
+        print("  lattices: " + ", ".join(f"{l['layer']} {l['kernel']} x {l['channels']}" for l in r["lattices"])
+              + (f"; also known as {', '.join(r['aliases'])}" if r["aliases"] else ""))
+    return 0
+
+
+def _cmd_encode(args) -> int:
+    """`haversack encode`."""
+    import json as _json
+    from .encoders.pipeline import encode
+    progress = None if (args.quiet or args.as_json) else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
+    r = encode(args.encoder, args.input, args.output, device=args.device, dtype=args.dtype, int8=args.int8,
+               slab=args.slab, progress=progress)
+    if args.as_json:
+        print(_json.dumps(r, indent=1))
+    else:
+        print(f"{r['field']}: {r['encoder']} on {r['device']} ({r['dtype']}{', int8' if r['int8'] else ''}), "
+              f"model grid {tuple(r['model_grid'])}, {sum(r['tokens'])} tokens, {r['bytes'] / 1e6:.1f} MB, "
+              f"{r['seconds']['total']} s; license {r['license']}")
+    return 0
+
+
 def _cmd_weights(args) -> int:
     """`haversack weights`."""
     from pathlib import Path
     from . import weights_fetch as wfm
     say = lambda m: print(m, file=sys.stderr, flush=True)
+    enc = _encoder_owning_weights(getattr(args, "task", None) or getattr(args, "weights_id", None))
+    if args.wcmd == "fetch" and enc is not None:
+        from .encoders import weights as ew
+        got = (ew.adopt(enc, args.from_path, progress=lambda m: say(f"  {m}")) if args.from_path
+               else ew.fetch(enc, progress=lambda m: say(f"  {m}")))
+        print(f"{enc.name}: weights ready under {ew.directory(enc)} ({len(got)} file(s)); license {enc.license}")
+        return 0
+    if args.wcmd == "fetch" and getattr(args, "from_path", None):
+        from .errors import InputError
+        raise InputError("--from installs an encoder's weights; tasks fetch from their catalog")
+    if args.wcmd == "remove" and enc is not None:
+        from .encoders import weights as ew
+        if not args.yes and not click.confirm(f"delete {enc.name}'s weights under {ew.directory(enc)}?", default=False):
+            return 1
+        gone = ew.remove(enc)
+        print(f"{enc.name}: removed {len(gone)} file(s)" if gone else f"{enc.name}: nothing installed")
+        return 0
     if args.wcmd == "fetch":
         # through the ecosystem catalog, not TotalSegmentator's manifest: every
         # catalog installs its own weights, and `tasks` sends people here for
@@ -1648,6 +1773,7 @@ def _cmd_weights(args) -> int:
         if not root.exists():
             print(f"no weights installed under {root}"); return 0
         datasets = _installed_datasets(root)
+        _list_encoder_weights()
         total = 0
         for d in datasets:
             _, b = _du(d); total += b

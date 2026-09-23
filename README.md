@@ -489,6 +489,40 @@ Silicon haversack caps PyTorch's MPS allocator at the device's recommended worki
 because past it Metal returns zeros instead of an error; a real shortfall then raises, and
 SynthStrip retries in fp16 before refusing.
 
+## Embedding fields: `encode`
+
+`haversack encode` runs an image encoder over a CT and writes its token lattices as an
+**embedding field** (`<name>.zarr.zip`): a zarr zip of one array per lattice, each placed in
+the scan's world coordinates, with the encoder, its weights' digest, the input's digest and
+grid, the license and the papers to cite in its provenance. Nothing in it is a mask or a
+label. The receiving end is [feldglas](https://github.com/mhalle/feldglas), which owns the
+format: `feldglas info`, `feldglas vectors` and `feldglas score` gate a field with your own
+segmentation (a haversack `.seg.nrrd`, local or by URL) and pool, compare or score what is
+inside. Every field also carries feldglas's guide as its `README.md`.
+
+```bash
+uv pip install "haversack[torch,encode] @ git+https://github.com/mhalle/haversack"
+haversack encoders                                   # what can encode, and what is installed
+haversack weights fetch radar:pretrain               # 1.6 GB, pinned by digest (or --from FILE)
+haversack encode ct.nii.gz -e radar:pretrain -o ct.radar.zarr.zip
+haversack encode idc:<uuid> -e ts.v2:total_fast -o ct.null.zarr.zip
+```
+
+Encoders are named like tasks, `family[.version]:name[@revision]`:
+
+- `radar:pretrain` - RADAR's vision encoder (Alibaba DAMO), three lattices of 256 channels
+  on 10 / 20 / 40 mm tokens. Its weights are **CC BY-NC-SA 4.0**: non-commercial use, and a
+  field made with them is a derivative under the same terms; the field says so.
+- `ts.v2:total_fast`, `ts.v2:total` - the encoder half of TotalSegmentator's network for
+  that task, run on exactly the input a segmentation would see (Apache-2.0). They use the
+  task's own weights (`haversack weights fetch ts.v2:total_fast`), and only the encoder runs.
+
+Inputs are anything `segment` takes, local files and remote sources alike. `--int8` stores
+tokens as int8 with a per-channel scale (about half the size of the fp16 default); `--json`
+prints what was done, with timings. The names used before encoding moved into haversack
+(`radar`, `null-totalsegmentator`, `null-totalsegmentator-1.5mm`) still resolve. Encoding is
+local today; the server has no encode job yet.
+
 ## What haversack does not do yet
 
 - Multi-channel nnU-Net inputs, region (sigmoid) heads, and the `3d_lowres`, cascade and `2d`

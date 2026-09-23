@@ -1,6 +1,6 @@
 {
  "_meta": {
-  "note": "Who made each model, under what license, and what its authors ask to be cited. Every entry was checked against the project's own README, LICENSE or documentation on 2026-09-06, and every PMID was resolved through PubMed from the DOI the authors publish. Task-level facts (a bundle's authors, a per-model license) live in the catalog manifests and are merged in by haversack.attribution; this file holds what is true of a whole ecosystem or engine. The `tasks` section overrides a single task whose model comes from somewhere other than its catalog.",
+  "note": "Who made each model, under what license, and what its authors ask to be cited. Every entry was checked against the project's own README, LICENSE or documentation on 2026-09-06, and every PMID was resolved through PubMed from the DOI the authors publish. Task-level facts (a bundle's authors, a per-model license) live in the catalog manifests and are merged in by haversack.attribution; this file holds what is true of a whole ecosystem or engine. The `tasks` section overrides a single task whose model comes from somewhere other than its catalog. The `encoders` section holds an embedding-field encoder that is no segmentation ecosystem (haversack encode); an nnU-Net encoder is its task's ecosystem.",
   "checked": "2026-09-06"
  },
  "ecosystems": {
@@ -377,6 +377,33 @@
   "moose:clin_ct_dental": {
    "derived_from": "dentalsegmentator",
    "note": "MOOSE's registry offers DentalSegmentator's Dataset112 checkpoint repackaged on its own host; the model, the license (CC BY 4.0, attribution required) and the paper to cite are DentalSegmentator's, not MOOSE's."
+  }
+ },
+ "encoders": {
+  "radar": {
+   "title": "RADAR",
+   "description": "A generalist vision-language model for abdominal CT, trained on over 400,000 contrast-enhanced examinations with image-text pairs from clinical reports; haversack runs its vision encoder only, as an embedding-field encoder.",
+   "group": "Alibaba DAMO Academy (Zhang Q, Zhang L, Liang T et al.)",
+   "repository": "https://github.com/alibaba-damo-academy/damo-radar",
+   "license": {
+    "code": "Apache-2.0",
+    "weights": "CC-BY-NC-SA-4.0",
+    "note": "The README's License section releases the code under Apache-2.0; its license badge and the Hugging Face model card (radar-generalist/RADAR) put the weights under CC BY-NC-SA 4.0 - non-commercial use only, and derivatives (an embedding field among them) under the same terms. Read 2026-09-23.",
+    "url": "https://huggingface.co/radar-generalist/RADAR"
+   },
+   "cite": [
+    {
+     "title": "An expert-level generalist AI for abdominal CT diagnosis",
+     "authors": "Zhang Q, Zhang J, Cao W, Lu Z, Chang W, Ding H, Chen C, Li Z, Xue X, Wang S, Zhang S, Xie Y, Xia Y, Wu Q, Shui Z, Li X, Zheng Z, Zhou Y, Mok TCW, Xia Y, Wang H, Ye X, Ma T, Peng J, Wang X, Ding J, Gao Y, Ye H, Liu Y, Chen D, Ni Z, Ning J, Zhang W, Liu J, Yu C, Ju S, Zhang J, Xiao W, Zhang L, Liang T",
+     "journal": "Science",
+     "volume": "393",
+     "issue": "6817",
+     "pages": "eaec6129",
+     "year": 2026,
+     "doi": "10.1126/science.aec6129",
+     "pmid_pending": "2026-09-23: PubMed returns no PMID for this DOI yet; add it once indexed"
+    }
+   ]
   }
  }
 }
