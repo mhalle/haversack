@@ -64,6 +64,32 @@ def installed_locally(spec: EncoderSpec, task_weights=None) -> bool:
         return False
 
 
+def input_record(ident: str | None, path) -> dict:
+    """What a server's field records of its input, for either executor: the job's identity,
+    and the bytes' digest. An input NAMED by its digest (an upload, a stored file or DICOM
+    tree) records that digest - never a hash of what staging made of it: a stored tree reaches
+    a worker as its decoded copy, whose digest is of bytes nobody sent (review, 2026-09-23)."""
+    from pathlib import Path
+    from ..content import is_digest
+    from .pipeline import _identity
+    ident = ident or "upload"
+    if is_digest(ident):
+        return {"input": ident, "digest": ident}
+    return _identity(ident, Path(path))
+
+
+def ensure_weights(name, progress=None) -> list:
+    """A SERVER's first use of an encoder: its pinned weights fetched if missing (digest
+    checked, as ``haversack weights fetch`` does), as a server installs a segmentation task's
+    weights on first use. The command line does not: there a 1.6 GB download under a license
+    is an explicit ``weights fetch``. Nothing for an nnU-Net encoder (its task's weights)."""
+    from . import weights as W
+    spec = resolve(str(name))
+    if spec.weights and not W.installed(spec):
+        return W.fetch(spec, progress=progress)
+    return []
+
+
 def validate_options(options: dict) -> dict:
     """The options of an encode job, checked against :data:`OPTIONS`; raises ``RequestError``."""
     from ..errors import RequestError

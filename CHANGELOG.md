@@ -10,7 +10,15 @@
   and one key for both would serve a label map to a field reader; a segmentation's key
   leaves the kind out, so no existing result recomputes. On the sample CT, both encoders
   served by a local server gave tokens identical to `haversack encode`, and a repeat ask
-  was a cache hit with the same bytes. The local server only: Modal has no encoder worker yet.
+  was a cache hit with the same bytes. On Modal, `HAVERSACK_ENCODE=1` deploys an encoder GPU
+  worker: a smoke deployment encoded the same CT with both families to tokens agreeing with the
+  local ones at median cosine 1.000000 and 0.999999 (CUDA against MPS, fp16), fetched RADAR's
+  checkpoint once onto its own volume, served repeats from the cache, and encoded an `idc:`
+  series (21 of 21 checks). A server fetches an encoder's pinned weights on first use, as it
+  does a task's; the command line still wants `weights fetch`.
+- **A job's event stream now sends the status `GET /v1/jobs/{id}` answers**, `key` and `links`
+  included, as SERVER.md always said it did; it sent the executor's raw record, so a client
+  whose wait ended on the stream held a status without the result's handle.
   The nnU-Net encoders now read their task's weights from the root the server's own
   `Segmenter` reads, where they used to read the default root whatever the server used.
 

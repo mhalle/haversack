@@ -427,11 +427,16 @@ content digest as `ETag`;
 includes the kind, so it never shares one with a segmentation of the same name, and no
 segmentation key changed when fields were added. A field has no path form yet and is not
 listed by `/v1/segmentations`; reach it through its job, whose `links` name `result` and
-`meta` only. An encoder's weights are not fetched on first use: `haversack weights fetch
-<encoder>` on the machine that computes (`GET /v1/encoders` says whether they are
-installed); an nnU-Net encoder uses its task's weights, which a segmentation of that task
-installs. Encode jobs run on the local server; the Modal deployment has no encoder worker
-yet, and says so: `GET /v1/encoders` carries `"encodes": false` there, and a submit is a 501.
+`meta` only.
+
+A server fetches an encoder's pinned weights on its first encode job, digest-checked, as it
+installs a segmentation task's weights on first use (`GET /v1/encoders` says whether they are
+installed); the command line does not, and wants `haversack weights fetch <encoder>`. An
+nnU-Net encoder uses its task's weights, installed the same way. On Modal, encoding is opt-in:
+deploy with `HAVERSACK_ENCODE=1` for an encoder GPU worker (`EncodeWorker`), whose image adds
+the `encode` extra and whose checkpoints live on the global `haversack-encoder-weights` volume
+(`HAVERSACK_ENCODER_VOLUME` to name another), apart from the segmentation weights. Without it
+`GET /v1/encoders` carries `"encodes": false` and a submit is a 501.
 
 ## Tasks and options
 

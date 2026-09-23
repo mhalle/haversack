@@ -3192,18 +3192,17 @@ class LocalExecutor:
         own convention - a pre-read image is dropped, never used), the field written into the
         job's directory, and its published record. The field records the job's identity - the
         source identifier and the bytes' digest - not the scratch path the bytes sat at."""
-        from .encoders.pipeline import _identity, encode_file
-        from .encoders.serving import field_payload
+        from .encoders.pipeline import encode_file
+        from .encoders.serving import field_payload, input_record
         take_pre_read(self.read_ahead, rec.id, fresh_bytes_wanted=True)   # nothing lingers pinned
         path = Path(rec.input_path)
-        ident = rec.input_identity[0] if rec.input_identity else "upload"
-        if is_digest(ident):
-            # the input IS named by its digest (an upload, a stored file or DICOM tree): record
-            # that, not a hash of what staging made of it - a stored tree reaches here as its
-            # decoded copy, whose digest is of bytes nobody sent (review, 2026-09-23)
-            identity = {"input": ident, "digest": ident}
-        else:
-            identity = _identity(ident, path)
+        identity = input_record(rec.input_identity[0] if rec.input_identity else None, path)
+        if self._encode is None:
+            # a server installs on first use (encoders.serving.ensure_weights); an injected
+            # encode_fn brings its own
+            from .encoders.serving import ensure_weights
+            reporter.stage("weights", rec.task)
+            ensure_weights(rec.task, progress=lambda m: reporter.stage("weights", m))
         reporter.stage("encode", rec.task)
         work = self._encode or encode_file
         report = work(rec.task, path, rec.dir / FIELD_NAME, identity=identity,
@@ -5158,7 +5157,10 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             first = executor.status_of(jid) or first
 
         def sse(payload: dict) -> str:
-            return f"event: status\ndata: {json.dumps(payload)}\n\n"
+            # the status GET /v1/jobs/{id} answers, key and links included: SERVER.md says each
+            # event IS that snapshot, and a client's wait() returns the last one - a raw record
+            # without them left `RemoteClient.encode`'s final status keyless (Modal smoke, 2026-09-23)
+            return f"event: status\ndata: {json.dumps(_with_links(payload))}\n\n"
 
         async def stream():
             snap = first

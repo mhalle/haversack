@@ -376,3 +376,18 @@ def test_the_cli_and_the_server_state_one_record(tmp_path, monkeypatch, capsys):
         assert {k: v for k, v in mine.items() if k != "installed"} == {k: v for k, v in row.items() if k != "installed"}
         assert isinstance(mine["installed"], bool), (name, mine["installed"])
     ex.close()
+
+
+def test_an_event_is_the_status_snapshot_key_and_links_included(tmp_path):
+    """SERVER.md: each event IS the status snapshot. The stream sent the executor's raw record,
+    without `key` and `links`, so a client whose wait() ended on the stream held a status with
+    no handle (found on the Modal smoke, 2026-09-23). Segmentations and fields alike."""
+    _, _, ex, client = make(tmp_path)
+    jid = post(client).json()["id"]
+    wait_state(client, jid, ("done",))
+    with client.stream("GET", f"/v1/jobs/{jid}/events") as r:
+        data = next(line for line in r.iter_lines() if line.startswith("data: "))
+    snap = json.loads(data[len("data: "):])
+    status = client.get(f"/v1/jobs/{jid}").json()
+    assert snap["key"] == status["key"] and snap["links"] == status["links"], snap
+    ex.close()
