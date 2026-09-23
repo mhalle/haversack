@@ -2,323 +2,30 @@
 
 ## [Unreleased]
 
-- **The ranked encoder's slab is sized from the device's free memory** (rankfield 0.3.5's
-  `memory_budget`, pinned below). `network.encode_budget` takes half of `device_budget_bytes` -
-  on MPS the allocator's pool grew in ~1 GiB heaps to
-  1.5-2.2x rankfield's `slab_bytes` bound - capped at rankfield's 1 GiB default, which is also
-  the answer on cpu. The cap is measured, not caution: on an M2, same process, conditions
-  alternated, K=118 at 236x167x167 encoded in 5.6 / 5.5 / 5.7 s at 7 / 15 / 30 planes and
-  8.1 s at 45, K=25 at 472x334x334 in 32.7 / 34.7 / 40.8 s at 5 / 11 / 22 - a thicker slab buys
-  nothing, so the measurement only ever shrinks it on a device too full for the default. CUDA
-  is unmeasured; `ENCODE_BUDGET_CEILING` is the number to lift there. `ranked.emit` takes
-  `memory_budget=` (keyword-only, never in the code's meta - it moves no byte) and the
-  nnU-Net and FastSurfer paths pass it; the nnU-Net path records it per model as
-  `encode_memory_budget_bytes`, beside `accumulate`, not as a deviation.
-- **A cascade's ranked store names each layer from its own model.** A crop stage outputs
-  its own model's classes - stage 0 of `ts.v2:lung_vessels` is `ts.v2:total_fast`'s 118 -
-  but the builder named every layer from the task's label map, so layer 0's spleen, kidneys
-  and gallbladder were stored as `lung_airways` ... `lung_veins`, coded in
-  `ts.v2:lung_vessels`, and values 5-117 as `label_<v>`. It meant to leave crop stages
-  unnamed, but recognized them by a part name (`<task>:s<i>` on every part) the pipeline had
-  stopped writing for the final stage, so the check never fired and `parts="last"` dropped
-  nothing. The emit now records `labels_named_by` - the one task of the catalog that runs the
-  stage's model alone (`TaskCatalog.stage_task`; all 26 ts.v2 cascades resolve), or none,
-  which leaves a stage unnamed rather than misnamed - and the store's part block keeps it. A
-  store whose layers follow two class lists declares both schemes: `labeling_scheme` is then
-  an array, the task's own first, as duckn seg 0.9 allows. `tools/ranked_verify.py` fails a
-  layer coded in another task's scheme (it had the same broken check, and reported the old
-  stores as merely unnamed) and no longer reports parts on a 3 mm and a 0.7 mm grid as
-  differently oriented; `tools/ranked_upgrade_seg.py` no longer drops `labeling_scheme`.
-  **Cascade stores written before this are misnamed in layer 0: rebuild them.** No format
-  version moves; emit directories that predate the field are still named correctly.
-- **`haversack view` opens current stores again.** Its bundled `data/preview.html` dated from
-  2026-09-05 and accepted only seg 0.6/0.7 and ranked 0.2/0.3, so it refused every store
-  written since the seg 0.8 work above. Rebuilt from sdfview `1983b26` (byte-identical to a
-  rebuild from that commit): it reads seg 0.9 segments by (layer, value) and ranked format
-  0.4, and a cascade whose parts sit on different grids - a 3 mm whole-body crop stage under
-  a 0.7 mm fine stage - is composed as haversack composes parts: each grid restored on its
-  own, painted in `part_order`, later over earlier. Parts sharing a grid still share an atlas
-  (a five-part `total` store renders as before, 7.0 s to load instead of 8.3 s). The lite
-  viewer and the margin renderer still refuse stores on several grids.
-- **`haversack serve --result-store s3://bucket/prefix` shares the result cache between
-  servers through an object store** (also `gs://`, `az://`; `HAVERSACK_RESULT_STORE`). The
-  POSIX cache's guarantees rest on rename and `flock`, which an object store does not have
-  and a filesystem emulating them over one (ZeroFS, assessed) loses on restart, so the store
-  gets its own protocol, the one build caches use: result bytes as blobs named by their
-  SHA-256 and written only if absent, and one pointer per key replaced by a conditional
-  write, so a publication is one write and an artifact can never land beside another
-  publication's labels. `--cache-dir` stays in front as each server's local copy, keeping
-  the store's generation token so a current copy downloads nothing. A store that does not
-  refuse a stale conditional write is refused at startup, naming it - asked, not assumed:
-  obstore's own local-disk store fails it. Anything missing or corrupt in the store reads as
-  a miss that the next computation repairs. `SharedResultCache.sweep` removes unreferenced
-  blobs after a day's grace and, optionally, entries past an age; nothing schedules it yet.
-  Not yet wired into the Modal deployment. `tools/probe_result_store.py` checks a bucket and
-  round-trips one result under a throwaway prefix, and `tools/soak_result_store.py` runs
-  publishers, readers and a sweeper as separate processes against it. First real store,
-  Cloudflare R2 (2026-09-19): both conditional writes honored, two servers sharing one
-  bucket served each other's results - the second never ran its segmenter - and the soak
-  saw no torn read and no error while a sweeper with no grace deleted blobs underneath it.
-  A hit costs one pointer read - about 85 ms median from this Mac, measured before
-  history existed; a key republished four times carries ~5x the pointer, which has not
-  been re-measured on a real bucket.
-- **The shared store answers the new listing contract** (main's `ResultCache.list` with
-  `keys` / `after` / `match` / `accept` / `memo` / `hold` / `workers`, 2026-09-21). Its three
-  mechanisms carry over, and two get cheaper against a bucket: a listing returns names AND
-  last-modified, so ordering and paging cost no stats at all, and the pointer IS the content
-  - meta, sizes and which artifacts exist are one document - so a row is ONE request where
-  the local cache pays a read plus three stats. `keys` reads only the names it was given and
-  never lists the bucket, a miss being one HEAD; the cursor is the same `(stamp, key)` in
-  nanoseconds, so a position issued by either cache means the same thing. Per-request
-  deliverables land as they were designed to: a hit renders what is missing into the SAME
-  generation, which is what `add_artifact` has always been - a conditional write that cannot
-  land beside another publication's labels, and a render for a generation that has moved on
-  is refused.
+Embedding fields (`haversack encode`, and encode jobs on the server and on Modal);
+TotalSegmentator v3 as its own catalog, and TotalSegmentator's crop and auxiliary-class rules
+applied as upstream applies them; `result:` references from one job to another; deliverables
+chosen per request; a filtered, paged listing; and a result store that servers can share
+through a directory or an object store. **What recomputes, once:** the ts.v2 tasks that crop
+(`crop=upstream`) and the three with auxiliary classes (`auxiliary=0`); no other key moves and
+`CACHE_EPOCH` stays. **What to rebuild:** the ranked stores of cascade tasks, whose first layer
+was misnamed. **Who must change:** a client that reads a ranked store's raw attributes (duckn
+seg 0.9, below). A server started without `--result-store` runs as before.
 
-- **`SharedResultCache.find_generation(key, digest)`**, for `result:` references across
-  machines. A `result:<key>` pins the referenced output's sha256 at submit and resolves
-  again in the worker, refusing other bytes; on one machine the submit's lease keeps that
-  generation alive, but a lease means nothing to another host, which may have republished
-  the key in between. Bounded history answers the question a lease was standing in for -
-  which generation has these bytes - and the sweep spares what history lists, so the pinned
-  result is still there and `fetch_generation` hands it over. Measured: another host
-  republishes, the pin refuses the new bytes, and the pinned generation is still found,
-  fetched and spared by a sweep.
+### Embedding fields
 
-- **A server with `--result-store` sweeps it, every `--sweep-interval-hours` (24 by
-  default, 0 to disable).** Now that `delete` leaves bytes for a sweep and a republication
-  leaves its predecessor's the same way, a store nothing sweeps only grows - and a
-  reclamation that depends on an operator remembering a cron line is one that does not
-  happen. The loop is deliberately dull: the shipped grace, no expiry by age, so it can
-  only remove bytes no entry refers to; it waits on the server's own condition so a
-  shutdown stops it at once; the first sweep is one interval away and the interval is
-  jittered, so a fleet restarting together does not all sweep in the same second; and a
-  failure is reported and retried rather than taken seriously enough to end the thread.
-
-- **`delete` stops reclaiming bytes; `haversack cache sweep` does it** (decided
-  2026-09-20, replacing the "deletion means gone" half of the history decision). Deciding at
-  delete time whether a blob belongs only to the entry being removed means deciding it
-  against live publishers, because deduplication lets a publication happening right now
-  reference those same bytes. Four attempts went into that - pre-listed candidates, a
-  refreshed timestamp on deduplicated writes, a re-check before each delete, a wait for
-  coarse clocks - and reviewers were still finding holes in it. The entry goes
-  immediately, everywhere; the bytes wait for a sweep, which answers the same question with
-  nothing else moving. About 120 lines and the hardest remaining reasoning in the module go
-  with it. A sweep of a store with NO entries left is refused unless `--empty-index-ok` says
-  it was meant, because "everything was deleted" and "wrong prefix" look identical from
-  there.
-
-- **Fifth review round (the same reviewer, on the fixes it asked for): nine more.** Two
-  were serious and both were in the new code. A filler killed between its claim and its
-  release left that claim behind, and every later fill on that host then read "someone is
-  placing it" and missed - permanently on a host that never computes, since only a
-  successful publication of that key prunes a claim; death is now proved the way it is
-  everywhere else here, and a live writer's claim (which holds a lock) still stands. And
-  `adopt` published on existence alone, so a zero-length labels file - exactly what a power
-  loss leaves behind a rename - was served as a 200; it checks the sizes the pointer
-  records now. The purge's re-check was narrowed rather than closed, because S3 and R2 date
-  objects to the whole second: it waits out the remainder, and only on a store whose own
-  timestamps say that is needed. The outage fallback is bounded by when this host last saw
-  the entry alive (15 minutes), so an unreachable store cannot resurrect a DELETED result
-  indefinitely; a publication the store REFUSES keeps no local copy, since a refusal is
-  deliberate and repeatable where an outage is not; the work-directory reaper now does what
-  its comment always claimed; and a DELETE that will be refused no longer cancels a running
-  compute first. The six sweep scripts are in `tools/config_sweep/` - results nobody can
-  re-run are not evidence.
-
-- **Configuration sweep: six environments nobody had run, three defects.** The reviewers
-  could attack code but not environments. Two servers sharing one `--cache-dir` (the
-  per-GPU deployment) came through clean - 446 reads, no torn read, a coherent directory
-  afterwards - as did a store made slow rather than broken (`/v1/health` answered in 0.01 s
-  while a store-touching route waited 1.5 s) and, for the first time off APFS, a cache root
-  on exFAT with no hard links and case-insensitive names (9 checks: publish, read, pull,
-  republish, push, history, sweep, delete, no leavings). What broke: an older haversack
-  DELETED an entry written by a newer one, removing the index and leaving bytes it cannot
-  name - refused now, 409 on the wire; a reader killed mid-fill left its work directory for
-  an hour although its process was provably gone, where `cache usage` and `cache clean`
-  cannot see it - death is proved and reclaimed at once now; and a fill needed TWICE the
-  result's size in free space, because it downloaded into its work directory and then
-  copied into place - a 6 MB result failed with 11 MB free. Fills hand the files over
-  instead, which also stops reading and writing every byte twice, and a publication that
-  lands nothing no longer leaves an empty entry directory behind.
-
-- **Fourth review round (one reviewer, the whole branch): eight more, including the same
-  window a third time.** Deduplication defeats BOTH earlier attempts at it - pre-listed
-  candidates and a refreshed timestamp - because the blob is genuinely old while only the
-  reference to it is new, and the test that was supposed to pin it passed for the wrong
-  reason (with one key in the store, an empty live set refused the whole sweep). provender
-  0.1.4 re-checks each candidate against the state it was listed in immediately before
-  deleting it, which with the refresh is what finally closes it; `delete` lists before it
-  scans, for the same reason. Also: a generation directory that is present but not current
-  - a crash between its rename and the pointer write, a second process placing it, a
-  pointer rolled back to it - is now ADOPTED rather than answered as a miss, which had
-  made such a key permanently unreadable on that host and, on a compute server, let the
-  next request overwrite a rollback; a store outage no longer turns a complete local copy
-  into a miss, and a publication the store refuses keeps its bytes on this disk rather
-  than discarding finished GPU work; local write failures during a read (a full or
-  read-only cache) are misses, not 500s; an entry written by a NEWER haversack is never
-  overwritten, while garbage still is; `executor.submit` joins the calls that run off the
-  event loop; a slow fill's work directory is no longer reaped by age while its process is
-  alive; and two processes sharing one `--cache-dir` wait for each other instead of both
-  computing.
-
-- **Third review round (four agents, same day): sixteen more, and `haversack cache sweep`.**
-  The one that mattered: deduplication defeats the sweep's candidate listing, because a
-  recomputation producing identical bytes uploads nothing - so the blob is old while the
-  pointer naming it is new, and both the sweep and `delete` could take it out from under a
-  result that had just been computed. provender 0.1.3 refreshes a deduplicated blob's
-  timestamp with a server-side copy (one request at any size, verified at 32 MB on R2), so
-  a blob is again as young as the reference to it. Also: `delete` no longer reads every
-  entry in the store on an HTTP route (bounded, and it says to run the sweep instead),
-  reclaims the bytes of generations the age bound has stopped listing, and REPORTS whether
-  the bytes actually went rather than only saying so on stderr; a repaired local copy gets
-  its result and meta documents back, not just its files, and "already complete here" is
-  now one definition instead of two that disagreed; blobs outlive the history listing by a
-  day so a host with a fast clock cannot collect what other hosts still list; `pull` names
-  the key that failed. `cache sweep` exists because an error message already told operators
-  to run it - and because a bound nothing can run is not a bound. Its help, and `cache
-  pull`'s, are now their own rather than `push`'s text. Several claims in this entry and in
-  the design doc were overstated and have been corrected against what the code does.
-
-- **Second review round (four agents, 2026-09-20): twenty defects, all fixed.** The worst
-  three: `push` read the entry's directory and its generation token separately, so a server
-  publishing that key in between bound one generation's bytes to another's token and the
-  pushing host believed its copy current for ever (the token now comes from the directory
-  in hand); `"history": null` - what another language emits for "no history" - made the
-  CURRENT result unreadable and, because the pointer then counted as unreadable, froze blob
-  deletion for the whole store; and the extraction had inverted the sweep's listing order,
-  so a blob written mid-sweep could be deleted at `grace_s=0` where the old order made it
-  structurally safe (provender 0.1.2 takes pre-listed candidates, and haversack lists
-  before it reads pointers again). Also: `delete` now removes the bytes, not just the
-  pointer, keeping what another entry shares and refusing loudly when a pointer it cannot
-  read makes "unreferenced" unknowable - near patient data, deletion means gone; the
-  history age bound applies on READ as well as on write, so a key published and then left
-  alone stops keeping its old generations; one rule now decides what a history entry is, so
-  an entry the readers rejected can no longer occupy a slot for ever; history entries no
-  longer carry `meta`, which no reader ever read; `--limit` bounds the work rather than the
-  entries examined, so a rerun makes progress; `pull` goes oldest-first, repairs a local
-  copy whose files went missing instead of calling it current, and reports what did not fit
-  in the local cache instead of counting it pulled; a store URL that is malformed says what
-  forms are accepted rather than advising about credentials it never used; a corrupt blob
-  is reported again (that warning was lost at the extraction seam); and a new guard
-  reconciles the dependency floor with the sourced tag and with the installed package,
-  which is the same drift the CI pin test exists for, one field over.
-
-- **`haversack cache push` and `cache pull` migrate a result cache to and from a shared
-  store.** The transition the consolidation plan needs: a cache that has been filling for
-  months is worth GPU-hours, and nothing else recovers it once the local protocol goes.
-  Each entry keeps the generation token it already has, so a pushed result is still served
-  from this machine afterwards without downloading anything, and an entry from before
-  generations existed is given one. Idempotent by construction - blobs are
-  create-if-absent, the pointer is written conditionally, and a rerun costs one pointer
-  read per key rather than a re-hash - so an interrupted push is simply rerun and two hosts
-  pushing overlapping caches upload the shared bytes once. `--conflict` decides what
-  happens when the store already holds a key: keep theirs (the default, because theirs may
-  be newer), take whichever was computed later, or take ours. `pull` makes a cold host warm
-  and is also the way out: afterwards the local cache answers on its own.
-
-- **The blob half is now `provender`, a package shared with feldglas.** A second project
-  needed content-addressed blobs on the same kind of store, and two copies of one protocol
-  is how this repo's defects have always started - so the blob store moved out to
-  https://github.com/mhalle/provender (pinned by tag, as rankfield and duckn are), leaving
-  thin wrappers here that turn its errors into haversack's and haversack keeps the pointer, the policy, and the live set
-  the sweep needs, which is the only part that knows what a result is. Reviewing the
-  extraction from the other side found two more: a sweep with no grace by default deletes a
-  blob uploaded a second ago (every client writes the blob before the index entry naming
-  it), and the package's own probe tool had been broken by a guard the day before, because
-  nothing imported it. Both fixed in provender 0.1.1, the second with a test that runs the
-  probe.
-
-- **A republication keeps its predecessors: bounded history in the shared store.** The
-  pointer carries the generations it replaced - up to `HISTORY_KEEP` (4) and
-  `HISTORY_MAX_AGE_S` (30 days), whichever runs out first - and the sweep treats their
-  blobs as referenced, so storage per key is bounded by both. Deduplication makes it nearly
-  free: a recomputation that produced identical bytes adds one small pointer entry and no
-  blob. It answers what this server published over the last 30 days, up to four
-  republications back; a weights upgrade can be compared against what it replaced, and a
-  bad one recovered - `fetch_generation()` writes it to a directory you own, and
-  republishing it is manual. The local copy offers no history API and never serves a
-  predecessor, though its own superseded directories linger until that key is published
-  again; history in the store is read deliberately (`history()`, `fetch_generation()`,
-  which materializes into a directory the caller owns). `delete` removes the entry, its
-  local copy and the bytes of every generation its pointer lists, keeping what another
-  entry shares - near patient data, deletion means gone - and says in its report when it
-  could not establish that, which `haversack cache sweep` then finishes.
-
-- **Review round on the above, same day: three agents, thirteen defects, all fixed.** The
-  one that mattered: obstore's errors do not subclass OSError, so a store fault - expired
-  credentials, DNS, a 503 - left `cache_get` as a bare 500 on routes SERVER.md promises
-  404/410 for, anonymous ones included; the same class of defect 0.12.3 had just fixed for
-  the scratch read. Reads now degrade to a miss (reported, throttled) and only WRITES
-  raise. Also: a cache lookup is a network round trip, so the async routes hand it to the
-  threadpool instead of stalling the event loop; a pointer's every field is validated
-  because another host wrote it, and only known filenames decide where bytes land; one
-  stray object under `results/` no longer aborts `list` and `sweep` for good; a sweep that
-  meets a pointer it cannot read deletes no blobs, so an old host cannot collect a newer
-  writer's results; a corrupt blob is no longer deleted (it is shared by every identical
-  result) but suspected and replaced on the next publication; a missing artifact blob no
-  longer costs the whole result; an artifact's blob gets the same post-pointer re-check as
-  the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
-  be written no longer fails a publication that already succeeded; and `list` reads at most
-  `limit` pointers rather than one per entry in the bucket.
-- **Result store sync: a merge no longer repeats, and a sync costs a fifteenth of the time.**
-  Found by soaking two real servers on one directory store for 35 minutes with syncs into
-  R2 (`tools/soak_server_store.py`). A merge - what sync writes when it cannot see how two
-  versions of a result are related - exists only at the destination, and every later sync
-  took it for a new version and merged the key again; it now counts as the version it
-  carries. And a sync walked the destination's history and refreshed every object in it on
-  every run: it now learns what the destination holds from the source's copy of the same
-  history, uploads a new object with one request, and syncs 8 results at once
-  (`--workers`). On R2, 16 results: 73.7 s to 4.9 s for an update, 200 s to 19 s for a
-  first copy.
-- **`haversack serve-store URL`: a read-only server over a result store.** Every read
-  route of `haversack serve` - results by path, meta, preview, statistics, the listing - and
-  nothing else: no jobs, no computation, and not one write to the store, so it runs on a
-  read-only credential, with no GPU, no weights and no torch. It is the Modal deployment's
-  public twin over a bucket instead of a volume. The one thing a bucket did not hold was the
-  result KEY, which is a digest of the task's weights versions; writers now record those
-  (`tasks/<task>.json`, rewritten only when they change) as they publish, and the reader
-  keys from them. A task no writer recorded, or a writer on another cache epoch, is a miss,
-  never a wrong result. Served from R2 in a real run: 565 ms for a first read, 115 ms after.
-- **`haversack cache sync SOURCE DESTINATION`: one result store into another.** A
-  server's directory store (`file:///path`) into a bucket, a bucket into a directory, or
-  any store into any other. Each result is decided by its history, not by clocks: copied
-  when the destination lacks it, fast-forwarded when the destination holds an older
-  version, left alone when the destination's is newer, and merged when both computed it
-  independently - the later computation wins and the other stays in its history. Every
-  object a result's kept history needs is copied before the destination's index names it,
-  and deletions travel as tombstones, which the sweep now removes after 30 days (a copy
-  that goes unsynced longer than that can bring a deleted result back). Rerunning is
-  cheap: a key already current costs two small reads.
-- **The result store's format 2: a ref naming an immutable manifest.** Each key's ref
-  (`results/<key>.json`) names a manifest stored as a blob - files by digest, result, meta,
-  the publication's token, and `replaces`, the manifest it superseded - and carries its
-  exact bytes, checked against the digest, so the present is still one read. History is the
-  `replaces` chain instead of a list copied into every pointer (a read no longer grows with
-  history); a late artifact is an amending manifest of the same publication; a deletion is a
-  tombstone, which the coming sync can carry where a removed ref could not. Format 1 is
-  still read and is converted, tokens kept, by the first write to its key. **Every host
-  sharing a store must upgrade together:** an older haversack reads format 2 as a newer
-  format - a miss, a refused publication, a sweep that deletes nothing. Also fixed on the
-  way: a host holding a result re-downloaded its labels whenever a late artifact had not
-  reached it yet, and a generation token read from the store is now validated before it
-  becomes part of a local path.
-- **The result store runs on a directory too: `--result-store file:///path`.** provender
-  0.1.6 adds `DiskStore`, a directory that honors both conditional writes (obstore's own
-  local store honors only one, so `file://` used to be refused at startup), and
-  `objectcache` now talks to its store through `provender.ops`, which answers for a bucket
-  and a directory alike. Same layout, same protocol, no network. Every store test runs
-  twice - in memory and on a directory - with the fault tests included, and the
-  multi-process soak passed on APFS and on a real exFAT volume. One host only: machines
-  share a bucket, never a directory over a network filesystem. Step 2 of
-  `docs/cache-consolidation.md`'s from-scratch design; nothing changes without the flag.
-- **The result store knows an encode job's field.** A pointer names its one primary output -
-  labels or `field.zarr.zip` - and `put(output_name=)`, the listing (a field row says its
-  `kind` and carries no label links), `find_generation` and `fetch_generation` answer for a
-  field as for labels; a name that is not a primary output is refused before anything is
-  uploaded, and a pointer naming two is served as neither. The local copy follows too - the
-  fill, `pull` and `push` - so a field computed on one server is a hit on another sharing the
-  store, without its encoder running.
+- **`haversack encode`: embedding fields, with the weights managed here.** An encoder's token
+  lattices are written as a feldglas embedding field (`.zarr.zip`, the `encode` extra), so the
+  weights an encoder needs are fetched, pinned and verified by the same program that manages
+  segmentation weights, instead of by a second tool. Encoders are named in the task grammar
+  (`radar:pretrain`, `ts.v2:total_fast`, `ts.v2:total`; `haversack encoders` lists them), one
+  generic path does reading, provenance and writing, and each algorithm family is one small
+  module. RADAR's weights (1.6 GB, CC BY-NC-SA 4.0) are pinned to a Hugging Face revision and
+  sha256: `weights fetch radar:pretrain` downloads them and `--from FILE` adopts a copy, both
+  refusing any other bytes. On a sample CT the tokens are identical to the fields feldglas's
+  tools made for the RADAR study, for all three encoders, lattice for lattice. The nnU-Net
+  encoders run the encoder only, so `ts.v2:total` encodes in 18 s where the old tool took 55 s.
+  RADAR joins the attribution record (its Science 2026 paper, DOI only until PubMed indexes it).
 - **Encode jobs on the server.** `POST /v1/jobs` takes `kind=encode` and an encoder name, and
   the job's result is an embedding field (`.zarr.zip`) where a segmentation's is labels: the
   same queue, single flight, result cache and job routes, with `GET /v1/encoders`,
@@ -333,77 +40,9 @@
   checkpoint once onto its own volume, served repeats from the cache, and encoded an `idc:`
   series (21 of 21 checks). A server fetches an encoder's pinned weights on first use, as it
   does a task's; the command line still wants `weights fetch`.
-- **A job's event stream now sends the status `GET /v1/jobs/{id}` answers**, `key` and `links`
-  included, as SERVER.md always said it did; it sent the executor's raw record, so a client
-  whose wait ended on the stream held a status without the result's handle.
-  The nnU-Net encoders now read their task's weights from the root the server's own
-  `Segmenter` reads, where they used to read the default root whatever the server used.
 
-- **`haversack encode`: embedding fields, with the weights managed here.** An encoder's token
-  lattices are written as a feldglas embedding field (`.zarr.zip`, the `encode` extra), so the
-  weights an encoder needs are fetched, pinned and verified by the same program that manages
-  segmentation weights, instead of by a second tool. Encoders are named in the task grammar
-  (`radar:pretrain`, `ts.v2:total_fast`, `ts.v2:total`; `haversack encoders` lists them), one
-  generic path does reading, provenance and writing, and each algorithm family is one small
-  module. RADAR's weights (1.6 GB, CC BY-NC-SA 4.0) are pinned to a Hugging Face revision and
-  sha256: `weights fetch radar:pretrain` downloads them and `--from FILE` adopts a copy, both
-  refusing any other bytes. On a sample CT the tokens are identical to the fields feldglas's
-  tools made for the RADAR study, for all three encoders, lattice for lattice. The nnU-Net
-  encoders run the encoder only, so `ts.v2:total` encodes in 18 s where the old tool took 55 s.
-  RADAR joins the attribution record (its Science 2026 paper, DOI only until PubMed indexes it).
+### TotalSegmentator
 
-- **American spelling everywhere, held by a test.** 105 British spellings (center, neighbor,
-  millimeters, labeled, color and license, among others, in their British forms) are gone from
-  the package, its docs, tests and tools, and `tests/test_american_spelling.py` fails on any new
-  one, in prose or inside an identifier (snake_case and camelCase are split before matching).
-  The reason is drift: each British word
-  in the tree is a template the next edit copies. A line that must quote someone else's spelling
-  says so with `spelling: allow <word>`, and a pragma that no longer matches fails too. The job
-  state `cancelled` is unchanged - it is on the wire. Nothing computed moves; newly written
-  ranked stores carry the respelled format README.
-- **TotalSegmentator results no longer carry classes their task does not name.** Some
-  TotalSegmentator models are trained with helper classes the task drops; upstream zeroes them
-  after prediction, haversack wrote them as unnamed values. `ts.v2:kidney_cysts` wrote Dataset
-  789's whole kidneys as values 3 and 4 - on one abdominal CT 45,234 and 55,244 voxels beside
-  531 of cyst - under a label map naming only 1 and 2. Every value a TotalSegmentator task's
-  label map does not name now becomes background, as upstream does, and the registry states each
-  task's dropped classes (`auxiliary`, upstream's own lists: kidney_cysts, appendicular_bones,
-  face_mr); a model emitting any other unnamed value is refused as not matching its catalog.
-  The named labels are unchanged voxel for voxel. These three tasks' results are keyed anew
-  (`auxiliary=0`) and recompute once; no other task's key moves.
-- **TotalSegmentator's crop tasks crop as TotalSegmentator does.** Every ts.v2 task that crops
-  with a coarse model first - head_muscles, headneck_bones_vessels, liver_segments,
-  lung_vessels and 22 more - now cuts the input to the crop classes' box plus the margin and
-  runs its final model on that cut alone, labeling nothing outside it; an empty crop is an empty
-  result. The crop used to be a speed approximation of whole-volume inference, grown to the
-  network's patch with real image and dropped when it saved too little, and it labeled beyond
-  upstream's box: on a neck CT, `headneck_bones_vessels` scored mean Dice 0.738 against upstream,
-  with zygomatic arches only haversack found. The crop stage's labels are restored nearest-
-  neighbor onto the input, as upstream restores them, and the margin is the 20 mm upstream
-  actually applies to every task that crops with its `total`/`body` models, not the value in the
-  task's config (upstream overrides it; teeth keeps its own 10 mm). These tasks' results are keyed
-  anew (`crop=upstream`) and recompute once; no other task's key moves.
-- **`ts.v2:headneck_muscles`: TotalSegmentator's 23 neck muscles.** Sternocleidomastoid, the
-  three scalenes, platysma, the three pharyngeal constrictors, the prevertebral muscles,
-  sternothyroid, thyrohyoid, levator scapulae and trapezius, each side separately where that
-  applies - one of upstream's openly available (Apache-2.0) tasks. The weights (Datasets 778
-  and 779) were in the manifest all along; the task was not, because upstream runs it as a
-  crop followed by a union - the 6 mm `total` model boxes the clavicles and C1/C5/T1/T4 plus
-  40 mm, exactly as for `headneck_bones_vessels`, and both models then run on that one crop
-  and are combined as `total`'s parts are, a later part over an earlier one - and a cascade
-  here could only end in a single model. A cascade's last stage may now be a union; the
-  registry refuses a union anywhere else, and a stage stating two things or none.
-
-- **A server describes an uninstalled task's structures.** `GET /v1/tasks/{task}` said
-  "structures are read from the checkpoint once installed" for every task whose weights the
-  server had not fetched - `moose:clin_ct_muscles` showed no structure list on a server whose
-  own `GET /v1/segments` listed its ten muscles. The segments index was mined from that very
-  checkpoint, and `haversack tasks TASK` has read it since the index shipped; describe now
-  reads it too, through one function the CLI shares, marked `structures_from: segments index`
-  with the version that pins it. Neither door shows a record whose catalog has since moved to
-  another version (the CLI used to print it anyway), or a list for a request pinned with
-  `@version`. A result's key reads nothing new: it is the same with the index, without it, and
-  with a broken one.
 - **TotalSegmentator v3 is the `ts.v3` catalog: `ts.v3:total`, `ts.v3:total_fast`,
   `ts.v3:total_fastest`.** Upstream's `total_v3` (Datasets 831-835 at 1.5 mm, 836 at 3 mm,
   837 at 6 mm, release `v3.0.0-weights`) under v2's task names, the catalog carrying the
@@ -438,24 +77,59 @@
   published as a release asset: Dataset857 (`thigh_shoulder_muscles`, `commercial` upstream)
   appeared in `v3.0.0-weights`, and taking its URL would have made haversack download what
   upstream installs only through its licensed backend. It is reported as `license_gated`.
+- **TotalSegmentator's crop tasks crop as TotalSegmentator does.** Every ts.v2 task that crops
+  with a coarse model first - head_muscles, headneck_bones_vessels, liver_segments,
+  lung_vessels and 22 more - now cuts the input to the crop classes' box plus the margin and
+  runs its final model on that cut alone, labeling nothing outside it; an empty crop is an empty
+  result. The crop used to be a speed approximation of whole-volume inference, grown to the
+  network's patch with real image and dropped when it saved too little, and it labeled beyond
+  upstream's box: on a neck CT, `headneck_bones_vessels` scored mean Dice 0.738 against upstream,
+  with zygomatic arches only haversack found. The crop stage's labels are restored nearest-
+  neighbor onto the input, as upstream restores them, and the margin is the 20 mm upstream
+  actually applies to every task that crops with its `total`/`body` models, not the value in the
+  task's config (upstream overrides it; teeth keeps its own 10 mm). These tasks' results are keyed
+  anew (`crop=upstream`) and recompute once; no other task's key moves.
+- **TotalSegmentator results no longer carry classes their task does not name.** Some
+  TotalSegmentator models are trained with helper classes the task drops; upstream zeroes them
+  after prediction, haversack wrote them as unnamed values. `ts.v2:kidney_cysts` wrote Dataset
+  789's whole kidneys as values 3 and 4 - on one abdominal CT 45,234 and 55,244 voxels beside
+  531 of cyst - under a label map naming only 1 and 2. Every value a TotalSegmentator task's
+  label map does not name now becomes background, as upstream does, and the registry states each
+  task's dropped classes (`auxiliary`, upstream's own lists: kidney_cysts, appendicular_bones,
+  face_mr); a model emitting any other unnamed value is refused as not matching its catalog.
+  The named labels are unchanged voxel for voxel. These three tasks' results are keyed anew
+  (`auxiliary=0`) and recompute once; no other task's key moves.
+- **`ts.v2:headneck_muscles`: TotalSegmentator's 23 neck muscles.** Sternocleidomastoid, the
+  three scalenes, platysma, the three pharyngeal constrictors, the prevertebral muscles,
+  sternothyroid, thyrohyoid, levator scapulae and trapezius, each side separately where that
+  applies - one of upstream's openly available (Apache-2.0) tasks. The weights (Datasets 778
+  and 779) were in the manifest all along; the task was not, because upstream runs it as a
+  crop followed by a union - the 6 mm `total` model boxes the clavicles and C1/C5/T1/T4 plus
+  40 mm, exactly as for `headneck_bones_vessels`, and both models then run on that one crop
+  and are combined as `total`'s parts are, a later part over an earlier one - and a cascade
+  here could only end in a single model. A cascade's last stage may now be a union; the
+  registry refuses a union anywhere else, and a stage stating two things or none.
+
+### Ranked stores
+
 - **Ranked stores are written under duckn seg 0.8, and carry the model's classes and nothing
-  derived from them.** duckn 0.4.0 changes what a segment is - it lists `label_values`,
-  always an array; `background: true` is `role: "background"`; a color is a CSS string - and
-  has no groups. The builder used to write two kinds: a `classes_<i>` partition per part,
-  and named unions (`g_lungs` over TotalSegmentator's five lobes, a vertebral column,
-  FastSurfer's subcortical sets) with `disjoint` and `exhaustive` claims. Those unions are
-  ours, not the model's - no TotalSegmentator task emits a "lungs" class - and they are
-  facts about a labeling scheme, the same for every store a model produces, so they move to
-  a document outside the store. The partition needs no statement at all: a part's classes
-  are disjoint because no two list the same value, and the background role means "none of
-  the described structures is here". `GROUP_CLAIMS`, `named_groups` and `part_partition`
-  are gone; `ranked_store.segment()` replaces `leaf()` and `group()`. **Clients that read
-  `label_value`, `members`, or a `g_*` / `classes_*` id from a store's raw attributes must
-  change** (the bundled `preview.html` still reads `label_value`). Stores already delivered
-  keep reading: `read_segmentation`, `ranked_restore` and the tools read both shapes, duckn
-  migrating the older one (a group becomes a segment listing its members' values).
-  `tools/ranked_upgrade_seg.py` now upgrades a store to 0.8 in place: it removes every
-  group the builder ever generated, whatever engine wrote it, and keeps one a user authored.
+  derived from them.** duckn 0.4.0 changes what a segment is - it lists `label_values`, always
+  an array; `background: true` is `role: "background"`; a color is a CSS string - and has no
+  groups. The builder used to write two kinds: a `classes_<i>` partition per part, and named
+  unions (`g_lungs` over TotalSegmentator's five lobes, a vertebral column, FastSurfer's
+  subcortical sets) with `disjoint` and `exhaustive` claims. Those unions are ours, not the
+  model's - no TotalSegmentator task emits a "lungs" class - and they are facts about a
+  labeling scheme, the same for every store a model produces, so they move to a document
+  outside the store. The partition needs no statement at all: a part's classes are disjoint
+  because no two list the same value, and the background role means "none of the described
+  structures is here". `GROUP_CLAIMS`, `named_groups` and `part_partition` are gone;
+  `ranked_store.segment()` replaces `leaf()` and `group()`. **Clients that read `label_value`,
+  `members`, or a `g_*` / `classes_*` id from a store's raw attributes must change** (so did
+  the bundled `preview.html`, until its rebuild below). Stores already delivered keep reading:
+  `read_segmentation`, `ranked_restore` and the tools read both shapes, duckn migrating the
+  older one (a group becomes a segment listing its members' values).
+  `tools/ranked_upgrade_seg.py` now upgrades a store to 0.8 in place: it removes every group
+  the builder ever generated, whatever engine wrote it, and keeps one a user authored.
 - **A store declares the labeling scheme it was produced under.** `labeling_scheme` names
   an entry of `terminologies`, and each class the catalog names carries its name as an exact
   designation in it - which is what lets a hierarchy, a color table or a cross-walk written
@@ -506,22 +180,174 @@
   already hands over its pre-argmax field, and the refusal that kept engine tasks out now
   admits the engines whose runner takes a ranked sink. `Segmenter.segment` accepts
   `probabilities=`.
-- duckn is pinned at `v0.4.1`, which renames a registry entry's `uri` and `url` to `system_uri`
-  and `definition_url` - a URI *of* the coding system, a URL *of* this version's definition -
-  and the schemes here use those names.
-- duckn is pinned at `v0.5.1`, seg extension 0.9: a segment may state a union once, as
-  `members`. Stores here list values and are read as 0.9 files unchanged; the builder writes
-  none, since a union belongs in a store only when its scheme defines it.
-- rankfield is pinned at `v0.3.3`, in `pyproject.toml` and CI's hand-written list. It is
-  v0.3.2's code with duckn pinned at `v0.5.1`, so the two siblings' tags now agree on duckn;
-  no encoder or decoder change and no bytes move.
-- rankfield is pinned at `v0.3.5` and feldglas at `v0.1.2`, in `pyproject.toml` and CI's
-  list. rankfield 0.3.5 sizes the encoders' slabs from `memory_budget` (1 GiB default) and
-  reads fields straight from a store; no bytes move. feldglas moves with it only because uv
-  resolves a git dependency's own `[tool.uv.sources]`: 0.1.1 pinned rankfield `v0.3.3`, and
-  two URLs for one package leave `haversack[encode]` unresolvable. 0.1.2 is the same code
-  with the new pin.
+- **A cascade's ranked store names each layer from its own model.** A crop stage outputs
+  its own model's classes - stage 0 of `ts.v2:lung_vessels` is `ts.v2:total_fast`'s 118 -
+  but the builder named every layer from the task's label map, so layer 0's spleen, kidneys
+  and gallbladder were stored as `lung_airways` ... `lung_veins`, coded in
+  `ts.v2:lung_vessels`, and values 5-117 as `label_<v>`. It meant to leave crop stages
+  unnamed, but recognized them by a part name (`<task>:s<i>` on every part) the pipeline had
+  stopped writing for the final stage, so the check never fired and `parts="last"` dropped
+  nothing. The emit now records `labels_named_by` - the one task of the catalog that runs the
+  stage's model alone (`TaskCatalog.stage_task`; all 26 ts.v2 cascades resolve), or none,
+  which leaves a stage unnamed rather than misnamed - and the store's part block keeps it. A
+  store whose layers follow two class lists declares both schemes: `labeling_scheme` is then
+  an array, the task's own first, as duckn seg 0.9 allows. `tools/ranked_verify.py` fails a
+  layer coded in another task's scheme (it had the same broken check, and reported the old
+  stores as merely unnamed) and no longer reports parts on a 3 mm and a 0.7 mm grid as
+  differently oriented; `tools/ranked_upgrade_seg.py` no longer drops `labeling_scheme`.
+  **Cascade stores written before this are misnamed in layer 0: rebuild them.** No format
+  version moves; emit directories that predate the field are still named correctly.
+- **The ranked encoder's slab is sized from the device's free memory** (rankfield 0.3.5's
+  `memory_budget`, pinned below). `network.encode_budget` takes half of `device_budget_bytes` -
+  on MPS the allocator's pool grew in ~1 GiB heaps to 1.5-2.2x rankfield's `slab_bytes` bound -
+  capped at rankfield's 1 GiB default, which is also the answer on cpu. The cap is measured,
+  not caution: on an M2, same process, conditions alternated, K=118 at 236x167x167 encoded in
+  5.6 / 5.5 / 5.7 s at 7 / 15 / 30 planes and 8.1 s at 45, K=25 at 472x334x334 in 32.7 / 34.7 /
+  40.8 s at 5 / 11 / 22 - a thicker slab buys nothing, so the measurement only ever shrinks it
+  on a device too full for the default. CUDA is unmeasured; `ENCODE_BUDGET_CEILING` is the
+  number to lift there. `ranked.emit` takes `memory_budget=` (keyword-only, never in the code's
+  meta - it moves no byte) and the nnU-Net and FastSurfer paths pass it; the nnU-Net path
+  records it per model as `encode_memory_budget_bytes`, beside `accumulate`, not as a
+  deviation.
+- **`haversack view` opens current stores again.** Its bundled `data/preview.html` dated from
+  2026-09-05 and accepted only seg 0.6/0.7 and ranked 0.2/0.3, so it refused every store
+  written since the seg 0.8 work above. Rebuilt from sdfview `1983b26` (byte-identical to a
+  rebuild from that commit): it reads seg 0.9 segments by (layer, value) and ranked format
+  0.4, and a cascade whose parts sit on different grids - a 3 mm whole-body crop stage under
+  a 0.7 mm fine stage - is composed as haversack composes parts: each grid restored on its
+  own, painted in `part_order`, later over earlier. Parts sharing a grid still share an atlas
+  (a five-part `total` store renders as before, 7.0 s to load instead of 8.3 s). The lite
+  viewer and the margin renderer still refuse stores on several grids.
 
+### Jobs, inputs and references
+
+- **A job's input can be a result the server itself computed: `result:<key>`.** Every
+  source until now named data that came from outside. `<key>` is the `key` a finished job
+  already reports, so jobs compose - CT to segmentation, then something computed from (CT,
+  segmentation) - and each step is cached under the rules every other result is, so a cheap
+  step run again never repeats the expensive one before it. `result:<key>!<name>` selects a
+  named output (only `labels` exists) and `@sha256:<digest>` pins the bytes. The key is 64
+  hex characters and nothing else, so no host can be spelled and a result on another server
+  cannot be referenced. `GET /v1/sources` lists `result` on a server that keeps a result
+  cache. This is step 1 of `docs/result-references.md`; results that are not label maps, and
+  an engine that needs them, are not part of it.
+- **The identity of a reference is the content digest of the output it names, not the key.**
+  `Cache-Control: no-cache` republishes other bytes under the same key, and a downstream
+  result keyed on the key would silently outlive the mask it was computed from. The server
+  resolves the reference at submit and keys the job on the digest it finds - the same digest
+  an upload of those bytes has, so referring to a result and sending its bytes are one
+  request with one cached answer. `no-cache` on the downstream job resolves the reference
+  again; it never recomputes the upstream result.
+- **A reference that does not resolve is refused at submit, with what to compute first**
+  (409 `result_missing`; 422 for an output the result does not have, or a label map bound to
+  a role that takes an image) - never a queued job that fails minutes later in a worker,
+  which on Modal is a GPU container started for nothing. The worker that fetches a reference
+  resolves it a second time and hashes what it copied, because on Modal a lease taken in the
+  api container does not reach a worker's pruning: a job computes only ever from the bytes it
+  was keyed on, and where a result was recomputed or evicted in between and those bytes can
+  no longer be read, it fails with "the referenced result changed" (or "no result ...")
+  rather than compute from others. On
+  Modal both resolutions read the result volume under the rules of 0.12.4 - never while
+  another thread of the container may be reloading it, a local copy made under the lock, a
+  miss believed only from a view newer than the request (503 otherwise) - and the prefetch
+  thread never stages a reference at all.
+- **An input role can take a label map.** A task's `inputs[].kind` is `image` or `labels`,
+  and `haversack.labelmap.read_label_map` reads a `.seg.nrrd` with its segment names, its
+  geometry and the task that made it. A consumer of (image, mask) selects structures by
+  name - `liver` is a different label value in every catalog - so a label map that carries
+  no names (a NIfTI) is refused unless the caller asks for label values, and one where a
+  name cannot be matched to voxels without choosing - two segments on one value, two values
+  under one name, layered segments, non-integer voxels - is refused always. The reader is
+  its own module: `io.read_image` stays the image reader, and the default `segment` path
+  imports none of it. Every declared role is required, as image roles are. No shipped task
+  takes a label map yet.
+- **`GET /v1/sources` says which prefixes have a path surface.** Every entry gains
+  `path_addressable`, and a server with a result cache lists one more entry, `result`, for
+  which it is false. Additive, and the only thing here an existing client can see besides
+  the dead links below going away: no route, no accepted request, no refusal code and no
+  cache key changed, so nothing stored is recomputed.
+- **The terms of the original data survive the hop.** A result computed from a reference
+  records, in `provenance.inputs`, the digest, the upstream key, output, task and weights
+  versions, and that task's attribution; `derived_from` carries what is above that hop flat
+  - earlier hops by reference, each original input once by value with its origin, license
+  and citation - so a long chain does not copy its whole ancestry at every step, and the
+  terms outlive the upstream entries' eviction. They are recorded by the computation, so
+  the one exception is a cache hit on an answer first computed from an UPLOAD of the same
+  label bytes: that answer says "uploaded by the caller", whoever asks for it next, as an
+  upload and a stored input already shared theirs. `no-cache` recomputes it from the
+  reference.
+- **No content digest is path-addressable.** A job status linked
+  `/v1/sha256-tree/<hex>/<task>/...` for an uploaded DICOM series referred to by digest - a
+  path no route has ever served - because the rule was written against the `sha256:`
+  spelling. It is asked of the digest grammar now, which is also what keeps a reference's
+  result off the path surface: a path is keyed with no lookup, and a reference needs one.
+- **A license a catalog states for one task now reaches the result, not only `describe`.**
+  `segment` wrote a result's attribution from the catalog's name and the modality alone, so
+  a license a manifest states per task never reached the `.seg.nrrd` header: it fell back to
+  the catalog's. The engine path always handed over the catalog's own record of the task;
+  the nnU-Net path now does too. Nothing shipped was misstated - every manifest that names a
+  per-task license repeats its catalog's - but a catalog whose tasks differ in license would
+  have been, in the one copy of the terms that travels with a download. A per-task license
+  that only repeats its catalog's keeps the catalog's fuller record (it names the code's
+  license as well), so no shipped task's header changes: without that, 17 would have lost
+  `code` or changed case for the same facts, and a result's ETag is the digest of that file.
+- **A job's event stream now sends the status `GET /v1/jobs/{id}` answers**, `key` and `links`
+  included, as SERVER.md always said it did; it sent the executor's raw record, so a client
+  whose wait ended on the stream held a status without the result's handle.
+  The nnU-Net encoders now read their task's weights from the root the server's own
+  `Segmenter` reads, where they used to read the default root whatever the server used.
+- **A server describes an uninstalled task's structures.** `GET /v1/tasks/{task}` said
+  "structures are read from the checkpoint once installed" for every task whose weights the
+  server had not fetched - `moose:clin_ct_muscles` showed no structure list on a server whose
+  own `GET /v1/segments` listed its ten muscles. The segments index was mined from that very
+  checkpoint, and `haversack tasks TASK` has read it since the index shipped; describe now
+  reads it too, through one function the CLI shares, marked `structures_from: segments index`
+  with the version that pins it. Neither door shows a record whose catalog has since moved to
+  another version (the CLI used to print it anyway), or a list for a request pinned with
+  `@version`. A result's key reads nothing new: it is the same with the index, without it, and
+  with a broken one.
+
+### What is served beside a result, and how
+
+- **What is rendered beside a result is the request's to say: `deliverables`.** The preview
+  and the statistics were a deployment setting, so every job paid for both - a cohort run
+  by upload rendered a preview per scan that no route can even serve - and "preview off"
+  meant redeploying. `POST /v1/jobs` takes a `deliverables` form field, a JSON list
+  (`["statistics"]`, `[]` for none); absent, a job gets the deployment's set, exactly as
+  before, and that set is also the ceiling: a name this server does not render, or has
+  never heard of, is refused at submit with what it offers (`GET /v1/health` lists it). A
+  declined deliverable costs nothing - no render, and with an empty list no second read of
+  the two volumes either. `RemoteClient.submit(..., deliverables=[...])` and `haversack
+  remote submit --deliverables statistics` (or `none`) send it. This is the light half of
+  `docs/result-references.md`: what is numpy-only and needs the image and the labels runs
+  where both already are; a GPU model is a job of its own over `result:`.
+- **A deliverable never enters a result's key.** Every option is hashed into the key, so the
+  list is a field of its own and is refused inside `options`: declining a preview and then
+  asking for one is one result - the same `key`, a cache hit, the same labels `ETag` - and
+  no segmentation is ever recomputed to draw a picture of it. No cache key moved and no
+  computed byte changed, so nothing stored is recomputed and `CACHE_EPOCH` stays.
+- **A cache hit still honors the list.** A deliverable the request names and the stored
+  result lacks - declined by the request that computed it, or never rendered - is rendered
+  on the hit, into the generation that already holds the labels and through the path every
+  artifact takes (its pending marker is the single flight, the cache's `add_artifact` the
+  placement), so an artifact can no more land beside another publication's labels than it
+  could before. The server never fetches an input again to do it: what it cannot render it
+  SAYS, in the job's `deliverables_unavailable` with the reason and the way out
+  (`no-cache`), rather than leave a link off without a word. On Modal artifacts are
+  rendered by the worker that computes a result, and a hit reaches no worker, so there a
+  hit reports what is missing and renders nothing; a render-only job is the follow-up.
+- **`links` name what was asked for, and a declined artifact is absent at once.** A job's
+  links advertised whatever the deployment renders; they are built from the job's own list
+  now, less what a hit said it could not deliver. The pending marker records what its
+  render will place, so a GET of a preview the job declined answers 404 immediately
+  instead of 202 until the statistics land. A read never renders: a GET of an artifact a
+  cached result lacks is a 404 that names the request which renders it, for an anonymous
+  caller and an authorized one alike.
+- **`statistics.json` says which axis order each spacing is in.** `grid_spacing_mm` is
+  (x, y, z) in RAS - the labelmap's spacing AFTER the RAS reorientation, so a coronal series
+  reads e.g. [0.78, 3.0, 0.78] - while `field_grid_spacing_mm` is the model grid's (z, y, x).
+  Nothing said so, and a reader guessed wrong (2026-09-19). The JSON's `units` block now
+  states the first; no number changes.
 - **`HEAD /v1/jobs/<id>/result`, and a "gone" no cache may keep.** An adversarial pass on
   the artifact routes below found the one file route they left without a `HEAD` - a job's
   own labels, 405 until now, and invisible to the test that reads the router for file names
@@ -634,102 +460,9 @@
   still 202 and an absent one 404. (`meta.json` kept a key-derived `ETag` at that point, its
   body being the result record and not the labels; it has a validator of its own now - the
   artifact entries above.)
-- **A job's input can be a result the server itself computed: `result:<key>`.** Every
-  source until now named data that came from outside. `<key>` is the `key` a finished job
-  already reports, so jobs compose - CT to segmentation, then something computed from (CT,
-  segmentation) - and each step is cached under the rules every other result is, so a cheap
-  step run again never repeats the expensive one before it. `result:<key>!<name>` selects a
-  named output (only `labels` exists) and `@sha256:<digest>` pins the bytes. The key is 64
-  hex characters and nothing else, so no host can be spelled and a result on another server
-  cannot be referenced. `GET /v1/sources` lists `result` on a server that keeps a result
-  cache. This is step 1 of `docs/result-references.md`; results that are not label maps, and
-  an engine that needs them, are not part of it.
-- **The identity of a reference is the content digest of the output it names, not the key.**
-  `Cache-Control: no-cache` republishes other bytes under the same key, and a downstream
-  result keyed on the key would silently outlive the mask it was computed from. The server
-  resolves the reference at submit and keys the job on the digest it finds - the same digest
-  an upload of those bytes has, so referring to a result and sending its bytes are one
-  request with one cached answer. `no-cache` on the downstream job resolves the reference
-  again; it never recomputes the upstream result.
-- **A reference that does not resolve is refused at submit, with what to compute first**
-  (409 `result_missing`; 422 for an output the result does not have, or a label map bound to
-  a role that takes an image) - never a queued job that fails minutes later in a worker,
-  which on Modal is a GPU container started for nothing. The worker that fetches a reference
-  resolves it a second time and hashes what it copied, because on Modal a lease taken in the
-  api container does not reach a worker's pruning: a job computes only ever from the bytes it
-  was keyed on, and where a result was recomputed or evicted in between and those bytes can
-  no longer be read, it fails with "the referenced result changed" (or "no result ...")
-  rather than compute from others. On
-  Modal both resolutions read the result volume under the rules of 0.12.4 - never while
-  another thread of the container may be reloading it, a local copy made under the lock, a
-  miss believed only from a view newer than the request (503 otherwise) - and the prefetch
-  thread never stages a reference at all.
-- **An input role can take a label map.** A task's `inputs[].kind` is `image` or `labels`,
-  and `haversack.labelmap.read_label_map` reads a `.seg.nrrd` with its segment names, its
-  geometry and the task that made it. A consumer of (image, mask) selects structures by
-  name - `liver` is a different label value in every catalog - so a label map that carries
-  no names (a NIfTI) is refused unless the caller asks for label values, and one where a
-  name cannot be matched to voxels without choosing - two segments on one value, two values
-  under one name, layered segments, non-integer voxels - is refused always. The reader is
-  its own module: `io.read_image` stays the image reader, and the default `segment` path
-  imports none of it. Every declared role is required, as image roles are. No shipped task
-  takes a label map yet.
-- **`GET /v1/sources` says which prefixes have a path surface.** Every entry gains
-  `path_addressable`, and a server with a result cache lists one more entry, `result`, for
-  which it is false. Additive, and the only thing here an existing client can see besides
-  the dead links below going away: no route, no accepted request, no refusal code and no
-  cache key changed, so nothing stored is recomputed.
-- **The terms of the original data survive the hop.** A result computed from a reference
-  records, in `provenance.inputs`, the digest, the upstream key, output, task and weights
-  versions, and that task's attribution; `derived_from` carries what is above that hop flat
-  - earlier hops by reference, each original input once by value with its origin, license
-  and citation - so a long chain does not copy its whole ancestry at every step, and the
-  terms outlive the upstream entries' eviction. They are recorded by the computation, so
-  the one exception is a cache hit on an answer first computed from an UPLOAD of the same
-  label bytes: that answer says "uploaded by the caller", whoever asks for it next, as an
-  upload and a stored input already shared theirs. `no-cache` recomputes it from the
-  reference.
-- **No content digest is path-addressable.** A job status linked
-  `/v1/sha256-tree/<hex>/<task>/...` for an uploaded DICOM series referred to by digest - a
-  path no route has ever served - because the rule was written against the `sha256:`
-  spelling. It is asked of the digest grammar now, which is also what keeps a reference's
-  result off the path surface: a path is keyed with no lookup, and a reference needs one.
 
-- **A license a catalog states for one task now reaches the result, not only `describe`.**
-  `segment` wrote a result's attribution from the catalog's name and the modality alone, so
-  a license a manifest states per task never reached the `.seg.nrrd` header: it fell back to
-  the catalog's. The engine path always handed over the catalog's own record of the task;
-  the nnU-Net path now does too. Nothing shipped was misstated - every manifest that names a
-  per-task license repeats its catalog's - but a catalog whose tasks differ in license would
-  have been, in the one copy of the terms that travels with a download. A per-task license
-  that only repeats its catalog's keeps the catalog's fuller record (it names the code's
-  license as well), so no shipped task's header changes: without that, 17 would have lost
-  `code` or changed case for the same facts, and a result's ETag is the digest of that file.
+### The result listing and the cache
 
-- **`statistics.json` says which axis order each spacing is in.** `grid_spacing_mm` is
-  (x, y, z) in RAS - the labelmap's spacing AFTER the RAS reorientation, so a coronal series
-  reads e.g. [0.78, 3.0, 0.78] - while `field_grid_spacing_mm` is the model grid's (z, y, x).
-  Nothing said so, and a reader guessed wrong (2026-09-19). The JSON's `units` block now
-  states the first; no number changes.
-
-- **A result cache the server cannot write is read whole.** A cache on a read-only
-  filesystem, or in a directory another user owns, is a supported way to read one - the
-  reader's lease and the entry lock have always allowed for it - but the lookup did its
-  least-recently-used touch and its read of `result.json` in one `try`, so where the touch
-  was refused the read was skipped and every hit came back with an empty result. Nothing
-  failed, which is why it went unseen until a listing was smoked over a cache mounted
-  read-only (2026-09-20), and three things quietly answered differently. The `ETag` fell
-  back from the content digest to the key, so `If-None-Match` from a client holding those
-  very bytes got the whole download again instead of a 304. A `result:<key>` reference was
-  refused `result_unreadable`, with the advice to recompute a result that was fine. And
-  `GET /v1/jobs/{id}/result`, which serves the cache entry only when its digest is the
-  job's, fell through to the job's own copy - 410 "purged" once that was gone, with the
-  bytes sitting in the entry. The touch is best effort and on its own now, as the input
-  cache's has been since 2026-09-06: there the LRU loses a touch, that is all. An empty
-  result is left meaning what it was always taken to mean, a `result.json` that is missing
-  or not what was written - which now includes bytes that are not UTF-8 (they raised, a
-  500) and JSON that is not an object. No cache format, lease, claim or eviction rule
-  changed, and nothing stored is recomputed.
 - **`GET /v1/segmentations` takes filters and pages, and its silent cap is gone.** It
   returned the newest 500 results and said nothing of the rest - a Modal cache of 2,083
   listed 500 - took no filter, and read every entry one after another, which on a Modal
@@ -794,41 +527,323 @@
   `HAVERSACK_RESULTS_KEEP` (default 500): adopt a larger cache with a larger bound, or lose
   the difference at the first job. The knob is forwarded to every container like the rest;
   unforwarded, the containers would commit and reload `<app>-cache`, mounted nowhere.
-- **What is rendered beside a result is the request's to say: `deliverables`.** The preview
-  and the statistics were a deployment setting, so every job paid for both - a cohort run
-  by upload rendered a preview per scan that no route can even serve - and "preview off"
-  meant redeploying. `POST /v1/jobs` takes a `deliverables` form field, a JSON list
-  (`["statistics"]`, `[]` for none); absent, a job gets the deployment's set, exactly as
-  before, and that set is also the ceiling: a name this server does not render, or has
-  never heard of, is refused at submit with what it offers (`GET /v1/health` lists it). A
-  declined deliverable costs nothing - no render, and with an empty list no second read of
-  the two volumes either. `RemoteClient.submit(..., deliverables=[...])` and `haversack
-  remote submit --deliverables statistics` (or `none`) send it. This is the light half of
-  `docs/result-references.md`: what is numpy-only and needs the image and the labels runs
-  where both already are; a GPU model is a job of its own over `result:`.
-- **A deliverable never enters a result's key.** Every option is hashed into the key, so the
-  list is a field of its own and is refused inside `options`: declining a preview and then
-  asking for one is one result - the same `key`, a cache hit, the same labels `ETag` - and
-  no segmentation is ever recomputed to draw a picture of it. No cache key moved and no
-  computed byte changed, so nothing stored is recomputed and `CACHE_EPOCH` stays.
-- **A cache hit still honors the list.** A deliverable the request names and the stored
-  result lacks - declined by the request that computed it, or never rendered - is rendered
-  on the hit, into the generation that already holds the labels and through the path every
-  artifact takes (its pending marker is the single flight, the cache's `add_artifact` the
-  placement), so an artifact can no more land beside another publication's labels than it
-  could before. The server never fetches an input again to do it: what it cannot render it
-  SAYS, in the job's `deliverables_unavailable` with the reason and the way out
-  (`no-cache`), rather than leave a link off without a word. On Modal artifacts are
-  rendered by the worker that computes a result, and a hit reaches no worker, so there a
-  hit reports what is missing and renders nothing; a render-only job is the follow-up.
-- **`links` name what was asked for, and a declined artifact is absent at once.** A job's
-  links advertised whatever the deployment renders; they are built from the job's own list
-  now, less what a hit said it could not deliver. The pending marker records what its
-  render will place, so a GET of a preview the job declined answers 404 immediately
-  instead of 202 until the statistics land. A read never renders: a GET of an artifact a
-  cached result lacks is a 404 that names the request which renders it, for an anonymous
-  caller and an authorized one alike.
+- **A result cache the server cannot write is read whole.** A cache on a read-only
+  filesystem, or in a directory another user owns, is a supported way to read one - the
+  reader's lease and the entry lock have always allowed for it - but the lookup did its
+  least-recently-used touch and its read of `result.json` in one `try`, so where the touch
+  was refused the read was skipped and every hit came back with an empty result. Nothing
+  failed, which is why it went unseen until a listing was smoked over a cache mounted
+  read-only (2026-09-20), and three things quietly answered differently. The `ETag` fell
+  back from the content digest to the key, so `If-None-Match` from a client holding those
+  very bytes got the whole download again instead of a 304. A `result:<key>` reference was
+  refused `result_unreadable`, with the advice to recompute a result that was fine. And
+  `GET /v1/jobs/{id}/result`, which serves the cache entry only when its digest is the
+  job's, fell through to the job's own copy - 410 "purged" once that was gone, with the
+  bytes sitting in the entry. The touch is best effort and on its own now, as the input
+  cache's has been since 2026-09-06: there the LRU loses a touch, that is all. An empty
+  result is left meaning what it was always taken to mean, a `result.json` that is missing
+  or not what was written - which now includes bytes that are not UTF-8 (they raised, a
+  500) and JSON that is not an object. No cache format, lease, claim or eviction rule
+  changed, and nothing stored is recomputed.
 
+### A result store servers can share (opt-in)
+
+- **`haversack serve --result-store s3://bucket/prefix` shares the result cache between
+  servers through an object store** (also `gs://`, `az://`; `HAVERSACK_RESULT_STORE`). The
+  POSIX cache's guarantees rest on rename and `flock`, which an object store does not have
+  and a filesystem emulating them over one (ZeroFS, assessed) loses on restart, so the store
+  gets its own protocol, the one build caches use: result bytes as blobs named by their
+  SHA-256 and written only if absent, and one pointer per key replaced by a conditional
+  write, so a publication is one write and an artifact can never land beside another
+  publication's labels. `--cache-dir` stays in front as each server's local copy, keeping
+  the store's generation token so a current copy downloads nothing. A store that does not
+  refuse a stale conditional write is refused at startup, naming it - asked, not assumed:
+  obstore's own local-disk store fails it. Anything missing or corrupt in the store reads as
+  a miss that the next computation repairs. `SharedResultCache.sweep` removes unreferenced
+  blobs after a day's grace and, optionally, entries past an age; nothing schedules it yet.
+  Not yet wired into the Modal deployment. `tools/probe_result_store.py` checks a bucket and
+  round-trips one result under a throwaway prefix, and `tools/soak_result_store.py` runs
+  publishers, readers and a sweeper as separate processes against it. First real store,
+  Cloudflare R2 (2026-09-19): both conditional writes honored, two servers sharing one
+  bucket served each other's results - the second never ran its segmenter - and the soak
+  saw no torn read and no error while a sweeper with no grace deleted blobs underneath it.
+  A hit costs one pointer read - about 85 ms median from this Mac, measured before
+  history existed; a key republished four times carries ~5x the pointer, which has not
+  been re-measured on a real bucket.
+- **The result store runs on a directory too: `--result-store file:///path`.** provender
+  0.1.6 adds `DiskStore`, a directory that honors both conditional writes (obstore's own
+  local store honors only one, so `file://` used to be refused at startup), and
+  `objectcache` now talks to its store through `provender.ops`, which answers for a bucket
+  and a directory alike. Same layout, same protocol, no network. Every store test runs
+  twice - in memory and on a directory - with the fault tests included, and the
+  multi-process soak passed on APFS and on a real exFAT volume. One host only: machines
+  share a bucket, never a directory over a network filesystem. Step 2 of
+  `docs/cache-consolidation.md`'s from-scratch design; nothing changes without the flag.
+- **The result store's format 2: a ref naming an immutable manifest.** Each key's ref
+  (`results/<key>.json`) names a manifest stored as a blob - files by digest, result, meta,
+  the publication's token, and `replaces`, the manifest it superseded - and carries its
+  exact bytes, checked against the digest, so the present is still one read. History is the
+  `replaces` chain instead of a list copied into every pointer (a read no longer grows with
+  history); a late artifact is an amending manifest of the same publication; a deletion is a
+  tombstone, which the coming sync can carry where a removed ref could not. Format 1 is
+  still read and is converted, tokens kept, by the first write to its key. **Every host
+  sharing a store must upgrade together:** an older haversack reads format 2 as a newer
+  format - a miss, a refused publication, a sweep that deletes nothing. Also fixed on the
+  way: a host holding a result re-downloaded its labels whenever a late artifact had not
+  reached it yet, and a generation token read from the store is now validated before it
+  becomes part of a local path.
+- **`haversack cache sync SOURCE DESTINATION`: one result store into another.** A
+  server's directory store (`file:///path`) into a bucket, a bucket into a directory, or
+  any store into any other. Each result is decided by its history, not by clocks: copied
+  when the destination lacks it, fast-forwarded when the destination holds an older
+  version, left alone when the destination's is newer, and merged when both computed it
+  independently - the later computation wins and the other stays in its history. Every
+  object a result's kept history needs is copied before the destination's index names it,
+  and deletions travel as tombstones, which the sweep now removes after 30 days (a copy
+  that goes unsynced longer than that can bring a deleted result back). Rerunning is
+  cheap: a key already current costs two small reads.
+- **`haversack serve-store URL`: a read-only server over a result store.** Every read
+  route of `haversack serve` - results by path, meta, preview, statistics, the listing - and
+  nothing else: no jobs, no computation, and not one write to the store, so it runs on a
+  read-only credential, with no GPU, no weights and no torch. It is the Modal deployment's
+  public twin over a bucket instead of a volume. The one thing a bucket did not hold was the
+  result KEY, which is a digest of the task's weights versions; writers now record those
+  (`tasks/<task>.json`, rewritten only when they change) as they publish, and the reader
+  keys from them. A task no writer recorded, or a writer on another cache epoch, is a miss,
+  never a wrong result. Served from R2 in a real run: 565 ms for a first read, 115 ms after.
+- **`haversack cache push` and `cache pull` migrate a result cache to and from a shared
+  store.** The transition the consolidation plan needs: a cache that has been filling for
+  months is worth GPU-hours, and nothing else recovers it once the local protocol goes.
+  Each entry keeps the generation token it already has, so a pushed result is still served
+  from this machine afterwards without downloading anything, and an entry from before
+  generations existed is given one. Idempotent by construction - blobs are
+  create-if-absent, the pointer is written conditionally, and a rerun costs one pointer
+  read per key rather than a re-hash - so an interrupted push is simply rerun and two hosts
+  pushing overlapping caches upload the shared bytes once. `--conflict` decides what
+  happens when the store already holds a key: keep theirs (the default, because theirs may
+  be newer), take whichever was computed later, or take ours. `pull` makes a cold host warm
+  and is also the way out: afterwards the local cache answers on its own.
+- **A server with `--result-store` sweeps it, every `--sweep-interval-hours` (24 by
+  default, 0 to disable).** Now that `delete` leaves bytes for a sweep and a republication
+  leaves its predecessor's the same way, a store nothing sweeps only grows - and a
+  reclamation that depends on an operator remembering a cron line is one that does not
+  happen. The loop is deliberately dull: the shipped grace, no expiry by age, so it can
+  only remove bytes no entry refers to; it waits on the server's own condition so a
+  shutdown stops it at once; the first sweep is one interval away and the interval is
+  jittered, so a fleet restarting together does not all sweep in the same second; and a
+  failure is reported and retried rather than taken seriously enough to end the thread.
+- **`delete` stops reclaiming bytes; `haversack cache sweep` does it** (decided
+  2026-09-20, replacing the "deletion means gone" half of the history decision). Deciding at
+  delete time whether a blob belongs only to the entry being removed means deciding it
+  against live publishers, because deduplication lets a publication happening right now
+  reference those same bytes. Four attempts went into that - pre-listed candidates, a
+  refreshed timestamp on deduplicated writes, a re-check before each delete, a wait for
+  coarse clocks - and reviewers were still finding holes in it. The entry goes
+  immediately, everywhere; the bytes wait for a sweep, which answers the same question with
+  nothing else moving. About 120 lines and the hardest remaining reasoning in the module go
+  with it. A sweep of a store with NO entries left is refused unless `--empty-index-ok` says
+  it was meant, because "everything was deleted" and "wrong prefix" look identical from
+  there.
+- **A republication keeps its predecessors: bounded history in the shared store.** The
+  pointer carries the generations it replaced - up to `HISTORY_KEEP` (4) and
+  `HISTORY_MAX_AGE_S` (30 days), whichever runs out first - and the sweep treats their
+  blobs as referenced, so storage per key is bounded by both. Deduplication makes it nearly
+  free: a recomputation that produced identical bytes adds one small pointer entry and no
+  blob. It answers what this server published over the last 30 days, up to four
+  republications back; a weights upgrade can be compared against what it replaced, and a
+  bad one recovered - `fetch_generation()` writes it to a directory you own, and
+  republishing it is manual. The local copy offers no history API and never serves a
+  predecessor, though its own superseded directories linger until that key is published
+  again; history in the store is read deliberately (`history()`, `fetch_generation()`,
+  which materializes into a directory the caller owns). `delete` removes the entry, its
+  local copy and the bytes of every generation its pointer lists, keeping what another
+  entry shares - near patient data, deletion means gone - and says in its report when it
+  could not establish that, which `haversack cache sweep` then finishes.
+- **The blob half is now `provender`, a package shared with feldglas.** A second project
+  needed content-addressed blobs on the same kind of store, and two copies of one protocol
+  is how this repo's defects have always started - so the blob store moved out to
+  https://github.com/mhalle/provender (pinned by tag, as rankfield and duckn are), leaving
+  thin wrappers here that turn its errors into haversack's and haversack keeps the pointer, the policy, and the live set
+  the sweep needs, which is the only part that knows what a result is. Reviewing the
+  extraction from the other side found two more: a sweep with no grace by default deletes a
+  blob uploaded a second ago (every client writes the blob before the index entry naming
+  it), and the package's own probe tool had been broken by a guard the day before, because
+  nothing imported it. Both fixed in provender 0.1.1, the second with a test that runs the
+  probe.
+- **The result store knows an encode job's field.** A pointer names its one primary output -
+  labels or `field.zarr.zip` - and `put(output_name=)`, the listing (a field row says its
+  `kind` and carries no label links), `find_generation` and `fetch_generation` answer for a
+  field as for labels; a name that is not a primary output is refused before anything is
+  uploaded, and a pointer naming two is served as neither. The local copy follows too - the
+  fill, `pull` and `push` - so a field computed on one server is a hit on another sharing the
+  store, without its encoder running.
+- **The shared store answers the new listing contract** (main's `ResultCache.list` with
+  `keys` / `after` / `match` / `accept` / `memo` / `hold` / `workers`, 2026-09-21). Its three
+  mechanisms carry over, and two get cheaper against a bucket: a listing returns names AND
+  last-modified, so ordering and paging cost no stats at all, and the pointer IS the content
+  - meta, sizes and which artifacts exist are one document - so a row is ONE request where
+  the local cache pays a read plus three stats. `keys` reads only the names it was given and
+  never lists the bucket, a miss being one HEAD; the cursor is the same `(stamp, key)` in
+  nanoseconds, so a position issued by either cache means the same thing. Per-request
+  deliverables land as they were designed to: a hit renders what is missing into the SAME
+  generation, which is what `add_artifact` has always been - a conditional write that cannot
+  land beside another publication's labels, and a render for a generation that has moved on
+  is refused.
+- **`SharedResultCache.find_generation(key, digest)`**, for `result:` references across
+  machines. A `result:<key>` pins the referenced output's sha256 at submit and resolves
+  again in the worker, refusing other bytes; on one machine the submit's lease keeps that
+  generation alive, but a lease means nothing to another host, which may have republished
+  the key in between. Bounded history answers the question a lease was standing in for -
+  which generation has these bytes - and the sweep spares what history lists, so the pinned
+  result is still there and `fetch_generation` hands it over. Measured: another host
+  republishes, the pin refuses the new bytes, and the pinned generation is still found,
+  fetched and spared by a sweep.
+- **Result store sync: a merge no longer repeats, and a sync costs a fifteenth of the time.**
+  Found by soaking two real servers on one directory store for 35 minutes with syncs into
+  R2 (`tools/soak_server_store.py`). A merge - what sync writes when it cannot see how two
+  versions of a result are related - exists only at the destination, and every later sync
+  took it for a new version and merged the key again; it now counts as the version it
+  carries. And a sync walked the destination's history and refreshed every object in it on
+  every run: it now learns what the destination holds from the source's copy of the same
+  history, uploads a new object with one request, and syncs 8 results at once
+  (`--workers`). On R2, 16 results: 73.7 s to 4.9 s for an update, 200 s to 19 s for a
+  first copy.
+- **Review round on the above, same day: three agents, thirteen defects, all fixed.** The
+  one that mattered: obstore's errors do not subclass OSError, so a store fault - expired
+  credentials, DNS, a 503 - left `cache_get` as a bare 500 on routes SERVER.md promises
+  404/410 for, anonymous ones included; the same class of defect 0.12.3 had just fixed for
+  the scratch read. Reads now degrade to a miss (reported, throttled) and only WRITES
+  raise. Also: a cache lookup is a network round trip, so the async routes hand it to the
+  threadpool instead of stalling the event loop; a pointer's every field is validated
+  because another host wrote it, and only known filenames decide where bytes land; one
+  stray object under `results/` no longer aborts `list` and `sweep` for good; a sweep that
+  meets a pointer it cannot read deletes no blobs, so an old host cannot collect a newer
+  writer's results; a corrupt blob is no longer deleted (it is shared by every identical
+  result) but suspected and replaced on the next publication; a missing artifact blob no
+  longer costs the whole result; an artifact's blob gets the same post-pointer re-check as
+  the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
+  be written no longer fails a publication that already succeeded; and `list` reads at most
+  `limit` pointers rather than one per entry in the bucket.
+- **Second review round (four agents, 2026-09-20): twenty defects, all fixed.** The worst
+  three: `push` read the entry's directory and its generation token separately, so a server
+  publishing that key in between bound one generation's bytes to another's token and the
+  pushing host believed its copy current for ever (the token now comes from the directory
+  in hand); `"history": null` - what another language emits for "no history" - made the
+  CURRENT result unreadable and, because the pointer then counted as unreadable, froze blob
+  deletion for the whole store; and the extraction had inverted the sweep's listing order,
+  so a blob written mid-sweep could be deleted at `grace_s=0` where the old order made it
+  structurally safe (provender 0.1.2 takes pre-listed candidates, and haversack lists
+  before it reads pointers again). Also: `delete` now removes the bytes, not just the
+  pointer, keeping what another entry shares and refusing loudly when a pointer it cannot
+  read makes "unreferenced" unknowable - near patient data, deletion means gone; the
+  history age bound applies on READ as well as on write, so a key published and then left
+  alone stops keeping its old generations; one rule now decides what a history entry is, so
+  an entry the readers rejected can no longer occupy a slot for ever; history entries no
+  longer carry `meta`, which no reader ever read; `--limit` bounds the work rather than the
+  entries examined, so a rerun makes progress; `pull` goes oldest-first, repairs a local
+  copy whose files went missing instead of calling it current, and reports what did not fit
+  in the local cache instead of counting it pulled; a store URL that is malformed says what
+  forms are accepted rather than advising about credentials it never used; a corrupt blob
+  is reported again (that warning was lost at the extraction seam); and a new guard
+  reconciles the dependency floor with the sourced tag and with the installed package,
+  which is the same drift the CI pin test exists for, one field over.
+- **Third review round (four agents, same day): sixteen more, and `haversack cache sweep`.**
+  The one that mattered: deduplication defeats the sweep's candidate listing, because a
+  recomputation producing identical bytes uploads nothing - so the blob is old while the
+  pointer naming it is new, and both the sweep and `delete` could take it out from under a
+  result that had just been computed. provender 0.1.3 refreshes a deduplicated blob's
+  timestamp with a server-side copy (one request at any size, verified at 32 MB on R2), so
+  a blob is again as young as the reference to it. Also: `delete` no longer reads every
+  entry in the store on an HTTP route (bounded, and it says to run the sweep instead),
+  reclaims the bytes of generations the age bound has stopped listing, and REPORTS whether
+  the bytes actually went rather than only saying so on stderr; a repaired local copy gets
+  its result and meta documents back, not just its files, and "already complete here" is
+  now one definition instead of two that disagreed; blobs outlive the history listing by a
+  day so a host with a fast clock cannot collect what other hosts still list; `pull` names
+  the key that failed. `cache sweep` exists because an error message already told operators
+  to run it - and because a bound nothing can run is not a bound. Its help, and `cache
+  pull`'s, are now their own rather than `push`'s text. Several claims in this entry and in
+  the design doc were overstated and have been corrected against what the code does.
+- **Fourth review round (one reviewer, the whole branch): eight more, including the same
+  window a third time.** Deduplication defeats BOTH earlier attempts at it - pre-listed
+  candidates and a refreshed timestamp - because the blob is genuinely old while only the
+  reference to it is new, and the test that was supposed to pin it passed for the wrong
+  reason (with one key in the store, an empty live set refused the whole sweep). provender
+  0.1.4 re-checks each candidate against the state it was listed in immediately before
+  deleting it, which with the refresh is what finally closes it; `delete` lists before it
+  scans, for the same reason. Also: a generation directory that is present but not current
+  - a crash between its rename and the pointer write, a second process placing it, a
+  pointer rolled back to it - is now ADOPTED rather than answered as a miss, which had
+  made such a key permanently unreadable on that host and, on a compute server, let the
+  next request overwrite a rollback; a store outage no longer turns a complete local copy
+  into a miss, and a publication the store refuses keeps its bytes on this disk rather
+  than discarding finished GPU work; local write failures during a read (a full or
+  read-only cache) are misses, not 500s; an entry written by a NEWER haversack is never
+  overwritten, while garbage still is; `executor.submit` joins the calls that run off the
+  event loop; a slow fill's work directory is no longer reaped by age while its process is
+  alive; and two processes sharing one `--cache-dir` wait for each other instead of both
+  computing.
+- **Fifth review round (the same reviewer, on the fixes it asked for): nine more.** Two
+  were serious and both were in the new code. A filler killed between its claim and its
+  release left that claim behind, and every later fill on that host then read "someone is
+  placing it" and missed - permanently on a host that never computes, since only a
+  successful publication of that key prunes a claim; death is now proved the way it is
+  everywhere else here, and a live writer's claim (which holds a lock) still stands. And
+  `adopt` published on existence alone, so a zero-length labels file - exactly what a power
+  loss leaves behind a rename - was served as a 200; it checks the sizes the pointer
+  records now. The purge's re-check was narrowed rather than closed, because S3 and R2 date
+  objects to the whole second: it waits out the remainder, and only on a store whose own
+  timestamps say that is needed. The outage fallback is bounded by when this host last saw
+  the entry alive (15 minutes), so an unreachable store cannot resurrect a DELETED result
+  indefinitely; a publication the store REFUSES keeps no local copy, since a refusal is
+  deliberate and repeatable where an outage is not; the work-directory reaper now does what
+  its comment always claimed; and a DELETE that will be refused no longer cancels a running
+  compute first. The six sweep scripts are in `tools/config_sweep/` - results nobody can
+  re-run are not evidence.
+- **Configuration sweep: six environments nobody had run, three defects.** The reviewers
+  could attack code but not environments. Two servers sharing one `--cache-dir` (the
+  per-GPU deployment) came through clean - 446 reads, no torn read, a coherent directory
+  afterwards - as did a store made slow rather than broken (`/v1/health` answered in 0.01 s
+  while a store-touching route waited 1.5 s) and, for the first time off APFS, a cache root
+  on exFAT with no hard links and case-insensitive names (9 checks: publish, read, pull,
+  republish, push, history, sweep, delete, no leavings). What broke: an older haversack
+  DELETED an entry written by a newer one, removing the index and leaving bytes it cannot
+  name - refused now, 409 on the wire; a reader killed mid-fill left its work directory for
+  an hour although its process was provably gone, where `cache usage` and `cache clean`
+  cannot see it - death is proved and reclaimed at once now; and a fill needed TWICE the
+  result's size in free space, because it downloaded into its work directory and then
+  copied into place - a 6 MB result failed with 11 MB free. Fills hand the files over
+  instead, which also stops reading and writing every byte twice, and a publication that
+  lands nothing no longer leaves an empty entry directory behind.
+
+### Also
+
+- **American spelling everywhere, held by a test.** 105 British spellings (center, neighbor,
+  millimeters, labeled, color and license, among others, in their British forms) are gone from
+  the package, its docs, tests and tools, and `tests/test_american_spelling.py` fails on any new
+  one, in prose or inside an identifier (snake_case and camelCase are split before matching).
+  The reason is drift: each British word
+  in the tree is a template the next edit copies. A line that must quote someone else's spelling
+  says so with `spelling: allow <word>`, and a pragma that no longer matches fails too. The job
+  state `cancelled` is unchanged - it is on the wire. Nothing computed moves; newly written
+  ranked stores carry the respelled format README.
+
+### Dependencies
+
+- duckn is pinned at `v0.5.1`, seg extension 0.9: a segment may state a union once, as
+  `members`. Stores here list values and are read as 0.9 files unchanged; the builder writes
+  none, since a union belongs in a store only when its scheme defines it. Since `v0.4.1` a
+  registry entry's `uri` and `url` are `system_uri` and `definition_url` - a URI *of* the
+  coding system, a URL *of* this version's definition - and the schemes here use those names.
+- rankfield is pinned at `v0.3.5` and feldglas at `v0.1.2`, in `pyproject.toml` and CI's
+  list. rankfield 0.3.5 sizes the encoders' slabs from `memory_budget` (1 GiB default) and
+  reads fields straight from a store; no bytes move. feldglas moves with it only because uv
+  resolves a git dependency's own `[tool.uv.sources]`: 0.1.1 pinned rankfield `v0.3.3`, and
+  two URLs for one package leave `haversack[encode]` unresolvable. 0.1.2 is the same code
+  with the new pin.
+- provender is pinned at `v0.1.6`: its `DiskStore` (a directory that honors both conditional
+  writes) and `provender.ops` are what the result store runs on, on a directory and on an
+  object store alike.
 
 ## [0.12.4] - 2026-09-19
 
