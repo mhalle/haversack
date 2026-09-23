@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.13.0] - 2026-09-23
 
 Embedding fields (`haversack encode`, and encode jobs on the server and on Modal);
 TotalSegmentator v3 as its own catalog, and TotalSegmentator's crop and auxiliary-class rules
