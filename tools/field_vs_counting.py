@@ -124,10 +124,10 @@ def measure_field(margin, spacing, *, refine: int = 1):
         near = [p for p, cn in zip(psi, CORNERS) if cn[ax] == 0]
         axis_n.append(sum(far) / 4.0 - sum(near) / 4.0)
     n = np.stack(axis_n)                      # psi per cell, index space
-    centre = sum(psi) / 8.0
+    center = sum(psi) / 8.0
 
     a = np.abs(n)
-    alpha = 0.5 * a.sum(0) - centre           # the sign folding collapses to exactly this
+    alpha = 0.5 * a.sum(0) - center           # the sign folding collapses to exactly this
     frac, dfrac = _cube_cut(a, alpha)
     grad = np.linalg.norm(n / sp[:, None], axis=0)        # physical |grad psi|
 

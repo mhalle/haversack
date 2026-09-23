@@ -228,10 +228,13 @@ def test_a_bare_task_name_is_refused_even_when_one_catalog_offers_it(tmp_path):
     cat = EcosystemCatalog(root=tmp_path)
     with pytest.raises(LookupError, match="needs its catalog: use cads:vertebrae or totalvibe:vertebrae"):
         cat.resolve("vertebrae")
-    with pytest.raises(LookupError, match="needs its catalog: use ts.v2:total_fast$"):
-        cat.resolve("total_fast")
-    with pytest.raises(LookupError, match="needs its catalog: use ts.v2:total_fast$"):
-        cat.resolve("total_fast@v2.0.0")
+    with pytest.raises(LookupError, match="needs its catalog: use ts.v2:total_mr$"):
+        cat.resolve("total_mr")                            # one catalog offers it
+    with pytest.raises(LookupError, match="needs its catalog: use ts.v2:total_mr$"):
+        cat.resolve("total_mr@v2.5.0-weights")
+    with pytest.raises(LookupError, match="needs its catalog: use ts.v2:total_fast or ts.v3:total_fast$"):
+        cat.resolve("total_fast")                          # ts.v3 reuses ts.v2's names
+    assert cat.resolve("ts.v3:total_fast")[2] == "ts.v3:total_fast"
     assert cat.resolve("cads:vertebrae")[2] == "cads:vertebrae"
     assert cat.resolve("totalvibe:vertebrae")[2] == "totalvibe:vertebrae"
     assert cat.resolve("ts.v2:total_fast")[2] == "ts.v2:total_fast"

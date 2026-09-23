@@ -748,9 +748,12 @@ def test_no_async_route_blocks_the_event_loop_on_the_cache():
     for node in ast.walk(tree):
         if not isinstance(node, ast.AsyncFunctionDef):
             continue
+        # a sync helper defined inside is not ours, and neither is a lambda: both are HANDED
+        # to something (main's `_await_artifact` runs its `look_again` through
+        # `asyncio.to_thread`), never run inline by the handler
         inner = {n for f in ast.walk(node)
-                 if isinstance(f, ast.FunctionDef)
-                 for n in ast.walk(f)}          # a sync helper defined inside is not ours
+                 if isinstance(f, (ast.FunctionDef, ast.Lambda))
+                 for n in ast.walk(f)}
         for call in ast.walk(node):
             if call in inner or not isinstance(call, ast.Call):
                 continue
@@ -758,7 +761,7 @@ def test_no_async_route_blocks_the_event_loop_on_the_cache():
             if (isinstance(fn, ast.Attribute) and fn.attr in blocking
                     and isinstance(fn.value, ast.Name) and fn.value.id == "executor"):
                 problems.append(f"{node.name} (line {call.lineno}) calls executor."
-                                f"{fn.attr} directly; use `await _offload(...)`")
+                                f"{fn.attr} directly; use `await asyncio.to_thread(...)`")
     assert not problems, "\n  ".join(problems)
 
 
@@ -2165,3 +2168,84 @@ class TestLateDeliverablesIntoAPublishedGeneration(_Hosts):
                                              self.file("p.png", b"png"), generation=gen))
         rows, _ = self.b.list()
         self.assertEqual(1, len(rows))
+
+
+class TestAnEncodeJobsField(_Hosts):
+    """An encode job publishes an embedding field where a segmentation publishes labels
+    (main, 2026-09-23): ``put(output_name=)``, one primary output per generation. The
+    PROTOCOL half answers for a field as for labels; the local-tier fill does not yet, so a
+    field is a miss on `get` until the one-layer decision is made (2026-09-23)."""
+
+    FIELD_META = {"task": "ts.v2:total_fast", "identity": ["upload:x"], "options": {},
+                  "computed": 1.0, "kind": "encode"}
+
+    def publish_field(self, cache, data=b"a field", key=KEY):
+        from haversack.serve import FIELD_NAME
+        return cache.put(key, self.file(f"field-{data.hex()}", data), {"outputs": []},
+                         dict(self.FIELD_META), output_name=FIELD_NAME)
+
+    def test_the_pointer_names_the_field_and_no_labels(self):
+        from haversack.serve import FIELD_NAME
+        self.publish_field(self.a)
+        files = self.pointer()["files"]
+        self.assertIn(FIELD_NAME, files)
+        self.assertNotIn(RESULT_NAME, files)
+        self.assertEqual(len(b"a field"), files[FIELD_NAME]["size"])
+
+    def test_the_local_copy_holds_the_field_under_its_own_name(self):
+        from haversack.serve import FIELD_NAME
+        gen = self.publish_field(self.a)
+        where = self.a.local._generation_dir(KEY, gen)
+        self.assertEqual(b"a field", (where / FIELD_NAME).read_bytes())
+        self.assertFalse((where / RESULT_NAME).exists())
+
+    def test_a_name_that_is_not_a_primary_output_uploads_nothing(self):
+        with self.assertRaises(ValueError):
+            self.a.put(KEY, self.file("x", b"bytes"), {}, {}, output_name="preview.png")
+        self.assertEqual([], list(obstore.list(self.store, "pre/").collect()))
+
+    def test_find_and_fetch_a_kept_generation_by_the_fields_digest(self):
+        from haversack.serve import FIELD_NAME
+        gen = self.publish_field(self.a, b"the pinned field")
+        self.publish_field(self.b, b"a later field")
+        digest = f"sha256:{hashlib.sha256(b'the pinned field').hexdigest()}"
+        self.assertEqual(gen, self.b.find_generation(KEY, digest))
+        dest = self.tmp / "pinned"
+        got = self.b.fetch_generation(KEY, gen, dest)
+        self.assertIsNotNone(got)
+        self.assertEqual([FIELD_NAME], got["written"])
+        self.assertEqual(b"the pinned field", (dest / FIELD_NAME).read_bytes())
+
+    def test_the_listing_row_is_the_local_caches_row(self):
+        """Said as a field and never linked as labels - the listing route refuses a row by
+        its ``kind``, so a store row without it would come back as a segmentation."""
+        self.publish_field(self.a)
+        local_rows, _ = self.a.local.list()
+        store_rows, _ = self.b.list()
+        self.assertEqual(1, len(store_rows))
+        self.assertEqual("encode", store_rows[0]["kind"])
+        self.assertNotIn("links", store_rows[0])
+        drop = {"published"}
+        self.assertEqual({k: v for k, v in local_rows[0].items() if k not in drop},
+                         {k: v for k, v in store_rows[0].items() if k not in drop})
+
+    def test_match_sees_the_kind_as_the_local_cache_does(self):
+        self.publish_field(self.a)
+        seen = []
+        self.b.list(match=lambda f: seen.append(f) or True)
+        self.assertEqual("encode", seen[0].get("kind"))
+
+    def test_a_pointer_naming_two_primary_outputs_is_served_as_neither(self):
+        from haversack.serve import FIELD_NAME
+        self.publish(self.a, b"labels")
+        ptr = self.pointer()
+        ptr["files"][FIELD_NAME] = dict(ptr["files"][RESULT_NAME])
+        obstore.put(self.store, f"pre/results/{KEY}.json", json.dumps(ptr).encode())
+        rows, _ = self.b.list()
+        self.assertEqual([], rows)
+        digest = ptr["files"][RESULT_NAME]["digest"]
+        self.assertIsNone(self.b.find_generation(KEY, digest))
+
+    def test_get_of_a_field_is_a_clean_miss_until_the_fill_learns_fields(self):
+        self.publish_field(self.a)
+        self.assertIsNone(self.b.get(KEY))

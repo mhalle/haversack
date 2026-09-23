@@ -17,6 +17,10 @@ The nnU-Net catalogs:
 - ``ts.v2`` - the TotalSegmentator v2 catalog. Its tasks are *compositions* (unions,
   cascades, remaps) that exist only as application logic, so it carries a full
   task registry (guarded by the remap drift test).
+- ``ts.v3`` - TotalSegmentator v3's ``total_v3`` (Datasets 831-837), listed as
+  ``total``/``total_fast``/``total_fastest``: the catalog name carries the ``_v3``. Same
+  shape as ``ts.v2``, its own registry (``tools/gen_ts_registry.py``), the same weights
+  manifest - TotalSegmentator's dataset ids are one namespace.
 - ``moose`` - MOOSE/moosez models. Bare, self-describing nnU-Net checkpoints
   on public release assets: the manifest holds name -> url + folder, and the
   spec is read from the installed checkpoint's own dataset.json.
@@ -63,6 +67,8 @@ MRSEGMENTATOR_MANIFEST = Path(__file__).parent / "data" / "mrsegmentator_weights
 DENTALSEGMENTATOR_MANIFEST = Path(__file__).parent / "data" / "dentalsegmentator_weights.json"
 TOTALVIBE_MANIFEST = Path(__file__).parent / "data" / "totalvibe_weights.json"
 CADS_MANIFEST = Path(__file__).parent / "data" / "cads_weights.json"
+TS_V2_TASKS = Path(__file__).parent / "data" / "ts_tasks.json"
+TS_V3_TASKS = Path(__file__).parent / "data" / "ts_v3_tasks.json"
 
 
 def manifest_entry(entries: dict, task: str, *, what: str = "", generator: str = "") -> dict:
@@ -323,6 +329,27 @@ class ModelEcosystem:
         (the "the checkpoint is the spec" rule)."""
         return {}
 
+    def labeling_scheme(self, task: str) -> dict | None:
+        """The duckn labeling scheme a store of ``task`` declares, or None when this ecosystem
+        has no published class list to name (an operator's own models, free-text prompts).
+
+        ``{"key", "name", "system_uri", "version", "definition_url"}`` - duckn's own field
+        names (seg 0.8 `terminologies`), so nothing translates between the two. The
+        ``system_uri`` is a URI OF the class list: it identifies it across files and is
+        compared byte for byte, never fetched, so it carries what changes the list - the
+        catalog's major version, the task - and not the release. ``version`` is the release,
+        which documents written for the scheme list exactly; ``definition_url`` is where a
+        person reads that release's definition. Tasks that share one class list
+        share one scheme. Answered offline, like :meth:`label_version`."""
+        return None
+
+    def scheme_code(self, task: str, value: int, name: str) -> str | None:
+        """This class's code in the task's labeling scheme, or None when the scheme has no
+        EXACT code for it - a designation says "this segment IS that concept", and a class
+        that is only near one, or wider, carries none (duckn seg 0.8 §4.1). The default is
+        the name, which is what a catalog whose codes ARE its names has."""
+        return name
+
     def label_version(self, task: str) -> dict:
         """What pins this task's label list, answered offline from what this build ships: the
         release and digest of the checkpoint its names are read from, a bundle's version, an
@@ -435,9 +462,12 @@ class TSEcosystem(ModelEcosystem):
 
     name = "ts.v2"
     description = "TotalSegmentator task catalog"
+    #: The registry this catalog's tasks come from. A TotalSegmentator catalog is this class
+    #: with another registry; the weights manifest (``ts_weights.json``) is shared.
+    REGISTRY = TS_V2_TASKS
 
     def __init__(self):
-        self._catalog = TaskCatalog("ts")
+        self._catalog = TaskCatalog("ts", path=self.REGISTRY)
 
     def tasks(self) -> list:
         return self._catalog.names()
@@ -468,12 +498,40 @@ class TSEcosystem(ModelEcosystem):
         """``(_meta, {task: raw entry})`` of the shipped registry, read once."""
         cached = getattr(self, "_raw_registry", None)
         if cached is None:
-            data = json.loads(TaskCatalog._builtin("ts").read_text(encoding="utf-8"))
+            data = json.loads(self.REGISTRY.read_text(encoding="utf-8"))
             items = data["tasks"] if isinstance(data, dict) and "tasks" in data else data
             items = list(items.values()) if isinstance(items, dict) else items
             meta = data.get("_meta", {}) if isinstance(data, dict) else {}
             cached = self._raw_registry = (meta, {d["name"]: d for d in items})
         return cached
+
+    #: TotalSegmentator's repository: the identity of its class lists, and where a release's
+    #: definition of them can be read.
+    UPSTREAM = "https://github.com/wasserth/TotalSegmentator"
+
+    def labeling_scheme(self, task: str) -> dict | None:
+        # The registry's label maps are TotalSegmentator's own `class_map`, entry for entry
+        # (checked against upstream at the registry's ts_version). Its `--fast` variants are
+        # not tasks upstream and have no class list of their own: `total_fast` and
+        # `total_fastest` ARE `total`'s classes from a coarser model. One class list is one
+        # scheme, so they declare `total`'s - which is what lets a hierarchy or a color table
+        # written for `ts.v2:total` apply to all three.
+        meta, entries = self._registry_entries()
+        if task not in entries:
+            raise LookupError(f"unknown ts.v2 task {task!r}")
+        base = task
+        for suffix in ("_fastest", "_fast"):
+            stem = task.removesuffix(suffix)
+            if stem != task and entries.get(stem, {}).get("label_map") == entries[task]["label_map"]:
+                base = stem
+                break
+        major = self.name.partition(".")[2]                          # "v2"
+        version = str(meta.get("ts_version"))
+        return {"key": f"{self.name}:{base}",
+                "name": f"TotalSegmentator {major} class labels, task {base}",
+                "system_uri": f"{self.UPSTREAM}#{major}:{base}",
+                "version": version,
+                "definition_url": f"{self.UPSTREAM}/tree/v{version}"}
 
     def label_version(self, task: str) -> dict:
         # The labels ARE the registry entry, generated from TotalSegmentator's own source at
@@ -482,7 +540,7 @@ class TSEcosystem(ModelEcosystem):
         # outputs, not something read out of a checkpoint.
         meta, entries = self._registry_entries()
         if task not in entries:
-            raise LookupError(f"unknown ts.v2 task {task!r}")
+            raise LookupError(f"unknown {self.name} task {task!r}")
         return {"ts_version": str(meta.get("ts_version")),
                 "registry_sha256": _digest(entries[task])}
 
@@ -490,7 +548,25 @@ class TSEcosystem(ModelEcosystem):
         spec = self._catalog.get(task)
         return {"kind": "segments", "modality": spec.modality,
                 "segments": [{"id": n, "value": v} for v, n in spec.label_map.items()],
-                "source": {"file": "haversack/data/ts_tasks.json"}}
+                "source": {"file": f"haversack/data/{self.REGISTRY.name}"}}
+
+
+class TSv3Ecosystem(TSEcosystem):
+    """TotalSegmentator v3: upstream's ``total_v3`` task, Datasets 831-835 (1.5 mm, five
+    parts), 836 (3 mm) and 837 (6 mm), from ``v3.0.0-weights``.
+
+    Listed as ``total``, ``total_fast`` and ``total_fastest`` - the catalog's name says v3,
+    as the naming policy has it (``family.version``; the makers' names are never changed
+    beyond that) - beside ``ts.v2``'s tasks of the same names, whose results and keys it
+    leaves alone. Its labels are v2's 117 with value 26 ``vertebrae_L6`` in place of
+    ``vertebrae_S1``, as upstream's ``class_map["total_v3"]`` and the checkpoints'
+    ``dataset.json`` both say. Every registry entry states ``plans: nnUNetPlans``: 831-836
+    also ship upstream's ``model_size="small"`` ResEnc model beside it, which the resolver
+    would otherwise refuse to choose between."""
+
+    name = "ts.v3"
+    description = "TotalSegmentator v3 task catalog"
+    REGISTRY = TS_V3_TASKS
 
 
 class ZipManifestEcosystem(ModelEcosystem):
@@ -771,7 +847,7 @@ class ZipManifestEcosystem(ModelEcosystem):
         out = super().info(task, root)
         entry = self._entries.get(task) or {}
         out["tag"] = entry.get("tag")
-        # The licence travels with the task. These are third-party weights and
+        # The license travels with the task. These are third-party weights and
         # some carry an attribution condition (DentalSegmentator's are CC BY 4.0);
         # a note in a docstring does not discharge that for whoever consumes the
         # output, so whatever the manifest recorded is published here.
@@ -827,6 +903,40 @@ class MooseEcosystem(ZipManifestEcosystem):
     MANIFEST = MOOSE_MANIFEST
     generator = "tools/gen_moose_manifest.py"
 
+    #: moosez's repository: the identity of its class lists. The lists themselves are stated
+    #: only inside each release asset's dataset.json, which is what moosez reads too - so the
+    #: names are upstream's own, and moosez's SNOMED mapping is already keyed by them.
+    UPSTREAM = "https://github.com/ENHANCE-PET/MOOSE"
+
+    #: Tasks that are another catalog's model repackaged, class list and all: `clin_ct_dental`
+    #: is DentalSegmentator's Dataset112 v100, the same five classes value for value (checked
+    #: against the mined segments index). One class list is one scheme, so it declares theirs.
+    REPACKAGED = {"clin_ct_dental": ("dentalsegmentator", "base")}
+
+    def labeling_scheme(self, task: str) -> dict | None:
+        if task not in self._entries:
+            raise LookupError(f"unknown {self.name} task {task!r}")
+        if task in self.REPACKAGED:
+            eco, theirs = self.REPACKAGED[task]
+            return {e.name: e for e in known_ecosystems()}[eco].labeling_scheme(theirs)
+        entry = self._entries[task]
+        version, url = str(entry.get("tag") or ""), str(entry.get("url") or "")
+        # The release stamp is read out of the asset's file name (upstream publishes no
+        # version per model). An asset that carries none has no release to declare, and
+        # "unknown" is not a version a document could list.
+        if not version or version == "unknown":
+            return None
+        # `fast_*` tasks are NOT folded onto their base task as ts.v2's are: they are separate
+        # upstream models in separate archives with their own release stamps, and their class
+        # lists coincide today by fact, not by construction.
+        pre, sep, rest = url.partition("/releases/download/")
+        return {"key": f"{self.name}:{task}",
+                "name": f"MOOSE class labels, task {task}",
+                "system_uri": f"{self.UPSTREAM}#{task}",
+                "version": version,
+                # the release page the asset is published on, else the asset itself
+                "definition_url": f"{pre}/releases/tag/{rest.split('/')[0]}" if sep else url}
+
 
 class MRSegmentatorEcosystem(ModelEcosystem):
     """MRSegmentator (Haentze et al., Charite; Apache-2.0): two stock nnU-Net v2
@@ -873,6 +983,34 @@ class MRSegmentatorEcosystem(ModelEcosystem):
 
     def tasks(self) -> list:
         return sorted(self._entries)
+
+    #: MRSegmentator's repository: the identity of its class lists, and where a release's
+    #: definition of them (the README class table) can be read.
+    UPSTREAM = "https://github.com/hhaentze/MRSegmentator"
+
+    def labeling_scheme(self, task: str) -> dict | None:
+        if task not in self._entries:
+            raise LookupError(f"unknown {self.name} task {task!r}")
+        # `base`: all 40 names equal upstream's README class table at v1.2.0, value for value.
+        # `body_comp` names its ten classes in German inside its checkpoint ("subcutanes
+        # Fett", "Rektus abdominis links") while upstream publishes them as
+        # `subcutaneous_fat`, `left_rectus_abdominis`, ...: what a store holds is not
+        # MRSegmentator's class list as anything outside that one archive spells it, so no
+        # scheme is declared for it (checked 2026-09-21; revisit when the checkpoint changes).
+        if task != "base":
+            return None
+        entry = self._entries[task]
+        release = str(entry.get("release") or "")
+        if not release.startswith("v"):                  # a git tag, not `zenodo:<id>`
+            return None
+        return {"key": f"{self.name}:{task}",
+                "name": f"MRSegmentator class labels, task {task}",
+                "system_uri": f"{self.UPSTREAM}#{task}",
+                # upstream's own weights_version ("1.2"), which the archive's version.json
+                # and the installer both check - NOT the source release "v1.2.0". Versions
+                # are matched as exact strings, so a document for this scheme lists "1.2".
+                "version": str(entry["tag"]),
+                "definition_url": f"{self.UPSTREAM}/tree/{release}"}
 
     def _folder(self, task: str, root) -> Path:
         entry = manifest_entry(self._entries, task, what=f"mrsegmentator task {task!r}",
@@ -1039,6 +1177,27 @@ class DentalSegmentatorEcosystem(ZipManifestEcosystem):
     MANIFEST = DENTALSEGMENTATOR_MANIFEST
     generator = "tools/gen_dentalsegmentator_manifest.py"
 
+    #: The Zenodo CONCEPT record of the weights: the identity of the class list across the
+    #: record's versions. No code repository owns the list - the Slicer extension is the
+    #: reference client, and it relabels class 1 "Maxilla & Upper Skull" for display, while
+    #: the codes here are the checkpoint's own ("Upper Skull").
+    CONCEPT_DOI = "https://doi.org/10.5281/zenodo.10829674"
+
+    def labeling_scheme(self, task: str) -> dict | None:
+        if task not in self._entries:
+            raise LookupError(f"unknown {self.name} task {task!r}")
+        entry = self._entries[task]
+        record = str(entry.get("release") or "").partition("zenodo:")[2]
+        if not record or not entry.get("tag"):
+            return None
+        return {"key": f"{self.name}:{task}",
+                "name": "DentalSegmentator class labels",
+                "system_uri": f"{self.CONCEPT_DOI}#{task}",
+                # upstream's own token, from the dataset folder's name; Zenodo publishes no
+                # version for the record
+                "version": str(entry["tag"]),
+                "definition_url": f"https://zenodo.org/records/{record}"}
+
 
 
 
@@ -1102,6 +1261,39 @@ class TotalVibeEcosystem(ZipManifestEcosystem):
     bucket = "totalvibe"
     MANIFEST = TOTALVIBE_MANIFEST
     generator = "tools/gen_totalvibe_manifest.py"
+
+    #: TotalVibeSegmentator's repository, in the repository's own casing: a scheme's uri is
+    #: compared byte for byte, so the canonical spelling is the only one.
+    UPSTREAM = "https://github.com/robert-graf/VIBESegmentator"
+
+    #: Tasks that are one class list under two names: Dataset 099 (sagittal) and Dataset 100
+    #: publish the SAME 72 value -> name map. Declared rather than derived, because a zip
+    #: manifest holds no labels to compare offline; a test re-checks it against the mined
+    #: segments index, so a release that splits them fails.
+    SAME_CLASSES = {"vibe_sagittal": "vibe"}
+
+    #: Tasks whose checkpoint names its classes with digit strings ("7", "117"): a document
+    #: keyed by those says nothing, and `feet_bones` values differ from upstream's own output
+    #: (upstream renumbers after inference; haversack does not). No scheme is declared. If
+    #: names are ever supplied for `body_regions` they will be haversack's, not upstream's.
+    UNNAMED_CLASSES = frozenset({"body_regions", "feet_bones"})
+
+    def labeling_scheme(self, task: str) -> dict | None:
+        if task not in self._entries:
+            raise LookupError(f"unknown {self.name} task {task!r}")
+        if task in self.UNNAMED_CLASSES:
+            return None
+        base = self.SAME_CLASSES.get(task, task)
+        entry = self._entries[base]
+        dsid, release = str(entry.get("dataset_id") or ""), str(entry.get("release") or "")
+        if not dsid or not release:
+            return None
+        return {"key": f"{self.name}:{base}",
+                "name": f"TotalVibeSegmentator class labels, dataset {dsid} ({base})",
+                # the nnU-Net dataset id is upstream's own identifier of the class list
+                "system_uri": f"{self.UPSTREAM}#{dsid}:{base}",
+                "version": release,
+                "definition_url": f"{self.UPSTREAM}/tree/{release}"}
 
     def _unpack_into(self, task: str, root) -> Path:
         # the archive's top level is the configuration folder itself; the
@@ -1184,6 +1376,28 @@ class CADSEcosystem(ZipManifestEcosystem):
     bucket = "cads"
     MANIFEST = CADS_MANIFEST
     generator = "tools/gen_cads_manifest.py"
+
+    #: CADS's repository: the identity of its class lists (`cads/dataset_utils/
+    #: bodyparts_labelmaps.py`, keyed by nnU-Net dataset id). The checkpoints' own names were
+    #: diffed against that module at cads-model-open_v1.0.0: all nine tasks equal value for
+    #: value, upstream's `0: background` aside (2026-09-21; tests/fixtures pins the comparison).
+    #: NOT its `labelmap_all_structure_renamed` display names. The open/research weights
+    #: variant is not in the uri - it changes the weights, not the classes - but it IS the
+    #: version, so a document that applies to both variants lists both.
+    UPSTREAM = "https://github.com/murong-xu/CADS"
+
+    def labeling_scheme(self, task: str) -> dict | None:
+        if task not in self._entries:
+            raise LookupError(f"unknown {self.name} task {task!r}")
+        entry = self._entries[task]
+        dsid, release = str(entry.get("dataset_id") or ""), str(entry.get("release") or "")
+        if not dsid or not release:
+            return None
+        return {"key": f"{self.name}:{task}",
+                "name": f"CADS class labels, dataset {dsid} ({task})",
+                "system_uri": f"{self.UPSTREAM}#{dsid}:{task}",
+                "version": release,
+                "definition_url": f"{self.UPSTREAM}/tree/{release}"}
 
     def spec(self, task: str, root) -> TaskSpec:
         import dataclasses
@@ -1532,6 +1746,29 @@ class FastSurferEcosystem(ImageBakedEcosystem):
         from .engines.fastsurfer import load_lut
         return sorted(v["name"] for v in load_lut().values())
 
+    #: FastSurfer's repository (the pinned fork changes packaging only): the identity of its
+    #: class lists. `FastSurferCNN/config/FastSurfer_ColorLUT.tsv` is byte-identical at every
+    #: 2.x tag from v2.0.0 to v2.5.4, and the shipped LUT equals it on all 78 ids.
+    UPSTREAM = "https://github.com/Deep-MI/FastSurfer"
+
+    def labeling_scheme(self, task: str) -> dict | None:
+        if task not in self.task_names:
+            raise LookupError(f"unknown {self.name} task {task!r}")
+        version = str(_registry.ENGINES[self.engine].weights_identity()[0]["version"])
+        return {"key": f"{self.name}:{task}",
+                "name": f"FastSurfer {task} class labels",
+                "system_uri": f"{self.UPSTREAM}#v{version.partition('.')[0]}:{task}",
+                "version": version,
+                "definition_url": f"{self.UPSTREAM}/tree/v{version}"}
+
+    def scheme_code(self, task: str, value: int, name: str) -> str | None:
+        # FastSurfer's codes are the numeric aparc+aseg ids, not the names. And a store holds
+        # the network's channels BEFORE `split_cortex_labels`, which lateralizes 19 lh-numbered
+        # ids spatially: in a store such a value is a bilateral channel wearing a left-
+        # hemisphere name, so it is not exactly the concept its id names and carries no code.
+        from .engines.fastsurfer import lateralized
+        return str(int(value)) if lateralized(value) else None
+
 
 def engine_of(ecosystem) -> str:
     """The engine name an ecosystem declares. Ecosystems are duck-typed here (an
@@ -1638,6 +1875,29 @@ class MonaiEcosystem(EngineEcosystem):
     """
 
     name = "monai"
+
+    #: The MONAI model zoo: the registry that defines the bundles. GitHub, not the bundles'
+    #: current host - the zoo has moved hosting before, and a uri compared byte for byte must
+    #: not move with it.
+    UPSTREAM = "https://github.com/Project-MONAI/model-zoo"
+
+    def labeling_scheme(self, task: str) -> dict | None:
+        # The bundle name distinguishes the class list (a bundle's `channel_def` has not moved
+        # across its version history where checked); the bundle version is the release. This
+        # says which list, not whether a run's names are the bundle's: a region head has no
+        # names to code, and the build path withholds the scheme for it (`labels_unnamed`).
+        try:
+            entry = self._entry(task)
+        except Exception as exc:                      # noqa: BLE001 - an uncurated bundle
+            raise LookupError(f"unknown {self.name} task {task!r}") from exc
+        version = str(entry.get("version") or "")
+        if not version:
+            return None
+        return {"key": f"{self.name}:{task}",
+                "name": f"MONAI model zoo bundle {task} class labels",
+                "system_uri": f"{self.UPSTREAM}#{task}",
+                "version": version,
+                "definition_url": entry.get("url") or f"https://huggingface.co/MONAI/{task}/tree/{version}"}
     engine = "monai"
     description = "MONAI model zoo bundles (engine)"
 
@@ -1941,7 +2201,7 @@ _ENGINE_ECOSYSTEMS = {"fastsurfer": FastSurferEcosystem,
 
 #: The nnU-Net catalogs, always served. One tuple for the served set and the structures
 #: index alike, so a catalog added here is mined and checked with no second edit.
-_NNUNET_CATALOGS = (TSEcosystem, MooseEcosystem, MRSegmentatorEcosystem,
+_NNUNET_CATALOGS = (TSEcosystem, TSv3Ecosystem, MooseEcosystem, MRSegmentatorEcosystem,
                     DentalSegmentatorEcosystem, TotalVibeEcosystem, CADSEcosystem)
 
 

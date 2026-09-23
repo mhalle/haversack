@@ -414,8 +414,15 @@ def refresh_manifest(path=None, *, repo: str = TS_REPO, token: str | None = None
             up["default"] = pins[wid]
 
     merged = {w: {"default": e["default"], "versions": dict(e["versions"])} for w, e in current.items()}
-    added, new_versions, repointed, migrated = {}, {}, {}, {}
+    added, new_versions, repointed, migrated, gated = {}, {}, {}, {}, {}
     for wid, up in upstream.items():
+        if wid not in merged and wid in LICENSE_GATED:
+            # Published as a release asset, but upstream installs it only through its
+            # licensed backend (Dataset857, thigh_shoulder_muscles, appeared in
+            # v3.0.0-weights, 2026-09). Adding its URL would make haversack download what
+            # TotalSegmentator itself gates; reported, never added. A human decides.
+            gated[wid] = up
+            continue
         if wid not in merged:
             if add_missing:
                 added[wid] = up
@@ -445,6 +452,9 @@ def refresh_manifest(path=None, *, repo: str = TS_REPO, token: str | None = None
 
     behind = {w: (merged[w]["default"], upstream[w]["default"])
               for w in upstream if w in merged and merged[w]["default"] != upstream[w]["default"]}
+    if gated:
+        say(f"  license-gated upstream, published as assets, NOT added: "
+            f"{', '.join(f'Dataset{w} ({LICENSE_GATED[w]})' for w in sorted(gated, key=int))}")
     say(f"manifest: {len(current)} -> {len(merged)} datasets; {len(added)} added, "
         f"{len(new_versions)} gained versions, {len(behind)} differ from "
         f"{'TotalSegmentator' if pins else 'upstream newest'}"
@@ -457,7 +467,7 @@ def refresh_manifest(path=None, *, repo: str = TS_REPO, token: str | None = None
     elif write:
         say(f"nothing to write ({path} is current)")
     return {"added": added, "new_versions": new_versions, "behind_upstream": behind,
-            "migrated": migrated,
+            "migrated": migrated, "license_gated": gated,
             "total": len(merged), "path": str(path)}
 
 

@@ -25,7 +25,7 @@ def test_lut_has_canonical_freesurfer_labels():
 
 
 def _upstream_lut_path():
-    """FastSurfer's own colour table, wherever this machine has it.
+    """FastSurfer's own color table, wherever this machine has it.
 
     Engines get their own environments, so the checkout running the tests usually is NOT
     the one holding FastSurferCNN; look in the per-engine venvs too before giving up.

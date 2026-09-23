@@ -76,7 +76,10 @@ up to N seconds (default 30, at most 110) and returns the bytes if they arrive i
 computation and returns 202 at once. A `HEAD` on the same path probes without computing:
 200 cached, 202 in flight (with the same progress headers), 404 absent. Its 200 carries
 the `ETag` and `Content-Length` the `GET` would, and like the `GET` it answers a matching
-`If-None-Match` with 304. The header never goes in the URL, so the URL stays the pure
+`If-None-Match` with 304. A 404 on a result path says `Cache-Control: no-store`, as a 202
+does: "not materialized" lasts only until somebody computes the result, and a cache that
+kept it would hide the `public` 200 that follows. Every artifact beside the labels answers `HEAD` too (see
+"Results by path"). The header never goes in the URL, so the URL stays the pure
 cache key.
 
 **`Cache-Control: no-cache` recomputes.** On a submit or an authorized result GET (with
@@ -108,8 +111,11 @@ A job's status (`GET /v1/jobs/{id}`) carries its `state` (`queued`, `running`, `
 elapsed), the `input_identity`, the result `key`, and once done a `result` block with the
 structure names, volumes in ml, provenance, timings, and the content digest of the output,
 plus `deliverables` - what this job renders beside its labels - and a `links` object: `self`,
-`events`, `result`, and for a path-addressable result the labels, the metadata and the
-deliverables this job was asked for. Follow the links rather than building URLs.
+`events`, `result`, and `meta`, `preview` and `statistics` for the metadata and the
+deliverables this job was asked for. For a path-addressable result those three (and `labels`)
+are its paths; for a result with no path - an upload's, a `result:` reference's, a multi-input
+job's, options off the grid menu - they are the job's own artifact routes, below. Follow the
+links rather than building URLs.
 
 `GET /v1/jobs/{id}/events` is Server-Sent Events: each event is the same status snapshot,
 so a dropped stream needs no replay - resubscribe, or poll the status URL. `GET
@@ -120,7 +126,24 @@ is not done answers 409; a result whose bytes were purged answers 410. A server 
 yet see a finished result - on Modal, the api container's view of the result volume can trail
 the worker's publication - answers 503 with `Retry-After` instead: retry it, it is not gone.
 The path surface answers the same 503 where it cannot tell a miss from a stale view, rather
-than 404 or a second compute. A job with a key is
+than 404 or a second compute.
+
+`GET /v1/jobs/{id}/meta.json`, `/preview.png`, `/statistics.json` and `/statistics.tsv` are
+the artifacts beside that result, for every job - and the only door to them for a result
+with no path, whose deliverables were rendered and then unreachable before 2026-09-21. They
+need the token like the rest of the jobs API, never less: a job's preview shows what was
+uploaded. They resolve as `/result` does and answer by its rules first - 404 no such job, 409
+not done, 410 the bytes are gone, 503 not visible yet - and then by the artifact's own: 202
+with `Retry-After` while a render that will place it is still running (`Prefer: wait=N` on a
+GET waits it out), 404 when none will, with the job's own `deliverables_unavailable` reason
+where it gave one. `HEAD` answers the same without the body and never waits. Each carries an
+`ETag` that is the digest of what is sent, honors `If-None-Match`, and is `Cache-Control:
+private, no-cache`: not for a shared cache, and revalidated rather than assumed, which the
+ETag makes cheap.
+Their 404s and 410s - and `/result`'s - say `Cache-Control: no-store`: "gone" turns back
+into 200 when the key is computed again with the same output.
+
+A job with a key is
 served from the result cache's entry for that key - the same bytes the path surface serves -
 and from the job's own copy only when there is no entry or the key has since been recomputed
 to different bytes. The download does not honor `Range`. On the local
@@ -155,6 +178,29 @@ artifact takes the same token. Reads obey the rules above: a cache hit is served
 `Cache-Control: public` and an `ETag`; a miss is 404 unless the caller is authorized and
 sends `Prefer`. `GET /v1/segmentations` lists the cached results (next section).
 
+Every file here has a validator of its own, and it is the digest of what is sent: the labels'
+`ETag` is their content digest, and each artifact's is the digest of its own body. So a
+`Cache-Control: no-cache` recompute, which republishes under the same key and the same URLs,
+moves the tag of every file whose bytes moved and of no other, and a client holding an old
+tag gets the new bytes, not a 304. (Before 2026-09-21 the four artifacts shared one tag
+derived from the key, which a republication did not change.) `If-None-Match` is answered
+on all of them, compared weakly as RFC 9110 has it (`W/"x"` matches `"x"`), and a 304 repeats
+the 200's `Cache-Control` and `Vary` and never a `Preference-Applied`.
+
+`HEAD` works on all of them and never computes, renders or waits, whatever `Prefer` says:
+the `ETag`, `Content-Length`, `Cache-Control` and `Vary` of the GET with no body, or the 304.
+For `preview.png` and `statistics.*` it is the probe for "has it rendered yet": 200 there,
+202 with `Retry-After` while the labels are still computing or a render that will place that
+deliverable is pending, and 404 otherwise - a deliverable nobody asked for is a 404 at once,
+not a 202, because no render is coming. The anonymous twin answers the same: it reads the
+api's pending-render marker (before 2026-09-21 it could not, and said 404 for a preview
+seconds from landing). `meta.json` is 404 until the labels are published, under either verb. An artifact's absence is never for a cache to keep: its 404, like its
+202, says `Cache-Control: no-store`, because an artifact arrives late - after `done`, on a
+later request that asks for it, from another host where several share a result store - and
+a 404 followed a moment later by a 200 is a legitimate sequence. Read a 404 for a
+deliverable you asked for as "not as far as this request saw", and ask again. A method a
+URL does not have is a 405 whose `Allow` lists the ones it has.
+
 Uploads are not path-addressable - their identity is a digest nobody else can guess - so an
 uploaded input's result is fetched through its job's `result` link, which is where the ETag
 revalidation earns its keep. No content digest is: not a stored input's, and not a `result`
@@ -177,7 +223,9 @@ GET /v1/segmentations?identity=idc:<crdc_series_uuid>&task=ts.v2:total&limit=100
 ```
 
 `links` is there when the result has a path (one hosted input, default options or a grid
-token); an upload's result, a `result:` reference's and a multi-input one are listed without.
+token); an upload's result, a `result:` reference's and a multi-input one are listed without:
+their artifacts are reached through a job (`/v1/jobs/{id}/preview.png`, ...), and the listing
+is of results, not of jobs - it knows no job id to build such a link from.
 `published` is what the order is by: the time of the publication the entry holds now, so a
 result recomputed with `no-cache` moves to the head, and nothing a READ does moves anything.
 
@@ -212,8 +260,11 @@ such view can be had the answer is 503 with `Retry-After`, never a shorter list.
 Beside the labels a server renders light deliverables: `preview`, a three-plane overlay
 (`preview.png`), and `statistics`, per-structure volumes and intensities (`statistics.json`,
 also as `.tsv`). They are rendered after the job already reports `done`, into the result's
-own cache entry, so they are eventually consistent: a GET of one that is still rendering
-answers 202 with `Retry-After`.
+own cache entry, so they are eventually consistent: a GET or a HEAD of one that is still
+rendering answers 202 with `Retry-After`. They are served by path where the result has one,
+and through the job (`/v1/jobs/{id}/preview.png`, ...) always. A job whose result has no cache
+entry to render into - a server run without a result cache - says so in
+`deliverables_unavailable` instead of listing what no route would serve.
 
 **Which are rendered is the request's to say.** `POST /v1/jobs` takes a `deliverables` form
 field, a JSON list of names: `["statistics"]`, or `[]` for none. Absent, the job gets the
@@ -353,13 +404,47 @@ are then on the upstream result, not on this one. `Cache-Control: no-cache` reco
 the reference. Results of references are not path-addressable; fetch them through the job's
 `result` link.
 
+## Embedding fields
+
+A job of kind `encode` makes an embedding field instead of labels: `POST /v1/jobs` with
+`kind=encode`, `task` naming an ENCODER (`GET /v1/encoders`, or `haversack remote encoders`),
+and one image as input, sent or named exactly as for a segmentation. The field is the
+encoder's token lattices placed in the scan's world (`<name>.zarr.zip`, read by
+[feldglas](https://github.com/mhalle/feldglas)). The name is resolved as an encoder and never
+through the task catalog: `ts.v2:total_fast` is both a task and an encoder, and `kind` decides.
+Aliases resolve as they do locally (`radar` is `radar:pretrain`); an `@revision` pin must be
+the revision the server runs, or the submit is a 404 naming it. The only option is `int8`
+(tokens stored as int8 with a per-channel scale), which is a different result from the fp16
+default. A field has no deliverables, and asking for any is a 422.
+
+Everything else is a segmentation's: the same queue, single flight, result cache and
+lifetimes, and the same job routes. `GET /v1/jobs/{id}/result` sends the field as
+`application/zip`, named after the encoder and the job (`radar_pretrain_<id>.zarr.zip`), with its
+content digest as `ETag`;
+`?format=` is refused with a 422, since a field has no other form. Its status says `"kind":
+"encode"`, and its `result.outputs[0]` is `{"name": "field", "kind": "field", ...}`: a
+`result:` reference to it cannot be bound where an image or labels belong. A field's key
+includes the kind, so it never shares one with a segmentation of the same name, and no
+segmentation key changed when fields were added. A field has no path form yet and is not
+listed by `/v1/segmentations`; reach it through its job, whose `links` name `result` and
+`meta` only.
+
+A server fetches an encoder's pinned weights on its first encode job, digest-checked, as it
+installs a segmentation task's weights on first use (`GET /v1/encoders` says whether they are
+installed); the command line does not, and wants `haversack weights fetch <encoder>`. An
+nnU-Net encoder uses its task's weights, installed the same way. On Modal, encoding is opt-in:
+deploy with `HAVERSACK_ENCODE=1` for an encoder GPU worker (`EncodeWorker`), whose image adds
+the `encode` extra and whose checkpoints live on the global `haversack-encoder-weights` volume
+(`HAVERSACK_ENCODER_VOLUME` to name another), apart from the segmentation weights. Without it
+`GET /v1/encoders` carries `"encodes": false` and a submit is a 501.
+
 ## Tasks and options
 
 `GET /v1/tasks` lists catalog names; `GET /v1/tasks/{task}` describes one: its `engine`,
 `lineage`, `modality`, the `structures`, the `weights` and whether they are installed, the
 `inputs` it takes (each with a role name and a kind - `image` or `labels`; every declared role is required), its
 `parameters` as two JSON Schemas, and its `behavior`. Task names cross the wire as qualified catalog
-names only (a bare `total_fast` is a 404 that names `ts.v2:total_fast`); the in-process API's ability to run a model folder by path stops at this
+names only (a bare `total_fast` is a 404 that names `ts.v2:total_fast` and `ts.v3:total_fast`); the in-process API's ability to run a model folder by path stops at this
 boundary. The grammar `eco:name@version` names an ecosystem, a task, and a weights version;
 all spellings of one task converge on one cache key. A version is a pin, and the server holds
 it the way every catalog does: the INSTALLED version decides, and an unknown one satisfies
@@ -375,7 +460,13 @@ before anything is installed. A segment is one item of a task's segment table, a
 `.seg.nrrd` or a DICOM segmentation: the label `value` it is written with, the `layer` it lives
 in where the output overlaps (no `layer` means layer 0), and its `id` - the model's own token
 for it, a code in that model's class list rather than a display name or an identity across
-models. A task's `structures` in `GET /v1/tasks/{task}` are those ids, in label order. The
+models. A task's `structures` in `GET /v1/tasks/{task}` are those ids, in label order - for a
+task whose weights are not installed here too, answered from the segments index and marked
+`structures_from: {"source": "segments index", "version": ...}` (with the record's `segments`
+table and its `note` where it has one). The index gives no list rather than a wrong one: none
+for a record whose catalog now pins another version, or for a request pinned with `@version`.
+The installed model's own labels decide a result, and a result's key does not depend on any
+of this. The
 search runs over every task's segments as its model states them, limited to the tasks this
 deployment serves (not to be confused with `/v1/segmentations`, which lists cached results).
 `q` is word prefixes in any order by default (`kid left` finds `kidney_left` and
@@ -547,6 +638,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/version` | read | what is deployed |
 | GET | `/v1/tasks` | read | task names |
 | GET | `/v1/tasks/<task>` | read | describe a task |
+| GET | `/v1/encoders` | read | what `kind=encode` jobs encode with: lattices, license, citation, installed |
 | GET | `/v1/segments` | read | which tasks produce a segment, and with what label value |
 | POST | `/v1/tasks/<task>/prepare` | token | install a task's weights now |
 | GET | `/v1/sources` | read | the hosted sources (and `result`), their identifier grammar, and which have a path surface |
@@ -555,7 +647,16 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/jobs` | token | brief status of every known job |
 | GET | `/v1/jobs/<id>` | token | full status, result metadata, links |
 | GET | `/v1/jobs/<id>/events` | token | status snapshots as Server-Sent Events |
-| GET | `/v1/jobs/<id>/result` | token | the labels (`?format=nii.gz` converts) |
+| GET | `/v1/jobs/<id>/result` | token | the labels (`?format=nii.gz` converts), or an encode job's field |
+| HEAD | `/v1/jobs/<id>/result` | token | the same, no body: status, `ETag`, length (none with `?format=`, which a HEAD does not convert) |
+| GET | `/v1/jobs/<id>/meta.json` | token | the job's result: provenance and structure names |
+| HEAD | `/v1/jobs/<id>/meta.json` | token | the same, no body |
+| GET | `/v1/jobs/<id>/preview.png` | token | the job's rendered preview; 202 while it renders |
+| HEAD | `/v1/jobs/<id>/preview.png` | token | probe: rendered, rendering, absent |
+| GET | `/v1/jobs/<id>/statistics.json` | token | the job's per-structure volumes |
+| HEAD | `/v1/jobs/<id>/statistics.json` | token | probe: rendered, rendering, absent |
+| GET | `/v1/jobs/<id>/statistics.tsv` | token | the same as a table |
+| HEAD | `/v1/jobs/<id>/statistics.tsv` | token | probe: rendered, rendering, absent |
 | DELETE | `/v1/jobs/<id>` | token | cancel or delete |
 | GET | `/v1/inputs/<digest>` | token | is this content already here |
 | PUT | `/v1/inputs/<digest>` | token | store one file, digest checked |
@@ -565,9 +666,13 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | DELETE | `/v1/<source>/<identifier>/<task>` | token | drop the cached result and every artifact |
 | DELETE | `/v1/<source>/<identifier>/<task>/labels.seg.nrrd` | token | the same, addressed by the labels file |
 | GET | `/v1/<source>/<identifier>/<task>/meta.json` | read | provenance and structure names |
+| HEAD | `/v1/<source>/<identifier>/<task>/meta.json` | read | the same, no body |
 | GET | `/v1/<source>/<identifier>/<task>/preview.png` | read | a rendered preview |
+| HEAD | `/v1/<source>/<identifier>/<task>/preview.png` | read | probe: rendered, rendering, absent |
 | GET | `/v1/<source>/<identifier>/<task>/statistics.json` | read | per-structure volumes |
+| HEAD | `/v1/<source>/<identifier>/<task>/statistics.json` | read | probe: rendered, rendering, absent |
 | GET | `/v1/<source>/<identifier>/<task>/statistics.tsv` | read | the same as a table |
+| HEAD | `/v1/<source>/<identifier>/<task>/statistics.tsv` | read | probe: rendered, rendering, absent |
 
 Every path-addressed route that names a file also exists with the `_res-1mm` token
 before the extension.

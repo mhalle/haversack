@@ -82,7 +82,7 @@ Probabilities can be renormalized exactly with `Z = Z_top / (1 - tail)`.
 It is often all zeros at useful depths and may be **absent entirely** (`exhaustive: true`, i.e.
 `depth >= classes`, or the writer dropped it). Treat a missing `tail` as zero.
 
-### `distance` — where the nearest surface is, in millimetres (optional)
+### `distance` — where the nearest surface is, in millimeters (optional)
 
 Present only when the store was built with it. One 3-D field on the data grid, like `tail`: the
 distance from this voxel to the **nearest surface** — the nearest place the argmax changes,
@@ -130,9 +130,9 @@ It is a **derived view, not a replacement for `support`**. Distance says where a
 it cannot say how confident the model was, what the alternatives were, or let you re-decide
 after the fact. Everything that needs those still reads the logits. What distance buys is a
 shared unit: margins are logits scoped to one softmax and are not comparable across parts, so a
-five-part composite can only be combined by paint order — millimetres let the same parts be
+five-part composite can only be combined by paint order — millimeters let the same parts be
 combined by nearest surface, and make cross-part geometric questions answerable. It is stored
-rather than derived on read because the derivation is **non-local** (a neighbourhood of radius
+rather than derived on read because the derivation is **non-local** (a neighborhood of radius
 `distance_truncation`, so per-brick derivation needs halos and whole-volume derivation costs
 tens of seconds) and easy to get wrong in ways that render plausibly rather than raise.
 
@@ -145,7 +145,7 @@ Three cautions if you compute your own:
   to zero at the surface and rises again beyond it — so a difference taken across the crossing
   measures the fold, not the slope, and at a symmetric fold it measures zero. Interpolate the
   *signed* field of the pair that actually swaps.
-- **Propagate with an Eikonal (Godunov) update, not min-plus sweeps.** `min(d, neighbour + h)`
+- **Propagate with an Eikonal (Godunov) update, not min-plus sweeps.** `min(d, neighbor + h)`
   measures a taxicab distance — up to √3 too large off-axis — and the error shades as facets.
   A planar test cannot catch either of the last two; a sphere against its analytic distance
   catches both.
@@ -175,7 +175,7 @@ voxel-quantized, and draws the division as a staircase. The information exists i
 the margin between the two structures is continuous along the surface, its zero is the true
 division at sub-voxel precision, and it continues *past* the surface into the third region as
 a virtual sheet. `junction` is that sheet's signed distance, `(l_a - l_b) / |grad (l_a - l_b)|`,
-in millimetres, **positive on the side of `junction_pair[0]`**, the lower class index.
+in millimeters, **positive on the side of `junction_pair[0]`**, the lower class index.
 
 **Where it is written.** Only within a few voxels of cells whose eight corners carry three or
 more labels — the triple lines. Everywhere else, including along a plain two-structure
@@ -352,16 +352,31 @@ story (for example, when a downstream step splits a channel spatially, so latera
 similar attribute is *not* recoverable from the LUT alone).
 
 Human-readable names, when present, are in the root group's
-`attributes.duckn.extensions.seg.segments` (duckn seg extension 0.7). A **leaf** has one
-`label_value` and a `name`; a **group** has `members` (segment ids) instead and is their
-union - it may claim `disjoint` (members share no voxel) and `exhaustive` (members exhaust
-what the group names); both together make a partition. Each part has a background leaf
-(class 0, `background: true`) and a `classes_<i>` group that is the softmax's own partition.
+`attributes.duckn.extensions.seg.segments` (duckn seg extension 0.8). Each segment has an
+`id`, a `name`, and `label_values`: the values of its part that belong to it, always a list. A
+class of the model lists exactly one value. Each part has a background segment (class 0,
+`"role": "background"`). The store carries the model's classes and nothing derived from
+them: unions such as "lungs" over five lobes are facts about the labeling scheme, the same
+for every store a model produces, and are kept outside the store. A part's classes share no
+voxel because no two list the same value, and the background is, by definition, where none
+of them is.
+
+Stores written before seg 0.8 carry `label_value` (one integer), `background: true`, and
+**groups** (`members`, with `disjoint` / `exhaustive` claims), including a `classes_<i>`
+partition per part; duckn's reader migrates them, a group becoming a segment that lists its
+members' values.
 
 A segment may also carry:
 
-- `layer` — which part owns its voxels. Two segments with different `layer` values came from
-  different softmaxes; see §3.1 before comparing or compositing them.
+- `layer` — which part owns its voxels: the index into `part_order` (the root's `haversack`
+  block), and so the array group `parts/<layer>`; absent means part 0. Two segments with
+  different `layer` values came from different softmaxes; see §3.1 before comparing or
+  compositing them. **This is this store's reading of `layer`, not duckn's.** duckn's seg
+  extension describes one array, where `layer` indexes its `list` axis; the parts here have
+  their own grids and crops and cannot share an array, so the `seg` block sits on the root
+  group and `layer` names a member of it. duckn does not define that layout yet (its seg
+  specification records it as open). Read the block without an array's axes: a reader that
+  checks it against one part's axes will refuse it, since no part has a `list` axis.
 - `extent` — `[min_i, max_i, min_j, max_j, min_k, max_k]`, **inclusive**, in the array's storage
   order, non-spatial axes not counted. Absent when the class does not appear. Use it to skip
   straight to a structure, and to test truncation as described in §6.
@@ -458,7 +473,7 @@ ours:
 - `processing` — the steps that produced this store, in order, each naming its `software` (name
   and version) and the `parameters` it ran with. Segmentation and store layout are separate
   steps because they fail independently: a reader doubting a store needs to know which to doubt.
-- `attribution` — licence and citation.
+- `attribution` — license and citation.
 
 ### What this store deliberately does NOT carry
 
@@ -509,9 +524,9 @@ Eight rules, each purchased with a visible artifact. Reference implementations:
 5. **Normals from a separately smoothed copy.** Shading moves no geometry, so smooth its
    field freely (bounded by half the thinnest structure); outward normal `-grad s`;
    two-sided for shells.
-6. **Identity from a dilated colour map, nearest.** The outside half of a shell must know
+6. **Identity from a dilated color map, nearest.** The outside half of a shell must know
    which structure it wraps.
-7. **Compose across stores in millimetres, per sample, in the world frame the metadata
+7. **Compose across stores in millimeters, per sample, in the world frame the metadata
    declares.** Never resample one store onto another's grid - that is what keeps native
    trees intact inside coarse glass.
 8. **Style is functions of `s` and `n`.** Ramp width = antialiased edge; tent = shell;
@@ -584,7 +599,7 @@ Two properties are load-bearing:
 
 It is also a readable duckn array in its own right — a coarse occupancy map, with `space_origin`
 shifted by half a brick and `space_direction` scaled by it. One caveat: where the shape is not a
-multiple of `brick`, the last brick along that axis is partial, so its true centre is nearer than
+multiple of `brick`, the last brick along that axis is partial, so its true center is nearer than
 the uniform grid declares. That is accepted deliberately; this is a conservative index, not a
 measurement.
 

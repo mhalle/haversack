@@ -23,6 +23,12 @@ POLICY = ("device", "dtype", "weights", "folds", "accumulate", "batch_size", "al
           "resampling_order", "envelope_mm", "convention", "interp", "grid", "configuration")
 
 
+#: The rule a cascade's crop follows, named in describe() and in its results' key
+#: (``serve.weights_versions_of``). "upstream": TotalSegmentator's own (2026-09-22). A change to it
+#: that moves computed labels names a new rule, and recomputes cascades only.
+CROP_RULE = "upstream"
+
+
 class Segmenter:
     """Segment with a fixed execution policy and warm models.
 
@@ -107,7 +113,7 @@ class Segmenter:
                 f"uv sync --extra {eng.extra} --extra serve, then run haversack from it "
                 f"(or deploy with {eng.enabled_env}=1 to run it on Modal).")
         # An engine task never reaches catalog.get(), where an nnU-Net task's `@version` is
-        # honoured, so a pin was dropped here and the one build there is ran instead.
+        # honored, so a pin was dropped here and the one build there is ran instead.
         # prepare() is the catalog's own door for a pinned version: it refuses one this
         # build does not run (ImageBakedEcosystem.ensure).
         if "@" in str(task) and hasattr(self.catalog, "prepare"):
@@ -133,7 +139,9 @@ class Segmenter:
     def segment(self, image, task, **overrides):
         """Segment ``image`` with ``task``; any policy argument may be overridden for this call."""
         from .engines.registry import NNUNETV2
-        unknown = set(overrides) - set(POLICY) - {"progress", "outside", "cancel"}
+        # `probabilities` is a ranked sink (haversack.ranked.RankedSpec): both the nnU-Net
+        # pipeline and an engine's runner take one, and it is per call, not policy
+        unknown = set(overrides) - set(POLICY) - {"progress", "outside", "cancel", "probabilities"}
         if unknown:
             raise TypeError(f"unknown argument(s) {sorted(unknown)}; policy is {sorted(POLICY)}")
         eng = self.engine_for(task)
@@ -221,10 +229,32 @@ class Segmenter:
             if info is not None and not info.get("materialized", True):
                 # weights not installed yet: report what is knowable without
                 # downloading anything, and how to materialize the rest
-                return self._introspection(
-                    {**info, "folds_default": list(self.policy["folds"]),
+                d = {**info, "folds_default": list(self.policy["folds"]),
                      "hint": "structures are read from the checkpoint once "
-                             "installed; prepare() or first use installs it"})
+                             "installed; prepare() or first use installs it"}
+                if not d.get("structures"):
+                    # The segments index was mined from this very checkpoint at the
+                    # version the catalog pins, so the list is knowable before install -
+                    # the CLI's `tasks TASK` said so from 2026-09-13, the server's
+                    # describe not until 2026-09-22. Only structures and segments are
+                    # added: the key reads `weights_installed` and `step_size`, and
+                    # before_install never raises into weights_versions_of.
+                    from . import segments
+                    known = segments.before_install(self.catalog, task)
+                    if known is not None:
+                        segs = known["segments"]
+                        d.update({
+                            "structures": [s["id"] for s in segs],
+                            "n_structures": len(segs), "segments": segs,
+                            "structures_from": {"source": "segments index",
+                                                "version": known["version"]},
+                            "hint": "structures are from the segments index, read from "
+                                    "this model's archive at the version the catalog "
+                                    "pins; the installed model's own labels decide a "
+                                    "result. prepare() or first use installs it"})
+                        if known.get("note"):
+                            d["structures_from"]["note"] = known["note"]
+                return self._introspection(d)
             if info is not None and info.get("unresolved"):
                 # The weights are installed but this build cannot choose among
                 # the configurations they ship. Report that, with the resolver's
@@ -265,8 +295,17 @@ class Segmenter:
             entry = {"id": str(wid), "installed": False}
             try:
                 if self.weights.have(wid):
-                    folder = self.weights.resolve(wid, configuration=self.policy["configuration"])
+                    choice = spec.model_choice(wid)
+                    folder = self.weights.resolve(wid, configuration=self.policy["configuration"],
+                                                  **choice)
                     entry["installed"] = True
+                    if choice:
+                        # Which folder ran, for the result key: the version sidecar sits in
+                        # the DATASET directory, shared by every model folder in it, so
+                        # `id=tag` alone cannot tell v3's nnUNetPlans model from the small
+                        # ResEnc one beside it. Only where the task states a choice, so no
+                        # key of a task that states none (all of ts.v2) moves.
+                        entry["model"] = Path(folder).name
                     from .weights_fetch import installed_version
                     side = installed_version(folder)
                     if side:
@@ -283,6 +322,20 @@ class Segmenter:
             installed.append(entry)
         d["weights_installed"] = installed
         d["channel_names"] = channels
+        if spec.shape == "cascade":
+            # How a cascade's crop is made, since 2026-09-22 upstream's (the box cut from the input
+            # before the final stage, nothing labeled outside it) - reported so the result key
+            # can say it: every cascade's labels changed that day, and no other task's did.
+            d["crop"] = CROP_RULE
+        if spec.auxiliary:
+            # the classes a TS model emits that the result maps to 0, as upstream does (2026-09-22)
+            # - reported so the result key can say it: these tasks' labels changed that day, no
+            # other task's did
+            d["auxiliary"] = {str(k): spec.auxiliary[k] for k in sorted(spec.auxiliary)}
+        if spec.step_size is not None:
+            # it changes the output, so the result key carries it (weights_versions_of) - only
+            # where a task states one, so no key of a task that states none moves
+            d["step_size"] = spec.step_size
         # The catalog's record carries facts the spec cannot: the manifest's
         # license, release and description, and the attribution block. They
         # used to reach a client only while the task was NOT installed - this
@@ -317,10 +370,12 @@ class Segmenter:
         store = as_store(self.policy["weights"],
                          layout="nnunetv2" if _uses_nnunet_preprocessing(spec) else "ts")
         for wid in spec.weights_ids:
-            folder = store.resolve(wid, configuration=self.policy["configuration"])
+            folder = store.resolve(wid, configuration=self.policy["configuration"],
+                                   **spec.model_choice(wid))
+            step = {} if spec.step_size is None else {"step_size": spec.step_size}
             self.models.get(folder, folds=self.policy["folds"], device=self.policy["device"],
                             dtype=self.policy["dtype"], accumulate=self.policy["accumulate"],
-                            batch_size=self.policy["batch_size"])
+                            batch_size=self.policy["batch_size"], **step)
         return len(self.models)
 
     def fetch(self, task) -> int:

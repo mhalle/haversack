@@ -37,14 +37,13 @@ WEIGHTS_ROOT = "/weights"
 
 # Same recipe as src/haversack/modal_app.py's base image: deps from pyproject extras, haversack MOUNTED
 # rather than installed so the running checkout is what executes. `idc` brings obstore for the
-# fetch; `cuda` brings the Triton restore backend.
+# the store models; `cuda` brings the Triton restore backend.
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
-    .uv_sync(extras=["torch", "idc", "cuda"], frozen=False,
+    .uv_sync(extras=["torch", "duckn", "cuda"], frozen=False,
              extra_options="--no-sources-package nnunetv2")
     .add_local_dir(str(PKG), remote_path="/root/pkg/haversack")
-    .add_local_file(str(TOOLS / "ranked_emit.py"), remote_path="/root/ranked_emit.py")
 )
 
 # FastSurfer needs its own image: it pins numpy/torch ranges that conflict with the torch
@@ -55,7 +54,7 @@ image = (
 fs_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
-    .uv_sync(extras=["fastsurfer", "idc"], frozen=False,
+    .uv_sync(extras=["fastsurfer", "duckn"], frozen=False,
              extra_options="--no-sources-package nnunetv2")
     .run_commands(
         "python -c \""
@@ -133,7 +132,10 @@ def emit(identifier: str, tasks: list[str], depth: int = 6, clip: float = 8.0,
                            "is not reachable from this worker")
     print(f"fetched {n} file(s) in {time.perf_counter() - t:.0f}s", flush=True)
 
-    import ranked_emit
+    # The emit is the package's (haversack.ranked_output since 2026-09-03); tools/ranked_emit.py
+    # is only its command line and has no `main` - calling that broke every emit here until
+    # 2026-09-22, found by the first smoke after.
+    from haversack.ranked_output import main as emit_one
     root = work / "out"
     root.mkdir()
     done, failed = [], []
@@ -144,7 +146,7 @@ def emit(identifier: str, tasks: list[str], depth: int = 6, clip: float = 8.0,
         try:
             EcosystemCatalog(root=WEIGHTS_ROOT).prepare(task)
             weights_vol.commit()
-            ranked_emit.main(str(series), task, str(out), depth, clip,
+            emit_one(str(series), task, str(out), depth, clip,
                              "none" if envelope_mm is None else envelope_mm)
         except Exception as exc:                       # noqa: BLE001
             # one task failing must not lose the others - they are the expensive part
@@ -254,7 +256,9 @@ def main(identifier: str, tasks: str, subject: str, workdir: str,
         mb = sum(f.stat().st_size for f in dest.iterdir()) / 1e6
         print(f"  {d.name:<16} -> {dest.name}  ({mb:.1f} MB)")
     shutil.rmtree(staging, ignore_errors=True)
-    missing = [t for t in want
-               if not (work / f"ranked_{subject}_{t.split(':')[-1]}").exists()]
+    # the FastSurfer emit lands as `brain/`, the engine's own directory name for its one part
+    def _dir(task):
+        return "brain" if task == "fastsurfer:asegdkt" else task.split(":")[-1]
+    missing = [t for t in want if not (work / f"ranked_{subject}_{_dir(t)}").exists()]
     if missing:
         raise SystemExit(f"missing after publish: {missing}")

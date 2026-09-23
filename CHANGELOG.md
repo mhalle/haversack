@@ -223,6 +223,292 @@
   the labels; `add_artifact` never raises on the overlap thread; a local copy that cannot
   be written no longer fails a publication that already succeeded; and `list` reads at most
   `limit` pointers rather than one per entry in the bucket.
+- **The result store knows an encode job's field.** A pointer names its one primary output -
+  labels or `field.zarr.zip` - and `put(output_name=)`, the listing (a field row says its
+  `kind` and carries no label links), `find_generation` and `fetch_generation` answer for a
+  field as for labels; a name that is not a primary output is refused before anything is
+  uploaded, and a pointer naming two is served as neither. The local-tier fill, `push` and
+  `pull` still know labels only, so with `--result-store` a field is published but read back
+  as a miss - deliberately, pending the one-layer decision that would delete that code.
+- **Encode jobs on the server.** `POST /v1/jobs` takes `kind=encode` and an encoder name, and
+  the job's result is an embedding field (`.zarr.zip`) where a segmentation's is labels: the
+  same queue, single flight, result cache and job routes, with `GET /v1/encoders`,
+  `RemoteClient.encode`, and `haversack remote encode` / `remote encoders` beside them. A
+  field's result key includes its kind, because `ts.v2:total_fast` is a task and an encoder
+  and one key for both would serve a label map to a field reader; a segmentation's key
+  leaves the kind out, so no existing result recomputes. On the sample CT, both encoders
+  served by a local server gave tokens identical to `haversack encode`, and a repeat ask
+  was a cache hit with the same bytes. On Modal, `HAVERSACK_ENCODE=1` deploys an encoder GPU
+  worker: a smoke deployment encoded the same CT with both families to tokens agreeing with the
+  local ones at median cosine 1.000000 and 0.999999 (CUDA against MPS, fp16), fetched RADAR's
+  checkpoint once onto its own volume, served repeats from the cache, and encoded an `idc:`
+  series (21 of 21 checks). A server fetches an encoder's pinned weights on first use, as it
+  does a task's; the command line still wants `weights fetch`.
+- **A job's event stream now sends the status `GET /v1/jobs/{id}` answers**, `key` and `links`
+  included, as SERVER.md always said it did; it sent the executor's raw record, so a client
+  whose wait ended on the stream held a status without the result's handle.
+  The nnU-Net encoders now read their task's weights from the root the server's own
+  `Segmenter` reads, where they used to read the default root whatever the server used.
+
+- **`haversack encode`: embedding fields, with the weights managed here.** An encoder's token
+  lattices are written as a feldglas embedding field (`.zarr.zip`, the `encode` extra), so the
+  weights an encoder needs are fetched, pinned and verified by the same program that manages
+  segmentation weights, instead of by a second tool. Encoders are named in the task grammar
+  (`radar:pretrain`, `ts.v2:total_fast`, `ts.v2:total`; `haversack encoders` lists them), one
+  generic path does reading, provenance and writing, and each algorithm family is one small
+  module. RADAR's weights (1.6 GB, CC BY-NC-SA 4.0) are pinned to a Hugging Face revision and
+  sha256: `weights fetch radar:pretrain` downloads them and `--from FILE` adopts a copy, both
+  refusing any other bytes. On a sample CT the tokens are identical to the fields feldglas's
+  tools made for the RADAR study, for all three encoders, lattice for lattice. The nnU-Net
+  encoders run the encoder only, so `ts.v2:total` encodes in 18 s where the old tool took 55 s.
+  RADAR joins the attribution record (its Science 2026 paper, DOI only until PubMed indexes it).
+
+- **American spelling everywhere, held by a test.** 105 British spellings (center, neighbor,
+  millimeters, labeled, color and license, among others, in their British forms) are gone from
+  the package, its docs, tests and tools, and `tests/test_american_spelling.py` fails on any new
+  one, in prose or inside an identifier (snake_case and camelCase are split before matching).
+  The reason is drift: each British word
+  in the tree is a template the next edit copies. A line that must quote someone else's spelling
+  says so with `spelling: allow <word>`, and a pragma that no longer matches fails too. The job
+  state `cancelled` is unchanged - it is on the wire. Nothing computed moves; newly written
+  ranked stores carry the respelled format README.
+- **TotalSegmentator results no longer carry classes their task does not name.** Some
+  TotalSegmentator models are trained with helper classes the task drops; upstream zeroes them
+  after prediction, haversack wrote them as unnamed values. `ts.v2:kidney_cysts` wrote Dataset
+  789's whole kidneys as values 3 and 4 - on one abdominal CT 45,234 and 55,244 voxels beside
+  531 of cyst - under a label map naming only 1 and 2. Every value a TotalSegmentator task's
+  label map does not name now becomes background, as upstream does, and the registry states each
+  task's dropped classes (`auxiliary`, upstream's own lists: kidney_cysts, appendicular_bones,
+  face_mr); a model emitting any other unnamed value is refused as not matching its catalog.
+  The named labels are unchanged voxel for voxel. These three tasks' results are keyed anew
+  (`auxiliary=0`) and recompute once; no other task's key moves.
+- **TotalSegmentator's crop tasks crop as TotalSegmentator does.** Every ts.v2 task that crops
+  with a coarse model first - head_muscles, headneck_bones_vessels, liver_segments,
+  lung_vessels and 22 more - now cuts the input to the crop classes' box plus the margin and
+  runs its final model on that cut alone, labeling nothing outside it; an empty crop is an empty
+  result. The crop used to be a speed approximation of whole-volume inference, grown to the
+  network's patch with real image and dropped when it saved too little, and it labeled beyond
+  upstream's box: on a neck CT, `headneck_bones_vessels` scored mean Dice 0.738 against upstream,
+  with zygomatic arches only haversack found. The crop stage's labels are restored nearest-
+  neighbor onto the input, as upstream restores them, and the margin is the 20 mm upstream
+  actually applies to every task that crops with its `total`/`body` models, not the value in the
+  task's config (upstream overrides it; teeth keeps its own 10 mm). These tasks' results are keyed
+  anew (`crop=upstream`) and recompute once; no other task's key moves.
+- **`ts.v2:headneck_muscles`: TotalSegmentator's 23 neck muscles.** Sternocleidomastoid, the
+  three scalenes, platysma, the three pharyngeal constrictors, the prevertebral muscles,
+  sternothyroid, thyrohyoid, levator scapulae and trapezius, each side separately where that
+  applies - one of upstream's openly available (Apache-2.0) tasks. The weights (Datasets 778
+  and 779) were in the manifest all along; the task was not, because upstream runs it as a
+  crop followed by a union - the 6 mm `total` model boxes the clavicles and C1/C5/T1/T4 plus
+  40 mm, exactly as for `headneck_bones_vessels`, and both models then run on that one crop
+  and are combined as `total`'s parts are, a later part over an earlier one - and a cascade
+  here could only end in a single model. A cascade's last stage may now be a union; the
+  registry refuses a union anywhere else, and a stage stating two things or none.
+
+- **A server describes an uninstalled task's structures.** `GET /v1/tasks/{task}` said
+  "structures are read from the checkpoint once installed" for every task whose weights the
+  server had not fetched - `moose:clin_ct_muscles` showed no structure list on a server whose
+  own `GET /v1/segments` listed its ten muscles. The segments index was mined from that very
+  checkpoint, and `haversack tasks TASK` has read it since the index shipped; describe now
+  reads it too, through one function the CLI shares, marked `structures_from: segments index`
+  with the version that pins it. Neither door shows a record whose catalog has since moved to
+  another version (the CLI used to print it anyway), or a list for a request pinned with
+  `@version`. A result's key reads nothing new: it is the same with the index, without it, and
+  with a broken one.
+- **TotalSegmentator v3 is the `ts.v3` catalog: `ts.v3:total`, `ts.v3:total_fast`,
+  `ts.v3:total_fastest`.** Upstream's `total_v3` (Datasets 831-835 at 1.5 mm, 836 at 3 mm,
+  837 at 6 mm, release `v3.0.0-weights`) under v2's task names, the catalog carrying the
+  version as the naming policy has it; `ts.v2` and every result it has keyed are untouched, and
+  a bare `total` now names both catalogs. The registry is generated from TotalSegmentator
+  2.18.0's own source by the new `tools/gen_ts_registry.py` (read out of the PyPI wheel, its
+  digest checked; upstream's `get_task_config` executed, not restated) and checked against
+  every checkpoint's plans and labels by range request. The labels are v2's 117 with value 26
+  `vertebrae_L6` in place of `vertebrae_S1`, as the checkpoints and upstream's v3 class maps
+  both say. Upstream states no license for the v3 weights (its README lists v2's `total` as
+  Apache-2.0 and does not mention v3; the release is a prerelease), and the attribution
+  record says that rather than guess. MR Datasets 870-873 are recorded in the weights manifest
+  and offered by no task: no upstream task uses them yet.
+- **`ts.v3` tiles at upstream's step, 0.8.** TotalSegmentator runs `total`, `total_v3` and
+  `total_mr` with a sliding-window step of 0.8 (faster; its own note says 0.001 Dice worse)
+  and everything else at nnU-Net's 0.5, which haversack used everywhere. On a CPTAC-CCRCC CT
+  on Modal, matching it took `ts.v3:total`'s voxel agreement with upstream from 99.86 % to
+  99.98 % (`total_fast` 99.88 % to 99.96 %). A registry entry may now state `step_size`; the
+  generator reads upstream's rule out of nnunet.py, and a stated step enters the warm-model
+  key and the result key (`step=0.8`). `ts.v2` states none and keeps 0.5, so none of its
+  results or keys move.
+- **A dataset holding two models of one configuration is refused, never chosen.** Datasets
+  831-836 each ship upstream's default `nnUNetPlans` model and, beside it, the
+  `nnUNetResEncUNetLPlans_8` model upstream runs only for `model_size="small"`. The resolver
+  keyed a dataset's folders by configuration alone, so the one sorting last - the small model
+  - would have run under the default's name without a word. A registry entry now states
+  `models: {dataset: {trainer, plans}}`, every resolve of that weights id carries it (the
+  load, `describe()` and so the result key's weights, `warm`, the orientation decision), and
+  a dataset still holding more than one match raises `AmbiguousModel` - reported as
+  `unresolved` by the doors that already report an installed model they cannot choose from.
+- **`weights refresh` no longer adds a license-gated dataset** that TotalSegmentator has also
+  published as a release asset: Dataset857 (`thigh_shoulder_muscles`, `commercial` upstream)
+  appeared in `v3.0.0-weights`, and taking its URL would have made haversack download what
+  upstream installs only through its licensed backend. It is reported as `license_gated`.
+- **Ranked stores are written under duckn seg 0.8, and carry the model's classes and nothing
+  derived from them.** duckn 0.4.0 changes what a segment is - it lists `label_values`,
+  always an array; `background: true` is `role: "background"`; a color is a CSS string - and
+  has no groups. The builder used to write two kinds: a `classes_<i>` partition per part,
+  and named unions (`g_lungs` over TotalSegmentator's five lobes, a vertebral column,
+  FastSurfer's subcortical sets) with `disjoint` and `exhaustive` claims. Those unions are
+  ours, not the model's - no TotalSegmentator task emits a "lungs" class - and they are
+  facts about a labeling scheme, the same for every store a model produces, so they move to
+  a document outside the store. The partition needs no statement at all: a part's classes
+  are disjoint because no two list the same value, and the background role means "none of
+  the described structures is here". `GROUP_CLAIMS`, `named_groups` and `part_partition`
+  are gone; `ranked_store.segment()` replaces `leaf()` and `group()`. **Clients that read
+  `label_value`, `members`, or a `g_*` / `classes_*` id from a store's raw attributes must
+  change** (the bundled `preview.html` still reads `label_value`). Stores already delivered
+  keep reading: `read_segmentation`, `ranked_restore` and the tools read both shapes, duckn
+  migrating the older one (a group becomes a segment listing its members' values).
+  `tools/ranked_upgrade_seg.py` now upgrades a store to 0.8 in place: it removes every
+  group the builder ever generated, whatever engine wrote it, and keeps one a user authored.
+- **A store declares the labeling scheme it was produced under.** `labeling_scheme` names
+  an entry of `terminologies`, and each class the catalog names carries its name as an exact
+  designation in it - which is what lets a hierarchy, a color table or a cross-walk written
+  once for a scheme find its segments in every store. For the `ts.v2` catalog the key is the
+  ecosystem-qualified name of the task whose class list it is, the `system_uri` carries the
+  catalog's major version and the task and not the release
+  (`https://github.com/wasserth/TotalSegmentator#v2:total`), `version` is the package
+  version the registry was generated from, and `url` is that release's tree. Checked
+  against upstream at 2.13.0: all 51 label maps equal TotalSegmentator's own `class_map`,
+  and the six `_fast` / `_fastest` variants have no class list of their own - they are their
+  base task's classes from a coarser model - so they declare its scheme
+  (`ts.v2:total_fast` writes `ts.v2:total`). A build handed its own names declares no
+  scheme, and neither does an engine that names its own labels;
+  `ModelEcosystem.labeling_scheme` is where the other catalogs will answer.
+- **Every catalog with a published class list declares its scheme, and the scheme now
+  reaches the stores the product writes.** The first cut never fired on the normal path:
+  `segment_to_store` hands the builder the run's own names, and the builder declared a scheme
+  only when it was handed none - so only `tools/ranked_build_store.py` ever wrote one.
+  `build(model_names=True)` says whose names they are; a caller's own names, or a run that
+  could not name its classes (`labels_unnamed`, a MONAI region head), still declare nothing.
+  Schemes resolve against every catalog this build knows, not the ones a machine serves.
+  Per catalog, each claim checked against upstream on 2026-09-21: **`moose`** per task,
+  versioned by the asset's release stamp, its `fast_*` tasks NOT folded onto their base
+  (separate upstream models whose lists coincide by fact), and `clin_ct_dental` declaring
+  DentalSegmentator's scheme, whose model it is; **`mrsegmentator`** `base` only, versioned
+  by upstream's `weights_version` (`1.2`, not the source tag) - `body_comp` names its classes
+  in German inside its checkpoint while upstream publishes them in English, so it declares
+  none; **`cads`** per task, all nine lists equal to upstream's own label-map module value for
+  value (pinned in `tests/fixtures`); **`totalvibe`** with `vibe` and `vibe_sagittal` sharing one
+  scheme, none for `body_regions` and `feet_bones` (digit-string names), and the repository
+  spelled `VIBESegmentator` as upstream spells it - the manifest had it wrong, and a `system_uri` is
+  compared byte for byte; **`dentalsegmentator`** identified by the weights' Zenodo concept
+  DOI; **`monai`** per bundle, the bundle name in the `system_uri` and its version as the release;
+  **`synthstrip`**, **`voxtell`** and **`custom`** declare none.
+- **FastSurfer stores code their classes by id, and 17 of them carry no code.** FastSurfer's
+  identifier for a class is the aparc+aseg number, so `ModelEcosystem.scheme_code` lets a
+  catalog say how it spells a class - and whether it has an exact code for it at all. A
+  ranked store holds the network's channels BEFORE `split_cortex_labels`, which lateralizes
+  17 lh-numbered cortical ids spatially (it is why the LUT has 31 `ctx-lh-*` ids and 14
+  `ctx-rh-*`): in a store, value 1003 is both caudal middle frontal cortices under a
+  left-hemisphere name. A designation says a segment IS a concept, so those 19 carry none.
+  Measured on a real run (ds000114 sub-01, on Modal): 17 channels moved 38-56% of their
+  voxels to the right under upstream's split, no other channel moved any, and 1025 and
+  1028 - which upstream's list names but which have rh channels of their own - moved none,
+  so those two keep their codes. Their NAMES are still the left-hemisphere ones, which is a
+  separate thing to put right.
+- **A ranked store can be written for `fastsurfer:asegdkt`** (`-o case.duckn`): the engine
+  already hands over its pre-argmax field, and the refusal that kept engine tasks out now
+  admits the engines whose runner takes a ranked sink. `Segmenter.segment` accepts
+  `probabilities=`.
+- duckn is pinned at `v0.4.1`, which renames a registry entry's `uri` and `url` to `system_uri`
+  and `definition_url` - a URI *of* the coding system, a URL *of* this version's definition -
+  and the schemes here use those names.
+- duckn is pinned at `v0.5.1`, seg extension 0.9: a segment may state a union once, as
+  `members`. Stores here list values and are read as 0.9 files unchanged; the builder writes
+  none, since a union belongs in a store only when its scheme defines it.
+- rankfield is pinned at `v0.3.3`, in `pyproject.toml` and CI's hand-written list. It is
+  v0.3.2's code with duckn pinned at `v0.5.1`, so the two siblings' tags now agree on duckn;
+  no encoder or decoder change and no bytes move.
+
+- **`HEAD /v1/jobs/<id>/result`, and a "gone" no cache may keep.** An adversarial pass on
+  the artifact routes below found the one file route they left without a `HEAD` - a job's
+  own labels, 405 until now, and invisible to the test that reads the router for file names
+  because its name has no dot. It answers what `GET` would (status, `ETag`, the file's
+  `Content-Length`, a 304 for a matching `If-None-Match`) and converts nothing: with
+  `?format=nii.gz` it says 200 and no length. The job routes' 410 now says `Cache-Control:
+  no-store` as their 404s do - RFC 9111 (4.2.2) lets a cache keep a 410 on a heuristic, and
+  these URLs say 200 again once the key is recomputed with the same output. The new routes'
+  record, in-flight and render-state lookups run off the event loop (on Modal each is a
+  Dict round trip, and the anonymous twin now makes one per artifact miss). One capability
+  went with the artifact work and is recorded here rather than restored: `preview.png` is
+  sent from memory, so it no longer answers `Range` requests (the labels still do).
+- **A result with no path can reach its deliverables: `/v1/jobs/<id>/preview.png`,
+  `/statistics.json`, `/statistics.tsv`, `/meta.json`.** The artifacts beside a result were
+  served only by its path, and a result whose identity has no path - an upload's, a
+  `result:` reference's, a multi-input job's - had none: the job rendered `preview.png` and
+  `statistics.json` into its cache entry, reported `deliverables: ["preview", "statistics"]`
+  with nothing unavailable, and offered no link, because no route served them. The person
+  who uploads a local scan from 3D Slicer is exactly who wants the statistics. The new
+  routes are the job's own and authorized like `/result`, never anonymous - a job's preview
+  shows what was uploaded - and resolve as `/result` does: through the job's key to its
+  published entry, held to the digest this job reported, and by its answers (404, 409 not
+  done, 410 gone, 503 not visible yet), then 202 with `Retry-After` while a render that will
+  place the artifact is pending and 404 when none will, with the job's own reason. A
+  path-less job's `links` carry them as `meta`, `preview` and `statistics` - the names a
+  path-addressable result uses, so a client follows one name either way. Listing rows for
+  such results stay without links: the listing is of results and knows no job. A job with no
+  cache entry to render into (a server without a result cache) now says so in
+  `deliverables_unavailable` rather than list what nothing would serve.
+- **Fixed: an artifact's strong `ETag` did not change when its bytes did.** `meta.json`,
+  `preview.png` and `statistics.json` / `.tsv` all carried one tag derived from the result
+  KEY, under `Cache-Control: public, max-age=3600`. A `Cache-Control: no-cache` recompute
+  republishes under the same key, so the same URL then served different bytes - a preview of
+  8290 and then 8309 bytes, a `volume_ml` of 0.384 and then 0.512 - under an unchanged
+  strong validator, which RFC 9110 (8.8.1) forbids, while the labels' tag (their content
+  digest) moved as it should. Each artifact's `ETag` is now the digest of the body it sends.
+  The content rather than the publication, because the read is already paid: three of the
+  four bodies are built per request and a `HEAD` owes them to its `Content-Length`, the
+  fourth is a PNG of kilobytes, and a digest is also right for a legacy entry with no
+  generation and for a job's own copy. With a tag that can be trusted, `If-None-Match` is
+  answered on all four as on the labels: a 304 that repeats `Cache-Control` and `Vary` and
+  never `Preference-Applied`. The labels' tag, the result key and every computed byte are
+  untouched.
+- **Fixed: `HEAD` on an artifact was a 405, and its `Allow` named a method the URL never
+  had.** `HEAD` had just become the compute-free probe for labels, and deliverables now land
+  after `done` - so "has the preview rendered?" was exactly the request being refused, with
+  `Allow: DELETE` on the api (the greedy `DELETE /v1/<source>/<id>/<task>` pattern also
+  matches `.../<task>/preview.png`, was registered first, and the router answers a 405 from
+  the first route whose path matches) and `Allow: GET` on the anonymous twin, which claims
+  header parity with the api by construction. Every artifact route - by path with its grid
+  tokens, on the twin, and through a job - now answers `HEAD` with `GET`'s `ETag`,
+  `Content-Length`, `Cache-Control` and `Vary` and no body, honors `If-None-Match`, and
+  never computes, renders or waits: 202 while the labels compute or a render that will place
+  that deliverable is pending, 404 otherwise - at once for a deliverable nobody asked for,
+  since no render is coming. A 405 now lists the methods of the URL asked about, whichever
+  routes they live in.
+- **Fixed: the anonymous twin called an artifact that was still rendering absent.** The
+  twin's executor had no view of the pending-render marker, so between a job's `done` and
+  its preview landing - on Modal, the worker's commit of it - a GET of `preview.png` there
+  answered 404, to the anonymous poller told everywhere else that a 404 is final. Found by
+  deploying (`haversack-doors-smoke`, a render slowed to 10 s), not by the suite: locally
+  the window is milliseconds. `create_public_app` takes the writer's `artifact_state` as a
+  read-only signal, as it takes `inflight`, and the Modal twin reads the marker (and never
+  sweeps a dead one: it writes nothing). It answers 202 with `Retry-After`, as the api does.
+- **"Not materialized" says `Cache-Control: no-store` too.** The labels' own 404 - HEAD
+  probe and GET, the api and the anonymous twin, every grid token - stated no freshness,
+  beside a 200 that says `public, max-age=3600`. It is the answer until somebody computes
+  the result, which is the next thing an authorized caller does with it, so a shared cache
+  that kept it on a heuristic (RFC 9111, 4.2.2) would go on hiding a result that exists.
+  Every 404 of these routes, the unknown task's included: a task unknown today is served
+  after the deploy that adds its catalog, and an uncached error costs one request.
+- **An artifact's 404 says `Cache-Control: no-store`**, as its 202 always has. An artifact
+  arrives late - after `done`, on a cache hit that asks for it, and with a shared result
+  store from another host into the same generation - so "not here" only ever means "not as
+  far as this request saw". The 200 beside it invites shared caches, and RFC 9111 (4.2.2)
+  lets one keep a 404 that states no freshness on a heuristic; a proxy could have gone on
+  answering 404 for a preview that landed a second later. The server remembers no absence
+  either: every request looks again.
+- **`If-None-Match` is compared weakly.** `W/"<tag>"` matches `"<tag>"`, as RFC 9110
+  (13.1.2) requires of this header; the strings were compared whole, so a client or proxy
+  that had weakened the tag - which one that re-encodes a body must - downloaded a label
+  volume it already held. The safe direction, and still wrong.
 - **Fixed: a 304 for a result by path dropped the caching fields its 200 carries.** A
   conditional `GET` of `/v1/<source>/<identifier>/<task>/labels.seg.nrrd` answered 304 with
   the `ETag` alone, while the 200 for the same request says `Cache-Control: public,
@@ -250,9 +536,9 @@
 - **`HEAD` honors `If-None-Match` with a 304, as `GET` does.** RFC 9110 (13.1.2) names the
   two methods together, and a `HEAD` that says 200 to the request `GET` says 304 to is the
   same disagreement one header over. Only the 200 is conditional: a result in flight is
-  still 202 and an absent one 404. `meta.json` keeps its key-derived `ETag` on purpose - its
-  body is the result record, which a recompute rewrites even when it reproduces the labels
-  byte for byte, so the labels' digest is not its validator.
+  still 202 and an absent one 404. (`meta.json` kept a key-derived `ETag` at that point, its
+  body being the result record and not the labels; it has a validator of its own now - the
+  artifact entries above.)
 - **A job's input can be a result the server itself computed: `result:<key>`.** Every
   source until now named data that came from outside. `<key>` is the `key` a finished job
   already reports, so jobs compose - CT to segmentation, then something computed from (CT,
@@ -670,7 +956,7 @@
   `synthstrip:mask` meant none; the row now carries `{1: "Brain"}`, and the engine reads its
   mask's label from there too.
 
-- **The server honours `task@version`.** It dropped the pin before a job existed, so
+- **The server honors `task@version`.** It dropped the pin before a job existed, so
   `POST /v1/jobs` with `ts.v2:total@X`, and a pinned GET, ran or served whatever version was
   installed - the silent wrong version the grammar exists to prevent; only `prepare` held it.
   Now a pin the server provably does not run is a 409 naming what it runs, on every route. One
@@ -1101,7 +1387,7 @@ identity - nothing fetched them, and there is nowhere to fetch them from.
   dropping it, which on Modal is the normal case for four of the five engines; and the
   README's engine list is pinned the way `--help` and SERVER.md already were.
 - Guards that could not fail were rewritten: the collection check now asks pytest what it
-  collects instead of modelling one of its four gates, and the upstream pin check no
+  collects instead of modeling one of its four gates, and the upstream pin check no
   longer lets one unreachable repository void the whole thing.
 
 ### Modal
@@ -1394,7 +1680,7 @@ says whose work it is - which model, under what license, from which data, under 
   needing `rm -rf`, and all three accept `--model-root` as well as `--root`. (`weights
   coverage` is still TotalSegmentator-only.)
 - **`tasks <name>` prints label order with the label**, and `--json` carries the mapping. It
-  printed names alphabetically, which for a numerically-labelled model gives 1, 10, 11, 2.
+  printed names alphabetically, which for a numerically-labeled model gives 1, 10, 11, 2.
   `describe()` carries `label_map` for the same reason: a caller reading a result cannot
   assume the labels are 1..N - `feet_bones` uses 1-17 and 99-117 - or that the names sort
   meaningfully, since several checkpoints name their structures with numbers. **This changes

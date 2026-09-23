@@ -43,6 +43,17 @@ class TheRecordIsComplete(unittest.TestCase):
             self.assertTrue(rec.get("group"), f"{name}: no group")
             self.assertIsNotNone(rec.get("license"), f"{name}: no license")
 
+    def test_every_encoder_has_a_record(self):
+        from haversack.encoders import ENCODERS
+        for spec in ENCODERS.values():
+            rec = attribution.for_encoder(spec)
+            self.assertIsNotNone(rec, f"no attribution record for encoder {spec.name!r}")
+            self.assertTrue(rec.get("cite"), spec.name)
+            lic = rec["license"]
+            weights = lic.get("weights") if isinstance(lic, dict) else lic
+            if spec.weights:                     # the encoder's own download: its record states the license
+                self.assertEqual(str(weights).casefold(), spec.license.casefold(), spec.name)
+
     def test_every_engine_has_a_record(self):
         from haversack.engines.registry import ENGINES
         for name in ENGINES:
@@ -55,7 +66,8 @@ class TheRecordIsComplete(unittest.TestCase):
         PubMed ID whenever the venue is indexed there."""
         data = attribution.load()
         recs = list(data["ecosystems"].values()) + [r for r in data["engines"].values()
-                                                    if "same_as_ecosystem" not in r]
+                                                    if "same_as_ecosystem" not in r] \
+            + list(data.get("encoders", {}).values())
         n = 0
         for rec in recs:
             for ref in rec.get("cite") or []:
@@ -64,6 +76,10 @@ class TheRecordIsComplete(unittest.TestCase):
                 self.assertTrue(ref.get("doi") or ref.get("arxiv"), f"unidentifiable: {ref['title']}")
                 indexed = ref.get("journal") not in ("arXiv", "medRxiv") and "CVPR" not in str(ref.get("journal"))
                 if ref.get("doi") and indexed:
+                    if ref.get("pmid_pending"):      # indexed venue, not indexed YET: dated, and says so
+                        self.assertNotIn("pmid", ref, f"{ref['title']}: a PMID and a pending note")
+                        self.assertRegex(ref["pmid_pending"], r"^\d{4}-\d{2}-\d{2}: ", ref["title"])
+                        continue
                     self.assertRegex(ref.get("pmid") or "", r"^\d{7,9}$", f"no PMID: {ref['title']}")
         self.assertGreaterEqual(n, 14)
 

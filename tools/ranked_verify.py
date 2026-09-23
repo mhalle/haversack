@@ -96,8 +96,13 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
     rep.check(bool(order), "empty part_order - paint order is external knowledge and must "
                            "be recorded")
 
-    segs = ext.get("seg", {}).get("segments", [])
-    leaves = [s for s in segs if "label_value" in s]          # groups carry `members`
+    # The segments as duckn reads them: a store written under an older seg version is
+    # migrated on the way in, so everything below sees the 0.8 shape. A class lists exactly
+    # one value; a segment listing several is a union someone authored.
+    # a `members` segment (seg 0.9) lists nothing; the model resolved its union
+    segs = ([{**s.model_dump(exclude_none=True), "label_values": s.sorted_values}
+             for s in seg_model.segments] if seg_model is not None else [])
+    leaves = [s for s in segs if len(s["label_values"]) == 1]
     # a cascade's earlier stages have their own classes, which the task's label map does not
     # name; numbered leaves there are honest, not a degraded lookup
     from haversack.ranked_build import CASCADE_PART
@@ -109,14 +114,9 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
               f"{len(named)} segments are unnamed (label_<id>) - the name lookup degraded")
     rep.check(all(0 <= s.get("layer", 0) < max(len(order), 1) for s in leaves),
               "a segment's layer is not a valid part index")
-    rep.check(all(any(s.get("background") and s.get("layer", 0) == i for s in leaves)
+    rep.check(all(any(s.get("role") == "background" and s.get("layer", 0) == i for s in leaves)
                   for i in range(len(order))),
-              "a part has no background leaf - its partition cannot include class 0")
-    rep.check(all(any(s.get("members") and s.get("exhaustive") and s.get("disjoint")
-                      and s["id"] == f"classes_{i}" for s in segs)
-                  for i in range(len(order))),
-              "a part has no partition group (classes_<i>) - the softmax's own partition "
-              "goes unstated")
+              "a part has no background segment - class 0 of its softmax goes unnamed")
 
     origins, directions = set(), set()
     for i, _p in enumerate(order):
@@ -335,11 +335,11 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
                       f"{int((rk0 == 0).sum())} voxels - every voxel must have a winner")
             lut = np.asarray(m["labels"])
             glob = lut[rk0.astype(np.int64) - 1]
-            # seg spec 0.7 rule 9, duckn's own check: every value present in this layer's
-            # labels, other than its background, has a leaf
+            # seg spec rule 16, duckn's own check: every value present in this layer's
+            # labels is its background or is listed by a segment
             if seg_model is not None:
-                err = _rejects(lambda: validate_seg_data(seg_model, glob, layer=i))
-                rep.check(err is None, f"parts/{i}: {err}")
+                found = validate_seg_data(seg_model, glob, layer=i)
+                rep.check(not found, f"parts/{i}: " + "; ".join(str(d) for d in found))
             if "occupancy" in g and "brick" in m:
                 occ, b = np.asarray(g["occupancy"]), m["brick"][0]
                 missed = 0
@@ -359,7 +359,7 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
             for s in leaves:
                 if s.get("layer", 0) != i or "extent" not in s:
                     continue
-                hit = glob == s["label_value"]
+                hit = glob == s["label_values"][0]
                 if not hit.any():
                     rep.check(False, f"parts/{i}: segment {s['name']} has an extent but no voxels")
                     continue

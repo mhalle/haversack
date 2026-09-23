@@ -2,7 +2,7 @@
 
 Reads the same registry JSON the MLX toolkit ships (``ts_tasks.json``), but with no dependency
 on that package - it imports mlx, which does not exist off Apple silicon. Only the parts haversack
-executes are modelled here: single-model tasks and label-union tasks. Cascades are recorded
+executes are modeled here: single-model tasks and label-union tasks. Cascades are recorded
 but not runnable yet, and say so.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .errors import ModelNotFound, UnsupportedModel
+from .errors import AmbiguousModel, ModelNotFound, UnsupportedModel
 from typing import Mapping
 
 WeightsId = int | str
@@ -49,12 +49,18 @@ class CascadeStep:
     whose labels become the result.
 
     A stage either runs a model (``weights_id``) or reuses another task's output as the crop
-    source (``crop_from_task``, e.g. teeth cropping from craniofacial_structures)."""
+    source (``crop_from_task``, e.g. teeth cropping from craniofacial_structures). The LAST
+    stage may instead be a label union (``union``): every part runs on the one box the stages
+    before it found, and paints its classes into one output in order, a later part over an
+    earlier one - TotalSegmentator's ``headneck_muscles`` (2026-09-22), which crops like
+    ``headneck_bones_vessels`` and then runs Datasets 778 and 779 on that crop, combining them
+    exactly as it combines ``total``'s five parts."""
 
     weights_id: WeightsId | None = None
     crop_to_classes: tuple[int, ...] = ()
     dilation_mm: float = 10.0
     crop_from_task: str | None = None
+    union: tuple["UnionPart", ...] = ()
 
 
 def dataset_labels(ds: dict, where: str = "dataset.json") -> dict[int, str]:
@@ -109,6 +115,35 @@ class TaskSpec:
     #: is not the truth. None (the default) follows the declared reader - RAS for
     #: the TotalSegmentator lineage, the stored order for a plain nnU-Net model.
     orientation: str | None = None
+    #: Which model folder to run for a weights id, when its dataset may hold more than one:
+    #: ``{dataset id: {"trainer": ..., "plans": ...}}``, either key optional. A dataset is
+    #: ``<trainer>__<plans>__<configuration>/`` folders, and TotalSegmentator's v3 release
+    #: ships two ``3d_fullres`` folders in each of 831-836 - ``nnUNetPlans`` (upstream's
+    #: default) and ``nnUNetResEncUNetLPlans_8`` (its ``model_size="small"``). The registry
+    #: says which one the task means, as upstream's own task config does; the resolver
+    #: refuses a dataset it cannot narrow to one folder rather than pick (2026-09-21).
+    models: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    #: The sliding window's tile step, when the task states one; None runs nnU-Net's 0.5.
+    #: TotalSegmentator tiles ``total``, ``total_v3`` and ``total_mr`` at 0.8 (nnunet.py:
+    #: faster, "dice 0.001 worse"), and matching it took ts.v3:total from 99.86 % to 99.98 %
+    #: voxel agreement with upstream (2026-09-21). Stated by ts.v3's registry only: ts.v2
+    #: keeps 0.5, which its cached results were computed with. A stated step enters the
+    #: warm-model key and the result key (``serve.weights_versions_of``).
+    step_size: float | None = None
+    #: Classes the model is trained with and the task does not report, ``{value: name}`` -
+    #: TotalSegmentator's ``class_map["<task>_auxiliary"]`` (kidney_cysts' whole kidneys,
+    #: appendicular_bones' humerus/femur/liver/spleen, face_mr's brain/liver). A TS-lineage
+    #: result maps every value its label map does not name to 0, as upstream's
+    #: ``remove_auxiliary_labels`` does; this list is what the model is expected to emit beyond
+    #: the label map, and a model emitting anything else is refused (2026-09-22). Stated tasks'
+    #: result keys carry ``auxiliary=0`` (``serve.weights_versions_of``).
+    auxiliary: Mapping[int, str] = field(default_factory=dict)
+
+    def model_choice(self, weights_id) -> dict:
+        """``{"trainer"?, "plans"?}`` this task states for ``weights_id`` - the keyword
+        arguments every resolve of that weights id must carry. Empty when it states none,
+        which is every task whose datasets hold a single model folder."""
+        return dict(self.models.get(_dataset_key(weights_id)) or {})
 
     @classmethod
     def from_model_folder(cls, folder, *, name: str | None = None) -> "TaskSpec":
@@ -145,7 +180,76 @@ class TaskSpec:
             return [self.single]
         if self.union:
             return [p.weights_id for p in self.union]
-        return [st.weights_id for st in self.cascade if st.weights_id is not None]
+        return [w for st in self.cascade
+                for w in ([st.weights_id] if st.weights_id is not None
+                          else [p.weights_id for p in st.union])]
+
+
+#: What a registry entry's ``models`` may state per dataset: the two name components of a
+#: ``<trainer>__<plans>__<configuration>`` folder that are not the configuration (that one
+#: stays a per-job policy knob). Anything else is refused on load, so a misspelled key
+#: cannot quietly state nothing and let the resolver refuse at run time instead.
+MODEL_CHOICE_KEYS = ("trainer", "plans")
+
+
+def _dataset_key(weights_id) -> str:
+    """Unpadded decimal for a numeric dataset id (8 and 008 are one dataset), else as given -
+    the same canonical form as ``weights_fetch.dataset_key``, restated so this module stays
+    free of the fetcher."""
+    t = str(weights_id).strip()
+    return str(int(t)) if t.isdigit() else t
+
+
+def _model_choices(raw, where: str) -> dict:
+    out = {}
+    for wid, choice in (raw or {}).items():
+        extra = sorted(set(choice) - set(MODEL_CHOICE_KEYS))
+        if extra:
+            raise ValueError(f"{where}: models[{wid!r}] states {extra}; only "
+                             f"{list(MODEL_CHOICE_KEYS)} name a model folder")
+        out[_dataset_key(wid)] = {k: str(v) for k, v in choice.items() if v}
+    return out
+
+
+def _union_parts(raw) -> tuple:
+    return tuple(UnionPart(weights_id=p["weights_id"],
+                           label_remap={int(k): int(v) for k, v in p.get("label_remap", {}).items()},
+                           name=p.get("name", ""))
+                 for p in raw or ())
+
+
+def _check_cascade(stages, where: str) -> None:
+    """A stage does exactly one thing, and only the last may be a union: a union's output is
+    a result, and nothing reads a crop box out of one (2026-09-22). Refused on load, so a
+    registry typo is a message naming the task rather than a stage that runs nothing."""
+    for i, st in enumerate(stages):
+        does = [k for k, v in (("weights_id", st.weights_id is not None),
+                               ("crop_from_task", st.crop_from_task is not None),
+                               ("union", bool(st.union))) if v]
+        if len(does) != 1:
+            raise ValueError(f"{where}: cascade stage {i + 1} states {does or 'nothing'}; "
+                             "a stage runs one model, reuses one task, or is a union")
+        if st.union and i != len(stages) - 1:
+            raise ValueError(f"{where}: cascade stage {i + 1} is a union but not the last "
+                             "stage; only the final stage may combine models")
+
+
+def _step_size(raw, where: str) -> float | None:
+    if raw is None:
+        return None
+    step = float(raw)
+    if not 0.0 < step <= 1.0:
+        raise ValueError(f"{where}: step_size {raw!r} is not a tile step in (0, 1]")
+    return step
+
+
+def _auxiliary(d: dict, where: str) -> dict:
+    aux = {int(k): str(v) for k, v in (d.get("auxiliary") or {}).items()}
+    named = {int(k) for k in d.get("label_map") or {}}
+    if aux.keys() & named or 0 in aux:
+        raise ValueError(f"{where}: auxiliary {sorted(aux.keys() & (named | {0}))} "
+                         "are values the task reports, not classes it drops")
+    return aux
 
 
 class TaskCatalog:
@@ -169,20 +273,22 @@ class TaskCatalog:
         items = raw["tasks"] if isinstance(raw, dict) and "tasks" in raw else raw
         items = list(items.values()) if isinstance(items, dict) else items
         for d in items:
-            union = tuple(UnionPart(weights_id=p["weights_id"],
-                                    label_remap={int(k): int(v) for k, v in p.get("label_remap", {}).items()},
-                                    name=p.get("name", ""))
-                          for p in d.get("union") or ())
+            union = _union_parts(d.get("union"))
             cascade = tuple(CascadeStep(weights_id=st.get("weights_id"),
                                         crop_to_classes=tuple(st.get("crop_to_classes") or ()),
                                         dilation_mm=float(st.get("dilation_mm", 10.0)),
-                                        crop_from_task=st.get("crop_from_task"))
+                                        crop_from_task=st.get("crop_from_task"),
+                                        union=_union_parts(st.get("union")))
                             for st in d.get("cascade") or ())
+            _check_cascade(cascade, f"{Path(path).name}: {d['name']}")
             self._specs[d["name"]] = TaskSpec(
                 name=d["name"], lineage=d.get("lineage", "ts"), modality=d.get("modality", "CT"),
                 shape=d.get("shape", "single"), single=d.get("single"), union=union,
                 cascade=cascade, orientation=d.get("orientation"),
-                label_map={int(k): str(v) for k, v in (d.get("label_map") or {}).items()})
+                models=_model_choices(d.get("models"), f"{Path(path).name}: {d['name']}"),
+                step_size=_step_size(d.get("step_size"), f"{Path(path).name}: {d['name']}"),
+                label_map={int(k): str(v) for k, v in (d.get("label_map") or {}).items()},
+                auxiliary=_auxiliary(d, f"{Path(path).name}: {d['name']}"))
 
     def get(self, name) -> TaskSpec:
         """A task by name (or the lineage-qualified ``ts:total`` form); a TaskSpec passes through."""
@@ -247,40 +353,78 @@ def _dataset_dirs(root: Path, weights_id) -> list[Path]:
     return list(seen.values()) or sorted(root.glob(str(weights_id)))
 
 
+def _folder_parts(folder: Path) -> tuple[str, str, str]:
+    """``(trainer, plans, configuration)`` of a ``<trainer>__<plans>__<configuration>`` folder."""
+    trainer, plans, config = folder.name.split("__")
+    return trainer, plans, config
+
+
 def resolve_model_folder(weights_id: WeightsId, *, layout: str = "ts", model_root=None,
-                         configuration: str | None = None) -> Path:
+                         configuration: str | None = None, trainer: str | None = None,
+                         plans: str | None = None) -> Path:
     """``Dataset<id>_*`` under the weights root -> its ``trainer__plans__config`` folder.
 
     A model folder path passes through unchanged, so a caller can point haversack straight at a
     stock nnU-Net result directory. When a dataset ships several configurations (a trained
     nnU-Net commonly has 2d / 3d_lowres / 3d_fullres / 3d_cascade_fullres), ``configuration``
     picks one; otherwise :data:`CONFIG_PREFERENCE` decides, rather than whichever sorts first.
+
+    ``trainer`` and ``plans`` narrow the folders first (a task's ``models`` entry states them).
+    If more than one folder still has the chosen configuration, this raises
+    :class:`~haversack.errors.AmbiguousModel` instead of choosing: until 2026-09-21 the
+    folders were keyed by configuration alone, so of TotalSegmentator v3's two ``3d_fullres``
+    folders in each of Datasets 831-836 the one that sorted last - the small ResEnc model,
+    ``nnUNetResEncUNetLPlans_8`` - ran in place of upstream's default, silently.
     """
     p = Path(str(weights_id)).expanduser()
     if p.is_dir() and p.name.count("__") == 2:
+        t, pl, _ = _folder_parts(p)
+        if (trainer and t != trainer) or (plans and pl != plans):
+            raise ModelNotFound(f"{p.name} is not the {trainer or '*'}__{plans or '*'} model "
+                                "this task states")
         return p
     root = Path(p) if p.is_dir() else weights_root(layout, model_root)
     matches = ([root] if p.is_dir() else _dataset_dirs(root, weights_id))
     if not matches:
         raise ModelNotFound(f"no Dataset{weights_id}_* under {root}")
-    configs = sorted(c for c in matches[0].iterdir()
+    dataset = matches[0]
+    configs = sorted(c for c in dataset.iterdir()
                      if c.is_dir() and not c.name.startswith(".") and c.name.count("__") == 2)
     if not configs:
-        raise ModelNotFound(f"no trainer__plans__config folder in {matches[0]}")
-    by_config = {c.name.rsplit("__", 1)[1]: c for c in configs}
+        raise ModelNotFound(f"no trainer__plans__config folder in {dataset}")
+    wanted = [c for c in configs
+              if (trainer is None or _folder_parts(c)[0] == trainer)
+              and (plans is None or _folder_parts(c)[1] == plans)]
+    if not wanted:
+        raise ModelNotFound(f"no {trainer or '*'}__{plans or '*'}__* model in {dataset.name}; "
+                            f"have {[c.name for c in configs]}")
+    by_config: dict[str, list[Path]] = {}
+    for c in wanted:
+        by_config.setdefault(_folder_parts(c)[2], []).append(c)
+
+    def only(config: str) -> Path:
+        found = by_config[config]
+        if len(found) > 1:
+            raise AmbiguousModel(
+                f"{dataset.name} holds {len(found)} {config!r} models "
+                f"({', '.join(f.name for f in found)}) and nothing states which to run. A "
+                "catalog task states it in its registry entry as models: {id: {plans, "
+                "trainer}}; to run one directly, pass its model folder path.")
+        return found[0]
+
     if configuration is not None:
         if configuration not in by_config:
-            raise ModelNotFound(f"configuration {configuration!r} not in {matches[0].name}; "
-                                    f"have {sorted(by_config)}")
-        return by_config[configuration]
+            raise ModelNotFound(f"configuration {configuration!r} not in {dataset.name}; "
+                                f"have {sorted(by_config)}")
+        return only(configuration)
     for name in CONFIG_PREFERENCE:
         if name in by_config:
-            return by_config[name]
-    if len(configs) == 1:
-        return configs[0]
+            return only(name)
+    if len(wanted) == 1:
+        return wanted[0]
     why = "; ".join(f"{k} ({UNSUPPORTED_CONFIGS[k]})" for k in sorted(by_config) if k in UNSUPPORTED_CONFIGS)
     raise ModelNotFound(
-        f"no runnable configuration in {matches[0].name}; have {sorted(by_config)}"
+        f"no runnable configuration in {dataset.name}; have {sorted(by_config)}"
         + (f" - unsupported: {why}" if why else "") + ". Pass configuration=... to choose.")
 
 

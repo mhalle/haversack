@@ -57,6 +57,30 @@ def load_lut() -> dict[int, dict]:
     return {int(k): v for k, v in raw.items()}
 
 
+#: The lh-numbered cortical ids FastSurfer lateralizes SPATIALLY, after the network: upstream's
+#: ``FastSurferCNN/data_loader/data_utils.py::split_cortex_labels`` (read at v2.5.4) relabels
+#: each connected component of these nearer the right white-matter centroid to ``id + 1000``.
+#: The network itself emits one channel for both hemispheres - which is why the LUT has 31
+#: ``ctx-lh-*`` ids and only 14 ``ctx-rh-*``. A labels output is split and these ids mean what
+#: they say; a RANKED store holds the channels before the split, where such a value covers the
+#: structure on BOTH sides under a left-hemisphere name. Shipped as a literal for the reason
+#: the LUT is: importing FastSurferCNN from the builder's environment fails in the ordinary
+#: case. Upstream's list also names 1025 and 1028, which have rh channels of their own (its
+#: comment calls the split a fix for them); measured on a real run (ds000114 sub-01, VINN
+#: 2.5.4, 2026-09-22) the network lateralizes both cleanly - 0 of 6091 and 0 of 16860 voxels
+#: moved - while the 17 here moved 38-56% of theirs and no other channel moved any. So the
+#: two are exact as stored, and are not listed.
+SPLIT_AFTER_THE_NETWORK = frozenset({
+    1003, 1006, 1007, 1008, 1009, 1011, 1015, 1018, 1019, 1020,
+    1026, 1027, 1029, 1030, 1031, 1034, 1035})
+
+
+def lateralized(value: int) -> bool:
+    """Whether a network CHANNEL with this id is exactly the structure its id names - false
+    for the ids :data:`SPLIT_AFTER_THE_NETWORK` lists, which are bilateral until the split."""
+    return int(value) not in SPLIT_AFTER_THE_NETWORK
+
+
 def label_names() -> dict[int, str]:
     """FastSurfer output label id -> name, for consumers that need names without
     colors (the ranked store builder).

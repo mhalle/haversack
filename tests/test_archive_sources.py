@@ -834,11 +834,11 @@ class TestTheArchiveCacheIsKeyedOnTheCredential:
     # There was a third test here that read the module's source and required each `_zip`
     # to contain the literals `ck = (outer, credentials)` and `cache.get(ck)`. It pinned a
     # VARIABLE NAME, not a property, and a review broke it both ways in one sitting: a
-    # behaviourally identical `_zip` spelled with `key` instead of `ck` FAILED it, while a
+    # behaviorally identical `_zip` spelled with `key` instead of `ck` FAILED it, while a
     # `_zip` that kept both literals and then added a scan over `cache.items()` matching on
-    # `k[0] == outer` - the replay defect, restored - PASSED. Only the behavioural tests
+    # `k[0] == outer` - the replay defect, restored - PASSED. Only the behavioral tests
     # caught that one. Brittleness that also gives false confidence is worse than no test,
-    # so it is gone; the two behavioural tests below and `test_archive_cache_isolates_
+    # so it is gone; the two behavioral tests below and `test_archive_cache_isolates_
     # credentials` cover both classes that keep an archive cache. A THIRD such class would
     # need its own, which is the cost of not having a rule that can be checked mechanically.
 

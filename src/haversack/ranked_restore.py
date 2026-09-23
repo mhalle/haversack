@@ -117,6 +117,22 @@ def resolve_grid(store, grid="input"):
             st.close()
 
 
+def _value(seg: dict):
+    """The one label value a stored segment is, or None. Reads the raw ``seg`` block of a
+    store of either shape: seg 0.8's ``label_values`` (a class lists exactly one) and the
+    ``label_value`` of stores written before it. A segment listing several values is a
+    union someone authored, not a class."""
+    values = seg.get("label_values")
+    if isinstance(values, list):
+        return int(values[0]) if len(values) == 1 else None
+    value = seg.get("label_value")
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _is_background(seg: dict) -> bool:
+    return seg.get("role") == "background" or bool(seg.get("background"))
+
+
 def roi_of(store, labels, *, grid="input", halo: int = 1) -> tuple:
     """The output-index box that should hold ``labels`` (label values), from their stored
     extents - a heuristic, see ``rankfield.roi_of``."""
@@ -130,8 +146,8 @@ def roi_of(store, labels, *, grid="input", halo: int = 1) -> tuple:
         for i, p in enumerate(parts):
             lut = p.field.labels
             for s in segs:
-                if s.get("label_value") in want and (s.get("layer") or 0) == i and s.get("extent") \
-                        and s["label_value"] in lut:
+                if _value(s) in want and (s.get("layer") or 0) == i and s.get("extent") \
+                        and _value(s) in lut:
                     extents.append((i, s["extent"]))
         if not extents:
             raise InputError(f"none of {sorted(want)} has an extent in this store")
@@ -221,8 +237,8 @@ def main_cli(argv=None) -> int:
     from .values import LabelSchema
     with open_store(Path(a.store), "r") as st:
         ext = st.root.attrs.asdict()["duckn"]["extensions"]
-    names = {int(s["label_value"]): s.get("name", "") for s in ext["seg"]["segments"]
-             if s.get("label_value") is not None and not s.get("background")}
+    names = {_value(s): s.get("name", "") for s in ext["seg"]["segments"]
+             if _value(s) is not None and not _is_background(s)}
     prov = {"restored_from": str(a.store), "interp": a.interp, "grid": list(res.grid.shape),
             "spacing": list(res.grid.spacing), "parts": res.parts,
             "haversack": (ext.get("haversack") or {}).get("haversack_version")}

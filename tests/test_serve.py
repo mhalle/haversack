@@ -204,7 +204,7 @@ def test_a_bare_task_name_gets_a_404_naming_the_qualified_one(tmp_path):
 
     ex = LocalExecutor(Qualified(), workdir=tmp_path, max_pending=4, keep_finished=50)
     client = TestClient(create_app(ex))
-    want = "task 'total_fast' needs its catalog: use ts.v2:total_fast"
+    want = "task 'total_fast' needs its catalog: use ts.v2:total_fast or ts.v3:total_fast"
     r = client.get("/v1/tasks/total_fast")
     assert (r.status_code, r.json()["detail"]) == (404, want)
     r = client.post("/v1/jobs", files={"file": ("scan.nii.gz", volume_bytes(7))},
@@ -2882,12 +2882,16 @@ def test_a_job_hands_back_its_key_and_the_urls_for_everything_it_made(tmp_path, 
 def test_links_are_absent_where_a_result_is_not_path_addressable(tmp_path):
     """An upload is identified by its sha256, which the path surface does not
     address - so the job offers its job-scoped URLs and no labels link, rather
-    than a URL that would 404."""
+    than a URL that would 404. Since 2026-09-21 the job-scoped URLs include the
+    artifacts (`meta` here: this server renders no deliverables), and no link names
+    a path - tests/test_job_artifacts.py follows them."""
     seg, ex, client = make(tmp_path)
     jid = submit(client)                      # a plain upload
     links = wait_state(client, jid)["links"]
     assert links["result"].endswith("/result")
-    assert "labels" not in links and "meta" not in links
+    assert "labels" not in links
+    assert all(url.startswith(f"/v1/jobs/{jid}") for url in links.values()), links
+    assert client.get(links["meta"]).status_code == 200    # and no link 404s
 
 
 # -- cache control: RFC 9111 semantics, per request and per engine ----------
@@ -3860,7 +3864,7 @@ def test_no_cache_refetches_an_input_whose_bytes_can_change(tmp_path):
     a result from a stale cached input just answers the same wrong thing again.
 
     Driven through the sequence the executor actually uses - `_refresh_input`,
-    then pin, then fetch - because that is where the behaviour lives; an earlier
+    then pin, then fetch - because that is where the behavior lives; an earlier
     version of this test called a `refresh=` argument no production code passed.
     """
     upstream = {"bytes": b"first version"}
@@ -3991,7 +3995,7 @@ def test_an_engines_cache_policy_does_not_force_an_input_refetch(tmp_path, monke
     that as "re-fetch the input" would re-download the series for every prompt and
     evict the copy the other jobs share, so the input refresh follows the CALLER.
 
-    Behavioural on purpose: the same claim as a source-text assertion still passed
+    Behavioral on purpose: the same claim as a source-text assertion still passed
     when the conflation was written back in as a prefix of the captured line.
     """
     from haversack import serve as serve_mod
@@ -4319,7 +4323,7 @@ def test_a_read_only_cache_root_does_not_fail_the_job(tmp_path):
 
 def test_a_no_cache_job_never_uses_a_pre_read_image(tmp_path):
     """Dropping the pre-read image in _refresh_input is not enough: the prefetch
-    thread refills that slot with no synchronisation, so a refill landing after
+    thread refills that slot with no synchronization, so a refill landing after
     the drop reinstalls the stale image and the job segments it - the fetch paid
     for, the stale answer returned. A job that asked for fresh bytes uses none."""
     import ast
@@ -4366,7 +4370,7 @@ def test_provenance_pairs_each_ROLE_with_its_own_digest(tmp_path, monkeypatch):
     assert got == want, (
         "provenance paired roles with the wrong digests: "
         + "; ".join(f"{r}: got {got.get(r)} want {want[r]}" for r in ROLES if got.get(r) != want[r]))
-    # and the identity on each record is that role's, not its neighbour's
+    # and the identity on each record is that role's, not its neighbor's
     assert {rec["role"]: rec["identity"] for rec in s["result"]["provenance"]["inputs"]} == want
 
 
@@ -4479,7 +4483,7 @@ class TestArtifactsBelongToOneGeneration:
                              files={"file": ("v.nii.gz", volume_bytes(), "application/gzip")},
                              headers={"Cache-Control": "no-cache"})
             wait_state(client, r2.json()["id"], ("done",))
-            # the behaviour first, so this fails on what a client would SEE
+            # the behavior first, so this fails on what a client would SEE
             now = ex.cache.get(key)[0].parent
             survivors = [n for n in SERVED_ARTIFACTS
                          if (now / n).exists()

@@ -58,14 +58,18 @@ class WeightsStore:
         from .tasks import _dataset_dirs
         return bool(_dataset_dirs(self.root, weights_id))
 
-    def resolve(self, weights_id, *, configuration: str | None = None) -> Path:
+    def resolve(self, weights_id, *, configuration: str | None = None,
+                trainer: str | None = None, plans: str | None = None) -> Path:
         """A loadable ``trainer__plans__config`` folder, fetched first if it is missing.
 
         A path to a model (or dataset) folder passes straight through, so a caller can always
-        point at something on disk without involving a store's layout at all.
+        point at something on disk without involving a store's layout at all. ``trainer`` and
+        ``plans`` are what a task states for this weights id (``TaskSpec.model_choice``); a
+        caller holding a spec passes them, or a dataset shipping several models is refused.
         """
         if Path(str(weights_id)).expanduser().is_dir():
-            return resolve_model_folder(weights_id, configuration=configuration)
+            return resolve_model_folder(weights_id, configuration=configuration,
+                                        trainer=trainer, plans=plans)
         if not self.have(weights_id):
             if not self.fetch_enabled:
                 raise ModelNotFound(
@@ -73,7 +77,7 @@ class WeightsStore:
                     f"disabled; download them or pass fetch=True")
             self.fetch(weights_id)
         return resolve_model_folder(weights_id, layout=self.layout, model_root=self.root,
-                                    configuration=configuration)
+                                    configuration=configuration, trainer=trainer, plans=plans)
 
     def ensure(self, task, *, catalog=None) -> list[Path]:
         """Make every model a task needs local, recursing through cascade crop-from tasks."""

@@ -178,7 +178,7 @@ def _fastsurfer_compute(image, **kw):
 
 
 def _fastsurfer_label_names(task: str) -> dict:
-    """FreeSurfer aparc+aseg id -> name, read from FastSurfer's own colour LUT.
+    """FreeSurfer aparc+aseg id -> name, read from FastSurfer's own color LUT.
 
     Ignores ``task``: this engine has one label namespace whatever it is asked for.
     """

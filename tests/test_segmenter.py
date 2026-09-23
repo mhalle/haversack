@@ -153,8 +153,10 @@ def test_structures_are_in_label_order():
 def test_tasks_lists_the_catalog():
     seg = Segmenter()
     assert "ts.v2:total" in seg.tasks() and len(seg.tasks()) == len(seg.catalog)
-    with pytest.raises(LookupError, match="use ts.v2:total$"):
-        seg.resolve_task("total")                          # a bare name is refused (0.11.0)
+    with pytest.raises(LookupError, match="use ts.v2:total_mr$"):
+        seg.resolve_task("total_mr")                       # a bare name is refused (0.11.0)
+    with pytest.raises(LookupError, match="use ts.v2:total or ts.v3:total$"):
+        seg.resolve_task("total")                          # v3 reuses v2's names (2026-09-21)
     assert seg.resolve_task("ts.v2:total@v2.0.0") == "ts.v2:total"
 
 

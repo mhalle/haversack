@@ -121,6 +121,12 @@ monai = ["monai>=1.4", "torch>=2.7", "nibabel", "itk", "pytorch-ignite", "einops
 # zarr 3.3 and duckn need Python 3.12, which is the project's floor (0.6.1: one floor, no
 # per-package markers - the extra was empty on 3.10 and rankfield-only on 3.11).
 duckn = ["duckn", "zarr>=3.3", "rankfield"]      # the ranked encoding + restore (github, a tag)
+# `haversack encode` (2026-09-23): an encoder's token lattices written as an embedding field. The
+# field format is feldglas's, and feldglas is its one author - haversack hands it the tokens and
+# writes through `feldglas.store` (zarr + duckn's own models, like the ranked stores). The networks
+# need the torch extra (RADAR's encoder is built from nnU-Net's dynamic_network_architectures);
+# RADAR's input convention reorients through nibabel, as upstream's DataFolder does.
+encode = ["feldglas", "duckn", "zarr>=3.3", "rankfield", "nibabel"]
 
 [build-system]
 requires = ["hatchling"]
@@ -173,10 +179,15 @@ conflicts = [
       { extra = "duckn" },
       { extra = "synthstrip" },
     ],
+    # the same numpy split: a field is written through zarr and duckn
+    [
+      { extra = "encode" },
+      { extra = "synthstrip" },
+    ],
 ]
 
 [tool.uv.sources]
-rankfield = { git = "https://github.com/mhalle/rankfield.git", tag = "v0.3.2" }
+rankfield = { git = "https://github.com/mhalle/rankfield.git", tag = "v0.3.3" }
 provender = { git = "https://github.com/mhalle/provender.git", tag = "v0.1.4" }
 # nnunetv2 comes from PyPI: haversack uses only stock nnunetv2 APIs (verified against 2.8.1). It
 # used to be a `path = "../upstream/nnUNet"` source here, but uv applies these sources to a
@@ -194,10 +205,14 @@ fastsurfer-lean = { git = "https://github.com/mhalle/fastsurfer-lean.git", tag =
 # PyPI release: 0.1.0 on PyPI predates helpers this engine uses (download_voxtell_model),
 # and pinning the rev means the source we integrated against is the source that runs.
 voxtell = { git = "https://github.com/MIC-DKFZ/VoxTell.git", rev = "8ef0332aec5d5dff925d6f6370386c00334b57ab" }
-# duckn = the metadata standard the ranked stores are written in (seg extension 0.7 as of
-# 0.3.0). A release tag, not a branch, so a sync is reproducible; to work on duckn itself,
+# duckn = the metadata standard the ranked stores are written in (seg extension 0.8 as of
+# 0.4.0). A release tag, not a branch, so a sync is reproducible; to work on duckn itself,
 # `uv pip install -e ../duckn` after the sync puts the sibling checkout in front of it.
-duckn = { git = "https://github.com/mhalle/duckn.git", tag = "v0.3.2" }
+duckn = { git = "https://github.com/mhalle/duckn.git", tag = "v0.5.1" }
+# feldglas = the embedding-field format and its receiving end (client, `feldglas` command); haversack
+# writes fields through it. A release tag, like duckn; `uv pip install -e ../feldglas` after the
+# sync to work on both.
+feldglas = { git = "https://github.com/mhalle/feldglas.git", tag = "v0.1.1" }
 # synthstrip-torch = our standalone SynthStrip inference package (StripModel + surfa conform
 # + SDT; weights fetched from MGH at runtime). Import namespace: synthstrip_torch.
 synthstrip-torch = { git = "https://github.com/mhalle/synthstrip-torch.git", rev = "1b871fb1f98fbe60ed1efe87de34a8703a106b44" }

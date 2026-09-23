@@ -54,6 +54,18 @@ INPUT_NOT_ON_HAND = ("not rendered for this stored result, and the input image i
                      "with its deliverables")
 RENDER_BUSY = ("another render of this result is still running and does not include it; "
                "submit again when it has finished")
+#: A deliverable is rendered INTO a result's cache entry and served FROM it - by path, or
+#: through the job (``/v1/jobs/<id>/preview.png``, 2026-09-21). A result with no entry has
+#: nowhere for one to land, so its job says so rather than list what no door will serve.
+NO_CACHE_ENTRY = ("not rendered: this result has no entry in the result cache, which is "
+                  "where a deliverable is rendered into and served from (the server runs "
+                  "without a result cache, or the input has no identity to key one by)")
+
+
+def unkeyed_deliverables(wanted, cache_key) -> dict | None:
+    """``deliverables_unavailable`` for a job about to publish with no cache key: every
+    name it would have rendered, each with ``NO_CACHE_ENTRY``. None when it has a key."""
+    return None if cache_key or not wanted else {d: NO_CACHE_ENTRY for d in wanted}
 
 
 def wanted_deliverables(asked, offered) -> tuple:

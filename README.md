@@ -78,7 +78,8 @@ with your own laid over it where one exists (`HAVERSACK_SEGMENTS`, else
 `~/.config/haversack/segments.json`): every task's segments - label value, layer where the
 output overlaps (none means layer 0), and the id its model gives each - as the model states
 them, with the version that pins each list. A task's `structures` are those ids in label order,
-and `haversack tasks TASK` prints them from the index for a model not installed here.
+and `haversack tasks TASK` (and a server's `GET /v1/tasks/{task}`) gives them from the index
+for a model not installed here, as long as the index record is current.
 `haversack catalog mine` refreshes the index and `haversack catalog check` finds stale
 records. A `--find` answer opens with a `#` line of counts and closes with a `# end:` line that
 gives the next page's `--offset`; `--count` sizes a search before reading it. This
@@ -114,7 +115,9 @@ package it writes your own manifest, `~/.config/haversack/ts_weights.json`
 (`HAVERSACK_TS_MANIFEST` to move it), which is laid over the packaged one on every read and
 survives upgrades; in a source checkout it edits the repository's file. `--dry-run` reports
 without writing, and existing entries are never repointed at a newer release unless you say
-`--update-existing`, because that changes the segmentations.
+`--update-existing`, because that changes the segmentations. A dataset TotalSegmentator serves
+only under its license is never added, even when it is also published as a release asset
+(Dataset857, `thigh_shoulder_muscles`, was in `v3.0.0-weights`); the refresh names it instead.
 
 `coverage` marks the TotalSegmentator tasks whose weights are behind TotalSegmentator's
 commercial license (`appendicular_bones`, `brain_structures`, `coronary_arteries`,
@@ -159,7 +162,15 @@ refused with the qualified form to use: what it meant would depend on which cata
 be installed, and two catalogs can offer the same name.
 
 `total_fast` is the 3 mm whole-body model; `total_fastest` is the 6 mm one (coarser, faster
-still), and `total` runs the five 1.5 mm models. Useful options:
+still), and `total` runs the five 1.5 mm models. TotalSegmentator v3 (upstream's `total_v3`,
+its `v3.0.0-weights` release) is the `ts.v3` catalog with the same three names -
+`ts.v3:total`, `ts.v3:total_fast`, `ts.v3:total_fastest` - beside `ts.v2`'s, which are
+unchanged. Its 117 labels are v2's with value 26 `vertebrae_L6` where v2 has `vertebrae_S1`.
+Upstream states no license for the v3 weights yet (its README lists only v2's `total` as
+Apache-2.0, and the release is marked a prerelease); `haversack cite ts.v3:total` says so.
+`ts.v3` tiles its sliding window at step 0.8, as TotalSegmentator does for these tasks;
+`ts.v2` keeps nnU-Net's 0.5, which its existing results were computed with.
+Useful options:
 
 | Option | Meaning |
 |---|---|
@@ -202,7 +213,7 @@ r = segment("scan.nii.gz", "ts.v2:total_fast")        # a Segmentation
 r.save("labels.nii.gz")
 liver = r.mask("liver")                          # boolean array (Z, Y, X) on the output grid
 r.present()                                      # {label: name} for what was found, e.g. {5: "liver", ...}
-r.volumes_ml()                                   # {name: millilitres}, e.g. {"liver": 1424.3, ...}
+r.volumes_ml()                                   # {name: milliliters}, e.g. {"liver": 1424.3, ...}
 r.timings, r.provenance                          # per-stage seconds; what ran, with what, and any deviations
 
 seg = Segmenter(cache_models=5)                  # models stay warm across calls
@@ -419,6 +430,9 @@ Without the flag a job gets the server's own set (`GET /v1/health` lists it), wh
 the most a request may name. A deliverable is never part of the result: declining the
 preview computes the same labels under the same key, and asking for it later is a cache hit
 that renders it then - or says why it cannot. The command line's `segment` renders neither.
+A finished job's `links` name where each one is: by the result's path when it has one, and
+through the job itself (`/v1/jobs/<id>/preview.png`, `/statistics.tsv`, with the token) when
+it does not - the result of an uploaded scan, above all.
 
 A finished job reports a `key`, and `result:<key>` names that result as the INPUT of another
 job on the same server - one job's labels as another's mask, without the bytes leaving the
@@ -474,6 +488,45 @@ stays in CPU memory unless the machine has 32 GB or more; 16 GB is tight for it.
 Silicon haversack caps PyTorch's MPS allocator at the device's recommended working set,
 because past it Metal returns zeros instead of an error; a real shortfall then raises, and
 SynthStrip retries in fp16 before refusing.
+
+## Embedding fields: `encode`
+
+`haversack encode` runs an image encoder over a CT and writes its token lattices as an
+**embedding field** (`<name>.zarr.zip`): a zarr zip of one array per lattice, each placed in
+the scan's world coordinates, with the encoder, its weights' digest, the input's digest and
+grid, the license and the papers to cite in its provenance. Nothing in it is a mask or a
+label. The receiving end is [feldglas](https://github.com/mhalle/feldglas), which owns the
+format: `feldglas info`, `feldglas vectors` and `feldglas score` gate a field with your own
+segmentation (a haversack `.seg.nrrd`, local or by URL) and pool, compare or score what is
+inside. Every field also carries feldglas's guide as its `README.md`.
+
+```bash
+uv pip install "haversack[torch,encode] @ git+https://github.com/mhalle/haversack"
+haversack encoders                                   # what can encode, and what is installed
+haversack weights fetch radar:pretrain               # 1.6 GB, pinned by digest (or --from FILE)
+haversack encode ct.nii.gz -e radar:pretrain -o ct.radar.zarr.zip
+haversack encode idc:<uuid> -e ts.v2:total_fast -o ct.null.zarr.zip
+```
+
+Encoders are named like tasks, `family[.version]:name[@revision]`:
+
+- `radar:pretrain` - RADAR's vision encoder (Alibaba DAMO), three lattices of 256 channels
+  on 10 / 20 / 40 mm tokens. Its weights are **CC BY-NC-SA 4.0**: non-commercial use, and a
+  field made with them is a derivative under the same terms; the field says so.
+- `ts.v2:total_fast`, `ts.v2:total` - the encoder half of TotalSegmentator's network for
+  that task, run on exactly the input a segmentation would see (Apache-2.0). They use the
+  task's own weights (`haversack weights fetch ts.v2:total_fast`), and only the encoder runs.
+
+Inputs are anything `segment` takes, local files and remote sources alike. `--int8` stores
+tokens as int8 with a per-channel scale (about half the size of the fp16 default); `--json`
+prints what was done, with timings. The names used before encoding moved into haversack
+(`radar`, `null-totalsegmentator`, `null-totalsegmentator-1.5mm`) still resolve. A server
+encodes too (see SERVER.md, "Embedding fields"):
+
+```bash
+haversack remote encoders
+haversack remote encode idc:<uuid> -e radar:pretrain -o ct.radar.zarr.zip
+```
 
 ## What haversack does not do yet
 

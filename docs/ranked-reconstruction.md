@@ -28,7 +28,7 @@ column is the part worth trusting, and each store carries those identifiers verb
 
 ℹ **The demo set has since moved on; these numbers have not been re-measured.** `CT_Abdo` was
 replaced by `nlst-217076` (IDC, NLST-ACRIN, patient 217076, 249 contiguous 1.25 mm slices) —
-an IDC case with a resolvable identifier, a DOI, a licence, and an independently published
+an IDC case with a resolvable identifier, a DOI, a license, and an independently published
 TotalSegmentator v1.5.6 segmentation of the same series to check against, none of which
 `CT_Abdo` has. Every measurement below was taken on the two cases named above and is reported
 as such; re-measure rather than assume it carries to the current set. The demo stores also now

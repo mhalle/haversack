@@ -34,7 +34,7 @@ be current without downloading anything.
 The store must honor conditional writes, and not every one does - obstore's own local
 filesystem store refuses replace-if-unchanged, and S3-compatible servers vary. So
 ``check_conditional_writes`` ASKS the store at startup, and a store that does not refuse a
-stale write is refused itself, naming the backend. Modelling the store from its docs is how
+stale write is refused itself, naming the backend. Modeling the store from its docs is how
 this repo has been wrong before.
 """
 from __future__ import annotations
@@ -202,6 +202,16 @@ def _well_formed_files(files) -> bool:
                 or any(c not in "0123456789abcdef" for c in digest[len("sha256:"):])):
             return False
     return True
+
+
+def _primary_name(files) -> str | None:
+    """Which primary output a publication's files hold - labels or an embedding field
+    (main, 2026-09-23) - or None. A generation holds exactly ONE (``serve.PRIMARY_NAMES``),
+    so a pointer naming two is not one this code serves: which it answered with would
+    depend on the order it asked in, the ambiguity the local cache refuses at write time."""
+    from .serve import PRIMARY_NAMES
+    held = [n for n in PRIMARY_NAMES if n in (files or {})]
+    return held[0] if len(held) == 1 else None
 
 
 def _history_of(ptr) -> list:
@@ -384,7 +394,8 @@ class SharedResultCache:
                 for g in _generations(ptr)]
 
     def find_generation(self, key: str, digest: str) -> str | None:
-        """Which kept generation of ``key`` published labels with this digest, if any.
+        """Which kept generation of ``key`` published a primary output (labels, or a field)
+        with this digest, if any.
 
         For `result:` references (main, 2026-09-20), which pin the referenced output's
         sha256 at submit and resolve AGAIN in the worker, refusing anything that is not
@@ -399,12 +410,11 @@ class SharedResultCache:
 
         Returns the generation token; ``fetch_generation`` then hands over the bytes.
         """
-        from .serve import RESULT_NAME
         ptr, _ = self._read_pointer(key)
         if ptr is None:
             return None
         for gen in _generations(ptr):
-            blob = (gen["files"] or {}).get(RESULT_NAME)
+            blob = (gen["files"] or {}).get(_primary_name(gen["files"]))
             if isinstance(blob, dict) and blob.get("digest") == digest:
                 return gen["generation"]
         return None
@@ -416,18 +426,21 @@ class SharedResultCache:
         Into a directory the CALLER owns, never into the local cache: a historical read
         must not become what this host serves.
         """
-        from .serve import ARTIFACT_NAMES, RESULT_NAME
+        from .serve import ARTIFACT_NAMES
         ptr, _ = self._read_pointer(key)
         if ptr is None:
             return None
         for g in _generations(ptr):
             if g["generation"] != generation:
                 continue
+            primary = _primary_name(g["files"])
+            if primary is None:
+                return None
             dest = Path(dest)
             dest.mkdir(parents=True, exist_ok=True)
             written = []
             for name, blob in g["files"].items():
-                if name not in (RESULT_NAME, *ARTIFACT_NAMES):
+                if name not in (primary, *ARTIFACT_NAMES):
                     continue                   # a foreign name may not decide a path
                 try:
                     if not self.blobs.fetch(blob["digest"], dest / name):
@@ -439,7 +452,7 @@ class SharedResultCache:
             # nothing written is not success: a generation whose files are all named
             # something this code will not place left the caller an empty directory and a
             # non-None answer (review, 2026-09-20)
-            return {**g, "written": written} if RESULT_NAME in written else None
+            return {**g, "written": written} if primary in written else None
         return None
 
     def get(self, key: str):
@@ -669,16 +682,23 @@ class SharedResultCache:
         return Path(tempfile.mkdtemp(prefix=mine, dir=root))
 
     def put(self, key: str, labels_path, result: dict, meta: dict,
-            preview_path=None, statistics_path=None) -> str:
+            preview_path=None, statistics_path=None, output_name: str | None = None) -> str:
         """Publish: blobs first, then the pointer, then the local copy. Returns the
-        generation token, which the local copy shares."""
-        from .serve import RESULT_NAME
-        sources = {RESULT_NAME: labels_path, "preview.png": preview_path,
+        generation token, which the local copy shares.
+
+        ``output_name`` is the primary output's name - labels, or an encode job's field
+        (main, 2026-09-23) - checked BEFORE anything is uploaded, so a wrong name costs no
+        blob and no pointer."""
+        from .serve import PRIMARY_NAMES, RESULT_NAME
+        output_name = output_name or RESULT_NAME
+        if output_name not in PRIMARY_NAMES:
+            raise ValueError(f"{output_name!r} is not a primary output ({', '.join(PRIMARY_NAMES)})")
+        sources = {output_name: labels_path, "preview.png": preview_path,
                    "statistics.json": statistics_path}
         gen, now = uuid.uuid4().hex, time.time()
         def keep_the_work():               # one per `with`: a generator cannot be re-entered
             return _keeping_the_work(self, key, labels_path, result, meta, preview_path,
-                                     statistics_path, gen)
+                                     statistics_path, gen, output_name)
         with keep_the_work():
             files = {name: self.blobs.put_file(src) for name, src in sources.items()
                      if src and Path(src).exists()}
@@ -693,7 +713,8 @@ class SharedResultCache:
         self._verify(pointer["files"], sources)
         try:
             self.local.put(key, labels_path, result, meta, preview_path=preview_path,
-                           statistics_path=statistics_path, generation=gen)
+                           statistics_path=statistics_path, output_name=output_name,
+                           generation=gen)
         except Exception as e:                 # noqa: BLE001
             # The publication HAPPENED - every host can read it - so a local copy that
             # cannot be written must not fail the job that just produced it (a full disk
@@ -812,7 +833,7 @@ class SharedResultCache:
         """
         from concurrent.futures import ThreadPoolExecutor, wait
 
-        from .serve import LIST_CHUNK, LIST_WORKERS, RESULT_NAME, resource_links
+        from .serve import LIST_CHUNK, LIST_WORKERS, resource_links
         import contextlib
         hold = hold or contextlib.nullcontext
         workers = LIST_WORKERS if workers is None else int(workers)
@@ -838,14 +859,18 @@ class SharedResultCache:
 
         def row_of(key: str, stamp: int, ptr) -> dict | None:
             files = ptr.get("files") or {}
-            if RESULT_NAME not in files:
+            primary = _primary_name(files)
+            if primary is None:
                 return None
             meta = ptr.get("meta") if isinstance(ptr.get("meta"), dict) else {}
             task, identity = meta.get("task"), meta.get("identity")
             options = meta.get("options")
             row = {"key": key, "task": task, "identity": identity, "options": options,
                    "computed": meta.get("computed"), "published": stamp / 1e9,
-                   "bytes": files[RESULT_NAME]["size"]}
+                   "bytes": files[primary]["size"]}
+            if meta.get("kind") not in (None, "segment"):
+                row["kind"] = meta["kind"]     # the local cache's rule: a field is said, never
+                return row                     # linked as labels
             if resource_links(task, identity, options):
                 row["links"] = resource_links(task, identity, options,
                                               preview="preview.png" in files,
@@ -892,9 +917,11 @@ class SharedResultCache:
                         continue
                     ptr = fields["_ptr"]
                     meta = ptr.get("meta") if isinstance(ptr.get("meta"), dict) else {}
-                    if match is not None and not match(
-                            {k: meta.get(k) for k in ("task", "identity", "options",
-                                                      "computed")}):
+                    said_fields = {k: meta.get(k) for k in ("task", "identity", "options",
+                                                            "computed")}
+                    if meta.get("kind") not in (None, "segment"):
+                        said_fields["kind"] = meta["kind"]     # as the local cache's fields
+                    if match is not None and not match(said_fields):
                         continue
                     built[c] = row_of(c[1], c[0], ptr)
                 for c in chunk:
@@ -1290,7 +1317,7 @@ def _refuses(conflict: str, current, meta) -> bool:
 
 @contextlib.contextmanager
 def _keeping_the_work(cache, key, labels_path, result, meta, preview_path, statistics_path,
-                      gen):
+                      gen, output_name):
     """Keep this host's copy of a result the STORE refused.
 
     The segmentation is finished and its bytes are on this disk. Failing the job is right -
@@ -1313,7 +1340,8 @@ def _keeping_the_work(cache, key, labels_path, result, meta, preview_path, stati
     except Exception:                          # noqa: BLE001 - the raise is the news
         try:
             cache.local.put(key, labels_path, result, meta, preview_path=preview_path,
-                            statistics_path=statistics_path, generation=gen)
+                            statistics_path=statistics_path, output_name=output_name,
+                            generation=gen)
         except Exception:                      # noqa: BLE001
             pass
         raise

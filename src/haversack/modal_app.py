@@ -95,7 +95,17 @@ DELIVERABLE_NOT_VISIBLE = (
     "this server cannot see the result store's latest state yet (a volume reload was "
     "refused), so it cannot tell whether this was rendered; ask again shortly")
 RESULTS_KEEP = int(os.environ.get("HAVERSACK_RESULTS_KEEP", "500"))
+#: Whether this deployment runs ``kind=encode`` jobs (2026-09-23): an encoder GPU worker
+#: (``EncodeWorker``), its image with the ``encode`` extra, and the encoder weights volume.
+#: Off by default - a deployment asks for it, as for an optional engine.
+ENCODE = os.environ.get("HAVERSACK_ENCODE", "0") not in ("0", "false", "no", "")
+#: Encoder weights (RADAR's pinned checkpoint), on a volume of their own: GLOBAL like
+#: `haversack-weights`, so a checkpoint is downloaded once per workspace, and apart from it,
+#: so an encode deployment adds nothing to the volume every segmentation deployment reads.
+#: An nnU-Net encoder uses its task's weights, on `haversack-weights`.
+ENCODER_VOLUME = os.environ.get("HAVERSACK_ENCODER_VOLUME") or "haversack-encoder-weights"
 WEIGHTS_ROOT, SCRATCH_ROOT, CACHE_ROOT = "/weights", "/scratch", "/cache"
+ENCODERS_ROOT = "/encoders"
 INPUTS_ROOT = "/inputs"
 #: container-local copies of a running job's own files - its uploads and its labels -
 #: so that nothing reads them from the scratch volume outside ``_vol_lock`` (see
@@ -171,6 +181,9 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   # the deploy mounts the named cache at /cache while the containers commit
                   # and reload the app's own volume, which is mounted nowhere.
                   "HAVERSACK_CACHE_VOLUME",
+                  # the encoder worker (2026-09-23): a module-level `if ENCODE:` defines it,
+                  # which a container that re-imports this module must see the same way
+                  "HAVERSACK_ENCODE", "HAVERSACK_ENCODER_VOLUME",
                   *_engines.engine_env_vars())
 
 # Base image (the ASGI api container + the nnU-Net GPU Worker). uv-NATIVE: the nnU-Net
@@ -490,13 +503,14 @@ def _read_cache(key: str):
     """The entry under ``key`` from the view as it stands - ``(local labels path,
     result)`` or None - read under ``_cache_view`` shared, and handed out as a local
     copy: the volume's own files are never open outside the lock."""
-    from haversack.serve import RESULT_NAME, ResultCache
+    from haversack.serve import ResultCache
     with _cache_view.shared():
         hit = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).get(key)   # leased, as before
         if hit is None:
             return None
         g = Path(hit[0]).parent
-        return _mirror(g, Path(MIRROR_ROOT) / key / g.name) / RESULT_NAME, hit[1]
+        # the primary output by its own name: labels, or an encode job's field
+        return _mirror(g, Path(MIRROR_ROOT) / key / g.name) / Path(hit[0]).name, hit[1]
 
 
 def _cache_view_since(since: float) -> None:
@@ -725,6 +739,41 @@ def _clear_pending_marker(key: str, jid: str) -> None:
         pass
 
 
+def _pending_marker(key: str, *, sweep: bool):
+    """The live ``artifacts:`` marker for ``key`` - one Dict get - or None. ``sweep``
+    removes a dead one on the way; the anonymous twin passes False, because it writes
+    nothing anywhere, not even housekeeping."""
+    m = jobs_dict.get(f"artifacts:{key}")
+    if not (isinstance(m, dict) and m.get("state") == "pending"):
+        return None
+    # the same 900 s rule the local executor applies on read: a marker a killed
+    # overlap thread left behind must not answer 202 forever
+    if time.time() - float(m.get("t") or 0) > 900:
+        # and the marker goes, as it does locally: left in place, the writer's
+        # refuse-if-present rule would decline to mark a genuinely new flight
+        if sweep:
+            try:
+                jobs_dict.pop(f"artifacts:{key}", None)
+            except Exception:                  # noqa: BLE001 - a read path must not fail on it
+                pass
+        return None
+    return m
+
+
+def _artifact_state(key: str, name: str | None = None, *, sweep: bool) -> str:
+    """"pending" while a worker's overlap will still place ``name`` into ``key``'s entry
+    (any deliverable, for ``name`` None), else "absent". One rule for the api and for
+    the twin (2026-09-21): the twin had no view of the marker at all, so between `done`
+    and the worker's commit of a preview it called the preview ABSENT - a 404 for a file
+    seconds away, to the anonymous poller told everywhere else to read 404 as final
+    (seen on the smoke `haversack-doors-smoke`, with a render slowed to 10 s)."""
+    from haversack.jobpolicy import pending_covers
+    m = _pending_marker(key, sweep=sweep)
+    if m is None:
+        return "absent"
+    return "pending" if name is None or pending_covers(m.get("names"), name) else "absent"
+
+
 def _clear_own_artifacts_marker(jid: str, meta: dict) -> None:
     """Failure-path cleanup: drop this job's artifacts-pending marker (the
     overlap worker owns it on success). Without this a put that raised
@@ -746,6 +795,19 @@ def _jobs_snapshot() -> list:
     may or may not be in it - so a scan may DECIDE from it, but anything it
     deletes or fails is re-read first, as the per-key reads always were."""
     return [(str(k), v) for k, v in jobs_dict.items()]
+
+
+#: The worker name an encode job runs on, in the place an engine's name stands.
+ENCODE_WORKER = "encode"
+
+
+def _worker_of(meta: dict) -> str:
+    """Which worker runs a job: the encoder worker for ``kind=encode``, else its task's
+    engine. ONE answer for the spawn and the prefetcher, so a worker warms only the jobs it
+    will run - an encode job of ``ts.v2:total_fast`` is not the nnU-Net worker's."""
+    if meta.get("kind") == "encode":
+        return ENCODE_WORKER
+    return _engines.engine_for_task(meta["task"]).name
 
 
 def _prefetch_candidate(current_jid: str, engine: str | None = None):
@@ -780,8 +842,7 @@ def _prefetch_candidate(current_jid: str, engine: str | None = None):
                             refresh_input=m.get("refresh_input"),
                             sources=m.get("source")):
             continue
-        if engine is not None and m.get("task") and \
-                _engines.engine_for_task(m["task"]).name != engine:
+        if engine is not None and m.get("task") and _worker_of(m) != engine:
             continue                       # another worker's job: not ours to warm
         src = (m.get("source") or [{"kind": "upload"}])[0]
         sk = source_cache_key(src)
@@ -1396,6 +1457,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             _emit(jid, {"state": "done", "finished": time.time(), "result": result})
             return
         from haversack.serve import run_name
+        encoding = meta.get("kind") == "encode"
         # per-container weights provisioning (engine's own), under the caller's pin if any
         ctx._ensure(run_name(meta["task"], meta.get("version")))
         entries = meta.get("source") or [{"kind": "upload"}]
@@ -1478,13 +1540,14 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             print(f"[fetch] {ident[:13]} {how} {time.time() - t_f:.1f}s", flush=True)
             rep.check()
             preread = take_pre_read(ctx.read_ahead, key,
-                                    fresh_bytes_wanted=bool(meta.get("refresh_input")))
+                                    fresh_bytes_wanted=bool(meta.get("refresh_input"))
+                                    or encoding)     # an encoder reads the FILE itself
             if preread is not None:
                 rep.stage("read", "preread")
                 print(f"[read] {ident[:13]} preread", flush=True)
                 input_path = preread
         else:
-            preread = take_pre_read(ctx.read_ahead, jid, fresh_bytes_wanted=False)
+            preread = take_pre_read(ctx.read_ahead, jid, fresh_bytes_wanted=encoding)
             if preread is not None:
                 rep2 = Reporter.of(on_progress, cancel=token)
                 rep2.stage("read", "preread")
@@ -1492,8 +1555,15 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
                 input_path = preread
             else:
                 input_path = _stage_uploads(ctx, jdir, local)[0]
-        from haversack.serve import RESULT_NAME, ResultCache, reference_input
-        s = ctx._compute(input_path, meta, on_progress, token)
+        from haversack.serve import OUTPUT_OF_KIND, RESULT_NAME, ResultCache, reference_input
+        name = OUTPUT_OF_KIND["encode"] if encoding else RESULT_NAME
+        local.mkdir(parents=True, exist_ok=True)
+        if encoding:
+            # the encoder writes its field itself, from the staged FILE (never a pre-read
+            # image), and records the job's identity (encoders.serving.input_record)
+            s = ctx._encode(input_path, meta, local / name, on_progress, token)
+        else:
+            s = ctx._compute(input_path, meta, on_progress, token)
         # Asked once more before anything is saved or published, as the local server
         # does. The cooperative token is honored only at a patch, and Modal's own
         # cancel - a signal raising InputCancellation - did not reach run_job on the
@@ -1501,20 +1571,25 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         # and reported done.
         if token.cancelled or _cancel_requested(jid):
             raise Cancelled("cancelled before publication")
-        record_inputs(s, entries, meta.get("input_identity") or [], ctx.series_cache)
+        if not encoding:
+            record_inputs(s, entries, meta.get("input_identity") or [], ctx.series_cache)
         # Saved locally and copied to the volume under the lock: everything after this
-        # reads the labels - their digest, the artifact pair, the cache put - and reads
+        # reads the output - its digest, the artifact pair, the cache put - and reads
         # the local file, which no reload in another thread can hide.
         import shutil
-        local.mkdir(parents=True, exist_ok=True)
-        labels = local / RESULT_NAME
-        s.save(labels)
+        labels = local / name
+        if not encoding:
+            s.save(labels)
         with ctx._vol_lock:
             jdir.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(labels, jdir / RESULT_NAME)   # the api's fallback reads it
+            shutil.copyfile(labels, jdir / name)   # the api's fallback reads it
             scratch_vol.commit()
-        from haversack.serve import result_payload
-        result = result_payload(s, labels)
+        if encoding:
+            from haversack.encoders.serving import field_payload
+            result = field_payload(s, labels)
+        else:
+            from haversack.serve import result_payload
+            result = result_payload(s, labels)
         # The publication order (re-key, pair load, pending marker,
         # cache put, done, overlap start) lives in one place -
         # haversack.serve.publish_completion; this side supplies the Dict
@@ -1535,8 +1610,13 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         # to what this container renders - the api checked it against ITS setting, and a
         # worker still warm from the previous deploy may have another. A record with no
         # list is a previous deploy's, or a path-surface ask: the deployment's set.
-        from haversack.jobpolicy import wanted_deliverables
-        wanted = wanted_deliverables(meta.get("deliverables"), ARTIFACTS)
+        from haversack.jobpolicy import unkeyed_deliverables, wanted_deliverables
+        wanted = () if encoding else wanted_deliverables(meta.get("deliverables"), ARTIFACTS)
+        # no key, no entry, nothing to render into: said on the record before `done`,
+        # as the local executor does, so `links` never names what no door serves
+        unkeyed = unkeyed_deliverables(wanted, meta.get("cache_key"))
+        if unkeyed:
+            _emit(jid, {"deliverables_unavailable": unkeyed})
 
         def _set_pending(key: str) -> None:
             _set_pending_marker(key, jid, wanted)
@@ -1554,7 +1634,8 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
                     key, labels, result,
                     {"identity": meta.get("input_identity"), "task": meta["task"],
                      "options": meta.get("options"), "job": jid,
-                     "computed": started})
+                     "computed": started, **({"kind": "encode"} if encoding else {})},
+                    output_name=name)
                 cache_vol.commit()
             return gen
 
@@ -1578,7 +1659,8 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             artifacts=wanted, cache_enabled=True,
             migrate_key=_migrate, set_pending=_set_pending,
             clear_pending=_clear_pending, put=_put,
-            mark_done=_mark_done, start_worker=_start)
+            mark_done=_mark_done, start_worker=_start,
+            **({"kind": "encode"} if encoding else {}))
     except Cancelled:
         _emit(jid, {"state": "cancelled", "finished": time.time()})
         _clear_own_artifacts_marker(jid, meta)
@@ -1710,6 +1792,10 @@ class _WorkerBase:
     def _compute(self, input_path, meta, on_progress, token):
         raise NotImplementedError
 
+    def _encode(self, input_path, meta, out, on_progress, token):
+        """An encode job's work; only ``EncodeWorker`` has one (the spawn routes by kind)."""
+        raise NotImplementedError(f"the {self.engine} worker runs no encode jobs")
+
     @modal.method()
     def run_job(self, jid: str, source_tokens: dict | None = None) -> None:
         try:
@@ -1792,6 +1878,69 @@ class Worker(_WorkerBase):
         return self.seg.segment(input_path, run_name(meta["task"], meta.get("version")),
                                 progress=on_progress,
                                 cancel=token, **(meta.get("options") or {}))
+
+
+if ENCODE:
+    # The encoder worker's image: the nnU-Net worker's plus the `encode` extra (feldglas, the
+    # field's writer; duckn, zarr, nibabel), and the encoder weights root on its volume.
+    encode_image = (
+        modal.Image.debian_slim(python_version="3.12")
+        .apt_install("git")
+        .uv_sync(extras=["torch", "serve", "cuda", "encode"], frozen=False)
+        .env({**{k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ},
+              "HAVERSACK_ENCODER_WEIGHTS": ENCODERS_ROOT})
+        .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
+    )
+    encoder_vol = modal.Volume.from_name(ENCODER_VOLUME, create_if_missing=True)
+
+    @app.cls(gpu=GPU, timeout=3600, memory=32768, scaledown_window=SCALEDOWN,
+             max_containers=MAX_CONTAINERS, image=encode_image,
+             volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
+                      CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol, ENCODERS_ROOT: encoder_vol})
+    class EncodeWorker(_WorkerBase):
+        """The encoder worker (2026-09-23): runs every ``kind=encode`` job - RADAR and the
+        nnU-Net encoders alike - through ``encoders.pipeline.encode_file``, and publishes the
+        field through the same ``_execute_job`` body a segmentation takes. A Segmenter answers
+        the key's describe (an nnU-Net encoder keys on its task's installed weights) and
+        installs a task's weights; encoder checkpoints install on first use onto their own
+        volume. No memory snapshot: the encoder imports are small beside the weights."""
+
+        engine = ENCODE_WORKER
+
+        def _engine_setup(self):
+            os.environ["TOTALSEG_WEIGHTS_PATH"] = WEIGHTS_ROOT
+            # HAVERSACK_ENCODER_WEIGHTS is the image's own env (ENCODERS_ROOT), not a knob
+            from haversack import Segmenter
+            self.seg = Segmenter(device="cuda", weights=WEIGHTS_ROOT)
+
+        def _prepare(self, task: str, progress=None) -> dict:
+            self._ensure(task)
+            return {"encoder": task}
+
+        def _ensure(self, task: str) -> None:
+            if task in self._ensured:
+                return
+            from haversack.encoders.registry import resolve
+            from haversack.encoders.serving import ensure_weights
+            spec = resolve(task)
+            if ensure_weights(spec.name):          # downloaded now: make it every container's
+                encoder_vol.commit()
+            if spec.uses_task:
+                self.seg.prepare(spec.uses_task)
+                weights_vol.commit()
+            self._ensured.add(task)
+
+        def _encode(self, input_path, meta, out, on_progress, token):
+            from haversack.encoders.pipeline import encode_file
+            from haversack.encoders.serving import input_record
+            from haversack.progress import Reporter
+            rep = Reporter.of(on_progress, cancel=token)
+            rep.stage("encode", meta["task"])
+            ident = (meta.get("input_identity") or [None])[0]
+            return encode_file(meta["task"], input_path, out, identity=input_record(ident, input_path),
+                               device="cuda", int8=bool((meta.get("options") or {}).get("int8")),
+                               cancel=token, task_weights=WEIGHTS_ROOT,
+                               progress=lambda m: rep.stage("encode", m))
 
 
 class _EngineShim:
@@ -1917,15 +2066,19 @@ def _worker_classes() -> dict:
     return {n: c for n, c in ENGINE_WORKERS.items() if _engines.enabled(n)}
 
 
-def _spawn_worker(task: str, jid: str, source_tokens=None):
+def _spawn_worker(task: str, jid: str, source_tokens=None, kind: str = "segment"):
     """Dispatch to the worker for this task's engine.
 
     Routes on the *grammar* - every wire form is canonicalized to ``eco:task``
     before it gets here - through the engine registry, so a new engine needs no
     branch: one registry row plus a worker class. An ecosystem with no engine
     entry (every nnU-Net catalog) falls through to the default engine."""
-    engine = _engines.engine_for_task(task).name
+    engine = _worker_of({"task": task, "kind": kind})
     workers = _worker_classes()
+    if engine == ENCODE_WORKER:
+        if not ENCODE:
+            raise RuntimeError("this deployment runs no encode jobs (deploy with HAVERSACK_ENCODE=1)")
+        return EncodeWorker().run_job.spawn(jid, source_tokens=source_tokens)
     if engine not in workers:
         env = _engines.ENGINES[engine].enabled_env
         raise RuntimeError(f"the {engine} engine is not enabled on this "
@@ -1935,6 +2088,13 @@ def _spawn_worker(task: str, jid: str, source_tokens=None):
 
 class ModalExecutor:
     """The :func:`haversack.serve.create_app` executor protocol over Modal primitives."""
+
+    #: Whether ``kind=encode`` jobs run here: when the deployment was made with
+    #: ``HAVERSACK_ENCODE=1`` (an ``EncodeWorker``). The submit door asks this and refuses
+    #: with 501 before any job exists otherwise.
+    encodes = ENCODE
+    #: The api container holds no encoder weights: ``/v1/encoders`` says None, not False.
+    encoder_weights_visible = False
 
     #: Supplied by :func:`api` after construction - the API container builds a
     #: catalog-only Segmenter (device is cosmetic there; jobs run on the Worker).
@@ -1985,32 +2145,14 @@ class ModalExecutor:
 
     def _pending_marker(self, key: str):
         """The live ``artifacts:`` marker for ``key`` - one Dict get - or None."""
-        m = jobs_dict.get(f"artifacts:{key}")
-        if not (isinstance(m, dict) and m.get("state") == "pending"):
-            return None
-        # the same 900 s rule the local executor applies on read: a marker a killed
-        # overlap thread left behind must not answer 202 forever
-        if time.time() - float(m.get("t") or 0) > 900:
-            # and the marker goes, as it does locally: left in place, the writer's
-            # refuse-if-present rule would decline to mark a genuinely new flight
-            try:
-                jobs_dict.pop(f"artifacts:{key}", None)
-            except Exception:                  # noqa: BLE001 - a read path must not fail on it
-                pass
-            return None
-        return m
+        return _pending_marker(key, sweep=True)
 
     def artifact_state(self, key: str, name: str | None = None) -> str:
         """As the local executor's: "pending" while a worker's overlap is still placing
         this entry's artifacts - and, asked about ONE deliverable, only when that render
         was asked for it (the marker's ``names``; a marker without them is a previous
         deploy's, which rendered its whole set)."""
-        from haversack.jobpolicy import pending_covers
-        m = self._pending_marker(key)
-        if m is None:
-            return "absent"
-        return ("pending" if name is None or pending_covers(m.get("names"), name)
-                else "absent")
+        return _artifact_state(key, name, sweep=True)
 
     def _unrendered_on_hit(self, key: str, wanted, hit) -> dict:
         """``{name: why}`` for what a cache hit's list names and its stored generation
@@ -2064,7 +2206,7 @@ class ModalExecutor:
     _weights_reloaded_at = 0.0
     _wv_cache: dict = {}                   # task -> (versions, stamped at)
 
-    def _fresh_weights_versions(self, task):
+    def _fresh_weights_versions(self, task, kind: str = "segment"):
         """weights_versions_of, but stale-proof: an API container's mounted
         weights volume is frozen at container start, so after the worker
         first-installs a task this side kept deriving weights=["unknown"] -
@@ -2074,23 +2216,24 @@ class ModalExecutor:
         container: "unknown" is also the honest permanent answer for weights
         haversack did not install (TS-installed, hand-copied), and an unthrottled
         version reloaded a multi-GB volume on every HEAD probe forever."""
-        from haversack.serve import weights_versions_of
+        from haversack.serve import versions_for
         cls = type(self)
-        cached = cls._wv_cache.get(task)
+        memo = task if kind == "segment" else (kind, task)   # a segmentation's memo as it was
+        cached = cls._wv_cache.get(memo)
         if cached is not None and time.time() - cached[1] < 30.0:
             return cached[0]               # the listing derives per ENTRY -
                                            # without this that is a describe()
                                            # volume walk per row
-        wv = weights_versions_of(self.segmenter, task)
+        wv = versions_for(self.segmenter, task, kind)
         if any("unknown" in str(v) for v in wv):
             reloaded = self._reload_weights()
             if reloaded is None:           # throttled: answer as-is, uncached
                 return wv
             if not reloaded:               # the reload failed
-                cls._wv_cache[task] = (wv, time.time())
+                cls._wv_cache[memo] = (wv, time.time())
                 return wv
-            wv = weights_versions_of(self.segmenter, task)
-        cls._wv_cache[task] = (wv, time.time())
+            wv = versions_for(self.segmenter, task, kind)
+        cls._wv_cache[memo] = (wv, time.time())
         return wv
 
     def _reload_weights(self):
@@ -2137,7 +2280,11 @@ class ModalExecutor:
     def submit(self, jid, jdir, input_path, task, options, *, source=None,
                identity=(), no_cache: bool = False, source_tokens=None,
                inputs: tuple = (), refresh_input: bool = False,
-               version: str | None = None, deliverables=None):
+               version: str | None = None, deliverables=None, kind: str = "segment"):
+        if kind != "segment" and not (kind == "encode" and self.encodes):
+            # the route asks `encodes` first; this is the second line, for a caller that did not
+            raise ValueError(f"this deployment runs no {kind!r} jobs")
+        encoding = kind == "encode"
         # `deliverables` is the request's list (None: it named none). It is written on
         # the job's record - which the worker reads ONCE, when the job starts, so the
         # list reaches it with no Dict read of its own - and it never reaches
@@ -2151,8 +2298,8 @@ class ModalExecutor:
         # written into the job dir under that role. Sending server-local paths
         # through a Dict to another container would be sending it a lie.
         from haversack.jobpolicy import wanted_deliverables
-        from haversack.serve import RESULT_NAME, result_key
-        wanted = wanted_deliverables(deliverables, ARTIFACTS)
+        from haversack.serve import result_key
+        wanted = () if encoding else wanted_deliverables(deliverables, ARTIFACTS)
         with self.volume_guard:
             # Make any upload visible to the worker - and only then: a commit was
             # 0.67 s of every submit's 1.48 (2026-09-19), paid by idc:/input: jobs
@@ -2166,8 +2313,10 @@ class ModalExecutor:
                 scratch_vol.commit()
         key = None
         if identity:
-            key = result_key(identity, task, options,
-                             self._fresh_weights_versions(task))
+            # the kind only for an encode job: a segmentation's calls are exactly as they were
+            key = (result_key(identity, task, options, self._fresh_weights_versions(task, kind),
+                              kind=kind) if encoding
+                   else result_key(identity, task, options, self._fresh_weights_versions(task)))
             if not no_cache:
                 hit = self.cache_get(key)
                 if hit is not None:
@@ -2179,7 +2328,8 @@ class ModalExecutor:
                             # which no other container (nor this one restarted) has
                             "result": hit[1],
                             "cache_path": str(Path(CACHE_ROOT) / key
-                                              / Path(hit[0]).parent.name / RESULT_NAME),
+                                              / Path(hit[0]).parent.name / Path(hit[0]).name),
+                            **({"kind": "encode"} if encoding else {}),
                             # the handle the job result route resolves - and leases -
                             # the entry by; cache_path names one generation, which a
                             # later publication of the key lets pruning reclaim
@@ -2198,6 +2348,7 @@ class ModalExecutor:
                 "input_identity": list(identity), "cache_key": key,
                 "deliverables": list(wanted),
                 "refresh_input": bool(refresh_input),
+                **({"kind": "encode"} if encoding else {}),
                 # the caller's pin: the worker runs run_name(task, version), so its
                 # catalog installs that version or refuses it (see serve.run_name)
                 **({"version": version} if version else {}),
@@ -2207,7 +2358,8 @@ class ModalExecutor:
         # installed version (see LocalExecutor.submit); the worker's re-key installs one
         if key and not (version and no_cache):
             jobs_dict[f"inflight:{key}"] = jid
-        call = _spawn_worker(task, jid, source_tokens)
+        call = (_spawn_worker(task, jid, source_tokens, kind=kind) if encoding
+                else _spawn_worker(task, jid, source_tokens))
         _emit(jid, {"call_id": call.object_id})   # merge, never clobber worker emits
         return meta
 
@@ -2296,6 +2448,8 @@ class ModalExecutor:
                 # that declined it
                 "deliverables", "deliverables_unavailable")
         d = {k: meta.get(k) for k in keys if meta.get(k) is not None}
+        if meta.get("kind") == "encode":
+            d["kind"] = "encode"               # as the local executor says it, and only then
         if meta.get("state") == "done" and meta.get("result") is not None:
             d["result"] = meta["result"]
         return d
@@ -2347,10 +2501,11 @@ class ModalExecutor:
         this only after the job's published cache entry, which is the copy this
         container can rely on: the scratch file is the worker's, and on 2026-09-19 the
         api container did not see it for 162 of 440 finished IDC jobs."""
-        from haversack.serve import RESULT_NAME
+        from haversack.serve import OUTPUT_OF_KIND, RESULT_NAME
         meta = jobs_dict.get(jid)
         if meta is None:
             return None, None
+        name = OUTPUT_OF_KIND["encode"] if meta.get("kind") == "encode" else RESULT_NAME
         if meta.get("cache_path"):
             p = Path(meta["cache_path"])
             _reload_cache_view()
@@ -2365,8 +2520,8 @@ class ModalExecutor:
         # reload (open files) leaves a view that may predate the worker's save: judge by
         # what is visible only once a reload has taken, and say "not visible yet" rather
         # than "gone" if none does.
-        p = Path(SCRATCH_ROOT) / jid / RESULT_NAME
-        local = Path(MIRROR_ROOT) / "_jobs" / jid / RESULT_NAME
+        p = Path(SCRATCH_ROOT) / jid / name
+        local = Path(MIRROR_ROOT) / "_jobs" / jid / name
         for delay in CACHE_CONFIRM_DELAYS_S:
             if delay:
                 time.sleep(delay)
@@ -2440,5 +2595,9 @@ if PUBLIC:
                                  # a miss read from a view a refused reload left stale
                                  # is a 503, not a 404 (see _confirm_cache_absent)
                                  confirm_absent=_confirm_cache_absent,
+                                 # a render still running is a 202, not a 404: read
+                                 # from the marker, never swept from here
+                                 artifact_state=lambda key, name=None: _artifact_state(
+                                     key, name, sweep=False),
                                  # so a pinned read can be answered, not refused outright
                                  versions_fn=lambda t: installed_versions(seg, t))

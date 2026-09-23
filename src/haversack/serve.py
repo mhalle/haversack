@@ -121,7 +121,7 @@ from .errors import Cancelled, InputError, HaversackError, ResourceError
 from .jobpolicy import (DELIVERABLES, INPUT_NOT_ON_HAND, RENDER_BUSY, fill_read_ahead,
                         missing_deliverables, pending_covers, prefetchable, record_inputs,
                         take_pre_read, refresh_cached_input, source_cache_key,
-                        wanted_deliverables)
+                        unkeyed_deliverables, wanted_deliverables)
 from .progress import CancelToken, Reporter
 
 ACTIVE = ("queued", "running")
@@ -130,11 +130,38 @@ ARTIFACT_PENDING_TTL = 900.0   # a pending marker older than this is a dead
 #: Defined in jobpolicy; imported here so the wire vocabulary has one source.
 from .jobpolicy import TERMINAL  # noqa: E402
 RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default artifact
+#: An encode job's output (2026-09-23): an embedding field, written by feldglas. A generation
+#: holds exactly ONE primary output, labels or a field; the key keeps them apart (``result_key``'s
+#: ``kind``), and every "is this entry there" question asks ``primary_output`` rather than
+#: naming the labels file, so the lifetime code (leases, claims, pruning) is one code for both.
+FIELD_NAME = "field.zarr.zip"
+PRIMARY_NAMES = (RESULT_NAME, FIELD_NAME)
+#: What each kind of job publishes, and the suffix a download of it is named with.
+OUTPUT_OF_KIND = {"segment": RESULT_NAME, "encode": FIELD_NAME}
+
+
+def primary_output(where) -> "Path | None":
+    """The primary output a generation directory holds (labels or a field), or None."""
+    for name in PRIMARY_NAMES:
+        p = Path(where) / name
+        if p.exists():
+            return p
+    return None
 #: The eventually-consistent artifacts, rendered after "done" is already served.
 #: Named once: `put` has to know which files belong to the generation it replaces.
 #: They are the files of `jobpolicy.DELIVERABLES` - the names a request asks for them
 #: under (2026-09-20) - read from that table rather than written a second time.
 ARTIFACT_NAMES = tuple(DELIVERABLES.values())
+#: What is SERVED beside a result's labels: the URL's file name -> (the file in the
+#: generation it is built from, the deliverable that file belongs to). ``meta.json`` is
+#: built from the result record, which every entry has, so it names neither. The one
+#: table both doors register from (2026-09-21) - the path surface, with its grid tokens,
+#: and the job-scoped routes - each name under GET and HEAD alike, so a view added here
+#: cannot come to exist at one door, or under one verb, and not the other.
+ARTIFACT_VIEWS = {"meta.json": (None, None),
+                  "preview.png": (DELIVERABLES["preview"], "preview"),
+                  "statistics.json": (DELIVERABLES["statistics"], "statistics"),
+                  "statistics.tsv": (DELIVERABLES["statistics"], "statistics")}
 #: Which publication an entry holds. Written by `put` before the labels file, so an
 #: entry that is visible at all has one, and checked by `add_artifact` so a worker
 #: from an earlier publication cannot write into a later one.
@@ -188,19 +215,27 @@ _ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack 
 CACHE_EPOCH = "3"
 
 
-def result_key(identity, task, options, weights_versions, epoch=None) -> str:
+def result_key(identity, task, options, weights_versions, epoch=None, kind: str = "segment") -> str:
     """The result-cache key: everything that determines the output bytes.
 
     (input identity) x (task + options) x (weights versions) x (cache epoch) - the
     design's cache contract. Over-keying on an option that turns out inert only
     costs hits; under-keying would serve wrong bytes, so all options count. See
     :data:`CACHE_EPOCH` for the last component and when it moves.
+
+    ``kind`` is what the job makes (2026-09-23): ``segment`` (labels, every key before that
+    day) or ``encode`` (an embedding field). It joins the payload only when it is not
+    ``segment``, so no existing key moves - and it must join then: ``ts.v2:total_fast`` is a
+    task AND an encoder, and one key for both would hand a label map to a field's reader.
     """
     import hashlib
-    payload = json.dumps({"identity": list(identity), "task": str(task),
-                          "options": {k: options[k] for k in sorted(options)},
-                          "weights": list(weights_versions),
-                          "haversack": epoch or CACHE_EPOCH}, sort_keys=True)
+    body = {"identity": list(identity), "task": str(task),
+            "options": {k: options[k] for k in sorted(options)},
+            "weights": list(weights_versions),
+            "haversack": epoch or CACHE_EPOCH}
+    if kind != "segment":
+        body["kind"] = str(kind)
+    payload = json.dumps(body, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -338,14 +373,40 @@ def weights_versions_of(segmenter, task) -> list:
 
     The one door every result key's weights pass through (Modal's
     ``_fresh_weights_versions`` wraps it), which is why the engine epoch joins here and
-    not at each ``result_key`` call site."""
+    not at each ``result_key`` call site. An entry that names the model folder it
+    resolved (``model``: its task states a trainer/plans choice, as ts.v3's do) adds it,
+    because one dataset's sidecar covers every folder in it (2026-09-21). A task that states
+    its tile step (``step_size``, ts.v3's 0.8) adds ``step=<value>`` the same way, and a cascade
+    its crop rule (``crop=upstream``, 2026-09-22), which moved every cascade's labels and no
+    other task's. A task stating auxiliary classes adds ``auxiliary=0`` (2026-09-22): its
+    results used to carry them as unnamed values, and now map them to 0 as upstream does."""
     try:
-        entries = segmenter.describe(task).get("weights_installed") or []
+        d = segmenter.describe(task)
+        entries = d.get("weights_installed") or []
         out = [f"{e.get('id')}={e.get('version') or e.get('sha256') or 'unknown'}"
+               + (f"/{e['model']}" if e.get("model") else "")
                for e in entries] or ["unknown"]
+        if d.get("step_size") is not None:
+            out.append(f"step={d['step_size']:g}")
+        if d.get("crop"):
+            out.append(f"crop={d['crop']}")
+        if d.get("auxiliary"):
+            out.append("auxiliary=0")
     except Exception:
         out = ["unknown"]
     return out + _engine_epoch(segmenter, task)
+
+
+def versions_for(segmenter, task, kind: str = "segment") -> list:
+    """The key's weights component for a job of ``kind``: ``weights_versions_of`` for a
+    segmentation, the encoder's own (``encoders.serving.field_versions``) for an encode job.
+    The ONE place the choice is made, so submit, publication's re-key and every executor key
+    an encode job alike (a re-key through the segmentation's door would publish the field
+    under a key nobody asks for - the _EngineShim lesson of 2026-09-12)."""
+    if kind == "encode":
+        from .encoders.serving import field_versions
+        return field_versions(segmenter, task)
+    return weights_versions_of(segmenter, task)
 
 
 def installed_versions(segmenter, task) -> list | None:
@@ -1243,13 +1304,13 @@ class ResultCache:
                     where = d                  # a legacy flat entry, or nothing at all
                 else:
                     where = self._generation_dir(key, gen)
-                if not (where / RESULT_NAME).exists():
+                if primary_output(where) is None:
                     if where == d:
                         return None
                     continue                   # the pointer moved on, or dangles: ask again
                 if lease and not self._take_lease(where):
                     continue                   # reclaimed before the lease could land
-                if (where / RESULT_NAME).exists():
+                if primary_output(where) is not None:
                     return where
             return None
 
@@ -1609,6 +1670,8 @@ class ResultCache:
         if not isinstance(meta, dict):
             return None
         fields = {k: meta.get(k) for k in ("task", "identity", "options", "computed")}
+        if meta.get("kind") not in (None, "segment"):
+            fields["kind"] = meta["kind"]      # a field says what it is; a segmentation's fields are as they were
         # Remembered under the stamp the CALLER saw. If a publication landed between that
         # stat and this read, what was read belongs to the new pointer and is filed under
         # the old one's stamp - which no stat will ever return again, so it is never
@@ -1635,12 +1698,15 @@ class ResultCache:
         content. None when the labels are gone."""
         import os
         try:
-            size = os.stat(where / RESULT_NAME).st_size
+            size = os.stat(primary_output(where) or where / RESULT_NAME).st_size
         except OSError:
             return None
         task, identity, options = fields.get("task"), fields.get("identity"), fields.get("options")
         row = {"key": key, "task": task, "identity": identity, "options": options,
                "computed": fields.get("computed"), "published": stamp / 1e9, "bytes": size}
+        if fields.get("kind") not in (None, "segment"):
+            row["kind"] = fields["kind"]       # an encode job's field: said, and never linked as labels
+            return row
         if resource_links(task, identity, options):    # asked first: two stats saved a row
             row["links"] = resource_links(task, identity, options,
                                           preview=(where / "preview.png").exists(),
@@ -1799,7 +1865,7 @@ class ResultCache:
             result = json.loads((g / "result.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):          # ValueError: JSONDecodeError, UnicodeDecodeError
             result = {}
-        return g / RESULT_NAME, result if isinstance(result, dict) else {}
+        return primary_output(g) or g / RESULT_NAME, result if isinstance(result, dict) else {}
 
     def adopt(self, key: str, gen: str, *, names=(), sizes=None) -> bool:
         """Make an existing, COMPLETE generation directory this entry's current one.
@@ -1861,8 +1927,8 @@ class ResultCache:
             return None
 
     def put(self, key: str, labels_path, result: dict, meta: dict,
-            preview_path=None, statistics_path=None, generation=None,
-            move: bool = False) -> str:
+            preview_path=None, statistics_path=None, output_name: str = RESULT_NAME,
+            generation=None, move: bool = False) -> str:
         """Publish one generation of a result, returning its generation token.
 
         The generation is assembled COMPLETE in a directory of its own and becomes
@@ -1932,7 +1998,9 @@ class ResultCache:
                 if src and Path(src).exists():
                     _place(name, _take(src) if move
                            else (lambda t, s=src: shutil.copy2(s, t)))
-            _place(RESULT_NAME, _take(labels_path) if move
+            if output_name not in PRIMARY_NAMES:
+                raise ValueError(f"{output_name!r} is not a primary output ({', '.join(PRIMARY_NAMES)})")
+            _place(output_name, _take(labels_path) if move
                    else (lambda t: shutil.copy2(labels_path, t)))
 
             # complete: the staging directory becomes a generation, and then one rename of
@@ -2048,11 +2116,15 @@ class ResultCache:
         unguarded in one direction and, once a check was added after the rename, let a
         late worker delete the artifact its successor had already placed.
         """
+        if name in PRIMARY_NAMES:
+            # a primary output is placed by `put` alone: an artifact of that name would give a
+            # generation two, and `get` would answer with whichever it asks for first
+            raise ValueError(f"{name!r} is a primary output, not an artifact")
         import os
         import shutil
         g = (self._generation_dir(key, generation) if generation
              else self._resolve(key, lease=False))    # a writer, not a reader: no lease
-        if g is None or not (g / RESULT_NAME).exists():
+        if g is None or primary_output(g) is None:
             return False
         tmp = g / f"{name}.{uuid.uuid4().hex[:8]}.tmp"   # unique per writer
         shutil.copy2(src_path, tmp)
@@ -2279,6 +2351,74 @@ def etag_of(key: str, result=None) -> str:
     return f'"{digest}"' if digest else f'"{key[:32]}"'
 
 
+def body_etag(body: bytes) -> str:
+    """The validator for an ARTIFACT beside a result - ``meta.json``, ``preview.png``,
+    ``statistics.json`` / ``.tsv`` - the digest of the very bytes sent, in the labels'
+    own spelling (``"sha256:<hex>"``).
+
+    Until 2026-09-21 all four carried ``etag_of(key)``, the KEY-derived tag, under
+    ``Cache-Control: public, max-age=3600``. A ``Cache-Control: no-cache`` recompute
+    republishes under the same key, so one URL then served other bytes (a preview of
+    8290 and then 8309 bytes, a ``volume_ml`` of 0.384 and then 0.512) under an
+    unchanged STRONG validator, which RFC 9110 8.8.1 forbids: a cache revalidating its
+    stored preview was told "not modified" about a picture of the previous labels - and
+    the four URLs of one result shared the one value besides.
+
+    Why the content and not the publication (a generation id plus the artifact's name,
+    which needs no read): the read is already paid. Three of the four bodies are BUILT
+    per request - ``meta.json`` from the result record, ``statistics.json``
+    re-serialized, the ``.tsv`` derived from it - so a HEAD owes them to its
+    ``Content-Length`` anyway, and the fourth is a PNG of kilobytes. A digest is also
+    right where a generation's name is not: a legacy flat entry has no generation, a
+    job's own copy is no publication at all, and two publications that render the same
+    bytes ARE the same to a cache - the labels' tag has always said so. A file that
+    goes from absent to present within a generation goes from 404 to 200: no tag was
+    ever issued for the absence, so none can be stale.
+    """
+    import hashlib
+    return f'"sha256:{hashlib.sha256(body).hexdigest()}"'
+
+
+def answer_body(request, resp, headers: dict):
+    """GET's 200, HEAD's 200 or either one's 304 for a response whose body is in hand.
+
+    ``resp`` is the 200 a GET sends and ``headers`` its caching fields, ETag included.
+    HEAD gets the same fields and the GET's ``Content-Length`` and ``Content-Type`` with
+    no content (RFC 9110 9.3.2); a matching ``If-None-Match`` gets the 304 on either
+    verb, as the labels do. One function, so the two verbs cannot come to disagree
+    about a representation - the defect the labels' probe had until 2026-09-21."""
+    from fastapi.responses import Response
+    fresh = not_modified(request, headers["ETag"], headers)
+    if fresh is not None:
+        return fresh
+    if request.method == "HEAD":
+        head = Response(status_code=200, headers=headers)
+        head.headers["content-length"] = str(len(resp.body))   # GET's, never the 0 of
+        head.headers["content-type"] = resp.headers["content-type"]    # an empty body
+        return head
+    resp.headers.update(headers)
+    return resp
+
+
+def artifact_response(view: str, *, result=None, path=None):
+    """The 200 a GET of one ``ARTIFACT_VIEWS`` name sends, its body in hand: the result
+    record for ``meta.json``, else built from the generation's file at ``path``. In
+    hand - never a ``FileResponse`` streamed at send time - because the validator is
+    the digest of these bytes (``body_etag``) and a HEAD owes their length; the files
+    are a PNG and a JSON of kilobytes. Blocking (it reads), so async routes call it off
+    the loop; OSError when the file left between the look and the read."""
+    from fastapi.responses import JSONResponse, Response
+    if view == "meta.json":
+        return JSONResponse(result or {})
+    if view == "preview.png":
+        return Response(Path(path).read_bytes(), media_type="image/png")
+    stats = json.loads(Path(path).read_text(encoding="utf-8"))
+    if view == "statistics.json":
+        return JSONResponse(stats)
+    from .statistics import statistics_tsv
+    return Response(statistics_tsv(stats), media_type="text/tab-separated-values")
+
+
 def same_output(own, published) -> bool:
     """Whether a published entry holds the bytes a job reported: both content digests
     known and equal. A missing digest is not a match - an entry whose result.json is
@@ -2322,8 +2462,18 @@ def not_modified(request, etag: str, headers=None):
         return None
     if not raw:
         return None
-    tags = {t.strip() for t in raw.split(",")}
-    if etag in tags or "*" in tags:
+
+    def opaque(tag: str) -> str:
+        # RFC 9110 13.1.2: If-None-Match uses the WEAK comparison - two tags match when
+        # their opaque parts do, whatever `W/` either wears (8.8.3.2). Until 2026-09-21
+        # the strings were compared whole, so `W/"<our tag>"` - what a proxy that
+        # re-encodes a body hands back, having weakened the tag as it must - was a 200
+        # and the whole label volume again. The safe direction, and still wrong.
+        tag = tag.strip()
+        return tag[2:] if tag.startswith("W/") else tag
+
+    tags = {opaque(t) for t in raw.split(",")}
+    if opaque(etag) in tags or "*" in tags:
         kept = {k: v for k, v in (headers or {}).items()
                 if k.lower() in _NOT_MODIFIED_KEEPS}
         return Response(status_code=304, headers={**kept, "ETag": etag})
@@ -2333,7 +2483,7 @@ def not_modified(request, etag: str, headers=None):
 def publish_completion(*, segmenter, task, identity, options, cache_key,
                        labels_path, input_image, artifacts, cache_enabled,
                        migrate_key, set_pending, clear_pending, put,
-                       mark_done, start_worker):
+                       mark_done, start_worker, kind: str = "segment"):
     """The one correct publication order for a finished segmentation, shared
     by both executors so ordering fixes cannot drift apart (in the 2026-08-25
     review, C7 and C8 each had to be written twice):
@@ -2357,8 +2507,9 @@ def publish_completion(*, segmenter, task, identity, options, cache_key,
     here. Returns (cache_key, pair)."""
     if cache_key:
         try:
-            fresh = result_key(identity, task, options,
-                               weights_versions_of(segmenter, task))
+            # the kind only when it is not a segmentation: that call stays exactly as it was
+            fresh = result_key(identity, task, options, versions_for(segmenter, task, kind),
+                               **({"kind": kind} if kind != "segment" else {}))
             if fresh != cache_key:
                 migrate_key(cache_key, fresh)
                 cache_key = fresh
@@ -2502,11 +2653,14 @@ class LocalExecutor:
     ``keep_finished`` more finish after them.
     """
 
+    #: ``kind=encode`` jobs run here (2026-09-23): in-process, on this server's device.
+    encodes = True
+
     def __init__(self, segmenter, *, workdir, max_pending: int = 16,
                  keep_finished: int = 50, segment_fn=None, fetch_idc_fn=None,
                  cache_dir=None, keep_cached: int = 500,
                  input_cache_bytes: int = 8 << 30, read_fn=None, sources=None,
-                 artifacts=("preview", "statistics"), jobs_ttl_h: float = 24.0,
+                 artifacts=("preview", "statistics"), jobs_ttl_h: float = 24.0, encode_fn=None,
                  result_store=None, sweep_interval_h: float = 24.0):
         self.segmenter = segmenter
         self.workdir = Path(workdir)
@@ -2514,6 +2668,8 @@ class LocalExecutor:
         self.max_pending = int(max_pending)
         self.keep_finished = int(keep_finished)
         self._segment = segment_fn or segmenter.segment
+        #: the encode job's work (``encoders.pipeline.encode_file``'s signature); tests inject one
+        self._encode = encode_fn
         self._fetch_idc = fetch_idc_fn or _fetch_idc_series
         self.sources = _source_registry(sources)
         self.series_cache = SeriesCache(self.workdir / "series_cache", self._fetch_source,
@@ -2660,8 +2816,9 @@ class LocalExecutor:
                             version=r.get("version"),
                             # held to what THIS process renders; a record from before
                             # the list has none and gets the deployment's set
-                            deliverables=wanted_deliverables(r.get("deliverables"),
-                                                             self.artifacts))
+                            deliverables=(() if r.get("kind") == "encode" else
+                                          wanted_deliverables(r.get("deliverables"),
+                                                              self.artifacts)))
             self._jobs[rec.id] = rec
             self._pending.append(rec.id)
             # the single-flight marker, oldest first: without it a re-ask for the same
@@ -2707,18 +2864,20 @@ class LocalExecutor:
                *, source=None, identity: tuple = (), no_cache: bool = False,
                source_tokens: dict | None = None, inputs: tuple = (),
                refresh_input: bool = False, version: str | None = None,
-               deliverables=None) -> JobRecord:
+               deliverables=None, kind: str = "segment") -> JobRecord:
         # `deliverables`: the request's list (None: it named none). It goes on the
         # record and is never seen by `result_key` below - rendering a preview, or
-        # declining one, is not a different result (2026-09-20).
+        # declining one, is not a different result (2026-09-20). An encode job renders
+        # none: a preview and statistics are of labels (2026-09-23).
         rec = JobRecord(id=jid, task=task, options=options, dir=jdir, input_path=input_path,
                         source=list(source or [{"kind": "upload"}]), input_identity=tuple(identity),
                         input_paths=tuple(inputs), source_tokens=source_tokens or None,
-                        refresh_input=bool(refresh_input), version=version,
-                        deliverables=wanted_deliverables(deliverables, self.artifacts))
+                        refresh_input=bool(refresh_input), version=version, kind=kind,
+                        deliverables=(() if kind == "encode"
+                                      else wanted_deliverables(deliverables, self.artifacts)))
         if self.cache is not None and identity:
-            rec.cache_key = result_key(identity, task, options,
-                                       weights_versions_of(self.segmenter, task))
+            rec.cache_key = result_key(identity, task, options, versions_for(self.segmenter, task, kind),
+                                       **({"kind": kind} if kind != "segment" else {}))
             if not no_cache:
                 hit = self.cache.get(rec.cache_key)
                 if hit is not None:
@@ -3185,6 +3344,31 @@ class LocalExecutor:
         rec.input_path = staged[rec.input_paths[0][0]]
         return staged
 
+    def _run_encode(self, rec: JobRecord, reporter) -> tuple:
+        """An encode job's compute: the staged input FILE (the encoder reads it itself, by its
+        own convention - a pre-read image is dropped, never used), the field written into the
+        job's directory, and its published record. The field records the job's identity - the
+        source identifier and the bytes' digest - not the scratch path the bytes sat at."""
+        from .encoders.pipeline import encode_file
+        from .encoders.serving import field_payload, input_record
+        take_pre_read(self.read_ahead, rec.id, fresh_bytes_wanted=True)   # nothing lingers pinned
+        path = Path(rec.input_path)
+        identity = input_record(rec.input_identity[0] if rec.input_identity else None, path)
+        if self._encode is None:
+            # a server installs on first use (encoders.serving.ensure_weights); an injected
+            # encode_fn brings its own
+            from .encoders.serving import ensure_weights
+            reporter.stage("weights", rec.task)
+            ensure_weights(rec.task, progress=lambda m: reporter.stage("weights", m))
+        reporter.stage("encode", rec.task)
+        work = self._encode or encode_file
+        report = work(rec.task, path, rec.dir / FIELD_NAME, identity=identity,
+                      device=self.segmenter.policy.get("device", "auto"),
+                      int8=bool(rec.options.get("int8")), cancel=rec.cancel_token,
+                      task_weights=getattr(getattr(self.segmenter, "weights", None), "root", None))
+        out = Path(report["field"])
+        return out, field_payload(report, out)
+
     def _dispatch(self) -> None:
         while True:
             with self._cv:
@@ -3260,14 +3444,17 @@ class LocalExecutor:
                             inp = preread
                         else:
                             inp = rec.input_path
-                seg = self._segment(inp, run_name(rec.task, rec.version), progress=reporter,
-                                    cancel=rec.cancel_token, **rec.options)
-                # what the result was computed FROM, and under what terms - the
-                # rights each fetch recorded beside its bytes, or "not
-                # determined" for an upload; the same rule the Modal worker applies
-                record_inputs(seg, entries, rec.input_identity, self.series_cache)
-                rec.labels_path = Path(seg.save(rec.dir / RESULT_NAME))
-                rec.result = result_payload(seg, rec.labels_path)
+                if rec.kind == "encode":
+                    rec.labels_path, rec.result = self._run_encode(rec, reporter)
+                else:
+                    seg = self._segment(inp, run_name(rec.task, rec.version), progress=reporter,
+                                        cancel=rec.cancel_token, **rec.options)
+                    # what the result was computed FROM, and under what terms - the
+                    # rights each fetch recorded beside its bytes, or "not
+                    # determined" for an upload; the same rule the Modal worker applies
+                    record_inputs(seg, entries, rec.input_identity, self.series_cache)
+                    rec.labels_path = Path(seg.save(rec.dir / RESULT_NAME))
+                    rec.result = result_payload(seg, rec.labels_path)
                 (rec.dir / "result.json").write_text(json.dumps(rec.result), encoding="utf-8")
 
                 def _migrate(old_key: str, new_key: str) -> None:
@@ -3288,6 +3475,11 @@ class LocalExecutor:
                     # added to the list up to here, and must not believe it did after.
                     wanted = wanted_deliverables(rec.deliverables, self.artifacts)
                     rec.deliverables, rec.deliverables_sealed = wanted, True
+                    # no entry to render into (no result cache, or no identity to key
+                    # one by): said before `done` is observable, so `links` never names
+                    # what no door will serve (2026-09-21)
+                    rec.deliverables_unavailable = unkeyed_deliverables(
+                        wanted, rec.cache_key) or rec.deliverables_unavailable
 
                 def _set_pending(key: str) -> None:
                     # refuse-if-present: a duplicate flight must not ACQUIRE
@@ -3327,8 +3519,9 @@ class LocalExecutor:
                         key, rec.labels_path, rec.result,
                         {"identity": list(rec.input_identity), "task": rec.task,
                          "options": rec.options, "computed": rec.started,
-                         "job": rec.id}),
-                    mark_done=_mark_done, start_worker=_start)
+                         "job": rec.id, **({"kind": rec.kind} if rec.kind == "encode" else {})},
+                        output_name=OUTPUT_OF_KIND.get(rec.kind, RESULT_NAME)),
+                    mark_done=_mark_done, start_worker=_start, kind=rec.kind)
             except _PrepareDone:
                 pass
             except Cancelled:
@@ -3509,6 +3702,10 @@ class LocalExecutor:
              "finished": r.get("finished"), "input_identity": r.get("input_identity") or [],
              "options": r.get("options") or {}, "cached": bool(r.get("cached")),
              "evicted": True, "result_available": not gone}
+        if r.get("kind") == "encode":
+            # as the live status says it: without it the links door read an evicted field as a
+            # segmentation and minted a task-named encoder's LABEL paths (review, 2026-09-23)
+            d["kind"] = "encode"
         if r.get("input_refresh_skipped"):
             d["input_refresh_skipped"] = True
         if r.get("error"):
@@ -3578,6 +3775,8 @@ class LocalExecutor:
                 d["deliverables"] = list(rec.deliverables)
                 if rec.deliverables_unavailable:
                     d["deliverables_unavailable"] = dict(rec.deliverables_unavailable)
+        if rec.kind == "encode":
+            d["kind"] = "encode"           # said only when it is not a segmentation: no status moves
         if rec.cached:
             d["cached"] = True
         if not brief and rec.state == "done" and rec.result is not None:
@@ -3741,8 +3940,10 @@ class CacheOnlyExecutor:
 
     def __init__(self, cache_get, key_fn, tasks_fn, *, inflight_fn=None,
                  resolve_fn=None, list_fn=None, sources=None, versions_fn=None,
-                 confirm_absent=None, weights_fn=None):
+                 confirm_absent=None, weights_fn=None, artifact_state=None):
         self._get, self._key, self._inflight = cache_get, key_fn, inflight_fn
+        if artifact_state is not None:     # optional: without it no render is ever
+            self.artifact_state = artifact_state   # known to be pending (see below)
         if confirm_absent is not None:     # optional: without it a miss is taken as read
             self.confirm_absent = confirm_absent
         if weights_fn is not None:         # optional: the weights versions ``key_fn`` keys
@@ -3938,6 +4139,40 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         return JSONResponse({"detail": {"code": "not_visible_yet", "message": str(exc)}},
                             status_code=503,
                             headers={"Retry-After": str(NOT_VISIBLE_RETRY_AFTER_S)})
+
+    @app.exception_handler(405)
+    async def _method_not_allowed(request: Request, exc):
+        """``Allow`` names the methods of THIS url (RFC 9110 15.5.6), not of whichever
+        route the router met first.
+
+        Starlette answers a 405 from the first route whose PATH matches, with that one
+        route's methods. Here the verbs of one URL are separate routes (HEAD, GET and
+        DELETE of a labels file), and the bare-task ``DELETE /v1/<source>/<id>/<task>``
+        is a greedy pattern that also matches every artifact URL - taking ``preview.png``
+        for the task - and is registered before them. So until 2026-09-21 a HEAD of
+        ``.../preview.png`` was refused with ``Allow: DELETE``: a method that URL has
+        never had (the alias answers it 404, no such task), and not the GET it has.
+
+        The methods are the union over the matching routes with the MOST SPECIFIC
+        template - the most literal text, which is how the artifact's own route outranks
+        the alias whose ``{task}`` swallowed its file name. It only describes: this runs
+        when no route matched path and method both, so no dispatch depends on it, and it
+        reads the router at request time, so the read-only twin (which drops routes
+        after they are registered) answers for what it kept."""
+        from starlette.routing import Match
+        best, allowed = -1, set()
+        for r in app.router.routes:
+            methods = getattr(r, "methods", None)
+            if not methods or r.matches(request.scope)[0] == Match.NONE:
+                continue
+            literal = len(re.sub(r"\{[^}]*\}", "", getattr(r, "path", "")))
+            if literal > best:
+                best, allowed = literal, set(methods)
+            elif literal == best:
+                allowed |= set(methods)
+        allow = ", ".join(sorted(allowed)) or (getattr(exc, "headers", None) or {}).get("Allow", "")
+        return JSONResponse({"detail": "Method Not Allowed"}, status_code=405,
+                            headers={"Allow": allow})
 
     _confirm = getattr(executor, "confirm_absent", None)
 
@@ -4281,6 +4516,30 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             out["detail"] = detail
         return out
 
+    @app.get("/v1/encoders", tags=["tasks"])
+    def encoders():
+        """What this server encodes with (``POST /v1/jobs`` with ``kind=encode``): each
+        encoder's lattices, license, citation, and whether its weights are installed HERE -
+        a downloaded checkpoint by its digest, an nnU-Net encoder by its task's install;
+        None where this process cannot see the weights (an API that does not compute)."""
+        from .encoders import ENCODERS
+        from .encoders import weights as ew
+        from .encoders.serving import describe as describe_encoder
+        see = getattr(executor, "encoder_weights_visible", True)
+        rows = []
+        for spec in ENCODERS.values():
+            installed = None
+            if see:
+                try:
+                    installed = (ew.installed(spec) if spec.weights
+                                 else bool((seg.describe(spec.uses_task) or {}).get("weights_installed")))
+                except Exception:
+                    installed = None
+            rows.append(describe_encoder(spec, installed))
+        # whether a `kind=encode` job runs HERE at all: a deployment with no encoder worker still
+        # lists what the encoders are, and says so rather than letting a submit find out (501)
+        return {"encodes": bool(getattr(executor, "encodes", False)), "encoders": rows}
+
     @app.post("/v1/tasks/{task}/prepare", status_code=202, tags=["tasks"])
     def prepare_task(request: Request, task: str):
         """Install a task's weights now (authorized): the deliberate form of
@@ -4498,6 +4757,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             return want is None or (t is not None and canonical_of(t) == want)
 
         def accept(e: dict) -> bool:       # advertise only links that resolve
+            if e.get("kind") not in (None, "segment"):
+                # a field is not a segmentation: refused by what its meta SAYS, not by its key
+                # failing to recompute as a segmentation's - that check sits in a `try` that
+                # fails open, and a field came back as a segmentation row when it raised
+                # (review, 2026-09-23)
+                return False
             idents = e.get("identity") if isinstance(e.get("identity"), list) else []
             ident0 = str((idents or [""])[0])          # on THIS app's mounted sources
             pfx = ident0.split(":", 1)[0] if ":" in ident0 else None
@@ -4555,8 +4820,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
     @app.post("/v1/jobs", status_code=202, tags=["jobs"])
     async def submit(request: Request, file: UploadFile | None = File(None),
                      task: str = Form(...), options: str = Form("{}"),
-                     source: str = Form(None), deliverables: str = Form(None)):
+                     source: str = Form(None), deliverables: str = Form(None),
+                     job_kind: str = Form("segment", alias="kind")):
         require_auth(request)
+        if job_kind not in ("segment", "encode"):
+            raise HTTPException(422, f"unknown job kind {job_kind!r}; a job is segment (the default) or encode")
         try:
             opts = json.loads(options)
             if not isinstance(opts, dict):
@@ -4617,6 +4885,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 raise HTTPException(422, f"source kind {kind!r} is not enabled on this "
                                          "server (missing dependency)")
         kind = src[0].get("kind", "upload") if src else "upload"
+        if job_kind == "encode":
+            return await _submit_encode(request, task, opts, src, asked, file, no_cache,
+                                        caller_asked_no_cache)
         written = task
         canonical = canon_task(task, unverified_ok=True)
         if canonical is None:              # catalog names only at the wire boundary
@@ -4687,9 +4958,56 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 _discard(jdir)
             raise
 
+    async def _submit_encode(request, task, opts, src, asked, file, no_cache, caller_asked_no_cache):
+        """``POST /v1/jobs`` with ``kind=encode`` (2026-09-23): an embedding field of ONE image.
+
+        The name is an ENCODER, resolved by the encoder registry and never by the task catalog
+        (``ts.v2:total_fast`` is both, and the kind decides). A pin (``@revision``) must be the
+        revision this server runs - an encoder has one at a time - so it is checked here and
+        not carried. Options are the encoder's (``int8``); a field has no deliverables. From
+        there it is the segmentation's door: the same staging, identity, cache and links."""
+        from .encoders.registry import resolve as resolve_encoder
+        from .encoders.serving import validate_options as encode_options
+        from .errors import InputError, RequestError
+        from .schemas import bind_sources, declared_inputs
+        try:
+            spec = resolve_encoder(task)
+        except InputError as e:
+            raise HTTPException(404, str(e)) from None
+        if not getattr(executor, "encodes", False):
+            raise HTTPException(501, "this server runs no encode jobs (no encoder worker is deployed); "
+                                     "encode locally with `haversack encode`")
+        if asked:
+            raise HTTPException(422, {"code": "no_deliverables",
+                                      "message": "an encode job renders no deliverables: a preview "
+                                                 "and statistics are of labels"})
+        try:
+            opts = encode_options(opts)
+            binding = bind_sources(src, declared_inputs({}), multi_input=False, task=spec.name)
+        except RequestError as e:
+            raise HTTPException(e.status, e.detail) from None
+        if not executor.accepting:
+            raise HTTPException(429, "queue is full, retry later", headers={"Retry-After": "30"})
+        jid, jdir = executor.new_job_dir()
+        handed: list = []
+        try:
+            return await _accept(request, jid, jdir, binding, spec.name, opts, src, file,
+                                 no_cache, executor, seg, caller_asked_no_cache,
+                                 handed=handed, role_specs={}, wanted=None, job_kind="encode")
+        except QueueFull as e:
+            _discard(jdir)
+            raise HTTPException(429, str(e), headers={"Retry-After": "30"}) from e
+        except content.UnidentifiedContent as e:
+            _discard(jdir)
+            raise HTTPException(422, {"code": "unknown_format", "message": str(e)}) from e
+        except BaseException:
+            if not handed:
+                _discard(jdir)
+            raise
+
     async def _accept(request, jid, jdir, binding, task, opts, src, file,
                       no_cache, executor, seg, caller_asked_no_cache=False,
-                      version=None, handed=None, role_specs=None, wanted=None):
+                      version=None, handed=None, role_specs=None, wanted=None, job_kind="segment"):
         # `wanted`: the request's deliverables, already checked (None: it named none).
         # It rides beside `opts` to the executor and never into them - `opts` is keyed.
         # `role_specs`: role -> what the task declares it takes (_validate_request's
@@ -4887,6 +5205,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                 # likewise: a request that named no list is the
                                 # executor's own default
                                 **({"deliverables": wanted} if wanted is not None else {}),
+                                # and the kind only when it is not a segmentation
+                                **({"kind": job_kind} if job_kind != "segment" else {}),
                                 refresh_input=caller_asked_no_cache,
                                 source_tokens=tokens,
                                 inputs=tuple(staged) if multi else ())
@@ -4945,9 +5265,26 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             asked = out.get("deliverables")
             kinds = set(getattr(executor, "artifacts", ()) or ()) if asked is None else set(asked)
             kinds -= set(out.get("deliverables_unavailable") or ())
-            links.update(resource_links(
+            # A field has no path form yet (its URL grammar is its own; phase 2's path
+            # surface), and `resource_links` would mint the LABELS' urls for a task-named
+            # encoder such as ts.v2:total_fast - so an encode job is reached through itself.
+            by_path = ({} if out.get("kind") == "encode" else resource_links(
                 out.get("task"), out.get("input_identity"), out.get("options"),
                 preview="preview" in kinds, statistics="statistics" in kinds))
+            if not by_path and "result" in links:
+                # A result with NO PATH - an upload, a `result:` reference, a
+                # multi-input job, options off the grid menu - reaches its artifacts
+                # through its job, under the names a path-addressable one uses, so a
+                # client follows `links.preview` without asking which kind it has.
+                # Until 2026-09-21 such a job rendered its deliverables into the cache
+                # and advertised nothing: no route served them. Only beside `result`:
+                # these resolve through the same bytes, and are gone when they are.
+                by_path = {"meta": f"/v1/jobs/{jid}/meta.json"}
+                if "preview" in kinds:
+                    by_path["preview"] = f"/v1/jobs/{jid}/preview.png"
+                if "statistics" in kinds:
+                    by_path["statistics"] = f"/v1/jobs/{jid}/statistics.tsv"
+            links.update(by_path)
         out["links"] = links
         return out
 
@@ -4971,7 +5308,10 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             first = await asyncio.to_thread(executor.status_of, jid) or first
 
         def sse(payload: dict) -> str:
-            return f"event: status\ndata: {json.dumps(payload)}\n\n"
+            # the status GET /v1/jobs/{id} answers, key and links included: SERVER.md says each
+            # event IS that snapshot, and a client's wait() returns the last one - a raw record
+            # without them left `RemoteClient.encode`'s final status keyless (Modal smoke, 2026-09-23)
+            return f"event: status\ndata: {json.dumps(_with_links(payload))}\n\n"
 
         async def stream():
             snap = first
@@ -5048,8 +5388,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         return state, path, own
 
 
-    @app.get("/v1/jobs/{jid}/result", tags=["jobs"])
     def result(request: Request, jid: str, format: str = None):
+        """A job's labels, under GET and HEAD. HEAD (2026-09-21: the one file route the
+        artifact work left without it, and invisible to the tripwire that reads the
+        router for names with a dot) answers what GET would - status, ETag, the file's
+        Content-Length, a 304 for a matching ``If-None-Match`` - and converts nothing:
+        with ``?format=`` it says 200 and no length, since the NIfTI's size is only
+        known by writing it."""
         require_auth(request)
         state, path, res = _job_result(jid)
         if state is None:
@@ -5061,6 +5406,22 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(410, gone)
         task_name = (executor.status_of(jid) or {}).get("task", "labels")
         stem = _task_stem(task_name)           # canonical eco:name is not filename-safe
+        head = request.method == "HEAD"
+        # What the bytes ARE, from the file the lookup handed back (either executor, entry or
+        # the job's own copy): an encode job's field is a zip, named and typed as one, and has
+        # no NIfTI form - refused, where converting it used to be SimpleITK's 500 (2026-09-23).
+        is_field = Path(path).name == FIELD_NAME
+        if is_field:                           # radar:pretrain -> radar_pretrain: the family says which model
+            stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(task_name))
+        suffix, media = (".zarr.zip", "application/zip") if is_field else (".seg.nrrd", "application/octet-stream")
+        if is_field and format is not None:
+            raise HTTPException(422, f"format={format!r}: an embedding field is served only as itself "
+                                     "(a .zarr.zip); `feldglas` reads it")
+        if head and format in ("nii.gz", "nii"):
+            from fastapi import Response
+            probe = Response(status_code=200, media_type="application/gzip")
+            del probe.headers["content-length"]    # Starlette's 0: not this body's length
+            return probe
         if format in ("nii.gz", "nii"):        # the LOSSY conversion, by request only
             import shutil
             import tempfile
@@ -5095,6 +5456,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             fh = open(path, "rb")
         except FileNotFoundError:
             raise HTTPException(410, gone) from None
+        if head:
+            from fastapi import Response
+            with fh:
+                size = os.fstat(fh.fileno()).st_size
+            return Response(status_code=200, media_type=media,
+                            headers={"ETag": etag, "Content-Length": str(size),
+                                     "Content-Disposition":
+                                         f'attachment; filename="{stem}_{jid}{suffix}"'})
         from starlette.background import BackgroundTask
         from starlette.responses import StreamingResponse
 
@@ -5109,12 +5478,230 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             finally:
                 fh.close()
 
-        name = f"{stem}_{jid}.seg.nrrd"
+        name = f"{stem}_{jid}{suffix}"
         return StreamingResponse(
-            chunks(), media_type="application/octet-stream",
+            chunks(), media_type=media,
             headers={"ETag": etag, "Content-Length": str(os.fstat(fh.fileno()).st_size),
                      "Content-Disposition": f'attachment; filename="{name}"'},
             background=BackgroundTask(fh.close))
+
+    # -- the artifacts beside a result: one body, two doors, both verbs ---------
+    def _prefer_echo(request, h: dict) -> dict:
+        """``h`` plus the RFC 7240 echo of the token the client SENT (respond-async is
+        echoed as itself, never rewritten to wait=0)."""
+        for raw in request.headers.getlist("prefer"):
+            for token in raw.split(","):
+                token = token.strip().lower()
+                if token == "respond-async":
+                    h["Preference-Applied"] = "respond-async"
+                    return h
+                if token.startswith("wait="):
+                    w = _prefer_wait_raw(request, wait_max)
+                    if w is not None:
+                        h["Preference-Applied"] = f"wait={int(w)}"
+                    return h
+        return h
+
+    def _artifact_headers(request, resp, *, shared: bool) -> dict:
+        """The caching fields of an artifact's 200: its validator is the digest of the
+        body in hand (``body_etag``). ``shared`` is the path surface - anonymous reads
+        of public data, cacheable by anyone for the hour the labels are. A job's
+        artifacts are neither: they sit behind the token and can show an upload, so
+        ``private``; and ``no-cache``, store but revalidate, because what a job's URL
+        serves can still change (absent, then rendered; an entry republished with the
+        same labels) and the ETag makes asking cheap. HEAD never waits, so it never
+        echoes a ``Prefer`` - as the labels' probe does not."""
+        h = {"Cache-Control": "public, max-age=3600" if shared else "private, no-cache",
+             "ETag": body_etag(resp.body), "Vary": "Prefer"}
+        return h if request.method == "HEAD" else _prefer_echo(request, h)
+
+    async def _await_artifact(key, labels, filename: str, what: str, *, deadline,
+                              look_again, confirmed=None, why: str | None = None):
+        """The artifact file beside ``labels``, waiting out a pending overlap thread.
+        202 + Retry-After while pending (or Prefer: wait exhausted); 404 only when its
+        absence is definitive. ``deadline`` is the REQUEST's one Prefer budget, shared
+        with the materialize leg - two legs must not each spend wait_max - and None
+        never waits, which is every HEAD.
+
+        The door supplies the two re-asks, each answering a labels path or None:
+        ``look_again()`` of the entry as it stands - on Modal the path in hand is a
+        local copy taken at lookup, which an artifact placed since does not reach
+        (2026-09-19) - and ``confirmed(since)`` of a view newer than ``since``, for an
+        executor whose view can be stale. By path both are the key's entry; through a
+        job both hold the entry to the job's own digest (``_job_result``). ``why`` is
+        the job's own reason it could not deliver this one, said in the 404."""
+        since = time.monotonic()
+        state = {"path": Path(labels).parent / filename}
+
+        async def look():
+            if state["path"].exists():
+                return state["path"]
+            again = await asyncio.to_thread(look_again)
+            if again is not None:
+                state["path"] = Path(again).parent / filename
+            return state["path"] if state["path"].exists() else None
+
+        if (found := await look()) is not None:
+            return found
+        _state = getattr(executor, "artifact_state", None)
+
+        async def state_fn() -> str:
+            # asked about THIS deliverable: a render that was not asked for it
+            # will never place it, so its absence is definitive at once. Off the
+            # loop: on Modal it is a Dict read, and since 2026-09-21 the twin asks too
+            return await asyncio.to_thread(_state, key, what)
+        pending = _state is not None and bool(key) and await state_fn() == "pending"
+        if pending:
+            if deadline is None:
+                deadline = time.time()
+            while time.time() < deadline:
+                await asyncio.sleep(0.2)
+                if (found := await look()) is not None:
+                    return found
+                if await state_fn() != "pending":
+                    break
+            if (found := await look()) is not None:
+                return found
+            if await state_fn() == "pending":
+                raise HTTPException(202,
+                                    headers=_progress_headers(
+                                        None, {"Retry-After": "2"}),
+                                    detail=f"{what} still materializing")
+        if (found := await look()) is not None:   # placed between our probe and
+            return found                          # the pending flag clearing
+        if confirmed is not None:
+            # a stale view is not an absence: ask one newer than this request, and
+            # answer 503 if none can be had (adversarial review, 2026-09-19)
+            again = await asyncio.to_thread(confirmed, since)
+            p = Path(again).parent / filename if again is not None else None
+            if p is not None and p.exists():
+                return p
+        if why:
+            raise HTTPException(404, f"no {what} for this job's result: {why}")
+        # A read never renders (decided 2026-09-20): a deliverable is asked for where
+        # the input is named and can be held - POST /v1/jobs - and this URL serves
+        # what exists, to anyone. Anonymous never computes; an authorized GET of a
+        # stored result's missing artifact does not either, Prefer or not: it has no
+        # job to stage an input under. So the answer is a definitive 404 that names
+        # the door which does.
+        raise HTTPException(404, f"no {what} for this result: it was not asked for when "
+                                 "the result was computed, or could not be rendered; an "
+                                 "authorized POST /v1/jobs of the same input and task "
+                                 f'with deliverables ["{what}"] renders it')
+
+    def _absence_is_never_stored(route):
+        """A result route whose 404s say ``Cache-Control: no-store`` - as its 202s
+        always have (``_progress_headers``). On the labels' routes (HEAD probe and GET)
+        as on the artifacts': "not materialized" is the answer until somebody computes
+        the result, which is the very next thing an authorized caller does with it, and
+        the 200 that follows says ``public, max-age=3600`` - so a shared cache that had
+        kept the 404 on a heuristic would go on hiding a result for as long as it
+        pleased. Every 404 of these routes, the unknown task's included: a task unknown
+        today is served after the deploy that adds its catalog, and an uncached error
+        costs a request.
+
+        An artifact arrives LATE: rendered after `done`, on a cache hit that asks for it,
+        and - with a result store several hosts share - by another host into the same
+        generation, with no republication to announce it. So "not here" is only ever
+        "not here yet, as far as this request could see", and a 404 followed moments
+        later by a 200 is a legitimate sequence. RFC 9111 4.2.2 lets a cache give a 404
+        with no explicit freshness a heuristic one, and the 200 beside it invites shared
+        caches (``public``): without this a proxy may keep answering 404 for a preview
+        that landed a second later. Nothing here remembers an absence either - every
+        request looks again (2026-09-21, with the object-store session)."""
+        import functools
+
+        def unstored(e):
+            # 410 with it (adversarial pass, 2026-09-21): "the bytes are gone" turns back
+            # into a 200 when the key is recomputed with the same output, and RFC 9111
+            # 4.2.2 lists 410 among the statuses a cache may keep on a heuristic. A 409
+            # is not on that list and is left alone.
+            if e.status_code in (404, 410):
+                e.headers = {**(e.headers or {}), "Cache-Control": "no-store"}
+            return e
+
+        if asyncio.iscoroutinefunction(route):
+            @functools.wraps(route)
+            async def guarded(*args, **kwargs):
+                try:
+                    return await route(*args, **kwargs)
+                except HTTPException as e:
+                    raise unstored(e)
+        else:                                  # a plain route stays one: FastAPI runs it
+            @functools.wraps(route)            # in its threadpool, off the event loop
+            def guarded(*args, **kwargs):
+                try:
+                    return route(*args, **kwargs)
+                except HTTPException as e:
+                    raise unstored(e)
+        return guarded
+
+    # the labels' own job route, registered here because its 404 and 410 are absences
+    # too; two routes, one function, as the artifacts' are (one operation id per verb)
+    _job_labels = _absence_is_never_stored(result)
+    app.head("/v1/jobs/{jid}/result", tags=["jobs"])(_job_labels)
+    app.get("/v1/jobs/{jid}/result", tags=["jobs"])(_job_labels)
+
+    async def _artifact_answer(request, view: str, *, shared: bool, result=None, path=None):
+        """The response for one view whose entry (``result``) or file (``path``) is in
+        hand: GET's 200, HEAD's 200, or the 304 of either."""
+        try:
+            resp = await asyncio.to_thread(artifact_response, view, result=result, path=path)
+        except OSError:                        # left between the look and the read
+            raise HTTPException(404, "not materialized") from None
+        return answer_body(request, resp, _artifact_headers(request, resp, shared=shared))
+
+    def _register_job_artifact(view: str):
+        file, what = ARTIFACT_VIEWS[view]
+
+        @_absence_is_never_stored
+        async def job_artifact(request: Request, jid: str):
+            """One artifact of a job's result - the door for results with NO PATH (an
+            upload, a ``result:`` reference, a multi-input job), and open to every job.
+
+            Authorized like ``/result``, never anonymous: a job's artifacts show what was
+            uploaded. Resolved like ``/result`` too - through the job's key to its
+            published entry, leased, and only while that entry holds the bytes THIS job
+            reported (``same_output``), else beside the job's own copy - and answered by
+            its rules: 404 no such job, 409 not done, 410 the bytes are gone, 503 not
+            visible yet. Then the artifact's own: 202 + Retry-After while a render that
+            will place it is pending, 404 when none will - with the job's own reason
+            where it gave one. HEAD is the same answer with no body, and never waits:
+            ``Prefer: wait=N`` on a GET waits out a render, as it does by path."""
+            require_auth(request)
+            state, labels, res = await asyncio.to_thread(_job_result, jid)
+            if state is None:
+                raise HTTPException(404, f"no job {jid!r}")
+            if state != "done":
+                raise HTTPException(409, f"job is {state}, not done")
+            if labels is None:                 # done, but the bytes were purged
+                raise HTTPException(410, "result no longer on the server; recompute it")
+            if what is None:
+                return await _artifact_answer(request, view, shared=False, result=res)
+            # off the loop: on Modal a record is a Dict round trip (~60-80 ms)
+            status = await asyncio.to_thread(executor.status_of, jid) or {}
+            key = status.get("cache_key") or status.get("key")
+            w = None if request.method == "HEAD" else _prefer_wait_raw(request, wait_max)
+
+            def confirmed(since: float):
+                again = confirm_absent(key, since)
+                return again[0] if again is not None and \
+                    same_output(status.get("result"), again[1]) else None
+
+            found = await _await_artifact(
+                key, labels, file, what, deadline=None if w is None else time.time() + w,
+                look_again=lambda: _job_result(jid)[1],
+                confirmed=confirmed if _confirm is not None and key else None,
+                why=(status.get("deliverables_unavailable") or {}).get(what))
+            return await _artifact_answer(request, view, shared=False, path=found)
+
+        # two routes, one function: FastAPI names an operation after its first method,
+        # so one route under both verbs would publish two operations with one id
+        app.head(f"/v1/jobs/{{jid}}/{view}", tags=["jobs"])(job_artifact)
+        app.get(f"/v1/jobs/{{jid}}/{view}", tags=["jobs"])(job_artifact)
+
+    for _view in ARTIFACT_VIEWS:
+        _register_job_artifact(_view)
 
     @app.delete("/v1/jobs/{jid}", tags=["jobs"])
     def cancel(request: Request, jid: str):
@@ -5144,19 +5731,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         SENT (respond-async is echoed as itself, never rewritten to
         wait=0); applied uniformly - labels and artifacts, waits and
         cache hits alike (a hit trivially satisfies wait=N)."""
-        h = _resource_headers(key, result)
-        for raw in request.headers.getlist("prefer"):
-            for token in raw.split(","):
-                token = token.strip().lower()
-                if token == "respond-async":
-                    h["Preference-Applied"] = "respond-async"
-                    return h
-                if token.startswith("wait="):
-                    w = _prefer_wait_raw(request, wait_max)
-                    if w is not None:
-                        h["Preference-Applied"] = f"wait={int(w)}"
-                    return h
-        return h
+        return _prefer_echo(request, _resource_headers(key, result))
 
     # The explicit HEAD registration is the compute-free probe, and the one
     # place status codes distinguish in-flight: 200 materialized / 202
@@ -5194,6 +5769,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
         def _register_probe(tok: str, gopts: dict):
             @app.head(base + f"/labels{tok}.seg.nrrd", tags=["results"])
+            @_absence_is_never_stored
             def probe(request: Request, ident: str, task: str):
                 """200 materialized / 202 computing / 404 absent, never a compute.
 
@@ -5259,6 +5835,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
         def _register_resource(tok: str, gopts: dict):
             @app.get(base + f"/labels{tok}.seg.nrrd", tags=["results"])
+            @_absence_is_never_stored
             async def resource(request: Request, ident: str, task: str):
                 ident = norm(ident)
                 if not re.fullmatch(pat, ident):
@@ -5481,53 +6058,6 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             # one" on every path-addressed artifact, not only the labels
             return wants_no_cache(request) and authed(request)
 
-        def _register_meta(tok: str, gopts: dict):
-            @app.get(base + f"/meta{tok}.json", tags=["results"])
-            def meta(request: Request, ident: str, task: str):
-                key = keyed(norm(ident), task, gopts)
-                if key is None:
-                    raise HTTPException(404, "unknown resource")
-                since = time.monotonic()
-                skip = _skip_cache(request)
-                hit = None if skip else executor.cache_get(key)
-                if hit is None and not skip:
-                    hit = confirm_absent(key, since)   # 503 when a stale view cannot tell
-                if hit is None:
-                    raise HTTPException(404, "not materialized")
-                # The key-derived validator, NOT the labels' digest, and on purpose
-                # (2026-09-21, when the HEAD probe took the digest): this body is the
-                # result record, which a recompute rewrites (timings, provenance) even
-                # when it reproduces the labels byte for byte, so the labels' digest
-                # would call two different bodies one. The honest tag is a digest of
-                # this JSON; nothing here evaluates If-None-Match, so no client is told
-                # "not modified" on the strength of this one.
-                return JSONResponse(hit[1], headers=_resource_headers(key))
-
-        _grid_routes(_register_meta)
-
-        def _register_preview(tok: str, gopts: dict):
-            @app.get(base + f"/preview{tok}.png", tags=["results"])
-            async def preview(request: Request, ident: str, task: str):
-                key = keyed(norm(ident), task, gopts)
-                if key is None:
-                    raise HTTPException(404, "unknown resource")
-                w = _prefer_wait_raw(request, wait_max)
-                deadline = None if w is None else time.time() + w
-                since = None if _skip_cache(request) else time.monotonic()
-                hit = None if since is None else \
-                    await asyncio.to_thread(executor.cache_get, key)
-                if hit is None:
-                    hit = await _materialize_entry(request, norm(ident),
-                                                   canon_task(task), gopts, key,
-                                                   deadline, since)
-                png = await _await_artifact(request, key, hit,
-                                            "preview.png", "preview",
-                                            deadline=deadline)
-                return FileResponse(png, media_type="image/png",
-                                    headers=_pref_headers(request, key))
-
-        _grid_routes(_register_preview)
-
         async def _materialize_entry(request, ident: str, task: str, opts: dict,
                                      key: str, deadline: float, since: float | None = None):
             """Initiate the segmentation chain from an artifact GET - the
@@ -5615,109 +6145,91 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                 headers=_progress_headers(snap.get("progress"),
                                                           {"Retry-After": "5"}))
 
-        async def _await_artifact(request, key, hit, filename: str, what: str,
-                                  deadline: float | None = None):
-            """The artifact file, waiting out a pending overlap thread. 202 +
-            Retry-After while pending (or Prefer: wait exhausted); 404 only
-            when its absence is definitive. ``deadline`` is the REQUEST's one
-            Prefer budget, shared with the materialize leg - two legs must
-            not each spend wait_max."""
-            path = Path(hit[0]).parent / filename
-            since = time.monotonic()
+        def _register_artifact(view: str, tok: str, gopts: dict):
+            file, what = ARTIFACT_VIEWS[view]
+            stem, _, ext = view.partition(".")
 
-            async def look():
-                """The file, or None. Asked again of the entry when the path in hand
-                lacks it: on Modal that path is a local copy taken at lookup, which
-                an artifact placed since does not reach (2026-09-19)."""
-                if path.exists():
-                    return path
-                again = await asyncio.to_thread(executor.cache_get, key)
-                p = Path(again[0]).parent / filename if again is not None else None
-                return p if p is not None and p.exists() else None
+            @_absence_is_never_stored
+            async def artifact(request: Request, ident: str, task: str):
+                """One artifact of a path-addressed result, under GET and HEAD.
 
-            if (found := await look()) is not None:
-                return found
-            _state = getattr(executor, "artifact_state", None)
+                Both verbs describe ONE representation: the validator is the digest of
+                the body (``body_etag``), a HEAD carries the GET's ETag, Content-Length,
+                Cache-Control and Vary, and either answers a matching ``If-None-Match``
+                with a 304 that repeats the caching fields - what the labels do. Until
+                2026-09-21 there was no HEAD here at all (405, ``Allow: DELETE``), the
+                tag was the key's, and nothing evaluated ``If-None-Match``; ``meta.json``
+                said so in as many words, which was true only while its tag could not
+                be trusted. Artifacts land late, so "has the preview rendered?" is a
+                question worth a probe that does not download the answer.
 
-            def state_fn(k: str) -> str:
-                # asked about THIS deliverable: a render that was not asked for it
-                # will never place it, so its absence is definitive at once
-                return _state(k, what)
-            pending = _state is not None and state_fn(key) == "pending"
-            if pending:
-                if deadline is None:
-                    deadline = time.time()
-                while time.time() < deadline:
-                    await asyncio.sleep(0.2)
-                    if (found := await look()) is not None:
-                        return found
-                    if state_fn(key) != "pending":
-                        break
-                if (found := await look()) is not None:
-                    return found
-                if state_fn(key) == "pending":
-                    raise HTTPException(202,
-                                        headers=_progress_headers(
-                                            None, {"Retry-After": "2"}),
-                                        detail=f"{what} still materializing")
-            if (found := await look()) is not None:   # placed between our probe and
-                return found                          # the pending flag clearing
-            if _confirm is not None:
-                # a stale view is not an absence: ask one newer than this request, and
-                # answer 503 if none can be had (adversarial review, 2026-09-19)
-                again = await asyncio.to_thread(confirm_absent, key, since)
-                p = Path(again[0]).parent / filename if again is not None else None
-                if p is not None and p.exists():
-                    return p
-            # A read never renders (decided 2026-09-20): a deliverable is asked for where
-            # the input is named and can be held - POST /v1/jobs - and this URL serves
-            # what exists, to anyone. Anonymous never computes; an authorized GET of a
-            # stored result's missing artifact does not either, Prefer or not: it has no
-            # job to stage an input under. So the answer is a definitive 404 that names
-            # the door which does.
-            raise HTTPException(404, f"no {what} for this result: it was not asked for when "
-                                     "the result was computed, or could not be rendered; an "
-                                     "authorized POST /v1/jobs of the same input and task "
-                                     f'with deliverables ["{what}"] renders it')
-
-        def _register_statistics(tok: str, gopts: dict):
-            async def _stats_key(request, ident, task, opts):
-                key = keyed(norm(ident), task, opts)
+                HEAD is a read of what exists: it never computes, never renders, never
+                waits, and ignores ``Prefer`` and ``Cache-Control: no-cache``. 200 (or
+                304) when the artifact is there; 202 + Retry-After while the labels are
+                still computing, or a render that will place THIS deliverable is
+                pending; 404 otherwise - a deliverable nobody asked for is a definitive
+                404, not a 202, since no render is coming. ``meta.json`` is every
+                entry's and waits on nothing, under either verb: 404 until the labels
+                are published, as its GET has always answered."""
+                from fastapi import Response
+                key = keyed(norm(ident), task, gopts)
                 if key is None:
                     raise HTTPException(404, "unknown resource")
-                w = _prefer_wait_raw(request, wait_max)
-                deadline = None if w is None else time.time() + w
-                since = None if _skip_cache(request) else time.monotonic()
-                hit = None if since is None else \
-                    await asyncio.to_thread(executor.cache_get, key)
-                if hit is None:
-                    hit = await _materialize_entry(request, norm(ident),
-                                                   canon_task(task), opts, key,
-                                                   deadline, since)
-                return key, hit, deadline
+                head = request.method == "HEAD"
+                if head or what is None:
+                    since = time.monotonic()
+                    # `no-cache` from an authorized caller means "not the stored one";
+                    # a HEAD starts nothing, so there it has nothing to mean
+                    skip = not head and _skip_cache(request)
+                    hit = None if skip else await asyncio.to_thread(executor.cache_get, key)
+                    if hit is None and not skip:
+                        # both off the loop: on Modal they are Dict reads and a
+                        # FunctionCall probe, and this branch is every anonymous HEAD
+                        jid = await asyncio.to_thread(executor.find_inflight, key) \
+                            if what is not None else None
+                        if jid is not None:    # computing: what a GET of it answers too
+                            snap = await asyncio.to_thread(executor.status_of, jid) or {}
+                            return Response(status_code=202, headers=_progress_headers(
+                                snap.get("progress"), {"Retry-After": "5"}))
+                        hit = await asyncio.to_thread(confirm_absent, key, since)  # 503 when
+                    if hit is None:                        # a stale view cannot tell
+                        raise HTTPException(404, "not materialized")
+                    deadline = None
+                else:
+                    w = _prefer_wait_raw(request, wait_max)
+                    deadline = None if w is None else time.time() + w
+                    since = None if _skip_cache(request) else time.monotonic()
+                    hit = None if since is None else \
+                        await asyncio.to_thread(executor.cache_get, key)
+                    if hit is None:
+                        hit = await _materialize_entry(request, norm(ident),
+                                                       canon_task(task), gopts, key,
+                                                       deadline, since)
+                if what is None:
+                    return await _artifact_answer(request, view, shared=True, result=hit[1])
 
-            @app.get(base + f"/statistics{tok}.json", tags=["results"])
-            async def statistics_json(request: Request, ident: str, task: str):
-                key, hit, deadline = await _stats_key(request, ident, task, gopts)
-                sj = await _await_artifact(request, key, hit,
-                                           "statistics.json", "statistics",
-                                           deadline=deadline)
-                return JSONResponse(json.loads(sj.read_text(encoding="utf-8")),
-                                    headers=_pref_headers(request, key))
+                def entry_labels(again):
+                    return again[0] if again is not None else None
 
-            @app.get(base + f"/statistics{tok}.tsv", tags=["results"])
-            async def statistics_tsv_view(request: Request, ident: str, task: str):
-                from fastapi import Response
-                from .statistics import statistics_tsv
-                key, hit, deadline = await _stats_key(request, ident, task, gopts)
-                sj = await _await_artifact(request, key, hit,
-                                           "statistics.json", "statistics",
-                                           deadline=deadline)
-                return Response(statistics_tsv(json.loads(sj.read_text(encoding="utf-8"))),
-                                media_type="text/tab-separated-values",
-                                headers=_pref_headers(request, key))
+                found = await _await_artifact(
+                    key, hit[0], file, what, deadline=deadline,
+                    look_again=lambda: entry_labels(executor.cache_get(key)),
+                    confirmed=None if _confirm is None else
+                    (lambda since: entry_labels(confirm_absent(key, since))))
+                return await _artifact_answer(request, view, shared=True, path=found)
 
-        _grid_routes(_register_statistics)
+            # two routes, one function (see the job-scoped registration)
+            url = base + f"/{stem}{tok}.{ext}"
+            app.head(url, tags=["results"])(artifact)
+            app.get(url, tags=["results"])(artifact)
+
+        def _register_artifacts(tok: str, gopts: dict):
+            # every view under every grid token, from the one table: a view added
+            # there is served here and through a job, under both verbs
+            for view in ARTIFACT_VIEWS:
+                _register_artifact(view, tok, gopts)
+
+        _grid_routes(_register_artifacts)
 
     for _prefix, _srcobj in sources.items():
         # a source that says it has no path surface gets none (`result`: its identity
@@ -5753,7 +6265,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
 def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
                       list_fn=None, resolve_fn=None, versions_fn=None, confirm_absent=None,
-                      weights_fn=None):
+                      weights_fn=None, artifact_state=None):
     """The anonymous read-only twin: cache hits and nothing else.
 
     Since review R4 this is create_app itself over a CacheOnlyExecutor with
@@ -5778,11 +6290,17 @@ def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
     ``weights_fn(task)`` (optional) is the weights-versions list ``key_fn`` keys ``task``
     on - ``result_key``'s fourth argument: with it the listing reads a task's versions once
     a request instead of once a key, and MUST then derive exactly what ``key_fn`` would.
+    ``artifact_state(key, name)`` (optional) is the writer's pending-render signal -
+    "pending" while a render that will place deliverable ``name`` into ``key``'s entry is
+    still running, else "absent" - read-only like ``inflight``. With it an artifact that is
+    seconds from landing answers 202 + Retry-After here as it does on the api; without it
+    (before 2026-09-21 there was no way to give it) the twin cannot tell and says 404.
     """
     ex = CacheOnlyExecutor(cache_get, key_fn, tasks_fn, inflight_fn=inflight,
                            resolve_fn=resolve_fn, list_fn=list_fn,
                            sources=sources, versions_fn=versions_fn,
-                           confirm_absent=confirm_absent, weights_fn=weights_fn)
+                           confirm_absent=confirm_absent, weights_fn=weights_fn,
+                           artifact_state=artifact_state)
     return create_app(ex, read_only=True)
 
 

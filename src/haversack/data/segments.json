@@ -6282,7 +6282,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "a0847608c92d6647014d9baca43850c713463468926ad455b8aa38f2be5827da",
+        "registry_sha256": "d9cfb3e4422312e2094eaf574838649a8c94743e3223118f0fa8c85681ea5412",
         "listing": "1"
       },
       "source": {
@@ -6379,8 +6379,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:aortic_sinuses": {
@@ -6391,7 +6391,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "f62372977a09e2a1af669593368be6b5a3729c2b7ed20f5c9da8acc08d0b4477",
+        "registry_sha256": "08d7759a0f255d021b45a050380d308ece26385fc93d4c4c053455661f29d4c9",
         "listing": "1"
       },
       "source": {
@@ -6416,8 +6416,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:appendicular_bones": {
@@ -6428,7 +6428,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6d278ac0ce8a1a2ce2d70d672d64c9fb3fec2ce2a152eefe5d0a81c5e349325f",
+        "registry_sha256": "eef4b647a3733cf46bc9bb3a0218369b70242691fd40b1f58bb7d4bdefc8e720",
         "listing": "1"
       },
       "source": {
@@ -6481,8 +6481,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:appendicular_bones_mr": {
@@ -6687,7 +6687,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "3c1ca922e50bef790b5491d51feb31cc21a76b79725ebb2a7c82c93624dbf7ed",
+        "registry_sha256": "0d6862b1abbd33318b86fcde5400de0b84634a2c9581e72d25b928f3a0e8f6b5",
         "listing": "1"
       },
       "source": {
@@ -6760,8 +6760,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:breasts": {
@@ -6797,7 +6797,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "17207fc925c68a61143f596bcffad90ba57f4be2bef99a4632c7f6d5436dcf9f",
+        "registry_sha256": "41de665cf7f09eac435ddbf85058e4fc4e065ba76f5e7cc17941645bdc426f0d",
         "listing": "1"
       },
       "source": {
@@ -6810,8 +6810,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:coronary_arteries": {
@@ -6946,7 +6946,7 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "8c9a4d0793f13d41608f2d2f81b235c7f7242d9c67314112d96ed5adbf881366",
+        "registry_sha256": "b85e7b0577ec86ca1d7a86eed385d83e22e746e30f8e627accbd362c1cc0c1a9",
         "listing": "1"
       },
       "source": {
@@ -6959,8 +6959,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:head_glands_cavities": {
@@ -6971,7 +6971,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "821bc400277002d5d24e4b1c3b757c9f45bb958f0ea987db0b78898d18a1bed4",
+        "registry_sha256": "a4126a51f4b930e41f4030a5842ef8b73cb427d59e7d8b446b1ab1b0f2b37683",
         "listing": "1"
       },
       "source": {
@@ -7056,8 +7056,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:head_muscles": {
@@ -7068,7 +7068,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "bd7a491d0951756a7a64853bbde30aa9764d0193f3b7160cbec75bfb4ca2fe4d",
+        "registry_sha256": "12640b17430cae5a65fa2e4bd1edcaa9bc51959be1b23173708f82cca307b3be",
         "listing": "1"
       },
       "source": {
@@ -7121,8 +7121,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:headneck_bones_vessels": {
@@ -7133,7 +7133,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "a691e47f27aac95a12a113b64789e49864256a04267b9e6cfbbb288e1162ba7a",
+        "registry_sha256": "4ab2f0fefa5fa2ff96355eeafd69c08966d100911a930d6fe8454b5b50105f92",
         "listing": "1"
       },
       "source": {
@@ -7190,8 +7190,121 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
+      }
+    },
+    "ts.v2:headneck_muscles": {
+      "task": "ts.v2:headneck_muscles",
+      "ecosystem": "ts.v2",
+      "engine": "nnunetv2",
+      "kind": "segments",
+      "modality": "CT",
+      "version": {
+        "ts_version": "2.13.0",
+        "registry_sha256": "12b85276785ad788b87193622ab522b9d20527a4f21a0a2110d072c8ff0461ca",
+        "listing": "1"
+      },
+      "source": {
+        "file": "haversack/data/ts_tasks.json"
+      },
+      "segments": [
+        {
+          "id": "sternocleidomastoid_right",
+          "value": 1
+        },
+        {
+          "id": "sternocleidomastoid_left",
+          "value": 2
+        },
+        {
+          "id": "superior_pharyngeal_constrictor",
+          "value": 3
+        },
+        {
+          "id": "middle_pharyngeal_constrictor",
+          "value": 4
+        },
+        {
+          "id": "inferior_pharyngeal_constrictor",
+          "value": 5
+        },
+        {
+          "id": "trapezius_right",
+          "value": 6
+        },
+        {
+          "id": "trapezius_left",
+          "value": 7
+        },
+        {
+          "id": "platysma_right",
+          "value": 8
+        },
+        {
+          "id": "platysma_left",
+          "value": 9
+        },
+        {
+          "id": "levator_scapulae_right",
+          "value": 10
+        },
+        {
+          "id": "levator_scapulae_left",
+          "value": 11
+        },
+        {
+          "id": "anterior_scalene_right",
+          "value": 12
+        },
+        {
+          "id": "anterior_scalene_left",
+          "value": 13
+        },
+        {
+          "id": "middle_scalene_right",
+          "value": 14
+        },
+        {
+          "id": "middle_scalene_left",
+          "value": 15
+        },
+        {
+          "id": "posterior_scalene_right",
+          "value": 16
+        },
+        {
+          "id": "posterior_scalene_left",
+          "value": 17
+        },
+        {
+          "id": "sterno_thyroid_right",
+          "value": 18
+        },
+        {
+          "id": "sterno_thyroid_left",
+          "value": 19
+        },
+        {
+          "id": "thyrohyoid_right",
+          "value": 20
+        },
+        {
+          "id": "thyrohyoid_left",
+          "value": 21
+        },
+        {
+          "id": "prevertebral_right",
+          "value": 22
+        },
+        {
+          "id": "prevertebral_left",
+          "value": 23
+        }
+      ],
+      "mined": {
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:heartchambers_highres": {
@@ -7202,7 +7315,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "0eabef79bfdb42cbf84c0dd46eab2f145152b1fe3b3fa0db6db51bb430f7fbe4",
+        "registry_sha256": "8119624665c59b90827ec80c84c10021dc7508f89efb958173e35e77fba9a9da",
         "listing": "1"
       },
       "source": {
@@ -7239,8 +7352,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:hip_implant": {
@@ -7251,7 +7364,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "9f384fed0bc910cdc5151fab06b631b53747f1ec3dff30f27beda7f6c01e7c51",
+        "registry_sha256": "96242024dafc397da496f8be8577766027edb72e15cee9ffae8ad1ecbca2eb32",
         "listing": "1"
       },
       "source": {
@@ -7264,8 +7377,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:kidney_cysts": {
@@ -7276,7 +7389,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6653583634744ae74fe3a2530bec373a25089771dc65e3b3da4ae42d40861f6d",
+        "registry_sha256": "bc4a75b9eaca6559759dfea51b029a2c3af91d40f59a6b691ceb467f8d12446b",
         "listing": "1"
       },
       "source": {
@@ -7293,8 +7406,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:liver_lesions": {
@@ -7305,7 +7418,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "5b74cc4863349468514f2c70dcebc2b609bf870e78698f1fc8350d687f499e16",
+        "registry_sha256": "953d6002a79b666a8765eb1ad22956163c4ff83b5e1cb4a5dc0048c6cd14c4d7",
         "listing": "1"
       },
       "source": {
@@ -7318,8 +7431,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:liver_lesions_mr": {
@@ -7330,7 +7443,7 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "56e9c2e4cc19ebc26be8ae99125ddc8199b4e4169208c9d25a66251ef3de22ed",
+        "registry_sha256": "e048f111e65b086f5f7a09291b9b756973fc69971510e7cf8d933d7499802897",
         "listing": "1"
       },
       "source": {
@@ -7343,8 +7456,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:liver_segments": {
@@ -7355,7 +7468,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "af0278fa0153a9582916639b1e1384b544584679bdc13ef850162e45cd7e172c",
+        "registry_sha256": "a209407a68fb25b58b87b0a628010f70d35ee7323e2c2388bb2c6ad4d337c3fc",
         "listing": "1"
       },
       "source": {
@@ -7396,8 +7509,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:liver_segments_mr": {
@@ -7408,7 +7521,7 @@
       "modality": "MR",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "780884260260649bd9fc65e006506e8405d2ed418c036bd0e7e9d8b96e5b5768",
+        "registry_sha256": "ed405d8a257cb700a56a821fee2d2eecefe50a9a5b561e580095cda3584360fc",
         "listing": "1"
       },
       "source": {
@@ -7449,8 +7562,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:liver_vessels": {
@@ -7490,7 +7603,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "a60725ead92431725d70b24aff090db95c38b2e544438352bd19972f39098075",
+        "registry_sha256": "8e9afaf0167f5d9f42b545f36d8be31b9dc47018612e9a5bf71aacf46b54a91c",
         "listing": "1"
       },
       "source": {
@@ -7507,8 +7620,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:lung_vessels": {
@@ -7519,7 +7632,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "db3b7493892bdc707f27c9ef19c00a023ea8e54bef9c761f6e07d5cde5f10512",
+        "registry_sha256": "59630ee57064dae1112e3fa5544f4a76f8f2be0bc7b8583ae16c7c35072eaf92",
         "listing": "1"
       },
       "source": {
@@ -7544,8 +7657,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:lung_vessels_LEGACY": {
@@ -7556,7 +7669,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6b1f26396602d032accf6d924bcd113e9dfe4b2416c58f5b03d2d53e96fd5f3b",
+        "registry_sha256": "42185df4ece3827764f9ec7e7a5580d9122c7b7d5f81455d9a108291c0a06486",
         "listing": "1"
       },
       "source": {
@@ -7573,8 +7686,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:oculomotor_muscles": {
@@ -7682,7 +7795,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "6bc5288616d389473ebe0639ed75ed2ce224fdd134a1a3f68a15d9bfe57602c1",
+        "registry_sha256": "9bd22c814a063e6722ca735b89b33ba18b5890c0848947376b6525f303de6d96",
         "listing": "1"
       },
       "source": {
@@ -7703,8 +7816,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:teeth": {
@@ -10642,7 +10755,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "c0bd946093b4c2b7ae016296f849253feb894508858f1a7445d960a6838cb33b",
+        "registry_sha256": "65c7876c0e9d90f00a665a03957bca075a36b883359443bc9ffc627b6e55761e",
         "listing": "1"
       },
       "source": {
@@ -10699,8 +10812,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "ts.v2:vertebrae_body": {
@@ -10851,6 +10964,1473 @@
       "mined": {
         "at": "2026-09-13",
         "by": "haversack 0.11.0"
+      }
+    },
+    "ts.v3:total": {
+      "task": "ts.v3:total",
+      "ecosystem": "ts.v3",
+      "engine": "nnunetv2",
+      "kind": "segments",
+      "modality": "CT",
+      "version": {
+        "ts_version": "2.18.0",
+        "registry_sha256": "dcfc309431dba00eeb32620d84177a69dfe359eee3878d7747d9cf36e6bfefe8",
+        "listing": "1"
+      },
+      "source": {
+        "file": "haversack/data/ts_v3_tasks.json"
+      },
+      "segments": [
+        {
+          "id": "spleen",
+          "value": 1
+        },
+        {
+          "id": "kidney_right",
+          "value": 2
+        },
+        {
+          "id": "kidney_left",
+          "value": 3
+        },
+        {
+          "id": "gallbladder",
+          "value": 4
+        },
+        {
+          "id": "liver",
+          "value": 5
+        },
+        {
+          "id": "stomach",
+          "value": 6
+        },
+        {
+          "id": "pancreas",
+          "value": 7
+        },
+        {
+          "id": "adrenal_gland_right",
+          "value": 8
+        },
+        {
+          "id": "adrenal_gland_left",
+          "value": 9
+        },
+        {
+          "id": "lung_upper_lobe_left",
+          "value": 10
+        },
+        {
+          "id": "lung_lower_lobe_left",
+          "value": 11
+        },
+        {
+          "id": "lung_upper_lobe_right",
+          "value": 12
+        },
+        {
+          "id": "lung_middle_lobe_right",
+          "value": 13
+        },
+        {
+          "id": "lung_lower_lobe_right",
+          "value": 14
+        },
+        {
+          "id": "esophagus",
+          "value": 15
+        },
+        {
+          "id": "trachea",
+          "value": 16
+        },
+        {
+          "id": "thyroid_gland",
+          "value": 17
+        },
+        {
+          "id": "small_bowel",
+          "value": 18
+        },
+        {
+          "id": "duodenum",
+          "value": 19
+        },
+        {
+          "id": "colon",
+          "value": 20
+        },
+        {
+          "id": "urinary_bladder",
+          "value": 21
+        },
+        {
+          "id": "prostate",
+          "value": 22
+        },
+        {
+          "id": "kidney_cyst_left",
+          "value": 23
+        },
+        {
+          "id": "kidney_cyst_right",
+          "value": 24
+        },
+        {
+          "id": "sacrum",
+          "value": 25
+        },
+        {
+          "id": "vertebrae_L6",
+          "value": 26
+        },
+        {
+          "id": "vertebrae_L5",
+          "value": 27
+        },
+        {
+          "id": "vertebrae_L4",
+          "value": 28
+        },
+        {
+          "id": "vertebrae_L3",
+          "value": 29
+        },
+        {
+          "id": "vertebrae_L2",
+          "value": 30
+        },
+        {
+          "id": "vertebrae_L1",
+          "value": 31
+        },
+        {
+          "id": "vertebrae_T12",
+          "value": 32
+        },
+        {
+          "id": "vertebrae_T11",
+          "value": 33
+        },
+        {
+          "id": "vertebrae_T10",
+          "value": 34
+        },
+        {
+          "id": "vertebrae_T9",
+          "value": 35
+        },
+        {
+          "id": "vertebrae_T8",
+          "value": 36
+        },
+        {
+          "id": "vertebrae_T7",
+          "value": 37
+        },
+        {
+          "id": "vertebrae_T6",
+          "value": 38
+        },
+        {
+          "id": "vertebrae_T5",
+          "value": 39
+        },
+        {
+          "id": "vertebrae_T4",
+          "value": 40
+        },
+        {
+          "id": "vertebrae_T3",
+          "value": 41
+        },
+        {
+          "id": "vertebrae_T2",
+          "value": 42
+        },
+        {
+          "id": "vertebrae_T1",
+          "value": 43
+        },
+        {
+          "id": "vertebrae_C7",
+          "value": 44
+        },
+        {
+          "id": "vertebrae_C6",
+          "value": 45
+        },
+        {
+          "id": "vertebrae_C5",
+          "value": 46
+        },
+        {
+          "id": "vertebrae_C4",
+          "value": 47
+        },
+        {
+          "id": "vertebrae_C3",
+          "value": 48
+        },
+        {
+          "id": "vertebrae_C2",
+          "value": 49
+        },
+        {
+          "id": "vertebrae_C1",
+          "value": 50
+        },
+        {
+          "id": "heart",
+          "value": 51
+        },
+        {
+          "id": "aorta",
+          "value": 52
+        },
+        {
+          "id": "pulmonary_vein",
+          "value": 53
+        },
+        {
+          "id": "brachiocephalic_trunk",
+          "value": 54
+        },
+        {
+          "id": "subclavian_artery_right",
+          "value": 55
+        },
+        {
+          "id": "subclavian_artery_left",
+          "value": 56
+        },
+        {
+          "id": "common_carotid_artery_right",
+          "value": 57
+        },
+        {
+          "id": "common_carotid_artery_left",
+          "value": 58
+        },
+        {
+          "id": "brachiocephalic_vein_left",
+          "value": 59
+        },
+        {
+          "id": "brachiocephalic_vein_right",
+          "value": 60
+        },
+        {
+          "id": "atrial_appendage_left",
+          "value": 61
+        },
+        {
+          "id": "superior_vena_cava",
+          "value": 62
+        },
+        {
+          "id": "inferior_vena_cava",
+          "value": 63
+        },
+        {
+          "id": "portal_vein_and_splenic_vein",
+          "value": 64
+        },
+        {
+          "id": "iliac_artery_left",
+          "value": 65
+        },
+        {
+          "id": "iliac_artery_right",
+          "value": 66
+        },
+        {
+          "id": "iliac_vena_left",
+          "value": 67
+        },
+        {
+          "id": "iliac_vena_right",
+          "value": 68
+        },
+        {
+          "id": "humerus_left",
+          "value": 69
+        },
+        {
+          "id": "humerus_right",
+          "value": 70
+        },
+        {
+          "id": "scapula_left",
+          "value": 71
+        },
+        {
+          "id": "scapula_right",
+          "value": 72
+        },
+        {
+          "id": "clavicula_left",
+          "value": 73
+        },
+        {
+          "id": "clavicula_right",
+          "value": 74
+        },
+        {
+          "id": "femur_left",
+          "value": 75
+        },
+        {
+          "id": "femur_right",
+          "value": 76
+        },
+        {
+          "id": "hip_left",
+          "value": 77
+        },
+        {
+          "id": "hip_right",
+          "value": 78
+        },
+        {
+          "id": "spinal_cord",
+          "value": 79
+        },
+        {
+          "id": "gluteus_maximus_left",
+          "value": 80
+        },
+        {
+          "id": "gluteus_maximus_right",
+          "value": 81
+        },
+        {
+          "id": "gluteus_medius_left",
+          "value": 82
+        },
+        {
+          "id": "gluteus_medius_right",
+          "value": 83
+        },
+        {
+          "id": "gluteus_minimus_left",
+          "value": 84
+        },
+        {
+          "id": "gluteus_minimus_right",
+          "value": 85
+        },
+        {
+          "id": "autochthon_left",
+          "value": 86
+        },
+        {
+          "id": "autochthon_right",
+          "value": 87
+        },
+        {
+          "id": "iliopsoas_left",
+          "value": 88
+        },
+        {
+          "id": "iliopsoas_right",
+          "value": 89
+        },
+        {
+          "id": "brain",
+          "value": 90
+        },
+        {
+          "id": "skull",
+          "value": 91
+        },
+        {
+          "id": "rib_left_1",
+          "value": 92
+        },
+        {
+          "id": "rib_left_2",
+          "value": 93
+        },
+        {
+          "id": "rib_left_3",
+          "value": 94
+        },
+        {
+          "id": "rib_left_4",
+          "value": 95
+        },
+        {
+          "id": "rib_left_5",
+          "value": 96
+        },
+        {
+          "id": "rib_left_6",
+          "value": 97
+        },
+        {
+          "id": "rib_left_7",
+          "value": 98
+        },
+        {
+          "id": "rib_left_8",
+          "value": 99
+        },
+        {
+          "id": "rib_left_9",
+          "value": 100
+        },
+        {
+          "id": "rib_left_10",
+          "value": 101
+        },
+        {
+          "id": "rib_left_11",
+          "value": 102
+        },
+        {
+          "id": "rib_left_12",
+          "value": 103
+        },
+        {
+          "id": "rib_right_1",
+          "value": 104
+        },
+        {
+          "id": "rib_right_2",
+          "value": 105
+        },
+        {
+          "id": "rib_right_3",
+          "value": 106
+        },
+        {
+          "id": "rib_right_4",
+          "value": 107
+        },
+        {
+          "id": "rib_right_5",
+          "value": 108
+        },
+        {
+          "id": "rib_right_6",
+          "value": 109
+        },
+        {
+          "id": "rib_right_7",
+          "value": 110
+        },
+        {
+          "id": "rib_right_8",
+          "value": 111
+        },
+        {
+          "id": "rib_right_9",
+          "value": 112
+        },
+        {
+          "id": "rib_right_10",
+          "value": 113
+        },
+        {
+          "id": "rib_right_11",
+          "value": 114
+        },
+        {
+          "id": "rib_right_12",
+          "value": 115
+        },
+        {
+          "id": "sternum",
+          "value": 116
+        },
+        {
+          "id": "costal_cartilages",
+          "value": 117
+        }
+      ],
+      "mined": {
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
+      }
+    },
+    "ts.v3:total_fast": {
+      "task": "ts.v3:total_fast",
+      "ecosystem": "ts.v3",
+      "engine": "nnunetv2",
+      "kind": "segments",
+      "modality": "CT",
+      "version": {
+        "ts_version": "2.18.0",
+        "registry_sha256": "d1d1004fd9acc011abe386e6ea805d35ad224f40527c838fc815e486c13523aa",
+        "listing": "1"
+      },
+      "source": {
+        "file": "haversack/data/ts_v3_tasks.json"
+      },
+      "segments": [
+        {
+          "id": "spleen",
+          "value": 1
+        },
+        {
+          "id": "kidney_right",
+          "value": 2
+        },
+        {
+          "id": "kidney_left",
+          "value": 3
+        },
+        {
+          "id": "gallbladder",
+          "value": 4
+        },
+        {
+          "id": "liver",
+          "value": 5
+        },
+        {
+          "id": "stomach",
+          "value": 6
+        },
+        {
+          "id": "pancreas",
+          "value": 7
+        },
+        {
+          "id": "adrenal_gland_right",
+          "value": 8
+        },
+        {
+          "id": "adrenal_gland_left",
+          "value": 9
+        },
+        {
+          "id": "lung_upper_lobe_left",
+          "value": 10
+        },
+        {
+          "id": "lung_lower_lobe_left",
+          "value": 11
+        },
+        {
+          "id": "lung_upper_lobe_right",
+          "value": 12
+        },
+        {
+          "id": "lung_middle_lobe_right",
+          "value": 13
+        },
+        {
+          "id": "lung_lower_lobe_right",
+          "value": 14
+        },
+        {
+          "id": "esophagus",
+          "value": 15
+        },
+        {
+          "id": "trachea",
+          "value": 16
+        },
+        {
+          "id": "thyroid_gland",
+          "value": 17
+        },
+        {
+          "id": "small_bowel",
+          "value": 18
+        },
+        {
+          "id": "duodenum",
+          "value": 19
+        },
+        {
+          "id": "colon",
+          "value": 20
+        },
+        {
+          "id": "urinary_bladder",
+          "value": 21
+        },
+        {
+          "id": "prostate",
+          "value": 22
+        },
+        {
+          "id": "kidney_cyst_left",
+          "value": 23
+        },
+        {
+          "id": "kidney_cyst_right",
+          "value": 24
+        },
+        {
+          "id": "sacrum",
+          "value": 25
+        },
+        {
+          "id": "vertebrae_L6",
+          "value": 26
+        },
+        {
+          "id": "vertebrae_L5",
+          "value": 27
+        },
+        {
+          "id": "vertebrae_L4",
+          "value": 28
+        },
+        {
+          "id": "vertebrae_L3",
+          "value": 29
+        },
+        {
+          "id": "vertebrae_L2",
+          "value": 30
+        },
+        {
+          "id": "vertebrae_L1",
+          "value": 31
+        },
+        {
+          "id": "vertebrae_T12",
+          "value": 32
+        },
+        {
+          "id": "vertebrae_T11",
+          "value": 33
+        },
+        {
+          "id": "vertebrae_T10",
+          "value": 34
+        },
+        {
+          "id": "vertebrae_T9",
+          "value": 35
+        },
+        {
+          "id": "vertebrae_T8",
+          "value": 36
+        },
+        {
+          "id": "vertebrae_T7",
+          "value": 37
+        },
+        {
+          "id": "vertebrae_T6",
+          "value": 38
+        },
+        {
+          "id": "vertebrae_T5",
+          "value": 39
+        },
+        {
+          "id": "vertebrae_T4",
+          "value": 40
+        },
+        {
+          "id": "vertebrae_T3",
+          "value": 41
+        },
+        {
+          "id": "vertebrae_T2",
+          "value": 42
+        },
+        {
+          "id": "vertebrae_T1",
+          "value": 43
+        },
+        {
+          "id": "vertebrae_C7",
+          "value": 44
+        },
+        {
+          "id": "vertebrae_C6",
+          "value": 45
+        },
+        {
+          "id": "vertebrae_C5",
+          "value": 46
+        },
+        {
+          "id": "vertebrae_C4",
+          "value": 47
+        },
+        {
+          "id": "vertebrae_C3",
+          "value": 48
+        },
+        {
+          "id": "vertebrae_C2",
+          "value": 49
+        },
+        {
+          "id": "vertebrae_C1",
+          "value": 50
+        },
+        {
+          "id": "heart",
+          "value": 51
+        },
+        {
+          "id": "aorta",
+          "value": 52
+        },
+        {
+          "id": "pulmonary_vein",
+          "value": 53
+        },
+        {
+          "id": "brachiocephalic_trunk",
+          "value": 54
+        },
+        {
+          "id": "subclavian_artery_right",
+          "value": 55
+        },
+        {
+          "id": "subclavian_artery_left",
+          "value": 56
+        },
+        {
+          "id": "common_carotid_artery_right",
+          "value": 57
+        },
+        {
+          "id": "common_carotid_artery_left",
+          "value": 58
+        },
+        {
+          "id": "brachiocephalic_vein_left",
+          "value": 59
+        },
+        {
+          "id": "brachiocephalic_vein_right",
+          "value": 60
+        },
+        {
+          "id": "atrial_appendage_left",
+          "value": 61
+        },
+        {
+          "id": "superior_vena_cava",
+          "value": 62
+        },
+        {
+          "id": "inferior_vena_cava",
+          "value": 63
+        },
+        {
+          "id": "portal_vein_and_splenic_vein",
+          "value": 64
+        },
+        {
+          "id": "iliac_artery_left",
+          "value": 65
+        },
+        {
+          "id": "iliac_artery_right",
+          "value": 66
+        },
+        {
+          "id": "iliac_vena_left",
+          "value": 67
+        },
+        {
+          "id": "iliac_vena_right",
+          "value": 68
+        },
+        {
+          "id": "humerus_left",
+          "value": 69
+        },
+        {
+          "id": "humerus_right",
+          "value": 70
+        },
+        {
+          "id": "scapula_left",
+          "value": 71
+        },
+        {
+          "id": "scapula_right",
+          "value": 72
+        },
+        {
+          "id": "clavicula_left",
+          "value": 73
+        },
+        {
+          "id": "clavicula_right",
+          "value": 74
+        },
+        {
+          "id": "femur_left",
+          "value": 75
+        },
+        {
+          "id": "femur_right",
+          "value": 76
+        },
+        {
+          "id": "hip_left",
+          "value": 77
+        },
+        {
+          "id": "hip_right",
+          "value": 78
+        },
+        {
+          "id": "spinal_cord",
+          "value": 79
+        },
+        {
+          "id": "gluteus_maximus_left",
+          "value": 80
+        },
+        {
+          "id": "gluteus_maximus_right",
+          "value": 81
+        },
+        {
+          "id": "gluteus_medius_left",
+          "value": 82
+        },
+        {
+          "id": "gluteus_medius_right",
+          "value": 83
+        },
+        {
+          "id": "gluteus_minimus_left",
+          "value": 84
+        },
+        {
+          "id": "gluteus_minimus_right",
+          "value": 85
+        },
+        {
+          "id": "autochthon_left",
+          "value": 86
+        },
+        {
+          "id": "autochthon_right",
+          "value": 87
+        },
+        {
+          "id": "iliopsoas_left",
+          "value": 88
+        },
+        {
+          "id": "iliopsoas_right",
+          "value": 89
+        },
+        {
+          "id": "brain",
+          "value": 90
+        },
+        {
+          "id": "skull",
+          "value": 91
+        },
+        {
+          "id": "rib_left_1",
+          "value": 92
+        },
+        {
+          "id": "rib_left_2",
+          "value": 93
+        },
+        {
+          "id": "rib_left_3",
+          "value": 94
+        },
+        {
+          "id": "rib_left_4",
+          "value": 95
+        },
+        {
+          "id": "rib_left_5",
+          "value": 96
+        },
+        {
+          "id": "rib_left_6",
+          "value": 97
+        },
+        {
+          "id": "rib_left_7",
+          "value": 98
+        },
+        {
+          "id": "rib_left_8",
+          "value": 99
+        },
+        {
+          "id": "rib_left_9",
+          "value": 100
+        },
+        {
+          "id": "rib_left_10",
+          "value": 101
+        },
+        {
+          "id": "rib_left_11",
+          "value": 102
+        },
+        {
+          "id": "rib_left_12",
+          "value": 103
+        },
+        {
+          "id": "rib_right_1",
+          "value": 104
+        },
+        {
+          "id": "rib_right_2",
+          "value": 105
+        },
+        {
+          "id": "rib_right_3",
+          "value": 106
+        },
+        {
+          "id": "rib_right_4",
+          "value": 107
+        },
+        {
+          "id": "rib_right_5",
+          "value": 108
+        },
+        {
+          "id": "rib_right_6",
+          "value": 109
+        },
+        {
+          "id": "rib_right_7",
+          "value": 110
+        },
+        {
+          "id": "rib_right_8",
+          "value": 111
+        },
+        {
+          "id": "rib_right_9",
+          "value": 112
+        },
+        {
+          "id": "rib_right_10",
+          "value": 113
+        },
+        {
+          "id": "rib_right_11",
+          "value": 114
+        },
+        {
+          "id": "rib_right_12",
+          "value": 115
+        },
+        {
+          "id": "sternum",
+          "value": 116
+        },
+        {
+          "id": "costal_cartilages",
+          "value": 117
+        }
+      ],
+      "mined": {
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
+      }
+    },
+    "ts.v3:total_fastest": {
+      "task": "ts.v3:total_fastest",
+      "ecosystem": "ts.v3",
+      "engine": "nnunetv2",
+      "kind": "segments",
+      "modality": "CT",
+      "version": {
+        "ts_version": "2.18.0",
+        "registry_sha256": "8e5316420d74793dc22c0a1c15438c2a43d3881a1bcf956baec0d31f1498d6f4",
+        "listing": "1"
+      },
+      "source": {
+        "file": "haversack/data/ts_v3_tasks.json"
+      },
+      "segments": [
+        {
+          "id": "spleen",
+          "value": 1
+        },
+        {
+          "id": "kidney_right",
+          "value": 2
+        },
+        {
+          "id": "kidney_left",
+          "value": 3
+        },
+        {
+          "id": "gallbladder",
+          "value": 4
+        },
+        {
+          "id": "liver",
+          "value": 5
+        },
+        {
+          "id": "stomach",
+          "value": 6
+        },
+        {
+          "id": "pancreas",
+          "value": 7
+        },
+        {
+          "id": "adrenal_gland_right",
+          "value": 8
+        },
+        {
+          "id": "adrenal_gland_left",
+          "value": 9
+        },
+        {
+          "id": "lung_upper_lobe_left",
+          "value": 10
+        },
+        {
+          "id": "lung_lower_lobe_left",
+          "value": 11
+        },
+        {
+          "id": "lung_upper_lobe_right",
+          "value": 12
+        },
+        {
+          "id": "lung_middle_lobe_right",
+          "value": 13
+        },
+        {
+          "id": "lung_lower_lobe_right",
+          "value": 14
+        },
+        {
+          "id": "esophagus",
+          "value": 15
+        },
+        {
+          "id": "trachea",
+          "value": 16
+        },
+        {
+          "id": "thyroid_gland",
+          "value": 17
+        },
+        {
+          "id": "small_bowel",
+          "value": 18
+        },
+        {
+          "id": "duodenum",
+          "value": 19
+        },
+        {
+          "id": "colon",
+          "value": 20
+        },
+        {
+          "id": "urinary_bladder",
+          "value": 21
+        },
+        {
+          "id": "prostate",
+          "value": 22
+        },
+        {
+          "id": "kidney_cyst_left",
+          "value": 23
+        },
+        {
+          "id": "kidney_cyst_right",
+          "value": 24
+        },
+        {
+          "id": "sacrum",
+          "value": 25
+        },
+        {
+          "id": "vertebrae_L6",
+          "value": 26
+        },
+        {
+          "id": "vertebrae_L5",
+          "value": 27
+        },
+        {
+          "id": "vertebrae_L4",
+          "value": 28
+        },
+        {
+          "id": "vertebrae_L3",
+          "value": 29
+        },
+        {
+          "id": "vertebrae_L2",
+          "value": 30
+        },
+        {
+          "id": "vertebrae_L1",
+          "value": 31
+        },
+        {
+          "id": "vertebrae_T12",
+          "value": 32
+        },
+        {
+          "id": "vertebrae_T11",
+          "value": 33
+        },
+        {
+          "id": "vertebrae_T10",
+          "value": 34
+        },
+        {
+          "id": "vertebrae_T9",
+          "value": 35
+        },
+        {
+          "id": "vertebrae_T8",
+          "value": 36
+        },
+        {
+          "id": "vertebrae_T7",
+          "value": 37
+        },
+        {
+          "id": "vertebrae_T6",
+          "value": 38
+        },
+        {
+          "id": "vertebrae_T5",
+          "value": 39
+        },
+        {
+          "id": "vertebrae_T4",
+          "value": 40
+        },
+        {
+          "id": "vertebrae_T3",
+          "value": 41
+        },
+        {
+          "id": "vertebrae_T2",
+          "value": 42
+        },
+        {
+          "id": "vertebrae_T1",
+          "value": 43
+        },
+        {
+          "id": "vertebrae_C7",
+          "value": 44
+        },
+        {
+          "id": "vertebrae_C6",
+          "value": 45
+        },
+        {
+          "id": "vertebrae_C5",
+          "value": 46
+        },
+        {
+          "id": "vertebrae_C4",
+          "value": 47
+        },
+        {
+          "id": "vertebrae_C3",
+          "value": 48
+        },
+        {
+          "id": "vertebrae_C2",
+          "value": 49
+        },
+        {
+          "id": "vertebrae_C1",
+          "value": 50
+        },
+        {
+          "id": "heart",
+          "value": 51
+        },
+        {
+          "id": "aorta",
+          "value": 52
+        },
+        {
+          "id": "pulmonary_vein",
+          "value": 53
+        },
+        {
+          "id": "brachiocephalic_trunk",
+          "value": 54
+        },
+        {
+          "id": "subclavian_artery_right",
+          "value": 55
+        },
+        {
+          "id": "subclavian_artery_left",
+          "value": 56
+        },
+        {
+          "id": "common_carotid_artery_right",
+          "value": 57
+        },
+        {
+          "id": "common_carotid_artery_left",
+          "value": 58
+        },
+        {
+          "id": "brachiocephalic_vein_left",
+          "value": 59
+        },
+        {
+          "id": "brachiocephalic_vein_right",
+          "value": 60
+        },
+        {
+          "id": "atrial_appendage_left",
+          "value": 61
+        },
+        {
+          "id": "superior_vena_cava",
+          "value": 62
+        },
+        {
+          "id": "inferior_vena_cava",
+          "value": 63
+        },
+        {
+          "id": "portal_vein_and_splenic_vein",
+          "value": 64
+        },
+        {
+          "id": "iliac_artery_left",
+          "value": 65
+        },
+        {
+          "id": "iliac_artery_right",
+          "value": 66
+        },
+        {
+          "id": "iliac_vena_left",
+          "value": 67
+        },
+        {
+          "id": "iliac_vena_right",
+          "value": 68
+        },
+        {
+          "id": "humerus_left",
+          "value": 69
+        },
+        {
+          "id": "humerus_right",
+          "value": 70
+        },
+        {
+          "id": "scapula_left",
+          "value": 71
+        },
+        {
+          "id": "scapula_right",
+          "value": 72
+        },
+        {
+          "id": "clavicula_left",
+          "value": 73
+        },
+        {
+          "id": "clavicula_right",
+          "value": 74
+        },
+        {
+          "id": "femur_left",
+          "value": 75
+        },
+        {
+          "id": "femur_right",
+          "value": 76
+        },
+        {
+          "id": "hip_left",
+          "value": 77
+        },
+        {
+          "id": "hip_right",
+          "value": 78
+        },
+        {
+          "id": "spinal_cord",
+          "value": 79
+        },
+        {
+          "id": "gluteus_maximus_left",
+          "value": 80
+        },
+        {
+          "id": "gluteus_maximus_right",
+          "value": 81
+        },
+        {
+          "id": "gluteus_medius_left",
+          "value": 82
+        },
+        {
+          "id": "gluteus_medius_right",
+          "value": 83
+        },
+        {
+          "id": "gluteus_minimus_left",
+          "value": 84
+        },
+        {
+          "id": "gluteus_minimus_right",
+          "value": 85
+        },
+        {
+          "id": "autochthon_left",
+          "value": 86
+        },
+        {
+          "id": "autochthon_right",
+          "value": 87
+        },
+        {
+          "id": "iliopsoas_left",
+          "value": 88
+        },
+        {
+          "id": "iliopsoas_right",
+          "value": 89
+        },
+        {
+          "id": "brain",
+          "value": 90
+        },
+        {
+          "id": "skull",
+          "value": 91
+        },
+        {
+          "id": "rib_left_1",
+          "value": 92
+        },
+        {
+          "id": "rib_left_2",
+          "value": 93
+        },
+        {
+          "id": "rib_left_3",
+          "value": 94
+        },
+        {
+          "id": "rib_left_4",
+          "value": 95
+        },
+        {
+          "id": "rib_left_5",
+          "value": 96
+        },
+        {
+          "id": "rib_left_6",
+          "value": 97
+        },
+        {
+          "id": "rib_left_7",
+          "value": 98
+        },
+        {
+          "id": "rib_left_8",
+          "value": 99
+        },
+        {
+          "id": "rib_left_9",
+          "value": 100
+        },
+        {
+          "id": "rib_left_10",
+          "value": 101
+        },
+        {
+          "id": "rib_left_11",
+          "value": 102
+        },
+        {
+          "id": "rib_left_12",
+          "value": 103
+        },
+        {
+          "id": "rib_right_1",
+          "value": 104
+        },
+        {
+          "id": "rib_right_2",
+          "value": 105
+        },
+        {
+          "id": "rib_right_3",
+          "value": 106
+        },
+        {
+          "id": "rib_right_4",
+          "value": 107
+        },
+        {
+          "id": "rib_right_5",
+          "value": 108
+        },
+        {
+          "id": "rib_right_6",
+          "value": 109
+        },
+        {
+          "id": "rib_right_7",
+          "value": 110
+        },
+        {
+          "id": "rib_right_8",
+          "value": 111
+        },
+        {
+          "id": "rib_right_9",
+          "value": 112
+        },
+        {
+          "id": "rib_right_10",
+          "value": 113
+        },
+        {
+          "id": "rib_right_11",
+          "value": 114
+        },
+        {
+          "id": "rib_right_12",
+          "value": 115
+        },
+        {
+          "id": "sternum",
+          "value": 116
+        },
+        {
+          "id": "costal_cartilages",
+          "value": 117
+        }
+      ],
+      "mined": {
+        "at": "2026-09-22",
+        "by": "haversack 0.12.4"
       }
     },
     "voxtell:text": {

@@ -45,6 +45,14 @@ def for_engine(name: str) -> dict | None:
     return dict(rec) if rec else None
 
 
+def for_encoder(spec) -> dict | None:
+    """An encoder's record (``haversack encode``): its own under ``encoders``, else - an nnU-Net
+    encoder, whose network is a task's - its ecosystem's."""
+    data = load()
+    rec = data.get("encoders", {}).get(spec.attribution) or data["ecosystems"].get(spec.attribution)
+    return dict(rec) if rec else None
+
+
 def _applies(ref: dict, info: dict) -> bool:
     """A reference marked ``when: {modality: MR}`` is asked for only by the
     models of that modality (TotalSegmentator's MRI paper for its MR tasks)."""

@@ -52,7 +52,7 @@ SPACE = "left-posterior-superior"
 ZIP_SUFFIX = ".zip"
 
 __all__ = ["RankedStore", "open_store", "is_zip", "grid_metadata", "grid_attrs",
-           "grid_reference", "brick_attrs", "part_attrs", "leaf", "group", "segmentation",
+           "grid_reference", "brick_attrs", "part_attrs", "segment", "segmentation",
            "root_attrs", "read_metadata", "validate_array", "read_segmentation"]
 
 
@@ -376,10 +376,10 @@ def grid_reference(direction_xyz, spacing_zyx, origin_xyz, shape_zyx, *,
 def brick_attrs(direction_xyz, spacing_zyx, origin_xyz, brick: int, *, list_axis: bool = True
                 ) -> dict:
     """Geometry of a brick summary (the occupancy index): a grid ``brick`` times coarser
-    whose samples are cell centres, with a ``list`` axis for the class.
+    whose samples are cell centers, with a ``list`` axis for the class.
 
     The last brick along an axis is partial when the shape is not a multiple of ``brick``,
-    so its true centre is nearer than this uniform grid says; left as-is deliberately - the
+    so its true center is nearer than this uniform grid says; left as-is deliberately - the
     array is a conservative index, not a measurement, and a uniform grid keeps it a readable
     duckn array rather than a private layout.
     """
@@ -399,39 +399,42 @@ def part_attrs(ranked_block: dict) -> dict:
                                      extensions={"ranked": ranked_block}))
 
 
-def leaf(id: str, name: str, label_value: int, *, layer: int | None = None,
-         extent: list[int] | None = None, background: bool = False,
-         color: list[float] | None = None):
-    """A duckn leaf ``Segment``: one label value in one layer. ``background`` marks the
-    layer's background leaf (seg spec 0.7 §3.2)."""
+def segment(id: str, name: str, label_values, *, layer: int | None = None,
+            extent: list[int] | None = None, role: str | None = None,
+            color=None, designations: list | None = None):
+    """A duckn ``Segment`` (seg spec 0.8): the label values of one layer that belong to it.
+    ``label_values`` is one integer or several; ``role`` is ``"background"`` or
+    ``"unknown"``; ``color`` is a CSS color string, or an sRGB float triple, which is
+    written as the string duckn's rule gives it."""
     from duckn import Segment
-    return Segment(id=id, name=name, label_value=int(label_value), layer=layer,
-                   extent=extent, background=(True if background else None), color=color)
+    from duckn.seg_color import format_color, from_slicer_floats
+    values = [label_values] if isinstance(label_values, int) else list(label_values)
+    if color is not None and not isinstance(color, str):
+        color = format_color(from_slicer_floats(color))[0]
+    return Segment(id=id, name=name, label_values=sorted({int(v) for v in values}),
+                   layer=(layer or None), extent=extent, role=role, color=color,
+                   designations=designations or None)
 
 
-def group(id: str, name: str, members: list[str], *, disjoint: bool = False,
-          exhaustive: bool = False, color: list[float] | None = None):
-    """A duckn group ``Segment``: the union of ``members`` (segment ids). ``disjoint``
-    claims the members share no voxel; ``exhaustive`` claims they exhaust the thing the
-    group names; both make a partition (seg spec 0.7 §2)."""
-    from duckn import Segment
-    return Segment(id=id, name=name, members=list(members),
-                   disjoint=(True if disjoint else None),
-                   exhaustive=(True if exhaustive else None), color=color)
-
-
-_SCT = {"name": "SNOMED CT", "url": "http://snomed.info/sct",
+_SCT = {"name": "SNOMED CT", "system_uri": "http://snomed.info/sct",
         "url_template": "http://snomed.info/id/{code}"}
 
 
-def segmentation(segments, *, terminologies: dict | None = None):
-    """The ``seg`` extension over ``segments``, validated by duckn's consistency rules."""
-    from duckn import SEG_EXTENSION_VERSION, SegmentationExtension, TerminologyEntry
+def segmentation(segments, *, terminologies: dict | None = None,
+                 labeling_scheme: str | None = None):
+    """The ``seg`` extension over ``segments``, checked against duckn's consistency rules:
+    any error raises (duckn's validator reports, and a writer must not write one).
+
+    Stores carry the model's classes and nothing derived from them: seg 0.8 has no groups,
+    and a union such as "lungs" is a fact about the labeling scheme, the same for every
+    store a model produces, which belongs to a document outside the store."""
+    from duckn import SEG_VERSION, SegmentationExtension, TerminologyEntry
     from duckn import validate_seg_extension
-    terms = {k: TerminologyEntry(**v) for k, v in (terminologies or {"SCT": _SCT}).items()}
-    ext = SegmentationExtension(version=SEG_EXTENSION_VERSION, terminologies=terms,
-                                segments=list(segments))
-    validate_seg_extension(ext)
+    from duckn.diagnostics import raise_on
+    terms = {k: TerminologyEntry(**v) for k, v in (terminologies or {}).items()}
+    ext = SegmentationExtension(version=SEG_VERSION, terminologies=terms or None,
+                                labeling_scheme=labeling_scheme, segments=list(segments))
+    raise_on(validate_seg_extension(ext))
     return ext
 
 
@@ -464,11 +467,13 @@ def validate_array(arr) -> None:
 
 
 def read_segmentation(root):
-    """The root's ``seg`` extension as a validated ``SegmentationExtension``."""
-    from duckn import SegmentationExtension, validate_seg_extension
+    """The root's ``seg`` extension as a ``SegmentationExtension`` of the current version.
+    A store written under an older seg version is migrated on the way in (its groups become
+    segments listing their members' values); a store duckn's rules say a reader refuses
+    raises ``duckn.DiagnosticsError``."""
+    from duckn import read_seg_extension
     ext = (read_metadata(root).extensions or {}).get("seg")
     if ext is None:
         raise KeyError("no seg extension on the root group")
-    seg = SegmentationExtension.model_validate(ext)
-    validate_seg_extension(seg)
+    seg, _ = read_seg_extension(ext)
     return seg

@@ -104,7 +104,7 @@ class TestConstruction(unittest.TestCase):
     def test_a_composite_sdf_holds_the_identity_only_near_its_own_surface(self):
         """A sector's SDF is `max` over its constraints: the zero set is exact, the
         distance is not. Past the surface's reach - the distance to the nearest edge or
-        junction - the neighbour's own nearest constraint is a different wall, so `d_nb`
+        junction - the neighbor's own nearest constraint is a different wall, so `d_nb`
         stops being `-d_c` and the identity goes with it. Measured here it survives to
         0.75 mm off a rim and a junction line and breaks by 1.8 logits at 1.5 mm.
 
@@ -129,7 +129,7 @@ class TestConstruction(unittest.TestCase):
         loses to a body's interior but beats every OTHER body there, so it takes the
         runner-up slot throughout the ball and the walls between sectors stop competing
         - the phantom keeps its labelmap and quietly loses its triple junction. Here the
-        neighbour must win that slot, which is the thing a flat zero destroys."""
+        neighbor must win that slot, which is the thing a flat zero destroys."""
         g, sec = _grid(spacing=0.5), ph.sectors(4, 8.0)
         lg = ph.logits(sec, g, gradient=3.0).numpy()
         pts = ph._points(g, None, None)

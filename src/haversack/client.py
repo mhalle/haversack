@@ -139,7 +139,7 @@ class RemoteClient:
             if not cursor:
                 return
 
-    def submit(self, image, task: str, *, deliverables=None, **options) -> str:
+    def submit(self, image, task: str, *, deliverables=None, kind: str | None = None, **options) -> str:
         """``image`` is a local file to upload, or ``"<source>:<identifier>"``
         (e.g. ``"idc:<crdc_series_uuid>"``) to have the server fetch the input
         from one of its registered data sources. A path that exists locally
@@ -150,8 +150,14 @@ class RemoteClient:
         renders its own set (``GET /v1/health`` lists it; a name outside it is refused).
         A keyword of its own and a form field of its own, NOT one of ``options``: those
         are part of the result's key, and declining a preview must not name another
-        result."""
+        result.
+
+        ``kind="encode"`` makes the job an embedding field of ``image`` with the ENCODER named
+        ``task`` (``GET /v1/encoders``), whose only option is ``int8``; None sends nothing,
+        which is a segmentation - the form every server before 2026-09-23 understands."""
         data = {"task": task, "options": json.dumps(options)}
+        if kind is not None:
+            data["kind"] = kind
         if deliverables is not None:
             data["deliverables"] = json.dumps(list(deliverables))
         img = str(image)
@@ -238,6 +244,22 @@ class RemoteClient:
             if snap["state"] in TERMINAL:
                 return snap
             time.sleep(poll_interval)
+
+    def encoders(self) -> dict:
+        """``GET /v1/encoders``: what the server encodes with."""
+        return self._json("GET", "/v1/encoders")
+
+    def encode(self, image, encoder: str, output, *, int8: bool = False, on_status=None) -> dict:
+        """An embedding field of ``image`` into ``output`` (``<name>.zarr.zip``): submit an
+        encode job, wait, fetch. Returns the final status; raises on a failed job."""
+        opts = {"int8": True} if int8 else {}
+        jid = self.submit(image, encoder, kind="encode", **opts)
+        final = self.wait(jid, on_status=on_status)
+        if final["state"] == "done":
+            self.fetch(jid, output)
+        elif final["state"] == "failed":
+            raise RemoteError(f"job {jid} failed: {final.get('error', 'unknown')}")
+        return final
 
     def run(self, image, task: str, output, *, on_status=None, deliverables=None,
             **options) -> dict:

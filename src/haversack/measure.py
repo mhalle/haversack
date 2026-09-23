@@ -159,11 +159,11 @@ def _sweep(block, sp, clip=None):
         n = np.stack([sum(p for p, cn in zip(psi, _CORNERS) if cn[ax] == 1) / 4.0
                       - sum(p for p, cn in zip(psi, _CORNERS) if cn[ax] == 0) / 4.0
                       for ax in range(3)])            # psi per cell, index space
-        centre = sum(psi) / 8.0
+        center = sum(psi) / 8.0
     else:
-        centre, n = _censored_fit(np.stack(psi).astype(np.float64), float(clip))
+        center, n = _censored_fit(np.stack(psi).astype(np.float64), float(clip))
     a = np.abs(n)
-    alpha = 0.5 * a.sum(0) - centre                   # the sign folding collapses to this
+    alpha = 0.5 * a.sum(0) - center                   # the sign folding collapses to this
     frac, dfrac = _cube_cut(a, alpha)
     grad = np.linalg.norm(n / sp[:, None], axis=0)    # physical |grad psi|
     return volume + float(frac.sum()) * cell, float((grad * dfrac).sum()) * cell

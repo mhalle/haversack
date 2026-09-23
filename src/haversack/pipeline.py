@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from .envelope import (Envelope, at_least, body_mask, body_threshold, envelope_margin,
-                       envelope_of, label_roi, margin_in_voxels, worth_cropping)
+                       envelope_of, margin_in_voxels, worth_cropping)
 from .frame import Frame
 from .mapping import Mapping
 from . import backends
@@ -41,6 +41,28 @@ def _warm_restore_kernel(device: str) -> None:
     threading.Thread(target=triton_gpu.warmup, daemon=True).start()
 
 
+def upstream_crop_box(labels, classes, margin_mm: float, spacing_zyx):
+    """The box a TotalSegmentator cascade's final stage runs on: ``(lo, hi)`` source indices, end
+    exclusive, or None when none of ``classes`` is present - upstream's ``crop_to_mask`` and
+    ``get_bbox_from_mask`` (cropping.py), restated on the canonical input grid.
+
+    Upstream takes the bounding box of the crop classes in the ORIGINAL image's index space and
+    widens it by ``int(mm / zoom)`` voxels per axis - truncated, not rounded - with the upper
+    end one past the last voxel, then clips to the image. The canonical grid is that index space
+    with its axes permuted and flipped, so the same box, spacing axis for axis, is the same set
+    of voxels (2026-09-22). An empty mask is upstream's "Crop is empty. Returning empty
+    segmentation" - the caller returns background, never the whole volume.
+    """
+    mask = np.isin(np.asarray(labels), [int(c) for c in classes])
+    if not mask.any():
+        return None
+    add = (float(margin_mm) / np.asarray(spacing_zyx, dtype=np.float64)).astype(int)
+    idx = np.nonzero(mask)
+    lo = tuple(max(0, int(i.min()) - int(a)) for i, a in zip(idx, add))
+    hi = tuple(min(int(n), int(i.max()) + 1 + int(a)) for i, a, n in zip(idx, add, mask.shape))
+    return lo, hi
+
+
 def _lut(K: int, remap: dict | None) -> np.ndarray:
     lut = np.arange(K, dtype=np.int64)
     if remap:
@@ -52,6 +74,29 @@ def _lut(K: int, remap: dict | None) -> np.ndarray:
                     f"emits {K} channels - the task catalog does not match the "
                     "installed weights (stale class map?)")
             lut[int(local)] = int(global_)
+    return lut
+
+
+def _named_lut(K: int, spec) -> np.ndarray:
+    """A TS-lineage model's own values, with every value its task's label map does not name
+    mapped to 0 - upstream's ``remove_auxiliary_labels``, which zeroes the argmax's labels (not
+    the channels before it) at model resolution. Until 2026-09-22 they were written:
+    kidney_cysts' result held Dataset 789's whole kidneys as unnamed values 3 and 4.
+
+    What falls outside the label map must be exactly the auxiliary classes the registry states,
+    so a result can move only where its key says so (``auxiliary=0``); anything else is a
+    catalog that does not match its weights, refused as ``_lut`` refuses a stale remap."""
+    lut = np.arange(K, dtype=np.int64)
+    if spec.lineage != "ts":
+        return lut
+    dropped = sorted(set(range(1, K)) - {int(v) for v in spec.label_map})
+    stated = sorted(int(v) for v in spec.auxiliary)
+    if dropped != stated:
+        raise ModelNotFound(
+            f"{spec.name}: the model emits values {dropped} its label map does not name, and "
+            f"the registry states auxiliary classes {stated} - the task catalog does not "
+            "match the installed weights (stale class map?)")
+    lut[dropped] = 0
     return lut
 
 
@@ -70,7 +115,8 @@ def canonical_orientation_for(spec, store, *, configuration: str | None = None) 
     if spec.orientation is not None:
         return str(spec.orientation)
     if _uses_nnunet_preprocessing(spec) and spec.single is not None:
-        folder = store.resolve(spec.single, configuration=configuration)
+        folder = store.resolve(spec.single, configuration=configuration,
+                               **spec.model_choice(spec.single))
         return nio.CANONICAL if nio.reader_reorients(folder) else None
     return nio.CANONICAL
 
@@ -239,11 +285,15 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     cached = {}                                   # resample key -> ResampledGrid (NOT normalized)
     identity = {}                                 # weights id -> what actually ran, for the store
 
-    def load(wid):
-        folder = store.resolve(wid, configuration=configuration)
+    def load(wid, spc):
+        # the stage's own spec states which model folder a shared dataset means
+        folder = store.resolve(wid, configuration=configuration, **spc.model_choice(wid))
+        # a task's stated tile step (ts.v3: upstream's 0.8); stated nowhere else, so every
+        # other task's call - and its provenance - is exactly what it was
+        step = {} if spc.step_size is None else {"step_size": spc.step_size}
         m = models.get(folder, folds=folds, device=device, dtype=dtype,
                        accumulate=accumulate, batch_size=batch_size,
-                       allow_transpose=allow_transpose)
+                       allow_transpose=allow_transpose, **step)
         # the folder name does NOT identify the weights version - Dataset297 ships as both
         # v2.0.0 and v2.0.4 and both unpack to the same name - so read what fetch_one recorded
         from .weights_fetch import installed_version
@@ -255,13 +305,15 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                                "version": rec.get("tag", "unknown"), "sha256": rec.get("sha256"),
                                "folds": list(available_folds(folder, folds)), "K": m.K,
                                "spacing": tuple(round(v, 4) for v in m.spacing_zyx),
+                               **step,
                                **({"transpose_forward": list(m.transpose_forward),
                                    "transpose_validated": False}
                                   if m.transpose_forward != (0, 1, 2) else {})})
         return m
 
-    def model_frame(model):
-        """This model's network input, sharing the resample with other models at its spacing.
+    def model_frame(model, box=None):
+        """This model's network input, sharing the resample with other models at its spacing
+        and, in a cascade's final stage, its crop box (``box``: see :func:`upstream_crop_box`).
 
         Only the crop+resample is cached. Normalization is nnU-Net's, and it is PER MODEL - each
         reads its own dataset's foreground statistics - so sharing a normalized array between the
@@ -269,17 +321,19 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         normalization-free grid and normalizing per model keeps the one resample per spacing that
         the cache is for, without that.
         """
-        key = (tuple(model.spacing_zyx), convention, resampling_order, crop_nonzero, str(device))
+        key = (tuple(model.spacing_zyx), convention, resampling_order, crop_nonzero, str(device), box)
         if key not in cached:
             cached[key] = to_model_grid(data_zyx, geometry, model.spacing_zyx, convention=convention,
                                         device=device, order=resampling_order,
-                                        original_orientation=orientation, crop_to_nonzero=crop_nonzero)
+                                        original_orientation=orientation, crop_to_nonzero=crop_nonzero,
+                                        box=box)
         grid = cached[key]
         return normalize_for(grid, model), grid.frame
 
-    def crop_on_model_grid(model, x, frame, *, use_body, roi_mm):
-        """A voxel box on this model's grid: the body envelope (optional) intersected with a
-        physical ROI (optional, from a coarse cascade stage). None means run the whole grid."""
+    def crop_on_model_grid(model, x, frame, *, use_body):
+        """A voxel box on this model's grid: the body envelope, when asked for. None means run
+        the whole grid. A cascade's crop is not this: it is applied to the source before the
+        resample (``model_frame(model, box)``), as upstream applies it (2026-09-22)."""
         shape = tuple(int(s) for s in x.shape[1:])
         start = [0, 0, 0]
         stop = list(shape)
@@ -291,19 +345,6 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                             margin_voxels=margin_in_voxels(envelope_mm, model.spacing_zyx))
             start = [max(a, b) for a, b in zip(start, e.start)]
             stop = [min(a, b) for a, b in zip(stop, e.stop)]
-        if roi_mm is not None:
-            (first_mm, last_mm), dil = roi_mm
-            # mm -> index on the grid the resampler actually consumed (== source unless
-            # crop-to-nonzero moved its origin), then that grid's index -> model coordinate
-            rf = frame.resampled_from
-            fr = frame.forward_rule
-            c0 = fr.apply(rf.mm_to_index(first_mm))
-            c1 = fr.apply(rf.mm_to_index(last_mm))
-            dv = margin_in_voxels(dil, model.spacing_zyx)
-            for ax in range(3):
-                a, b = sorted((c0[ax], c1[ax]))
-                start[ax] = max(start[ax], int(np.floor(a)) - dv[ax])
-                stop[ax] = min(stop[ax], int(np.ceil(b)) + 1 + dv[ax])
         start = [max(0, v) for v in start]
         stop = [min(n, v) for n, v in zip(shape, stop)]
         if any(b <= a for a, b in zip(start, stop)):          # empty -> fall back to whole grid
@@ -363,7 +404,8 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             input_orientation=orientation, frame=frame.to_meta())
         T[f"probabilities:{part}"] = time.perf_counter() - t
 
-    def predict_into(model, x, frame, ogrid, env, *, lut, paint, out, part="", weights=None):
+    def predict_into(model, x, frame, ogrid, env, *, lut, paint, out, part="", weights=None,
+                     restore=None):
         # tripwire: `x` must carry THIS model's normalization. Several models share one resample,
         # and feeding one model's normalization to another is silent and severe - the organs
         # model's CT clip at +276 HU flattens all bone for the parts that follow it.
@@ -389,7 +431,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             d = deviation("restore backend", "auto", "torch", choice.fallback)
             if d not in prov["deviations"]:                 # parts on one grid say it once
                 prov["deviations"].append(d)
-        to_labels(logits, ogrid, mapping, interp=interp, outside="background", lut=lut, paint=paint,
+        to_labels(logits, ogrid, mapping, interp=restore or interp, outside="background", lut=lut, paint=paint,
                   out=out, backend=choice.name)
         if device == "cuda":
             torch.cuda.synchronize()
@@ -399,9 +441,14 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         if device in ("cuda", "mps"):
             (torch.cuda if device == "cuda" else torch.mps).empty_cache()
 
-    def run_single_or_union(spc, tag):
-        parts = spc.parts
-        report.n_parts = max(report.n_parts, len(parts))
+    def run_single_or_union(spc, tag, *, parts=None, box=None, use_body=True, first=0,
+                            out_grid=None, restore=None):
+        """One model, or a union's models painted in order into one output. A cascade's final
+        stage comes here too (2026-09-22) - one model, or a union like headneck_muscles' - with
+        ``box``, the source box its crop stage found, which every part runs on; ``first``, its
+        position in the task's progress; and, for a crop source, ``out_grid``/``restore``."""
+        parts = spc.parts if parts is None else parts
+        report.n_parts = max(report.n_parts, first + len(parts))
         og = None
         out = None
         fr = None
@@ -412,23 +459,24 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         for i, (wid, remap, pname) in enumerate(parts):
             key = f"{tag}{sfx if sfx is not None else ':' + pname}"
             t = time.perf_counter()
-            report.enter_part(i, f"{pname} ({wid})")
-            model = load(wid)
+            report.enter_part(first + i, f"{pname} ({wid})" + ("" if box is None else " (cropped)"))
+            model = load(wid, spc)
             T[f"load:{key}"] = time.perf_counter() - t
             t = time.perf_counter()
-            x, fr = model_frame(model)
-            env = crop_on_model_grid(model, x, fr, use_body=True, roi_mm=None)
+            x, fr = model_frame(model, box)
+            env = crop_on_model_grid(model, x, fr, use_body=use_body and box is None)
             if not env.is_whole():
                 report.stage("preprocess", f"envelope {env.fraction * 100:.0f} % of the model grid")
             T[f"preprocess:{key}"] = time.perf_counter() - t
             if og is None:
-                og = fr.resolve_grid(grid)
+                og = fr.resolve_grid(grid if out_grid is None else out_grid)
                 max_label = max((int(v) for v in spc.label_map), default=255)
                 out = torch.zeros(og.shape, dtype=torch.uint8 if max_label <= 255 else torch.uint16, device=device)
             t = time.perf_counter()
             report.stage("predict", pname)
-            predict_into(model, x, fr, og, env, lut=_lut(model.K, remap), paint=len(parts) > 1,
-                         out=out, part=pname, weights=wid)
+            lut = _named_lut(model.K, spc) if remap is None else _lut(model.K, remap)
+            predict_into(model, x, fr, og, env, lut=lut, paint=len(parts) > 1,
+                         out=out, part=pname, weights=wid, restore=restore)
             where = "device" if model.accumulate_choice["on_device"] else "host"
             report.stage("restore", f"{where} accumulator")
             for m in prov["models"]:                 # the effective placement, per model
@@ -442,51 +490,72 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             models.release(model)
         return out, fr, og
 
-    def run_cascade(spc, tag):
-        roi_mm = None
-        out = fr = og = None
+    def run_cascade(spc, tag, *, out_grid=None, restore=None):
+        """TotalSegmentator's crop, as upstream runs it (2026-09-22). Each stage before the last
+        labels the whole image (inside any box already found), restored nearest-neighbor onto
+        the input grid as upstream restores its crop model; the box of its crop classes, widened
+        by its margin (:func:`upstream_crop_box`), is cut out of the input BEFORE the final
+        stage's resample, and the final stage runs on that cut alone - never grown to the patch,
+        never dropped for saving too little - so nothing outside the box is labeled. An empty
+        crop is an empty result, as upstream returns one.
+
+        Until 2026-09-22 the crop was a speed approximation of whole-volume inference instead
+        (grown by ``at_least``, collapsed by ``worth_cropping``), tuned against the model run on
+        the whole volume (medseg docs/backend-decision.md, "Cascade mode-B") and never compared
+        with upstream: on a neck CT headneck_bones_vessels scored mean Dice 0.738 against
+        upstream, zygomatic arches labeled beyond upstream's box."""
+        box = None
         stages = spc.cascade
-        report.n_parts = max(report.n_parts, len(stages))
+        report.n_parts = max(report.n_parts, len(stages) - 1 + max(1, len(stages[-1].union)))
         for i, step in enumerate(stages):
-            last = i == len(stages) - 1
+            if i == len(stages) - 1:
+                parts = ([(p.weights_id, dict(p.label_remap), p.name or str(p.weights_id))
+                          for p in step.union] if step.union else [(step.weights_id, None, tag)])
+                return run_single_or_union(spc, tag, parts=parts, box=box, use_body=False,
+                                           first=i, out_grid=out_grid, restore=restore)
             if step.crop_from_task is not None:
                 report.stage("cascade", f"{tag} stage {i + 1}/{len(stages)}: crop from {step.crop_from_task!r}")
                 crop = step.crop_from_task
                 if ":" not in crop and ":" in spc.name:       # a registry names its own tasks bare
                     crop = f"{spc.name.partition(':')[0]}:{crop}"
-                sub_labels, sub_fr, sub_og = run_task_canonical(resolve(crop), f"{tag}:{step.crop_from_task}")
-                e = label_roi(sub_labels.cpu().numpy(), step.crop_to_classes,
-                              margin_voxels=margin_in_voxels(step.dilation_mm, sub_og.spacing))
-                roi_mm = None if e.is_whole() else ((tuple(float(v) for v in sub_og.index_to_mm(e.start)),
-                                                     tuple(float(v) for v in sub_og.index_to_mm([h - 1 for h in e.stop]))), step.dilation_mm)
-                report.stage("cascade", f"ROI from {step.crop_from_task!r}: "
-                             + ("whole volume" if roi_mm is None else f"{e.fraction * 100:.0f} % of the grid"))
-                continue
-            t = time.perf_counter()
-            report.enter_part(i, f"{tag} stage {i + 1}/{len(stages)}: model {step.weights_id}"
-                              + ("" if roi_mm is None else " (cropped)"))
-            model = load(step.weights_id)
-            x, fr = model_frame(model)
-            T[f"load:{tag}:s{i}"] = time.perf_counter() - t
-            env = crop_on_model_grid(model, x, fr, use_body=not last, roi_mm=roi_mm)
-            og = fr.resolve_grid(grid)
-            out = torch.zeros(og.shape, dtype=torch.uint8, device=device)
-            t = time.perf_counter()
-            predict_into(model, x, fr, og, env, lut=np.arange(model.K, dtype=np.int32),
-                         paint=False, out=out, part=f"{tag}:s{i}", weights=step.weights_id)
-            T[f"network:{tag}:s{i}"] = time.perf_counter() - t
-            if not last:
-                e = label_roi(out.cpu().numpy(), step.crop_to_classes,
-                              margin_voxels=margin_in_voxels(step.dilation_mm, og.spacing))
-                roi_mm = None if e.is_whole() else ((tuple(float(v) for v in og.index_to_mm(e.start)),
-                                                     tuple(float(v) for v in og.index_to_mm([h - 1 for h in e.stop]))), step.dilation_mm)
-                report.stage("cascade", "ROI: " + ("absent -> whole volume next" if roi_mm is None
-                             else f"{e.fraction * 100:.0f} % of the grid, +{step.dilation_mm} mm"))
-            models.release(model)
-        return out, fr, og
+                # upstream runs the crop task whole, its labels on the input image
+                labels_in, src, _ = run_task_canonical(resolve(crop), f"{tag}:{step.crop_from_task}",
+                                                       out_grid="input", restore="nearest")
+            else:
+                t = time.perf_counter()
+                report.enter_part(i, f"{tag} stage {i + 1}/{len(stages)}: model {step.weights_id}"
+                                  + ("" if box is None else " (cropped)"))
+                model = load(step.weights_id, spc)
+                x, src = model_frame(model, box)
+                T[f"load:{tag}:s{i}"] = time.perf_counter() - t
+                env = Envelope((0, 0, 0), tuple(int(s) for s in x.shape[1:]), tuple(int(s) for s in x.shape[1:]))
+                labels_in = torch.zeros(src.source.shape, dtype=torch.uint8, device=device)
+                t = time.perf_counter()
+                predict_into(model, x, src, src.source, env, lut=np.arange(model.K, dtype=np.int32),
+                             paint=False, out=labels_in, part=f"{tag}:s{i}", weights=step.weights_id,
+                             restore="nearest")
+                T[f"network:{tag}:s{i}"] = time.perf_counter() - t
+                models.release(model)
+            box = upstream_crop_box(labels_in.cpu().numpy(), step.crop_to_classes, step.dilation_mm,
+                                    src.source.spacing)
+            prov.setdefault("crops", []).append({
+                "task": tag, "stage": i + 1, "classes": [int(c) for c in step.crop_to_classes],
+                "margin_mm": float(step.dilation_mm),
+                "box": None if box is None else [list(box[0]), list(box[1])]})
+            if box is None:
+                report.stage("cascade", "crop classes absent -> empty result, as upstream returns")
+                og = src.resolve_grid(grid if out_grid is None else out_grid)
+                max_label = max((int(v) for v in spc.label_map), default=255)
+                return (torch.zeros(og.shape, dtype=torch.uint8 if max_label <= 255 else torch.uint16,
+                                    device=device), src, og)
+            frac = float(np.prod([h - l for l, h in zip(*box)])) / float(np.prod(src.source.shape))
+            report.stage("cascade", f"crop {frac * 100:.0f} % of the input, +{step.dilation_mm:g} mm")
+        raise AssertionError("unreachable: a cascade ends in a model or a union stage")
 
-    def run_task_canonical(spc, tag=""):
-        return run_cascade(spc, tag or spc.name) if spc.shape == "cascade" else run_single_or_union(spc, tag or spc.name)
+    def run_task_canonical(spc, tag="", *, out_grid=None, restore=None):
+        if spc.shape == "cascade":
+            return run_cascade(spc, tag or spc.name, out_grid=out_grid, restore=restore)
+        return run_single_or_union(spc, tag or spc.name, out_grid=out_grid, restore=restore)
 
     with lock:
         labels, frame, out_grid = run_task_canonical(spec)
@@ -499,7 +568,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     T["to input orientation"] = time.perf_counter() - t
     T["total"] = time.perf_counter() - t_start
     prov.update(input_orientation=orientation, output_grid=tuple(out_grid.shape),
-                cropped_to_nonzero=frame.model_source is not None,
+                cropped_to_nonzero=bool(crop_nonzero) and frame.model_source is not None,
                 probabilities=(None if probabilities is None else
                                {"depth": probabilities.depth, "clip": probabilities.clip}))
     return Segmentation(labels=out_img, schema=schema, grid=out_grid, spec=spec,

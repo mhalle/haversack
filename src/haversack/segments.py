@@ -333,6 +333,39 @@ def current_version(eco, task: str) -> dict:
     return {**eco.label_version(task), "listing": LISTING_EPOCH}
 
 
+def before_install(catalog, name: str) -> dict | None:
+    """What the index says ``name`` produces, for a door describing a task whose model is not
+    installed: ``{"segments", "version"}`` plus the record's ``note`` when it has one - or None
+    when the index cannot say it truthfully. That is a task it holds no segment list for (never
+    mined, or ``open`` like VoxTell's), a record gone stale (its catalog now pins another
+    version, as ``check`` would report it), a caller's version pin (the record is of the
+    catalog's version, not the one asked for), or an index that cannot be read at all.
+
+    The one reading both doors use - ``haversack tasks TASK`` and ``describe()``, which is
+    ``GET /v1/tasks/{task}`` - so they cannot disagree about a task. The CLI read the index
+    from 2026-09-13; the server's describe kept saying "read from the checkpoint once installed"
+    until 2026-09-22, while its own ``/v1/segments`` listed the same task's segments.
+
+    Never raises: ``describe()`` is also the door every result key's weights versions pass
+    (``serve.weights_versions_of``), and an exception there turns a key's weights into
+    "unknown". A broken user index costs this answer, never a key."""
+    try:
+        eco, short, _canonical, version = catalog.resolve(name)
+        if version is not None:
+            return None
+        rec = index().records.get(f"{eco.name}:{short}")
+        if not rec or rec.get("kind") != "segments" or not rec.get("segments"):
+            return None
+        if rec.get("version") != json.loads(json.dumps(current_version(eco, short))):
+            return None
+        out = {"segments": [dict(s) for s in rec["segments"]], "version": dict(rec["version"])}
+        if rec.get("note"):
+            out["note"] = str(rec["note"])
+        return out
+    except Exception:                               # noqa: BLE001 - see the docstring
+        return None
+
+
 def _rules_of(record) -> str:
     """The listing rules a record was derived under; one from before the field reads as "1"."""
     return str(((record or {}).get("version") or {}).get("listing", "1"))
@@ -503,6 +536,9 @@ class Index:
     found, and nothing here pretends otherwise."""
 
     def __init__(self, records: dict):
+        #: the records this index was built from, as read: :func:`before_install` answers from
+        #: them, so a describe pays for the files once per change, as search does
+        self.records: dict = records
         self.entries: list[dict] = []
         self.open: list[dict] = []
         #: a record's note - a caveat about what its values mean, such as a MONAI head whose

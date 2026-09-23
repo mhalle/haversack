@@ -27,7 +27,7 @@ The regions are **axis-aligned blocks by design**, not anatomical contours: a le
 body-level grid. Upstream's `imgs/roi.jpg` is the only documentation of the scheme — neck at
 top, both arms, then four cranio-caudal bands each split left and right. Eleven blocks.
 
-## Measured behaviour (2026-09-06)
+## Measured behavior (2026-09-06)
 
 Three inputs through `totalvibe:body_regions` on MPS. "Outside the body" is against a filled
 envelope (closing + hole fill), because a plain HU threshold calls lung parenchyma air — an
@@ -42,7 +42,7 @@ error that first produced a spurious 32 %.
 Read: **field of view matters far more than modality.** The chest CT sits near the median
 training extent and the split lands within ~2 mm of the body's own midline. The brain T1 is
 below the minimum training extent in two axes and gets a rough bisection displaced by more
-than a centimetre. Modality is nearly irrelevant — the CT result is the best of the three,
+than a centimeter. Modality is nearly irrelevant — the CT result is the best of the three,
 which supports upstream's asterisk holding for 278 as well.
 
 Sampling caveat for anyone re-measuring: pick slices where both members of a pair genuinely
@@ -100,6 +100,6 @@ and never hand-written, so it is re-runnable when upstream ships a new release.
 ## Also worth fixing while in here
 
 The manifest entry describes 278 as `"body-region splitter (head, thorax, abdomen, ...)"` with
-modality `MR`. Given upstream's "NAKO VIBE-only" and the measured behaviour, something closer
+modality `MR`. Given upstream's "NAKO VIBE-only" and the measured behavior, something closer
 to *whole-body VIBE; needs a large field of view, works on CT* would warn callers off the
 misuse performed twice in this session.

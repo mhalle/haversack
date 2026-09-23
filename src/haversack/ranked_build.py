@@ -30,102 +30,28 @@ import numpy as np
 from rankfield import levels as rf_levels
 import zarr
 
-from haversack.ranked_store import (brick_attrs, grid_attrs, grid_reference, group, leaf,
-                                    open_store, part_attrs, root_attrs, segmentation)
+from haversack.ranked_store import (brick_attrs, grid_attrs, grid_reference, open_store,
+                                    part_attrs, root_attrs, segment, segmentation)
 
-# The named unions a store carries beyond the model's own classes, per engine: (id, name,
-# member predicate on the leaf name, disjoint, exhaustive). `disjoint` is always true here -
-# members are distinct classes of one softmax. `exhaustive` is claimed only where the model
-# DEFINES the concept as exactly these classes: TotalSegmentator's lung is its five lobes and
-# nothing else. The vertebral column is not exhaustive (discs, and vertebrae outside the field
-# of view) and the FastSurfer groups are subsets of larger systems. Shared with
-# tools/ranked_upgrade_seg.py so an upgraded store carries the same claims as a fresh one.
-GROUP_CLAIMS = {
-    "fastsurfer": [
-        # NO whole-hemisphere group. FastSurfer's network emits 31 lh-numbered cortical
-        # channels and only 14 rh-numbered ones; the missing right-hemisphere regions ride
-        # inside lh-numbered channels and are separated by `split_cortex_labels`, which is
-        # SPATIAL. So laterality is not a property of the stored labels for cortex, and a
-        # `g_rh` union over them would quietly drop 17 regions. The engine says as much in
-        # `labels_note`. The aseg structures below ARE lateralized in channel space (14 each),
-        # so those group honestly - named for what they actually contain.
-        ("g_subcortical_left", "left subcortical structures",
-         lambda n: n.startswith("Left-"), True, False),
-        ("g_subcortical_right", "right subcortical structures",
-         lambda n: n.startswith("Right-"), True, False),
-        ("g_cortex", "cerebral cortex", lambda n: n.startswith("ctx-"), True, False),
-        ("g_cerebellum", "cerebellum", lambda n: "Cerebellum" in n, True, False),
-        ("g_ventricles", "ventricular system",
-         lambda n: "Ventricle" in n or n.endswith("-Vent"), True, False),
-    ],
-    "nnunetv2": [
-        # exhaustive ONLY when the members are exactly the five lobes (or a left/right pair):
-        # `lung_vessels` and `lung_trachea_bronchia` also start with `lung_`, and a task that
-        # has those and no lobes must not ship a "lungs" that is exhaustive of two vessels
-        ("g_lungs", "lungs", lambda n: n.startswith("lung_"), True, True,
-         ({"lung_upper_lobe_left", "lung_lower_lobe_left", "lung_upper_lobe_right",
-           "lung_middle_lobe_right", "lung_lower_lobe_right"},
-          {"lung_left", "lung_right"})),
-        ("g_spine", "vertebral column", lambda n: n.startswith("vertebrae_"), True, False),
-    ],
-}
+# Stores carry the model's classes and nothing derived from them (duckn seg 0.8). Until
+# 0.8 this builder also wrote named unions - "lungs" over TotalSegmentator's five lobes, a
+# vertebral column, FastSurfer's subcortical sets - and a partition group per part, with
+# `disjoint` and `exhaustive` claims. Those are facts about a labeling scheme, the same for
+# every store a model produces, and seg 0.8 moves them to a document outside the store,
+# keyed by the scheme. What 0.8 does not need said at all: a part's classes are disjoint
+# because no two list the same value, and they exhaust the model's domain because the
+# background role means "none of the described structures is here".
+
+#: Every group id the builder EVER generated, across every engine. Kept so that a tool
+#: reading an older store can tell a generated group from one a user authored.
+GENERATED_GROUP_IDS = frozenset({
+    "g_subcortical_left", "g_subcortical_right", "g_cortex", "g_cerebellum", "g_ventricles",
+    "g_lungs", "g_spine"})
 
 
-#: Every group id the builder has EVER generated, across every engine. Not the same
-#: question as `claims_for`, and the difference is a migration: the upgrader decides
-#: which existing groups it owns and may rebuild, and asking `claims_for(engine)` gets
-#: that wrong for exactly the stores the claims fix was written for. A monai store
-#: written before 2026-09-08 carries `g_lungs` from the old nnU-Net fallback; monai
-#: now claims nothing, so the upgrader saw an id it did not recognise, filed it as a
-#: user-authored group and re-emitted it verbatim - `exhaustive=True` and all, which
-#: is the anatomical assertion the fix exists to remove. A generated id belongs to the
-#: builder whether or not this engine still generates it.
-GENERATED_GROUP_IDS = frozenset(
-    gid for claims in GROUP_CLAIMS.values() for gid, *_ in claims)
-
-
-def claims_for(engine):
-    """The named unions ``engine``'s stores carry, or none at all.
-
-    Deliberately NOT defaulting to nnU-Net's. It used to, and the default was wrong rather
-    than merely empty: every engine without its own entry inherited TotalSegmentator's
-    claims, so a store whose leaves happened to be named like TS's five lung lobes shipped
-    `g_lungs` with ``exhaustive=True`` - an anatomical assertion that TotalSegmentator's
-    model DEFINES the lung as exactly those five and nothing else. MONAI bundles and VoxTell
-    prompts can produce those names without making that claim, and an exhaustive union is
-    read as a guarantee by anything consuming the store. An engine that declares no claims
-    now makes none, which is the only honest default.
-
-    Shared with tools/ranked_upgrade_seg.py, which asked the same question and carried its
-    own copy of the same wrong fallback.
-    """
-    return GROUP_CLAIMS.get(str(engine), ())
-
-
-def named_groups(engine, leaves):
-    """The engine's named unions over ``leaves`` (duckn Segments), as group Segments.
-    A group is written whenever it has a member, even one: the set of group ids in a
-    store is a property of the task, not of how much anatomy the field of view held."""
-    out = []
-    for claim in claims_for(engine):
-        gid, name, pred, disjoint, exhaustive = claim[:5]
-        exact = claim[5] if len(claim) > 5 else None
-        hits = [s for s in leaves if s.label_value is not None and not s.background
-                and pred(s.name or "")]
-        if exact is not None and {s.name for s in hits} not in exact:
-            continue                    # the prefix matched, the concept did not
-        if hits:
-            out.append(group(gid, name, [s.id for s in hits], disjoint=disjoint,
-                             exhaustive=exhaustive))
-    return out
-
-
-def part_partition(index, part_name, leaves):
-    """The partition a softmax defines: every class of part ``index``, background
-    included, disjoint and exhaustive of the model's domain (seg spec 0.7 §2)."""
-    members = [s.id for s in leaves if (s.layer or 0) == index]
-    return group(f"classes_{index}", f"{part_name}: every class of the model, background "
-                 "included", members, disjoint=True, exhaustive=True)
+#: Catalogs added after 0.11.0 stopped accepting bare task names: no store names a task of
+#: theirs bare, so a bare name in a store's metadata is never resolved into one.
+CATALOGS_AFTER_BARE_NAMES = frozenset({"ts.v3"})
 
 
 def _ts_names(task):
@@ -135,8 +61,14 @@ def _ts_names(task):
     that goes stale silently when the catalog moves, and a wrong name on a segment is the kind
     of error nothing downstream catches.
     """
-    from haversack.ecosystems import RENAMED_ECOSYSTEMS, EcosystemCatalog
     from haversack.tasks import _resolve_spec
+    name, cat = _qualified(task)
+    return dict(_resolve_spec(name, cat).label_map)
+
+
+def _qualified(task):
+    """``(canonical name, catalog)`` for a task as a store's metadata spells it."""
+    from haversack.ecosystems import RENAMED_ECOSYSTEMS, EcosystemCatalog
     from haversack.weights import as_store
     store = as_store(None, layout="ts")
     cat = EcosystemCatalog(root=store.root)
@@ -148,10 +80,36 @@ def _ts_names(task):
     if sep and eco in RENAMED_ECOSYSTEMS:
         name = f"{RENAMED_ECOSYSTEMS[eco]}:{short}"
     elif not sep:
-        found = [n for n in cat.names() if n.partition(":")[2] == name]
+        # a bare name was last written before 0.11.0, so never by a catalog added since -
+        # ts.v3 (2026-09-21) reuses ts.v2's task names and would make every one ambiguous
+        found = [n for n in cat.names() if n.partition(":")[2] == name
+                 and n.partition(":")[0] not in CATALOGS_AFTER_BARE_NAMES]
         if len(found) == 1:
             name = found[0]
-    return dict(_resolve_spec(name, cat).label_map)
+    return name, cat
+
+
+def scheme_for(engine, task):
+    """``(scheme, code_of)`` for a store of ``task``: the duckn labeling scheme it declares
+    (``ModelEcosystem.labeling_scheme``) and ``code_of(value, name)``, the scheme's code for a
+    class or None where it has no exact one (``ModelEcosystem.scheme_code``). ``(None, None)``
+    when there is no scheme to declare: an ecosystem with no published class list, or a task
+    the catalog cannot place. That is an honest answer - the store then declares none - so
+    nothing here raises. Which classes a scheme covers, and how it spells them, is the
+    ecosystem's judgment; the builder knows nothing of catalogs."""
+    try:
+        # Every catalog this build KNOWS, not the ones this machine serves: which scheme a
+        # class list belongs to is a fact about the catalog, and a store built where an
+        # engine is switched off must not lose it.
+        from haversack.ecosystems import EcosystemCatalog, known_ecosystems
+        name, _served = _qualified(task)
+        eco, short, _canonical, _version = EcosystemCatalog(known_ecosystems()).resolve(name)
+        scheme = eco.labeling_scheme(short)
+        if scheme is None:
+            return None, None
+        return scheme, lambda value, label: eco.scheme_code(short, value, label)
+    except Exception:                              # noqa: BLE001 - no scheme is a valid store
+        return None, None
 
 
 CASCADE_PART = re.compile(r":s\d+$")      # a cascade stage is named `<task>:s<i>`
@@ -209,11 +167,11 @@ def geometry(part):
     Two engines record their geometry differently, because their grids arise differently.
     FastSurfer states its conformed grid outright - the logits are native to it, there is no
     crop and the spacing is exactly 1 mm by construction. That grid is an image grid, so its
-    samples are cell centres. The nnU-Net path states a canonical frame plus a requested
+    samples are cell centers. The nnU-Net path states a canonical frame plus a requested
     spacing, so the grid it actually landed on has to be derived, and HOW depends on which
     convention the resample used:
 
-      corner (TotalSegmentator, scipy.zoom)  holds the first and last sample centres, so
+      corner (TotalSegmentator, scipy.zoom)  holds the first and last sample centers, so
           spacing is (n_src-1)*s_src/(n_model-1) and voxel 0 does not move  -> duckn `node`
       center (nnU-Net native, skimage)       holds the field of view, so spacing is
           n_src*s_src/n_model and voxel 0 moves in by half the spacing change -> duckn `cell`
@@ -276,7 +234,7 @@ JUNCTION_SPAN = 127          # byte steps from the interface to the truncation, 
 
 
 def distance_field(ranks, support, clip, spacing, truncation, levels=None):
-    """``(Z, Y, X)`` uint8: how far the nearest surface is, in millimetres.
+    """``(Z, Y, X)`` uint8: how far the nearest surface is, in millimeters.
 
     ONE FIELD, NOT A STACK. It is the distance to the nearest place the argmax changes,
     whichever pair of classes forms it. A second field keyed to the next LOGIT rank was tried
@@ -288,12 +246,12 @@ def distance_field(ranks, support, clip, spacing, truncation, levels=None):
     ignores the divisor. This field is immune, being found from the labelmap rather than a rank.
 
     WHY STORE IT, when it is derivable from `support` sitting beside it. Unlike decoding a
-    margin, which is pointwise, this is NON-LOCAL: it needs a neighbourhood of radius
+    margin, which is pointwise, this is NON-LOCAL: it needs a neighborhood of radius
     `truncation`, so a client deriving it per brick needs halos, and one deriving it whole
     spends ~53 s on a five-part 1.5 mm case before the first frame. It is also easy to get
     wrong in ways that render plausibly rather than raise. It remains a derived VIEW, not a
     replacement - `support` carries confidence, alternatives, and the ability to re-decide,
-    none of which survive the conversion to millimetres.
+    none of which survive the conversion to millimeters.
 
     THE ENCODING COUNTS UP FROM THE TRUNCATION, mirroring `support` counting up from the clip:
     `distance_max` is on the surface, 0 is at or beyond `distance_truncation`. That keeps "zero
@@ -345,7 +303,7 @@ def _crossing_distance(ranks, support, clip, spacing, truncation, lut=None):
 
     WHICH SURFACE IS FOUND BY THE LABELMAP, NOT BY A RANK PAIR. An earlier version watched the
     (winner, runner-up) pair for a sign change, which misses an argmax change whenever the class
-    that overtakes is not the local runner-up - at one voxel l_A > l_B > l_D, at its neighbour
+    that overtakes is not the local runner-up - at one voxel l_A > l_B > l_D, at its neighbor
     l_D > l_A > l_B: the winner changed and that pair never crossed. `win[a] != win[b]` has no
     such gap, and it needs no logits at all.
 
@@ -392,7 +350,7 @@ def _crossing_distance(ranks, support, clip, spacing, truncation, lut=None):
 def _eikonal(d, spacing, truncation):
     """Propagate seeded crossings outward by solving |grad d| = 1.
 
-    NOT a min-plus sweep. `d = min(d, neighbour + h)` along each axis in turn measures a taxicab
+    NOT a min-plus sweep. `d = min(d, neighbor + h)` along each axis in turn measures a taxicab
     distance: a diagonal comes out as dx + dy rather than sqrt(dx^2 + dy^2), up to sqrt(2) too
     large in 2-D and sqrt(3) in 3-D. Shading reads a gradient, so the error appears as facets on
     every surface not aligned with an axis, and as |grad d| clustering near sqrt(2) instead of 1.
@@ -402,7 +360,7 @@ def _eikonal(d, spacing, truncation):
     against its analytic distance -- |grad d| is NOT a discriminating statistic
     here, because a narrow band is mostly clamped at the truncation.
 
-    The Godunov update solves the Eikonal equation: with the smaller neighbour a_i on each axis,
+    The Godunov update solves the Eikonal equation: with the smaller neighbor a_i on each axis,
     find d satisfying sum_i max(d - a_i, 0)^2 / h_i^2 = 1, trying one, two, then three active
     axes. Seeded voxels keep their interpolated sub-voxel values.
 
@@ -410,7 +368,7 @@ def _eikonal(d, spacing, truncation):
     running full-volume iterations to move values on the ~1 % of voxels near a surface. Each
     iteration advances influence by at most one voxel from a finite value, so dilating the seed
     mask by the iteration count (Chebyshev) contains every voxel any iteration could touch, and
-    a band voxel's neighbours outside the band were never updated by the dense version either -
+    a band voxel's neighbors outside the band were never updated by the dense version either -
     they hold the same `big` in both. Bit-identical by construction, and verified against the
     dense implementation on a real 52 Mvoxel part.
     """
@@ -433,7 +391,7 @@ def _eikonal(d, spacing, truncation):
             band[lo] |= band[hi]
             band[hi] |= band[lo]
 
-    # pad by one voxel of `big` so neighbour gathers never leave the array
+    # pad by one voxel of `big` so neighbor gathers never leave the array
     padded = np.full(tuple(n + 2 for n in d.shape), big, np.float32)
     core = tuple(slice(1, -1) for _ in d.shape)
     padded[core] = np.minimum(d, big)
@@ -448,7 +406,7 @@ def _eikonal(d, spacing, truncation):
     cur = r[flat]
     axes = [(np.minimum, s, np.float32(hv)) for s, hv in zip(strides, h)]
     for _ in range(n_iter):
-        # per-axis smaller neighbour, then a 3-element sort network carrying h alongside
+        # per-axis smaller neighbor, then a 3-element sort network carrying h alongside
         # (anisotropic spacing travels with its axis through the swaps)
         trip = [(np.minimum(r[flat - s], r[flat + s]), np.full(flat.shape, hv, np.float32))
                 for _, s, hv in axes]
@@ -498,12 +456,12 @@ def junction_field(ranks, support, clip, spacing, truncation, reach=None, levels
 
     ONE SIGNED FIELD PER VOXEL, FOR ONE PAIR. At each voxel of the tube around a triple line,
     `pair` names the two leading real (non-background) classes in logit order, stored
-    canonically by class index, and `junction` is the signed distance in millimetres to the
+    canonically by class index, and `junction` is the signed distance in millimeters to the
     level set where their logits are equal, positive on the first class's side:
     (l_a - l_b) / |grad (l_a - l_b)|. That is the deficit DIFFERENCE over its own gradient -
     never the winner's margin over its gradient, which is folded. The gradient is a central
-    difference of the same two classes' deficit difference at the six axis neighbours, each read
-    from that neighbour's own rank list (a class absent from a list is floored at the clip), so
+    difference of the same two classes' deficit difference at the six axis neighbors, each read
+    from that neighbor's own rank list (a class absent from a list is floored at the clip), so
     the pair is evaluated consistently across the stencil whoever wins at each tap.
 
     SPARSE BY CONSTRUCTION. Cells whose eight corners carry three or more labels are where a
@@ -652,8 +610,8 @@ def _junction_at(idx, read_planes, shape, clip, h, truncation, slab, lut=None):
         swap = have & (b < a)
         a, b = np.where(swap, b, a), np.where(swap, a, b)
 
-        # m = l_a - l_b = deficit(b) - deficit(a), at the voxel and its axis neighbours; the
-        # halo of one slice holds every neighbour a slab voxel has.
+        # m = l_a - l_b = deficit(b) - deficit(a), at the voxel and its axis neighbors; the
+        # halo of one slice holds every neighbor a slab voxel has.
         def m_at(zz, yy, xx):
             loc = (slice(None), zz - a0, yy, xx)
             return _deficit_at(rk[loc], su[loc], b, clip, lut) - _deficit_at(rk[loc], su[loc], a, clip, lut)
@@ -761,10 +719,10 @@ def occupancy(ranks, support, K, smax, brick=BRICK):
 
 
 def brick_geometry(direction, eff, origin, brick, nb):
-    """duckn block for the coarse grid: cell-centred bricks, one `list` axis for the class.
+    """duckn block for the coarse grid: cell-centered bricks, one `list` axis for the class.
 
     The last brick along an axis is partial when the shape is not a multiple of `brick`, so its
-    true centre is nearer than this uniform grid says. That is left as-is deliberately: the
+    true center is nearer than this uniform grid says. That is left as-is deliberately: the
     array is a conservative index, not a measurement, and declaring a uniform grid keeps it a
     readable duckn array rather than a private layout.
     """
@@ -870,7 +828,8 @@ def generator_steps(meta, items, engine, *, parts_kept="all", layers=("occupancy
 
 
 def build(src, out, case, parts="all", allow_unnamed=False,
-          distance_voxels=DISTANCE_VOXELS, names=None, quiet=False, source=None):
+          distance_voxels=DISTANCE_VOXELS, names=None, quiet=False, source=None,
+          model_names=False):
     """Build the store at ``out`` from an emit directory ``src``. ``names`` (label id -> name)
     overrides the catalog lookup, for a caller that already holds the task's label map.
     Progress goes to stderr (``quiet`` silences it). ``source`` is a duckn provenance source
@@ -886,19 +845,27 @@ def build(src, out, case, parts="all", allow_unnamed=False,
     src, out = Path(src), Path(out)
     meta = json.loads((src / "meta.json").read_text(encoding="utf-8"))
     with open_store(out, "w") as st:   # a directory, or a standard zarr zip when OUT ends in .zip
-        _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say, source)
+        _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say,
+                    source, model_names)
     if not quiet:                        # sizing the store walks it: not for a dropped line
         say(f"wrote {out} ({st.size_bytes() / 1e6:.2f} MB)")
     return out
 
 
-def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say, source=None):
+def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names, meta, say,
+                source=None, model_names=False):
     root = st.root
     segs, order = [], []
 
     engine = next(iter(meta["parts"].values())).get("engine", "nnunetv2")
     NAMES = (dict(names) if names is not None
              else names_for(engine, meta.get("task"), allow_unnamed, say=say))
+
+    # The labeling scheme is declared only when the names ARE the model's: a caller that
+    # hands in its own names has left the scheme, and a code must be the scheme's own word.
+    # `model_names` is how a caller that read the names off the run itself says so.
+    scheme, code_of = (scheme_for(engine, meta.get("task"))
+                       if names is None or model_names else (None, None))
 
     items = list(meta["parts"].items())
     if parts == "last" and len(items) > 1:
@@ -1050,34 +1017,38 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
         wins = rk_all[0].astype(np.int64)
         del rk_all
         boxes = segment_extents(np.asarray(lut)[wins - 1], {int(x) for x in lut} - {0})
-        # The background is a leaf too (seg spec 0.7): the softmax's class 0, so the part's
-        # partition can include it and every value in `ranks[0] - 1` resolves to a segment.
+        # The background is a segment too: the softmax's class 0, with the background role,
+        # so it has a name and every value in `ranks[0] - 1` is listed by a segment.
         # `layer` is a per-part fact in a multi-part store and says nothing in a single-part
-        # one. Leaves are unique per (layer, value): two parts that both emit value 1 are two
-        # leaves - a cascade's stages, whose channels are per-stage indices, collide on every
-        # value below the smaller K, and a dedupe on the value alone once gave stage 1's
-        # classes no leaves at all while its partition still claimed to be exhaustive.
+        # one. Segments are unique per (layer, value): two parts that both emit value 1 are
+        # two segments - a cascade's stages, whose channels are per-stage indices, collide on
+        # every value below the smaller K, and a dedupe on the value alone once gave stage
+        # 1's classes no segments at all.
         lay = i if multi else None
-        segs.append(leaf(f"background_{i}", "background", 0, layer=lay, background=True))
+        segs.append(segment(f"background_{i}", "background", 0, layer=lay, role="background"))
         for v in sorted({int(x) for x in lut} - {0}):
-            if any(s.label_value == v and (s.layer or 0) == i for s in segs):
+            if any(s.label_values == [v] and (s.layer or 0) == i for s in segs):
                 continue
             sid = f"c{v}_l{i}" if v in shared else f"c{v}"
-            segs.append(leaf(sid, part_names.get(v, f"label_{v}"), v, layer=lay,
-                             extent=boxes.get(v)))
+            # a class the scheme names carries its name as an exact designation in it: that
+            # is what lets a document written for the scheme find the segment in any store
+            code = code_of(v, part_names[v]) if scheme and v in part_names else None
+            coded = None if code is None else [{
+                "scheme": scheme["key"], "code": code,
+                # where the code is not the name, the name is the code's meaning
+                **({"meaning": part_names[v]} if code != part_names[v] else {})}]
+            segs.append(segment(sid, part_names.get(v, f"label_{v}"), v, layer=lay,
+                                extent=boxes.get(v), designations=coded))
         del wins
         order.append({"index": i, "name": name})
         say(f"  parts/{i} {name:<12} grid {tuple(grid)} crop {tuple(start)} "
               f"eff {[round(v, 6) for v in eff]}", flush=True)
 
-    # Groups (seg spec 0.7): one partition per part - the softmax's classes, background
-    # included - plus the engine's named unions with their claims (GROUP_CLAIMS).
-    groups = [part_partition(i, o["name"], segs) for i, o in enumerate(order)]
-    groups += named_groups(engine, segs)
-
     root.attrs.update(root_attrs(
         # the seg extension goes through duckn's model and consistency validator
-        segmentation(segs + groups),
+        segmentation(segs, labeling_scheme=scheme and scheme["key"],
+                     terminologies=scheme and {scheme["key"]: {
+                         k: scheme[k] for k in ("name", "system_uri", "version", "definition_url")}}),
         haversack={"haversack_version": dict(items)[order[0]["name"]].get("haversack"),
                    "engine": engine, "task": meta["task"], "case": case,
                    "source_file": Path(meta["image"]).name, "part_order": order},

@@ -109,9 +109,9 @@ def test_sphere_distance_is_euclidean_not_taxicab(field, truncation_voxels):
     140 um for the Godunov update.
     """
     n, radius = 80, 18.0
-    centre = (n - 1) / 2.0 * SP[0]
+    center = (n - 1) / 2.0 * SP[0]
     g = np.meshgrid(*[np.arange(n) * SP[0] for _ in range(3)], indexing="ij")
-    rad = np.sqrt(sum((c - centre) ** 2 for c in g))
+    rad = np.sqrt(sum((c - center) ** 2 for c in g))
     ranks, support = _encode(radius - rad)
     truth = np.abs(rad - radius)
 
@@ -224,9 +224,9 @@ def test_baked_distances_reproduce_deficit_crossings():
     """
     rbs = _load_tools()
     n, radius = 64, 15.0
-    centre = (n - 1) / 2.0 * SP[0]
+    center = (n - 1) / 2.0 * SP[0]
     g = np.meshgrid(*[np.arange(n) * SP[0] for _ in range(3)], indexing="ij")
-    rad = np.sqrt(sum((c - centre) ** 2 for c in g))
+    rad = np.sqrt(sum((c - center) ** 2 for c in g))
     ranks, support = _encode(radius - rad)
     T = 2.0 * min(SP)
     q = rbs.distance_field(ranks, support, CLIP, SP, T)

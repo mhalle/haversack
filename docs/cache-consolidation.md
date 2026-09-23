@@ -92,7 +92,7 @@ copying rather than adopting:
   means gRPC, protobufs, and an extra service per deployment. **Copy the shape, not the
   software** — already done in `objectcache`.
 - **python-diskcache** (SQLite index + files, LRU, safe across processes) is a credible
-  LOCAL tier and would retire hand-rolled eviction. Unverified here: behaviour with
+  LOCAL tier and would retire hand-rolled eviction. Unverified here: behavior with
   multi-MB values, and whether its index survives the filesystems this repo supports (a
   cache root on exFAT is a supported configuration). Worth a measured experiment before it
   is trusted, not an assumption.

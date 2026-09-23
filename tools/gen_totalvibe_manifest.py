@@ -41,10 +41,10 @@ from pathlib import Path
 
 import zippeek
 
-REPO = "robert-graf/VibeSegmentator"
+REPO = "robert-graf/VIBESegmentator"
 TAG = "v1.0.0"
 API = f"https://api.github.com/repos/{REPO}/releases/tags/{TAG}"
-#: The licence of the repository the release is published from. Recorded per task
+#: The license of the repository the release is published from. Recorded per task
 #: because it travels with the weights, and `info()` publishes it.
 LICENSE = "Apache-2.0"
 DEST = Path(__file__).parent.parent / "src/haversack/data/totalvibe_weights.json"

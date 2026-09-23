@@ -45,7 +45,7 @@ def model_grid_geometry(meta):
     nonzero first (every nnU-Net-native lineage), else `frame.source`, never the full canonical
     grid when a crop happened - and on the convention:
 
-      corner (TotalSegmentator, scipy.zoom)  holds the first and last sample centres, so
+      corner (TotalSegmentator, scipy.zoom)  holds the first and last sample centers, so
           spacing is (n_src-1)*s_src/(n_model-1) and voxel 0 does not move  -> duckn `node`
       center (nnU-Net native, skimage)       holds the field of view, so spacing is
           n_src*s_src/n_model and voxel 0 moves in by half the spacing change -> duckn `cell`
@@ -83,7 +83,7 @@ def model_grid_geometry(meta):
 
 
 def _true_spacing(meta):
-    """The spacing the part actually landed on: a distance stated in millimetres has to use
+    """The spacing the part actually landed on: a distance stated in millimeters has to use
     the grid the samples are really on, not the one that was asked for."""
     return model_grid_geometry(meta)[0]
 
@@ -163,10 +163,23 @@ def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=None, *, quiet=Fals
         say(f"  {part:<12} {code!r}  ->  {out.name}/{part}_*.npy")
 
     segment_kw.setdefault("progress", None if quiet else (lambda p: say(f"    {p}")))
-    from haversack.pipeline import segment
     from haversack.ranked import RankedSpec
-    seg = segment(image, task, probabilities=RankedSpec(sink=sink, depth=depth, clip=clip),
-                  envelope_mm=envelope_mm, **segment_kw)
+    spec = RankedSpec(sink=sink, depth=depth, clip=clip)
+    if _runs_on_an_engine(task):
+        # An engine with a ranked sink of its own (FastSurfer hands over its pre-argmax field,
+        # engines/fastsurfer.emit_probabilities) runs through the Segmenter, which is the door
+        # every engine task uses; nnU-Net policy that means nothing to it is left behind.
+        from haversack.segmenter import Segmenter
+        seg = Segmenter(device=segment_kw.get("device", "auto"),
+                        weights=segment_kw.get("weights"),
+                        batch_size=segment_kw.get("batch_size", "auto")).segment(
+            image, task, probabilities=spec, progress=segment_kw.get("progress"))
+    else:
+        from haversack.pipeline import segment
+        seg = segment(image, task, probabilities=spec, envelope_mm=envelope_mm, **segment_kw)
+    if not metas:
+        raise RuntimeError(f"{task} produced no ranked output: its engine took no "
+                           "probabilities sink, so there is nothing to build a store from")
 
     (out / "meta.json").write_text(json.dumps(
         {"image": str(image), "task": task, "depth": depth, "clip": clip,
@@ -176,6 +189,30 @@ def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=None, *, quiet=Fals
     say(f"done in {time.perf_counter() - t0:.0f}s -> {out}")
     return seg
 
+
+
+#: Engines whose runner takes a ranked sink. A store is the whole output distribution, so an
+#: engine that returns only labels has nothing to put in one.
+RANKED_ENGINES = frozenset({"fastsurfer"})
+
+
+def _runs_on_an_engine(task) -> bool:
+    from haversack.engines import registry
+    try:
+        return registry.engine_for_task(task).name != registry.NNUNETV2
+    except Exception:                                  # noqa: BLE001 - a TaskSpec, a folder
+        return False
+
+
+def supports_store_output(task) -> bool:
+    """Whether ``task`` can write a ranked store: every nnU-Net task, and the engines in
+    :data:`RANKED_ENGINES`."""
+    from haversack.engines import registry
+    try:
+        name = registry.engine_for_task(task).name
+    except Exception:                                  # noqa: BLE001
+        return True
+    return name == registry.NNUNETV2 or name in RANKED_ENGINES
 
 
 def input_source(spec) -> dict:
@@ -219,6 +256,10 @@ def segment_to_store(image, task, out, *, case=None, depth=6, clip=8.0, parts="a
     try:
         envelope_mm = segment_kw.pop("envelope_mm", None)          # segment()'s default: none
         seg = main(image, task, staging, depth, clip, envelope_mm, quiet=quiet, **segment_kw)
+        # Names the run reports are the model's own, so the store may declare the labeling
+        # scheme they belong to - unless the run could not name its classes and fell back to
+        # `label <v>` (a MONAI region head), or the caller brought names of its own.
+        model_names = names is None and not (seg.provenance or {}).get("labels_unnamed")
         if names is None:
             names = {int(v): str(n) for v, n in seg.schema.names.items()}
         if case is None:
@@ -226,7 +267,7 @@ def segment_to_store(image, task, out, *, case=None, depth=6, clip=8.0, parts="a
         if source is None:
             source = input_source(image)
         build(staging, out, case, parts, allow_unnamed, distance_voxels, names=names, quiet=quiet,
-              source=source)
+              source=source, model_names=model_names)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return seg, out

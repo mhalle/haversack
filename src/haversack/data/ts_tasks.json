@@ -4,7 +4,39 @@
   "ts_version": "2.13.0",
   "generator": "scripts/refresh_ts_registry.py",
   "generator_version": 1,
-  "task_count": 51
+  "task_count": 52,
+  "added_by_hand": {
+   "headneck_muscles": "2026-09-22: upstream 2.13.0's own task (Datasets 778+779 cropped as headneck_bones_vessels), left out by the generator because it had no shape for a cascade ending in a union; the entry is built from upstream's class_map/class_map_parts_headneck_muscles and headneck_bones_vessels' crop stage, and tests/test_cascade_union.py holds it to them"
+  },
+  "crop_margin": "2026-09-22: every crop stage that runs a model (298/297/300/852) states 20 mm - the margin TotalSegmentator applies, not the crop_addon its task config lists. python_api.py sets `crop_addon = [20,20,20] if crop_model is None else crop_addon` after building the crop mask, and crop_model is None for every task that crops with the total/body models (teeth, which crops from craniofacial_structures, keeps its own 10 mm). In 2.13.0 and 2.18.0 alike, since upstream's teeth commit 14a0513 (2025-08-21). The values these entries held, from the configs, are in configured_crop_addon_mm.",
+  "configured_crop_addon_mm": {
+   "abdominal_muscles": 5.0,
+   "aortic_sinuses": 0.0,
+   "brain_structures": 10.0,
+   "cerebral_bleed": 10.0,
+   "coronary_arteries": 20.0,
+   "coronary_arteries_LEGACY": 20.0,
+   "craniofacial_structures": 20.0,
+   "head_glands_cavities": 10.0,
+   "head_muscles": 10.0,
+   "headneck_bones_vessels": 40.0,
+   "headneck_muscles": 40.0,
+   "heartchambers_highres": 5.0,
+   "hip_implant": 10.0,
+   "kidney_cysts": 10.0,
+   "liver_lesions": 10.0,
+   "liver_lesions_mr": 3.0,
+   "liver_segments": 10.0,
+   "liver_segments_mr": 10.0,
+   "liver_vessels": 20.0,
+   "lung_nodules": 10.0,
+   "lung_vessels": 10.0,
+   "lung_vessels_LEGACY": 10.0,
+   "oculomotor_muscles": 20.0,
+   "pleural_pericard_effusion": 50.0,
+   "ventricle_parts": 0.0
+  },
+  "auxiliary": "2026-09-22: each entry's `auxiliary` is upstream's class_map[\"<task>_auxiliary\"] (map_to_binary.py, 2.13.0 and 2.18.0 alike): classes the model is trained with and the task does not report. Upstream zeroes them after prediction (postprocessing.remove_auxiliary_labels, from nnunet.py); haversack maps every value a TS task's label map does not name to 0 and refuses a model whose unnamed values are not exactly this list. Checked against the checkpoints' dataset.json by range request for every public final-stage model on 2026-09-22: only Dataset 789 (kidney_cysts) has classes beyond its task's label map. appendicular_bones (304) and face_mr (856) are licensed and were not read; renal_arteries_auxiliary has no ts.v2 task."
  },
  "tasks": [
   {
@@ -17,7 +49,7 @@
      "crop_to_classes": [
       1
      ],
-     "dilation_mm": 5.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 952,
@@ -61,7 +93,7 @@
      "crop_to_classes": [
       51
      ],
-     "dilation_mm": 0.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 920,
@@ -94,6 +126,12 @@
     "9": "carpal",
     "10": "metacarpal",
     "11": "phalanges_hand"
+   },
+   "auxiliary": {
+    "12": "humerus",
+    "13": "femur",
+    "14": "liver",
+    "15": "spleen"
    },
    "lineage": "ts"
   },
@@ -178,7 +216,7 @@
      "crop_to_classes": [
       90
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 409,
@@ -226,7 +264,7 @@
      "crop_to_classes": [
       90
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 150,
@@ -332,6 +370,10 @@
    "label_map": {
     "1": "face"
    },
+   "auxiliary": {
+    "2": "brain",
+    "3": "liver"
+   },
    "lineage": "ts"
   },
   {
@@ -344,7 +386,7 @@
      "crop_to_classes": [
       91
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 775,
@@ -385,7 +427,7 @@
      "crop_to_classes": [
       91
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 777,
@@ -423,7 +465,7 @@
       43,
       40
      ],
-     "dilation_mm": 40.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 776,
@@ -448,6 +490,90 @@
    "lineage": "ts"
   },
   {
+   "name": "headneck_muscles",
+   "modality": "CT",
+   "shape": "cascade",
+   "cascade": [
+    {
+     "weights_id": 298,
+     "crop_to_classes": [
+      73,
+      74,
+      50,
+      46,
+      43,
+      40
+     ],
+     "dilation_mm": 20.0
+    },
+    {
+     "union": [
+      {
+       "weights_id": 778,
+       "label_remap": {
+        "1": 1,
+        "2": 2,
+        "3": 3,
+        "4": 4,
+        "5": 5,
+        "6": 6,
+        "7": 7,
+        "8": 8,
+        "9": 9,
+        "10": 10,
+        "11": 11
+       },
+       "name": "muscles_1"
+      },
+      {
+       "weights_id": 779,
+       "label_remap": {
+        "1": 12,
+        "2": 13,
+        "3": 14,
+        "4": 15,
+        "5": 16,
+        "6": 17,
+        "7": 18,
+        "8": 19,
+        "9": 20,
+        "10": 21,
+        "11": 22,
+        "12": 23
+       },
+       "name": "muscles_2"
+      }
+     ]
+    }
+   ],
+   "label_map": {
+    "1": "sternocleidomastoid_right",
+    "2": "sternocleidomastoid_left",
+    "3": "superior_pharyngeal_constrictor",
+    "4": "middle_pharyngeal_constrictor",
+    "5": "inferior_pharyngeal_constrictor",
+    "6": "trapezius_right",
+    "7": "trapezius_left",
+    "8": "platysma_right",
+    "9": "platysma_left",
+    "10": "levator_scapulae_right",
+    "11": "levator_scapulae_left",
+    "12": "anterior_scalene_right",
+    "13": "anterior_scalene_left",
+    "14": "middle_scalene_right",
+    "15": "middle_scalene_left",
+    "16": "posterior_scalene_right",
+    "17": "posterior_scalene_left",
+    "18": "sterno_thyroid_right",
+    "19": "sterno_thyroid_left",
+    "20": "thyrohyoid_right",
+    "21": "thyrohyoid_left",
+    "22": "prevertebral_right",
+    "23": "prevertebral_left"
+   },
+   "lineage": "ts"
+  },
+  {
    "name": "heartchambers_highres",
    "modality": "CT",
    "shape": "cascade",
@@ -457,7 +583,7 @@
      "crop_to_classes": [
       51
      ],
-     "dilation_mm": 5.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 301,
@@ -489,7 +615,7 @@
       77,
       78
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 260,
@@ -516,7 +642,7 @@
       1,
       20
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 789,
@@ -527,6 +653,10 @@
    "label_map": {
     "1": "kidney_cyst_left",
     "2": "kidney_cyst_right"
+   },
+   "auxiliary": {
+    "3": "kidney_left",
+    "4": "kidney_right"
    },
    "lineage": "ts"
   },
@@ -540,7 +670,7 @@
      "crop_to_classes": [
       5
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 591,
@@ -563,7 +693,7 @@
      "crop_to_classes": [
       5
      ],
-     "dilation_mm": 3.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 589,
@@ -586,7 +716,7 @@
      "crop_to_classes": [
       5
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 570,
@@ -616,7 +746,7 @@
      "crop_to_classes": [
       5
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 576,
@@ -674,7 +804,7 @@
       13,
       14
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 913,
@@ -702,7 +832,7 @@
       13,
       14
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 117,
@@ -732,7 +862,7 @@
       13,
       14
      ],
-     "dilation_mm": 10.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 258,
@@ -801,7 +931,7 @@
       13,
       14
      ],
-     "dilation_mm": 50.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 315,
@@ -1847,7 +1977,7 @@
      "crop_to_classes": [
       90
      ],
-     "dilation_mm": 0.0
+     "dilation_mm": 20.0
     },
     {
      "weights_id": 552,

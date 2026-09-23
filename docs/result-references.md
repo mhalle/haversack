@@ -166,6 +166,15 @@ hangs off the INPUT (the encode does not depend on any mask), so it is a job of 
   the POST which renders it - anonymous and authorized alike, `Prefer` or not: the path has
   no job to stage or pin an input under. (An absent RESULT is still computed by an
   authorized GET with `Prefer`, with the deployment's set.)
+- **Every rendered deliverable has a door (2026-09-21).** As first built, a `result:`
+  reference's job - like an upload's and a multi-input one - rendered its deliverables into
+  its entry and had no route that served them: artifacts were served by path only, and a
+  digest identity has no path (above). They are served through the job now
+  (`/v1/jobs/<id>/meta.json`, `/preview.png`, `/statistics.json`, `/statistics.tsv`;
+  authorized, resolved like `/result` and held to the job's own digest), and `links` names
+  them. It stays true that no content digest is path-addressable. An artifact's `ETag` is the
+  digest of its own body since the same day - it was the key's, which a republication under
+  the same key does not move.
 - **The per-deliverable identity was not needed, and is not built.** Nothing here caches a
   deliverable under a key of its own: an artifact is a file in its result's generation, its
   presence is the whole test, and the result cache's format, generations, leases and claims
