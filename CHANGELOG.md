@@ -14,6 +14,23 @@
   `memory_budget=` (keyword-only, never in the code's meta - it moves no byte) and the
   nnU-Net and FastSurfer paths pass it; the nnU-Net path records it per model as
   `encode_memory_budget_bytes`, beside `accumulate`, not as a deviation.
+- **A cascade's ranked store names each layer from its own model.** A crop stage outputs
+  its own model's classes - stage 0 of `ts.v2:lung_vessels` is `ts.v2:total_fast`'s 118 -
+  but the builder named every layer from the task's label map, so layer 0's spleen, kidneys
+  and gallbladder were stored as `lung_airways` ... `lung_veins`, coded in
+  `ts.v2:lung_vessels`, and values 5-117 as `label_<v>`. It meant to leave crop stages
+  unnamed, but recognized them by a part name (`<task>:s<i>` on every part) the pipeline had
+  stopped writing for the final stage, so the check never fired and `parts="last"` dropped
+  nothing. The emit now records `labels_named_by` - the one task of the catalog that runs the
+  stage's model alone (`TaskCatalog.stage_task`; all 26 ts.v2 cascades resolve), or none,
+  which leaves a stage unnamed rather than misnamed - and the store's part block keeps it. A
+  store whose layers follow two class lists declares both schemes: `labeling_scheme` is then
+  an array, the task's own first, as duckn seg 0.9 allows. `tools/ranked_verify.py` fails a
+  layer coded in another task's scheme (it had the same broken check, and reported the old
+  stores as merely unnamed) and no longer reports parts on a 3 mm and a 0.7 mm grid as
+  differently oriented; `tools/ranked_upgrade_seg.py` no longer drops `labeling_scheme`.
+  **Cascade stores written before this are misnamed in layer 0: rebuild them.** No format
+  version moves; emit directories that predate the field are still named correctly.
 - **`haversack serve --result-store s3://bucket/prefix` shares the result cache between
   servers through an object store** (also `gs://`, `az://`; `HAVERSACK_RESULT_STORE`). The
   POSIX cache's guarantees rest on rename and `flock`, which an object store does not have

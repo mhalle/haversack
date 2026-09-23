@@ -368,7 +368,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             return worth_cropping(env, saving=1.0 - model.tiles(env.extent) / model.tiles(shape))
         return env
 
-    def emit_probabilities(model, logits, frame, env, *, lut, part, weights=None):
+    def emit_probabilities(model, logits, frame, env, *, lut, part, weights=None, label_task=None):
         """Encode this part's output distribution while the logits are still here.
 
         Between the network and the restore is the only moment they exist, so this costs
@@ -381,6 +381,12 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         reader holding the spatial extent can redo the restore onto any grid - different
         spacing, nearest instead of linear, a confidence gate - without the network. Without
         the extent the same arrays are only a picture of the grid they were computed on.
+
+        ``label_task`` (``labels_named_by`` in the meta) is the task whose label map names
+        ``lut``'s values: the task itself for its own parts, but for a cascade's crop stage
+        the task that runs the stage's model alone (``ts.v2:total_fast`` for stage 0 of
+        ``lung_vessels``), or None where no task does. ``task`` stays the task that was run,
+        which is what the store is OF.
         """
         from . import ranked
         t = time.perf_counter()
@@ -400,7 +406,8 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                 m["encode_memory_budget_bytes"] = budget
         ranked.emit(
             probabilities, part, logits, memory_budget=budget, softmax=soft,
-            part=part, task=spec.name, haversack=_version(), engine="nnunetv2",
+            part=part, task=spec.name, labels_named_by=label_task, haversack=_version(),
+            engine="nnunetv2",
             spacing_zyx=[float(v) for v in model.spacing_zyx],
             envelope={"start": [int(v) for v in env.start],          # a range, both ends
                       "stop": [int(v) for v in env.stop]},
@@ -412,7 +419,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         T[f"probabilities:{part}"] = time.perf_counter() - t
 
     def predict_into(model, x, frame, ogrid, env, *, lut, paint, out, part="", weights=None,
-                     restore=None):
+                     restore=None, label_task=None):
         # tripwire: `x` must carry THIS model's normalization. Several models share one resample,
         # and feeding one model's normalization to another is silent and severe - the organs
         # model's CT clip at +276 HU flattens all bone for the parts that follow it.
@@ -425,7 +432,8 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         crop = x[(slice(None), *env.slices)] if not env.is_whole() else x
         logits = model.predict_logits(crop, report=report).to(device)
         if probabilities is not None:
-            emit_probabilities(model, logits, frame, env, lut=lut, part=part, weights=weights)
+            emit_probabilities(model, logits, frame, env, lut=lut, part=part, weights=weights,
+                               label_task=label_task)
         mapping = frame.mapping(ogrid)
         if not env.is_whole():
             mapping = mapping >> Mapping((1.0, 1.0, 1.0), tuple(-float(v) for v in env.start))
@@ -483,7 +491,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             report.stage("predict", pname)
             lut = _named_lut(model.K, spc) if remap is None else _lut(model.K, remap)
             predict_into(model, x, fr, og, env, lut=lut, paint=len(parts) > 1,
-                         out=out, part=pname, weights=wid, restore=restore)
+                         out=out, part=pname, weights=wid, restore=restore, label_task=spc.name)
             where = "device" if model.accumulate_choice["on_device"] else "host"
             report.stage("restore", f"{where} accumulator")
             for m in prov["models"]:                 # the effective placement, per model
@@ -496,6 +504,16 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             T[f"network:{key}"] = time.perf_counter() - t
             models.release(model)
         return out, fr, og
+
+    def stage_task(spc, i):
+        """The task whose label map names crop stage ``i``'s channels (the catalog's
+        ``stage_task``), or None: a crop stage outputs its own model's classes, not the
+        cascade's. A catalog that cannot say leaves the stage unnamed rather than misnamed."""
+        finder = getattr(catalog, "stage_task", None)
+        try:
+            return None if finder is None else finder(spc.name, i)
+        except LookupError:
+            return None
 
     def run_cascade(spc, tag, *, out_grid=None, restore=None):
         """TotalSegmentator's crop, as upstream runs it (2026-09-22). Each stage before the last
@@ -540,7 +558,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                 t = time.perf_counter()
                 predict_into(model, x, src, src.source, env, lut=np.arange(model.K, dtype=np.int32),
                              paint=False, out=labels_in, part=f"{tag}:s{i}", weights=step.weights_id,
-                             restore="nearest")
+                             restore="nearest", label_task=stage_task(spc, i))
                 T[f"network:{tag}:s{i}"] = time.perf_counter() - t
                 models.release(model)
             box = upstream_crop_box(labels_in.cpu().numpy(), step.crop_to_classes, step.dilation_mm,

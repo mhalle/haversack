@@ -421,7 +421,7 @@ _SCT = {"name": "SNOMED CT", "system_uri": "http://snomed.info/sct",
 
 
 def segmentation(segments, *, terminologies: dict | None = None,
-                 labeling_scheme: str | None = None):
+                 labeling_scheme: str | list[str] | None = None):
     """The ``seg`` extension over ``segments``, checked against duckn's consistency rules:
     any error raises (duckn's validator reports, and a writer must not write one).
 

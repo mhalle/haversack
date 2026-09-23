@@ -318,6 +318,28 @@ class TaskCatalog:
     def __len__(self) -> int:
         return len(self._specs)
 
+    def stage_task(self, name, stage: int) -> str | None:
+        """The task whose label map names the classes of crop stage ``stage`` of cascade
+        ``name``: the one task of this catalog that runs that stage's model alone.
+
+        A crop stage's channels are its own model's classes, not the cascade's - stage 0 of
+        ``lung_vessels`` is Dataset297, ``total_fast``'s 118 classes, where the task's label
+        map names the 5 of Dataset117. None when the stage runs no model of its own (a
+        ``crop_from_task`` stage), when ``stage`` is not a crop stage, or when no single task
+        of this catalog runs that model - or several do and disagree about its classes."""
+        spec = self.get(name)
+        if spec.shape != "cascade" or not 0 <= stage < len(spec.cascade) - 1:
+            return None
+        wid = spec.cascade[stage].weights_id
+        if wid is None:
+            return None
+        key = _dataset_key(wid)
+        solo = [s for _n, s in sorted(self._specs.items())
+                if s.single is not None and _dataset_key(s.single) == key]
+        if not solo or any(dict(s.label_map) != dict(solo[0].label_map) for s in solo[1:]):
+            return None
+        return solo[0].name
+
 
 def weights_root(layout: str = "ts", explicit=None) -> Path:
     """Explicit argument, then environment, then the layout's default location."""

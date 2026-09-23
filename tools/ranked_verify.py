@@ -63,6 +63,48 @@ class Report:
         return not self.fail
 
 
+def layer_tasks(r, order):
+    """``{layer: (task, labels_named_by)}``: the task each part was run for, and the task
+    whose label map names its values - the same, except for a cascade's crop stage."""
+    from haversack.ranked_build import label_task_of
+    out = {}
+    for i, _o in enumerate(order):
+        if f"parts/{i}" in r:
+            m = r[f"parts/{i}"].attrs.asdict().get("duckn", {}).get("extensions", {}).get("ranked", {})
+            out[i] = (m.get("task"), label_task_of(str(m.get("part", "")), m, i == len(order) - 1))
+    return out
+
+
+def check_layer_names(rep, ext, tasks, leaves):
+    """Each layer's classes are named and coded from the task whose label map names its
+    part's values - for a cascade's crop stage, the task that runs the stage's model alone.
+    A builder that named every layer from the task called stage 0 of `lung_vessels` (118 of
+    `total_fast`'s classes) `lung_airways`, `lung_airways_wall`, ... in the task's scheme.
+    Checked against the catalog, so only where it can say: a designated segment must carry
+    its layer's scheme and that scheme's code for its value's name there."""
+    from haversack.ranked_build import names_for, scheme_for
+    engine = ext.get("haversack", {}).get("engine", "nnunetv2")
+    for i, (_own, task) in tasks.items():
+        coded = [s for s in leaves if (s.get("layer") or 0) == i and s.get("designations")]
+        if task is None or not coded:
+            continue
+        scheme, code_of = scheme_for(engine, task)
+        if scheme is None:
+            continue
+        try:
+            names = names_for(engine, task, allow_unnamed=True, say=lambda *a, **k: None)
+        except SystemExit:
+            names = {}
+        wrong = [f"{s['id']}={s['designations'][0].get('code')}" for s in coded
+                 if s["designations"][0].get("scheme") != scheme["key"]
+                 or (s["label_values"][0] in names
+                     and s["designations"][0].get("code")
+                     != code_of(s["label_values"][0], names[s["label_values"][0]]))]
+        rep.check(not wrong,
+                  f"parts/{i}: {len(wrong)} of {len(coded)} classes are not coded as {task}'s "
+                  f"({scheme['key']}) - named from another part's label map? e.g. {wrong[:4]}")
+
+
 def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
     st = open_store(path, "r")           # a directory, or a zarr zip
     r = st.root
@@ -103,15 +145,18 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
     segs = ([{**s.model_dump(exclude_none=True), "label_values": s.sorted_values}
              for s in seg_model.segments] if seg_model is not None else [])
     leaves = [s for s in segs if len(s["label_values"]) == 1]
-    # a cascade's earlier stages have their own classes, which the task's label map does not
-    # name; numbered leaves there are honest, not a degraded lookup
-    from haversack.ranked_build import CASCADE_PART
-    cascade = bool(order) and len(order) > 1 and all(CASCADE_PART.search(str(o.get("name", "")))
-                                                      for o in order)
-    named = [s for s in leaves if not (cascade and (s.get("layer") or 0) != len(order) - 1)]
-    rep.check(all("name" in s and not str(s["name"]).startswith("label_") for s in named),
-              f"{sum(1 for s in named if str(s.get('name','')).startswith('label_'))} of "
-              f"{len(named)} segments are unnamed (label_<id>) - the name lookup degraded")
+    # Every layer is named, a cascade's crop stages too: each from the task whose label map
+    # names its part's values (check_layer_names). Stores built before that numbered their
+    # crop stages; so did one no task names, and that build said so.
+    tasks = layer_tasks(r, order)
+    crop = {i for i, (own, named_by) in tasks.items() if named_by != own}
+    for where, some in (("", [s for s in leaves if (s.get("layer") or 0) not in crop]),
+                        (" of a cascade's crop stages", [s for s in leaves
+                                                         if (s.get("layer") or 0) in crop])):
+        bad = sum(1 for s in some if str(s.get("name", "label_")).startswith("label_"))
+        rep.check(not bad, f"{bad} of {len(some)} segments{where} are unnamed (label_<id>) - "
+                           "the name lookup degraded", warn_only=bool(where))
+    check_layer_names(rep, ext, tasks, leaves)
     rep.check(all(0 <= s.get("layer", 0) < max(len(order), 1) for s in leaves),
               "a segment's layer is not a valid part index")
     rep.check(all(any(s.get("role") == "background" and s.get("layer", 0) == i for s in leaves)
@@ -296,8 +341,10 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
                   f"{[a.get('kind') for a in ax]}")
         rep.check("space_origin" in at, f"parts/{i}: ranks has no space_origin")
         origins.add(tuple(round(float(v), 4) for v in at.get("space_origin", [])))
-        directions.add(tuple(round(float(x), 6) for a in ax if a.get("kind") == "space"
-                             for x in a.get("space_direction", [])))
+        # the axes' unit vectors: a cascade's stages share an orientation at different spacings
+        directions.add(tuple(round(float(x) / (float(np.linalg.norm(a["space_direction"])) or 1.0), 6)
+                             for a in ax if a.get("kind") == "space" and a.get("space_direction")
+                             for x in a["space_direction"]))
 
         if "occupancy" in g:
             rep.check("brick" in m, f"parts/{i}: occupancy present but no declared brick - "

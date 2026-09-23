@@ -351,6 +351,15 @@ If a `labels_note` field is present, **read it** — it warns where the mapping 
 story (for example, when a downstream step splits a channel spatially, so laterality or a
 similar attribute is *not* recoverable from the LUT alone).
 
+`labels_named_by`, when present, is the task whose label map names the part's label ids. It is
+the part's own `task` except for a cascade's crop stage, which outputs its own model's classes:
+stage 0 of `ts.v2:lung_vessels` is `ts.v2:total_fast`'s 118 classes, where the task's label
+map names the fine stage's 5, so value 1 is the spleen in layer 0 and `lung_airways` in layer 1.
+A store whose parts follow different class lists declares each one: the seg extension's
+`labeling_scheme` is then an array of scheme keys, the task's own first, and each segment's
+designation says which it belongs to. Stores written before 2026-09-23 lack the field, and in
+them a cascade's crop stage was named from the task's label map, which is wrong: rebuild them.
+
 Human-readable names, when present, are in the root group's
 `attributes.duckn.extensions.seg.segments` (duckn seg extension 0.8). Each segment has an
 `id`, a `name`, and `label_values`: the values of its part that belong to it, always a list. A

@@ -76,7 +76,8 @@ def _upgrade(st, store: Path) -> None:
                     for s in segments]
     new_seg = segmentation(                              # duckn's rules are checked here
         segments, terminologies={k: v.model_dump(exclude_none=True)
-                                 for k, v in (seg.terminologies or {}).items()})
+                                 for k, v in (seg.terminologies or {}).items()},
+        labeling_scheme=seg.labeling_scheme)             # one key, or a cascade's several
 
     pv = dict(ext.get("provenance") or {"version": "1.0"})
     steps = [s for s in pv.get("processing", []) if s.get("name") != STEP]

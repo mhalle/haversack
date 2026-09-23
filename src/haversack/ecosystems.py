@@ -343,6 +343,12 @@ class ModelEcosystem:
         share one scheme. Answered offline, like :meth:`label_version`."""
         return None
 
+    def stage_task(self, task: str, stage: int) -> str | None:
+        """The task of this ecosystem whose label map names crop stage ``stage`` of cascade
+        ``task`` (:meth:`TaskCatalog.stage_task`), or None. Only a catalog with cascades has
+        an answer."""
+        return None
+
     def scheme_code(self, task: str, value: int, name: str) -> str | None:
         """This class's code in the task's labeling scheme, or None when the scheme has no
         EXACT code for it - a designation says "this segment IS that concept", and a class
@@ -493,6 +499,9 @@ class TSEcosystem(ModelEcosystem):
 
     def spec(self, task: str, root) -> TaskSpec:
         return self._catalog.get(task)
+
+    def stage_task(self, task: str, stage: int) -> str | None:
+        return self._catalog.stage_task(task, stage)
 
     def _registry_entries(self) -> tuple[dict, dict]:
         """``(_meta, {task: raw entry})`` of the shipped registry, read once."""
@@ -2318,6 +2327,14 @@ class EcosystemCatalog:
         name does not resolve."""
         eco = self.ecosystem_of(name)
         return None if eco is None else engine_of(eco)
+
+    def stage_task(self, name: str, stage: int) -> str | None:
+        """The qualified task whose label map names crop stage ``stage`` of cascade ``name``
+        - ``ts.v2:total_fast`` for stage 0 of ``ts.v2:lung_vessels`` - or None
+        (:meth:`TaskCatalog.stage_task`). Offline: nothing is installed."""
+        eco, short, canonical, _version = self.resolve(name)
+        found = eco.stage_task(short, stage)
+        return None if found is None else f"{canonical.partition(':')[0]}:{found}"
 
     def installed(self, name) -> bool:
         """Whether ``get(name)`` finds the task's weights in place, so it installs nothing."""

@@ -112,7 +112,38 @@ def scheme_for(engine, task):
         return None, None
 
 
-CASCADE_PART = re.compile(r":s\d+$")      # a cascade stage is named `<task>:s<i>`
+CASCADE_STAGE = re.compile(r"(?P<task>.+):s(?P<stage>\d+)")   # a crop stage: `<task>:s<i>`
+
+
+def stage_task(task, stage):
+    """The task whose label map names crop stage ``stage`` of cascade ``task``, qualified -
+    ``ts.v2:total_fast`` for stage 0 of ``ts.v2:lung_vessels`` - or None where the catalog
+    cannot say (``EcosystemCatalog.stage_task``). For emits written before parts recorded
+    their ``labels_named_by``."""
+    try:
+        from haversack.ecosystems import EcosystemCatalog, known_ecosystems
+        name, _served = _qualified(task)
+        return EcosystemCatalog(known_ecosystems()).stage_task(name, int(stage))
+    except Exception:                              # noqa: BLE001 - unnamed, never misnamed
+        return None
+
+
+def label_task_of(name, part, last):
+    """The task whose label map names part ``name``'s label values.
+
+    A task's own parts carry its classes, but a cascade's crop stage carries its own model's -
+    stage 0 of ``lung_vessels`` is ``total_fast``'s 118 classes, not the 5 the task's label
+    map names - and a store that named them from the task called the spleen `lung_airways`.
+    The emit records it as ``labels_named_by`` (None where no task names the stage), and the
+    store's part block keeps it, so a reader need not re-derive it. An older emit
+    did not, and its crop stages are recognized by name, ``<task>:s<i>``, anywhere but last:
+    the final stage is always emitted last, and was once named ``:s<i>`` too."""
+    if "labels_named_by" in part:
+        return part["labels_named_by"]
+    m = CASCADE_STAGE.fullmatch(name)
+    if m and not last:
+        return stage_task(m["task"], m["stage"])
+    return part.get("task")
 
 
 def names_for(engine, task, allow_unnamed=False, say=None):
@@ -868,19 +899,44 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
                        if names is None or model_names else (None, None))
 
     items = list(meta["parts"].items())
+    # whose label map names each part's values: the task's own, or - for a cascade's crop
+    # stages - the task that runs the stage's model alone
+    own = {n: p.get("task", meta.get("task")) for n, p in items}
+    label_task = {n: label_task_of(n, p, k == len(items) - 1)
+                  for k, (n, p) in enumerate(items)}
+    crop = [n for n, _ in items if label_task[n] != own[n]]
     if parts == "last" and len(items) > 1:
-        # only meaningful for a cascade, whose part names are `<task>:s<i>`; refuse to drop
-        # parts of a multi-model task, where every part carries different structures
-        if all(CASCADE_PART.search(n) for n, _ in items):
-            dropped = [n for n, _ in items[:-1]]
-            say(f"  cascade: keeping {items[-1][0]} only, dropping {dropped}", flush=True)
-            items = items[-1:]
+        # only meaningful for a cascade: drop its crop stages, keep what the task produced.
+        # A multi-model task's parts are complementary, and every one is kept.
+        if crop and len(crop) < len(items):
+            say(f"  cascade: keeping {[n for n, _ in items if n not in crop]}, dropping {crop}",
+                flush=True)
+            items = [(n, p) for n, p in items if n not in crop]
         else:
             say(f"  parts='last' ignored: {len(items)} complementary parts, not a cascade",
                   flush=True)
 
     multi = len(items) > 1
-    cascade = multi and all(CASCADE_PART.search(n) for n, _ in items)
+    # The scheme each part's classes belong to: the task's for its own parts, the stage
+    # task's for a crop stage. Two class lists are two schemes, and duckn declares both.
+    schemes = {}
+    part_labels = {}
+    for n, _p in items:
+        lt = label_task[n]
+        if lt == own[n]:
+            part_labels[n] = (NAMES, scheme, code_of)
+        elif lt is None:
+            say(f"  ! {n}: no task names this cascade stage's classes; "
+                "its segments will be named label_<id>", flush=True)
+            part_labels[n] = ({}, None, None)
+        else:
+            part_labels[n] = (names_for(engine, lt, allow_unnamed, say=say),
+                              *scheme_for(engine, lt))
+        sc = part_labels[n][1]
+        if sc is not None:
+            schemes.setdefault(sc["key"], sc)
+    if scheme is not None and scheme["key"] in schemes:       # the task's own class list first
+        schemes = {scheme["key"]: scheme, **schemes}
     # a value two parts both emit needs two leaves, and both get the layer in their id
     counts = {}
     for _n, part in items:
@@ -888,10 +944,8 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
             counts[v] = counts.get(v, 0) + 1
     shared = {v for v, c in counts.items() if c > 1}
     for i, (name, part) in enumerate(items):
-        # a task's label map names the FINAL stage's classes; an earlier cascade stage has
-        # its own (the cropping model's), which the emit does not carry - leave them numbered
-        # rather than hand a liver-segments name to a stage-0 organ channel
-        part_names = NAMES if (not cascade or i == len(items) - 1) else {}
+        # a task's label map names the FINAL stage's classes; a crop stage has its own model's
+        part_names, part_scheme, part_code_of = part_labels[name]
         eff, origin, direction, centering = geometry(part)
         grid, start, stop = extent(part)
         g = root.create_group(f"parts/{i}")
@@ -921,6 +975,10 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
             block["softmax"] = part["softmax"]
         if "labels_note" in part:
             block["labels_note"] = part["labels_note"]
+        if label_task[name] is not None:
+            # which task's label map names `labels`: the task's own, or for a cascade's crop
+            # stage the task that runs that stage's model alone (its classes, not the task's)
+            block["labels_named_by"] = label_task[name]
         if "target_grid" in part:                                  # fastsurfer: the input grid
             block["target_grid"] = duckn_grid(part["target_grid"])
         g.attrs.update(part_attrs(block))
@@ -1032,9 +1090,10 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
             sid = f"c{v}_l{i}" if v in shared else f"c{v}"
             # a class the scheme names carries its name as an exact designation in it: that
             # is what lets a document written for the scheme find the segment in any store
-            code = code_of(v, part_names[v]) if scheme and v in part_names else None
+            code = (part_code_of(v, part_names[v]) if part_scheme and v in part_names
+                    else None)
             coded = None if code is None else [{
-                "scheme": scheme["key"], "code": code,
+                "scheme": part_scheme["key"], "code": code,
                 # where the code is not the name, the name is the code's meaning
                 **({"meaning": part_names[v]} if code != part_names[v] else {})}]
             segs.append(segment(sid, part_names.get(v, f"label_{v}"), v, layer=lay,
@@ -1046,9 +1105,13 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
 
     root.attrs.update(root_attrs(
         # the seg extension goes through duckn's model and consistency validator
-        segmentation(segs, labeling_scheme=scheme and scheme["key"],
-                     terminologies=scheme and {scheme["key"]: {
-                         k: scheme[k] for k in ("name", "system_uri", "version", "definition_url")}}),
+        # one scheme is declared as its key, several - a cascade whose stages follow
+        # different class lists - as an array (seg 0.9 §3.1)
+        segmentation(segs, labeling_scheme=(None if not schemes else next(iter(schemes))
+                                            if len(schemes) == 1 else list(schemes)),
+                     terminologies={key: {k: sc[k] for k in ("name", "system_uri", "version",
+                                                             "definition_url")}
+                                    for key, sc in schemes.items()} or None),
         haversack={"haversack_version": dict(items)[order[0]["name"]].get("haversack"),
                    "engine": engine, "task": meta["task"], "case": case,
                    "source_file": Path(meta["image"]).name, "part_order": order},
