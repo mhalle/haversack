@@ -491,9 +491,9 @@ Silicon haversack caps PyTorch's MPS allocator at the device's recommended worki
 because past it Metal returns zeros instead of an error; a real shortfall then raises, and
 SynthStrip retries in fp16 before refusing.
 
-## Embedding fields: `encode`
+## Embedding fields: `embed`
 
-`haversack encode` runs an image encoder over a CT and writes its token lattices as an
+`haversack embed` runs an image encoder over a CT and writes its token lattices as an
 **embedding field** (`<name>.zarr.zip`): a zarr zip of one array per lattice, each placed in
 the scan's world coordinates, with the encoder, its weights' digest, the input's digest and
 grid, the license and the papers to cite in its provenance. Nothing in it is a mask or a
@@ -503,11 +503,11 @@ segmentation (a haversack `.seg.nrrd`, local or by URL) and pool, compare or sco
 inside. Every field also carries feldglas's guide as its `README.md`.
 
 ```bash
-uv pip install "haversack[torch,encode] @ git+https://github.com/mhalle/haversack"
-haversack encoders                                   # what can encode, and what is installed
+uv pip install "haversack[torch,embed] @ git+https://github.com/mhalle/haversack"
+haversack encoders                                   # the encoders, and which are installed
 haversack weights fetch radar:pretrain               # 1.6 GB, pinned by digest (or --from FILE)
-haversack encode ct.nii.gz -e radar:pretrain -o ct.radar.zarr.zip
-haversack encode idc:<uuid> -e ts.v2:total_fast -o ct.null.zarr.zip
+haversack embed ct.nii.gz -e radar:pretrain -o ct.radar.zarr.zip
+haversack embed idc:<uuid> -e ts.v2:total_fast -o ct.null.zarr.zip
 ```
 
 Encoders are named like tasks, `family[.version]:name[@revision]`:
@@ -521,13 +521,13 @@ Encoders are named like tasks, `family[.version]:name[@revision]`:
 
 Inputs are anything `segment` takes, local files and remote sources alike. `--int8` stores
 tokens as int8 with a per-channel scale (about half the size of the fp16 default); `--json`
-prints what was done, with timings. The names used before encoding moved into haversack
+prints what was done, with timings. The names used before embedding moved into haversack
 (`radar`, `null-totalsegmentator`, `null-totalsegmentator-1.5mm`) still resolve. A server
-encodes too (see SERVER.md, "Embedding fields"):
+embeds too (see SERVER.md, "Embedding fields"):
 
 ```bash
 haversack remote encoders
-haversack remote encode idc:<uuid> -e radar:pretrain -o ct.radar.zarr.zip
+haversack remote embed idc:<uuid> -e radar:pretrain -o ct.radar.zarr.zip
 ```
 
 ## What haversack does not do yet

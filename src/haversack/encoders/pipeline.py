@@ -1,4 +1,4 @@
-"""The one encode path every encoder shares: resolve the encoder, check its weights, fetch and read
+"""The one embedding path every encoder shares: resolve the encoder, check its weights, fetch and read
 the input, let the family prepare and run it, place the lattices, record provenance, and write the
 field through feldglas (the format's one author).
 
@@ -66,15 +66,15 @@ def field_of(spec: EncoderSpec, tokens, prepared, identity: dict):
                  provenance=prov, embedding=emb, data_box=prepared.data_box)
 
 
-def encode(name: str, input_spec, out, *, device: str = "auto", dtype: str | None = None, int8: bool = False,
+def embed(name: str, input_spec, out, *, device: str = "auto", dtype: str | None = None, int8: bool = False,
            slab: int = 16, progress=None) -> dict:
-    """Encode one input with encoder ``name`` into ``out`` (``<name>.zarr.zip``). Returns what was done."""
+    """Embed one input with encoder ``name`` into ``out`` (``<name>.zarr.zip``). Returns what was done."""
     _check_out(out)
     spec = _ready(name)
     from ..sources import materialize
     t0 = time.time()
     path = Path(materialize(str(input_spec), progress=progress))
-    return encode_file(spec.name, path, out, identity=_identity(input_spec, path), device=device, dtype=dtype,
+    return embed_file(spec.name, path, out, identity=_identity(input_spec, path), device=device, dtype=dtype,
                        int8=int8, slab=slab, progress=progress, started=t0)
 
 
@@ -95,14 +95,14 @@ def _ready(name: str) -> EncoderSpec:
     try:
         import feldglas.store  # noqa: F401 - the writer
     except ImportError:
-        raise InputError("encoding writes through feldglas: install haversack[encode]") from None
+        raise InputError("an embedding is written through feldglas: install haversack[embed]") from None
     return spec
 
 
-def encode_file(name: str, path, out, *, identity: dict, device: str = "auto", dtype: str | None = None,
+def embed_file(name: str, path, out, *, identity: dict, device: str = "auto", dtype: str | None = None,
                 int8: bool = False, slab: int = 16, progress=None, cancel=None, started: float | None = None,
                 task_weights=None) -> dict:
-    """Encode an input ALREADY on disk (a file or a DICOM folder) into ``out``. ``identity`` is what
+    """Embed an input ALREADY on disk (a file or a DICOM folder) into ``out``. ``identity`` is what
     the field records of its input - a server passes the job's (source, identifier, digest), not
     the scratch path it staged the bytes at. ``cancel``, when given, is checked between steps.
     ``task_weights``: where an nnU-Net encoder's task weights are installed (a server's own root)."""
@@ -130,7 +130,7 @@ def encode_file(name: str, path, out, *, identity: dict, device: str = "auto", d
     say(f"{spec.name}: preparing {path.name}")
     prepared = family.prepare(spec, image, model)
     check()
-    say(f"{spec.name}: encoding on {dev.type} ({dtype}), model grid {tuple(prepared.grid['shape'])}")
+    say(f"{spec.name}: embedding on {dev.type} ({dtype}), model grid {tuple(prepared.grid['shape'])}")
     t2 = time.time()
     tokens = family.run(spec, model, prepared, dev, tdt, slab=slab)
     t3 = time.time()
@@ -139,8 +139,8 @@ def encode_file(name: str, path, out, *, identity: dict, device: str = "auto", d
     from feldglas.store import write_field
     out.parent.mkdir(parents=True, exist_ok=True)
     write_field(out, field, token_dtype=np.int8 if int8 else np.float16)
-    return {"field": str(out), "bytes": out.stat().st_size, "encoder": spec.name, "revision": spec.revision,
+    return {"embedding": str(out), "bytes": out.stat().st_size, "encoder": spec.name, "revision": spec.revision,
             "license": spec.license, "device": dev.type, "dtype": dtype, "int8": int8,
             "model_grid": list(prepared.grid["shape"]), "tokens": [int(len(t)) for t in tokens],
-            "seconds": {"read": round(t1 - t0, 2), "load_and_prepare": round(t2 - t1, 2), "encode": round(t3 - t2, 2),
+            "seconds": {"read": round(t1 - t0, 2), "load_and_prepare": round(t2 - t1, 2), "embed": round(t3 - t2, 2),
                         "total": round(time.time() - t0, 2)}}

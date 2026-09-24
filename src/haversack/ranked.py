@@ -20,7 +20,7 @@ try:
                            deficit, encode, encode_regions, levels, margin, probabilities, settle_ties,
                            to_device)
     from rankfield import SUPPORT_MAX, TAIL_MAX, ZERO_LEVEL  # noqa: F401 - re-exported for tools and tests
-    from rankfield import DEFAULT_MEMORY_BUDGET  # noqa: F401 - the ceiling network.encode_budget caps at
+    from rankfield import DEFAULT_MEMORY_BUDGET  # noqa: F401 - the ceiling network.ranked_encode_budget caps at
 except ModuleNotFoundError as _e:
     if _e.name != "rankfield":
         raise
@@ -79,7 +79,7 @@ def emit(spec, part, logits, /, *, memory_budget: int | None = None, **meta) -> 
     emitting, a reader cannot otherwise tell what produced the file.
 
     ``memory_budget`` is the bytes the encoder sizes its slab to; None is rankfield's small
-    default. Measuring the device is the pipeline's business (``network.encode_budget``),
+    default. Measuring the device is the pipeline's business (``network.ranked_encode_budget``),
     so the caller measures once, passes it here and records what it passed. It is
     keyword-only and never lands in ``meta``: it moves no byte of the code, and a store
     that recorded the machine it was written on would differ between two runs that agree.

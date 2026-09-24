@@ -1,11 +1,11 @@
-"""Encode jobs on the server (2026-09-23): ``POST /v1/jobs`` with ``kind=encode``.
+"""Embedding jobs on the server (2026-09-23): ``POST /v1/jobs`` with ``kind=embed``.
 
 An embedding field is a second OUTPUT KIND through the queue, the result cache and the job
 routes; labels stay the default. What these hold, each against a way it has failed or could:
 
 - no existing result key moves (a segmentation's key is the old formula, byte for byte), and a
   field's key differs from a segmentation's of the same name - ``ts.v2:total_fast`` is both;
-- an encode job's name is resolved as an ENCODER, never through the task catalog;
+- an embedding job's name is resolved as an ENCODER, never through the task catalog;
 - the field is published and served as a field: named ``.zarr.zip``, typed as a zip, validated
   by its digest, refused a NIfTI conversion, advertised by no label or preview link;
 - publication re-keys through the encoder's versions, not the segmentation's (a re-key through
@@ -29,13 +29,13 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from haversack import serve as serve_mod  # noqa: E402
 from haversack.encoders import serving  # noqa: E402
-from haversack.serve import FIELD_NAME, LocalExecutor, create_app, result_key  # noqa: E402
+from haversack.serve import EMBEDDING_NAME, LocalExecutor, create_app, result_key  # noqa: E402
 
 from test_serve import FakeSegmenter, volume_bytes, wait_state  # noqa: E402
 
 
 class FakeEncoder:
-    """``encode_file``'s signature; writes a small zip whose bytes depend on the input and int8."""
+    """``embed_file``'s signature; writes a small zip whose bytes depend on the input and int8."""
 
     def __init__(self):
         self.calls = []
@@ -48,18 +48,18 @@ class FakeEncoder:
             z.writestr("zarr.json", json.dumps({"encoder": name, "input": identity.get("digest"), "int8": int8}))
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(buf.getvalue())
-        return {"field": str(out), "bytes": out.stat().st_size, "encoder": name, "revision": "r",
+        return {"embedding": str(out), "bytes": out.stat().st_size, "encoder": name, "revision": "r",
                 "license": "CC-BY-NC-SA-4.0", "device": device, "dtype": "fp32", "int8": int8,
                 "model_grid": [8, 8, 8], "tokens": [1, 8, 64], "seconds": {"total": 0.0}}
 
 
 def make(tmp_path, token=None):
     seg, enc = FakeSegmenter(steps=1), FakeEncoder()
-    ex = LocalExecutor(seg, workdir=tmp_path / "work", cache_dir=tmp_path / "cache", encode_fn=enc)
+    ex = LocalExecutor(seg, workdir=tmp_path / "work", cache_dir=tmp_path / "cache", embed_fn=enc)
     return seg, enc, ex, TestClient(create_app(ex, token=token))
 
 
-def post(client, *, task="radar:pretrain", kind="encode", options=None, fill=0, **extra):
+def post(client, *, task="radar:pretrain", kind="embed", options=None, fill=0, **extra):
     return client.post("/v1/jobs", files={"file": ("scan.nii.gz", volume_bytes(fill))},
                        data={"task": task, "kind": kind, "options": json.dumps(options or {}), **extra})
 
@@ -82,12 +82,12 @@ def test_no_segmentation_key_moves():
 
 def test_a_field_and_labels_of_one_name_never_share_a_key():
     args = (("idc:1",), "ts.v2:total_fast", {}, ["297=v2.0.0"])
-    assert result_key(*args, kind="encode") != result_key(*args)
+    assert result_key(*args, kind="embed") != result_key(*args)
 
 
 def test_an_encoders_versions_are_its_pins_and_its_epoch():
     v = serving.field_versions(None, "radar")
-    assert v[0].startswith("radar:pretrain@") and v[-1] == f"encode@epoch={serving.ENCODE_EPOCH}"
+    assert v[0].startswith("radar:pretrain@") and v[-1] == f"embed@epoch={serving.EMBED_EPOCH}"
     assert any(x.startswith("checkpoint_radar_pretrain.pth=sha256:") for x in v)
 
 
@@ -103,15 +103,15 @@ def test_an_nnunet_encoder_keys_on_its_tasks_weights_only():
 
 # -- the job ---------------------------------------------------------------------
 
-def test_an_encode_job_publishes_and_serves_a_field(tmp_path):
+def test_an_embedding_job_publishes_and_serves_a_field(tmp_path):
     _, enc, ex, client = make(tmp_path)
     r = post(client, task="radar")                       # an alias resolves to the canonical name
     assert r.status_code == 202, r.text
     s = wait_state(client, r.json()["id"], ("done", "failed"))
     assert s["state"] == "done", s
-    assert s["task"] == "radar:pretrain" and s["kind"] == "encode" and s["deliverables"] == []
+    assert s["task"] == "radar:pretrain" and s["kind"] == "embed" and s["deliverables"] == []
     out = s["result"]["outputs"][0]
-    assert out["name"] == "field" and out["kind"] == "field"
+    assert out["name"] == "embedding" and out["kind"] == "embedding"
     links = s["links"]
     # the job-scoped meta, and nothing of labels: no labels/preview/statistics link, no path form
     assert set(links) == {"self", "events", "result", "meta"}, links
@@ -134,11 +134,11 @@ def test_an_encode_job_publishes_and_serves_a_field(tmp_path):
     assert ident == {"input": s["input_identity"][0], "digest": s["input_identity"][0]}
     # the cache entry holds the field under its own name, and its meta says what it is
     entry = ex.cache.get(s["key"])
-    assert entry is not None and entry[0].name == FIELD_NAME
+    assert entry is not None and entry[0].name == EMBEDDING_NAME
     stored = json.loads((entry[0].parent / "meta.json").read_text())
-    assert stored["kind"] == "encode" and stored["task"] == "radar:pretrain"
+    assert stored["kind"] == "embed" and stored["task"] == "radar:pretrain"
     record = client.get(f"/v1/jobs/{s['id']}/meta.json").json()      # the result record
-    assert record["outputs"][0]["kind"] == "field" and record["encoder"] == "radar:pretrain"
+    assert record["outputs"][0]["kind"] == "embedding" and record["encoder"] == "radar:pretrain"
     ex.close()
 
 
@@ -161,7 +161,7 @@ def test_publication_rekeys_through_the_encoders_versions(tmp_path, monkeypatch)
     monkeypatch.setattr(serving, "field_versions", lambda seg, name: next(seen))
     _, _, ex, client = make(tmp_path)
     s = wait_state(client, post(client).json()["id"], ("done",))
-    want = result_key(tuple(s["input_identity"]), "radar:pretrain", {}, ["after"], kind="encode")
+    want = result_key(tuple(s["input_identity"]), "radar:pretrain", {}, ["after"], kind="embed")
     assert s["key"] == want
     assert ex.cache.get(want) is not None
     ex.close()
@@ -209,7 +209,7 @@ def test_the_server_lists_its_encoders(tmp_path):
     rows = {e["name"]: e for e in client.get("/v1/encoders").json()["encoders"]}
     from haversack.encoders import ENCODERS
     assert set(rows) == set(ENCODERS)
-    assert client.get("/v1/encoders").json()["encodes"] is True
+    assert client.get("/v1/encoders").json()["embeds"] is True
     r = rows["radar:pretrain"]
     assert r["license"] == "CC-BY-NC-SA-4.0" and r["options"] == {"int8": "bool"}
     assert r["attribution"]["cite"][0]["doi"] == "10.1126/science.aec6129"
@@ -217,9 +217,9 @@ def test_the_server_lists_its_encoders(tmp_path):
     ex.close()
 
 
-def test_the_client_encodes_through_the_server(tmp_path):
-    """``RemoteClient.encode`` is submit(kind=encode) + wait + fetch; a plain ``submit`` sends
-    no ``kind`` at all, so a server from before encoding reads it as it always did."""
+def test_the_client_embeds_through_the_server(tmp_path):
+    """``RemoteClient.embed`` is submit(kind=embed) + wait + fetch; a plain ``submit`` sends
+    no ``kind`` at all, so a server from before embeddings reads it as it always did."""
     from haversack.client import RemoteClient
     _, enc, ex, client = make(tmp_path)
     sent = []
@@ -235,31 +235,31 @@ def test_the_client_encodes_through_the_server(tmp_path):
     src = tmp_path / "scan.nii.gz"
     src.write_bytes(volume_bytes(7))
     out = tmp_path / "f.zarr.zip"
-    final = rc.encode(src, "radar", out, int8=True)
-    assert final["state"] == "done" and final["kind"] == "encode"
-    assert sent[-1]["kind"] == "encode" and json.loads(sent[-1]["options"]) == {"int8": True}
+    final = rc.embed(src, "radar", out, int8=True)
+    assert final["state"] == "done" and final["kind"] == "embed"
+    assert sent[-1]["kind"] == "embed" and json.loads(sent[-1]["options"]) == {"int8": True}
     assert zipfile.is_zipfile(out) and enc.calls[-1]["int8"] is True
     rc.submit(src, "total_fast")
     assert "kind" not in sent[-1]
     ex.close()
 
 
-def test_a_server_that_cannot_encode_says_so_before_any_job_exists(tmp_path):
-    """Modal has no encoder worker yet: its executor says `encodes = False`, and the door
+def test_a_server_that_cannot_embed_says_so_before_any_job_exists(tmp_path):
+    """Modal has no encoder worker yet: its executor says `embeds = False`, and the door
     answers 501 naming the local path - no job, no directory, no worker spawned."""
     _, enc, ex, client = make(tmp_path)
-    ex.encodes = False
+    ex.embeds = False
     before = set((tmp_path / "work").iterdir())
     r = post(client)
-    assert r.status_code == 501 and "haversack encode" in r.text
+    assert r.status_code == 501 and "haversack embed" in r.text
     assert set((tmp_path / "work").iterdir()) == before and enc.calls == []
     ex.close()
 
 
-def test_the_modal_executor_does_not_encode():
+def test_the_modal_executor_does_not_embed():
     import pytest as _p
     modal_app = _p.importorskip("haversack.modal_app")
-    assert modal_app.ModalExecutor.encodes is False
+    assert modal_app.ModalExecutor.embeds is False
 
 
 def test_a_field_cannot_be_referred_to_as_an_image(tmp_path):
@@ -285,11 +285,11 @@ def test_a_hosted_inputs_field_gets_no_label_paths(tmp_path, monkeypatch):
         (d / "s.nii.gz").write_bytes(volume_bytes(11))
         return d
     seg, enc = FakeSegmenter(steps=1), FakeEncoder()
-    ex = LocalExecutor(seg, workdir=tmp_path / "w", cache_dir=tmp_path / "c", encode_fn=enc,
+    ex = LocalExecutor(seg, workdir=tmp_path / "w", cache_dir=tmp_path / "c", embed_fn=enc,
                        fetch_idc_fn=fake_fetch)
     client = TestClient(create_app(ex))
     u = "0be27d1c-9410-47ff-9c9f-a44b26a4bd55"
-    r = client.post("/v1/jobs", data={"task": "radar:pretrain", "kind": "encode",
+    r = client.post("/v1/jobs", data={"task": "radar:pretrain", "kind": "embed",
                                       "source": json.dumps([{"kind": "idc", "crdc_series_uuid": u}])})
     assert r.status_code == 202, r.text
     s = wait_state(client, r.json()["id"], ("done", "failed"))
@@ -301,7 +301,7 @@ def test_a_hosted_inputs_field_gets_no_label_paths(tmp_path, monkeypatch):
     ex.close()
 
 
-def _idc_executor(tmp_path, monkeypatch, workdir="w", encode_fn=None):
+def _idc_executor(tmp_path, monkeypatch, workdir="w", embed_fn=None):
     monkeypatch.setattr(serve_mod, "_idc_enabled", lambda: True)
 
     def fake_fetch(series, jobdir):
@@ -310,24 +310,24 @@ def _idc_executor(tmp_path, monkeypatch, workdir="w", encode_fn=None):
         (d / "s.nii.gz").write_bytes(volume_bytes(13))
         return d
     return LocalExecutor(FakeSegmenter(steps=1), workdir=tmp_path / workdir, cache_dir=tmp_path / "c",
-                         encode_fn=encode_fn or FakeEncoder(), fetch_idc_fn=fake_fetch)
+                         embed_fn=embed_fn or FakeEncoder(), fetch_idc_fn=fake_fetch)
 
 
-def test_an_evicted_or_restarted_encode_job_is_still_a_field(tmp_path, monkeypatch):
+def test_an_evicted_or_restarted_embedding_job_is_still_a_field(tmp_path, monkeypatch):
     """The status built from the STORED record (after a restart, or once the record leaves
     memory) says `kind` as the live one does; without it the links door read the field as a
     segmentation and minted a task-named encoder's label paths (review, 2026-09-23)."""
     ex = _idc_executor(tmp_path, monkeypatch)
     client = TestClient(create_app(ex))
     u = "0be27d1c-9410-47ff-9c9f-a44b26a4bd55"
-    r = client.post("/v1/jobs", data={"task": "ts.v2:total_fast", "kind": "encode",
+    r = client.post("/v1/jobs", data={"task": "ts.v2:total_fast", "kind": "embed",
                                       "source": json.dumps([{"kind": "idc", "crdc_series_uuid": u}])})
     jid = wait_state(client, r.json()["id"], ("done",))["id"]
     ex.close()
     ex2 = _idc_executor(tmp_path, monkeypatch)
     client2 = TestClient(create_app(ex2))
     s = client2.get(f"/v1/jobs/{jid}").json()
-    assert s.get("evicted") is True and s["kind"] == "encode", s
+    assert s.get("evicted") is True and s["kind"] == "embed", s
     assert set(s["links"]) == {"self", "events", "result", "meta"}, s["links"]
     assert client2.get(s["links"]["result"]).headers["content-type"] == "application/zip"
     ex2.close()
@@ -356,7 +356,7 @@ def test_an_artifact_cannot_take_a_primary_outputs_name(tmp_path):
     s = wait_state(client, post(client).json()["id"], ("done",))
     src = tmp_path / "x"
     src.write_bytes(b"x")
-    for name in ("labels.seg.nrrd", FIELD_NAME):
+    for name in ("labels.seg.nrrd", EMBEDDING_NAME):
         with pytest.raises(ValueError):
             ex.cache.add_artifact(s["key"], name, src)
     ex.close()

@@ -399,11 +399,11 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         soft["engine"] = "nnunetv2"
         # the encoder's slab, sized from this device's free memory now: machine-dependent but
         # byte-neutral, so it is recorded beside the accumulator placement, not as a deviation
-        from .network import encode_budget
-        budget = encode_budget(logits.device)
+        from .network import ranked_encode_budget
+        budget = ranked_encode_budget(logits.device)
         for m in prov["models"]:
             if m["weights"] == str(weights):
-                m["encode_memory_budget_bytes"] = budget
+                m["ranked_encode_budget_bytes"] = budget
         ranked.emit(
             probabilities, part, logits, memory_budget=budget, softmax=soft,
             part=part, task=spec.name, labels_named_by=label_task, haversack=_version(),

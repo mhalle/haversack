@@ -792,7 +792,7 @@ class SharedResultCache:
 
         from .serve import ARTIFACT_NAMES
         gen, files = ptr["generation"], ptr.get("files") or {}
-        primary = _primary_name(files)         # labels, or an encode job's field
+        primary = _primary_name(files)         # labels, or an embedding job's field
         if primary is None:
             return False
         with self._fill_lock(key):
@@ -996,7 +996,7 @@ class SharedResultCache:
         """Publish: blobs first, then the pointer, then the local copy. Returns the
         generation token, which the local copy shares.
 
-        ``output_name`` is the primary output's name - labels, or an encode job's field
+        ``output_name`` is the primary output's name - labels, or an embedding job's field
         (main, 2026-09-23) - checked BEFORE anything is uploaded, so a wrong name costs no
         blob and no pointer."""
         from .serve import PRIMARY_NAMES, RESULT_NAME

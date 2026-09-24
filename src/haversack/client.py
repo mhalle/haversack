@@ -152,7 +152,7 @@ class RemoteClient:
         are part of the result's key, and declining a preview must not name another
         result.
 
-        ``kind="encode"`` makes the job an embedding field of ``image`` with the ENCODER named
+        ``kind="embed"`` makes the job an embedding field of ``image`` with the ENCODER named
         ``task`` (``GET /v1/encoders``), whose only option is ``int8``; None sends nothing,
         which is a segmentation - the form every server before 2026-09-23 understands."""
         data = {"task": task, "options": json.dumps(options)}
@@ -279,14 +279,14 @@ class RemoteClient:
             time.sleep(poll_interval)
 
     def encoders(self) -> dict:
-        """``GET /v1/encoders``: what the server encodes with."""
+        """``GET /v1/encoders``: the encoders the server embeds with."""
         return self._json("GET", "/v1/encoders")
 
-    def encode(self, image, encoder: str, output, *, int8: bool = False, on_status=None) -> dict:
+    def embed(self, image, encoder: str, output, *, int8: bool = False, on_status=None) -> dict:
         """An embedding field of ``image`` into ``output`` (``<name>.zarr.zip``): submit an
-        encode job, wait, fetch. Returns the final status; raises on a failed job."""
+        embedding job, wait, fetch. Returns the final status; raises on a failed job."""
         opts = {"int8": True} if int8 else {}
-        jid = self.submit(image, encoder, kind="encode", **opts)
+        jid = self.submit(image, encoder, kind="embed", **opts)
         final = self.wait(jid, on_status=on_status)
         if final["state"] == "done":
             self.fetch(jid, output)

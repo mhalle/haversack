@@ -1,6 +1,6 @@
 """The encoders haversack can run, as data: what each is, where its weights come from, how its
 input is prepared, what its lattices are. No torch here - :mod:`.pipeline` imports a family module
-only to encode.
+only to embed with it.
 
 A spec states facts, measured or pinned, and nothing else: an unmeasured reach or look offset is
 absent (``None``), never guessed, because it reaches the field's ``thickness`` and ``support`` and
@@ -134,7 +134,7 @@ def resolve(name: str) -> EncoderSpec:
     spec = ENCODERS.get(base)
     if spec is None:
         near = sorted(n for n in ENCODERS if n.split(":")[0] == base.split(":")[0]) or sorted(ENCODERS)
-        raise InputError(f"no encoder {name!r}; haversack encodes with: {', '.join(near)}")
+        raise InputError(f"no encoder {name!r}; haversack embeds with: {', '.join(near)}")
     if pin and not spec.revision.startswith(pin):
         raise InputError(f"{name!r}: this haversack runs {spec.name} at revision {spec.revision[:12]}, not {pin}")
     return spec

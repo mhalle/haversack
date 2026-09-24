@@ -436,7 +436,7 @@ def test_emit_probabilities_sizes_the_encode_from_the_logits_device(monkeypatch)
     lg = torch.randn(K, Z, Y, X)
     ref = sitk.GetImageFromArray(np.zeros((Z, Y, X), np.float32))
     asked = []
-    monkeypatch.setattr(network, "encode_budget", lambda device: asked.append(device) or 7777)
+    monkeypatch.setattr(network, "ranked_encode_budget", lambda device: asked.append(device) or 7777)
     passed = []
     real_emit = ranked.emit
 

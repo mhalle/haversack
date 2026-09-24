@@ -388,18 +388,18 @@ def _command_line() -> click.Group:
         ])
     root.add_command(segment)
 
-    encode = _Command(
-        'encode', callback=_dispatch(_cmd_encode, 'encode'),
-        short_help='encode an image into an embedding field (token lattices placed in the patient)',
+    embed = _Command(
+        'embed', callback=_dispatch(_cmd_embed, 'embed'),
+        short_help="an image's embedding field (token lattices placed in the patient)",
         help=('Run an encoder - a model whose output is an embedding FIELD, not labels - on one '
               'image, and write the field as <name>.zarr.zip (read it with feldglas). The input is '
               'anything `segment` takes. The encoder\'s weights must be installed first: '
               '`haversack weights fetch <encoder>`. The field inherits the weights\' license.'),
         epilog=_verbatim("""examples:
-  haversack encoders                                       what can be encoded
+  haversack encoders                                       the encoders, and which are installed
   haversack weights fetch radar:pretrain                   its weights (1.6 GB, CC BY-NC-SA 4.0)
-  haversack encode scan.nii.gz --encoder radar:pretrain -o scan.zarr.zip
-  haversack encode idc:<crdc_series_uuid> --encoder radar:pretrain -o scan.zarr.zip --int8"""),
+  haversack embed scan.nii.gz --encoder radar:pretrain -o scan.zarr.zip
+  haversack embed idc:<crdc_series_uuid> --encoder radar:pretrain -o scan.zarr.zip --int8"""),
         params=[
             click.Argument(['input'], help='an image file or folder, or a remote input (idc:, s3:, ...) as `segment` takes'),
             click.Option(['--encoder', '-e'], required=True, help='an encoder from `haversack encoders`'),
@@ -412,7 +412,7 @@ def _command_line() -> click.Group:
             click.Option(['--json', 'as_json'], is_flag=True, help='print what was done as JSON'),
             click.Option(['--quiet', '-q'], is_flag=True, help='no progress lines on stderr'),
         ])
-    root.add_command(encode)
+    root.add_command(embed)
     encoders = _Command(
         'encoders', callback=_dispatch(_cmd_encoders, 'encoders'),
         short_help='list the encoders: what each is, its weights, license and whether they are installed',
@@ -840,11 +840,11 @@ def _command_line() -> click.Group:
         ])
     remote.add_command(remote_submit)
     remote_encode = _Command(
-        'encode', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+        'embed', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
         short_help='an embedding field of an image, computed by the server',
-        help=('Submit an encode job (POST /v1/jobs, kind=encode), follow it, and download the '
+        help=('Submit an embedding job (POST /v1/jobs, kind=embed), follow it, and download the '
               'field (<name>.zarr.zip). The server fetches, runs and caches it like a '
-              'segmentation; `haversack remote encoders` lists what it encodes with.'),
+              'segmentation; `haversack remote encoders` lists the encoders it embeds with.'),
         params=[
             click.Argument(['input'],
                            help=('a local image file, or <source>:<identifier> for a source the '
@@ -860,7 +860,7 @@ def _command_line() -> click.Group:
     remote.add_command(remote_encode)
     remote_encoders = _Command(
         'encoders', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
-        short_help='what the server can encode with')
+        short_help='the encoders the server embeds with')
     remote.add_command(remote_encoders)
     remote_status = _Command(
         'status', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
@@ -1181,14 +1181,14 @@ def _cmd_remote(args) -> int:
         for e in c.encoders().get("encoders") or []:
             state = {True: "installed", False: "not installed", None: "-"}.get(e.get("installed"), "-")
             print("\t".join([str(e.get("name")), str(e.get("license")), state]))
-    elif args.rcmd == "encode":
+    elif args.rcmd == "embed":
         opts = {"int8": True} if args.int8 else {}
         if args.no_wait:
-            print(c.submit(args.input, args.encoder, kind="encode", **opts))
+            print(c.submit(args.input, args.encoder, kind="embed", **opts))
             return 0
         stem = args.input[4:16] if args.input.startswith("idc:") else args.input.rsplit(".nii", 1)[0].rstrip("/")
         out = args.output or f"{stem}_{_file_stem(args.encoder)}.zarr.zip"
-        final = c.encode(args.input, args.encoder, out, int8=args.int8,
+        final = c.embed(args.input, args.encoder, out, int8=args.int8,
                          on_status=lambda st: print(f"  {st['state']}", file=sys.stderr, flush=True))
         if final["state"] != "done":
             print(f"job ended {final['state']}", file=sys.stderr)
@@ -1991,12 +1991,12 @@ def _cmd_encoders(args) -> int:
     return 0
 
 
-def _cmd_encode(args) -> int:
-    """`haversack encode`."""
+def _cmd_embed(args) -> int:
+    """`haversack embed`."""
     import json as _json
-    from .encoders.pipeline import encode
+    from .encoders.pipeline import embed
     progress = None if (args.quiet or args.as_json) else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
-    r = encode(args.encoder, args.input, args.output, device=args.device, dtype=args.dtype, int8=args.int8,
+    r = embed(args.encoder, args.input, args.output, device=args.device, dtype=args.dtype, int8=args.int8,
                slab=args.slab, progress=progress)
     if args.as_json:
         print(_json.dumps(r, indent=1))

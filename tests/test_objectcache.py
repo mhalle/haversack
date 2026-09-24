@@ -3017,33 +3017,33 @@ class TestLateDeliverablesIntoAPublishedGeneration(_Hosts):
         self.assertEqual(1, len(rows))
 
 
-class TestAnEncodeJobsField(_Hosts):
-    """An encode job publishes an embedding field where a segmentation publishes labels
+class TestAnEmbeddingJobsField(_Hosts):
+    """An embedding job publishes an embedding field where a segmentation publishes labels
     (main, 2026-09-23): ``put(output_name=)``, one primary output per generation. The
     PROTOCOL half answers for a field as for labels; the local-tier fill does not yet, so a
     field is a miss on `get` until the one-layer decision is made (2026-09-23)."""
 
     FIELD_META = {"task": "ts.v2:total_fast", "identity": ["upload:x"], "options": {},
-                  "computed": 1.0, "kind": "encode"}
+                  "computed": 1.0, "kind": "embed"}
 
     def publish_field(self, cache, data=b"a field", key=KEY):
-        from haversack.serve import FIELD_NAME
+        from haversack.serve import EMBEDDING_NAME
         return cache.put(key, self.file(f"field-{data.hex()}", data), {"outputs": []},
-                         dict(self.FIELD_META), output_name=FIELD_NAME)
+                         dict(self.FIELD_META), output_name=EMBEDDING_NAME)
 
     def test_the_pointer_names_the_field_and_no_labels(self):
-        from haversack.serve import FIELD_NAME
+        from haversack.serve import EMBEDDING_NAME
         self.publish_field(self.a)
         files = self.pointer()["files"]
-        self.assertIn(FIELD_NAME, files)
+        self.assertIn(EMBEDDING_NAME, files)
         self.assertNotIn(RESULT_NAME, files)
-        self.assertEqual(len(b"a field"), files[FIELD_NAME]["size"])
+        self.assertEqual(len(b"a field"), files[EMBEDDING_NAME]["size"])
 
     def test_the_local_copy_holds_the_field_under_its_own_name(self):
-        from haversack.serve import FIELD_NAME
+        from haversack.serve import EMBEDDING_NAME
         gen = self.publish_field(self.a)
         where = self.a.local._generation_dir(KEY, gen)
-        self.assertEqual(b"a field", (where / FIELD_NAME).read_bytes())
+        self.assertEqual(b"a field", (where / EMBEDDING_NAME).read_bytes())
         self.assertFalse((where / RESULT_NAME).exists())
 
     def test_a_name_that_is_not_a_primary_output_uploads_nothing(self):
@@ -3052,7 +3052,7 @@ class TestAnEncodeJobsField(_Hosts):
         self.assertEqual([], list(ops.list(self.store, "pre/").collect()))
 
     def test_find_and_fetch_a_kept_generation_by_the_fields_digest(self):
-        from haversack.serve import FIELD_NAME
+        from haversack.serve import EMBEDDING_NAME
         gen = self.publish_field(self.a, b"the pinned field")
         self.publish_field(self.b, b"a later field")
         digest = f"sha256:{hashlib.sha256(b'the pinned field').hexdigest()}"
@@ -3060,8 +3060,8 @@ class TestAnEncodeJobsField(_Hosts):
         dest = self.tmp / "pinned"
         got = self.b.fetch_generation(KEY, gen, dest)
         self.assertIsNotNone(got)
-        self.assertEqual([FIELD_NAME], got["written"])
-        self.assertEqual(b"the pinned field", (dest / FIELD_NAME).read_bytes())
+        self.assertEqual([EMBEDDING_NAME], got["written"])
+        self.assertEqual(b"the pinned field", (dest / EMBEDDING_NAME).read_bytes())
 
     def test_the_listing_row_is_the_local_caches_row(self):
         """Said as a field and never linked as labels - the listing route refuses a row by
@@ -3070,7 +3070,7 @@ class TestAnEncodeJobsField(_Hosts):
         local_rows, _ = self.a.local.list()
         store_rows, _ = self.b.list()
         self.assertEqual(1, len(store_rows))
-        self.assertEqual("encode", store_rows[0]["kind"])
+        self.assertEqual("embed", store_rows[0]["kind"])
         self.assertNotIn("links", store_rows[0])
         drop = {"published"}
         self.assertEqual({k: v for k, v in local_rows[0].items() if k not in drop},
@@ -3080,13 +3080,13 @@ class TestAnEncodeJobsField(_Hosts):
         self.publish_field(self.a)
         seen = []
         self.b.list(match=lambda f: seen.append(f) or True)
-        self.assertEqual("encode", seen[0].get("kind"))
+        self.assertEqual("embed", seen[0].get("kind"))
 
     def test_a_pointer_naming_two_primary_outputs_is_served_as_neither(self):
-        from haversack.serve import FIELD_NAME
+        from haversack.serve import EMBEDDING_NAME
         self.publish(self.a, b"labels")
         ptr = self.pointer()
-        ptr["files"][FIELD_NAME] = dict(ptr["files"][RESULT_NAME])
+        ptr["files"][EMBEDDING_NAME] = dict(ptr["files"][RESULT_NAME])
         ops.put(self.store, f"pre/results/{KEY}.json", json.dumps(ptr).encode())
         rows, _ = self.b.list()
         self.assertEqual([], rows)
@@ -3095,12 +3095,12 @@ class TestAnEncodeJobsField(_Hosts):
 
     def test_another_host_is_served_the_field(self):
         """It was published and then read back as a miss - the fill knew labels only - so
-        with a store on, every repeat of an encode job re-ran the encoder (2026-09-23)."""
-        from haversack.serve import FIELD_NAME
+        with a store on, every repeat of an embedding job re-ran the encoder (2026-09-23)."""
+        from haversack.serve import EMBEDDING_NAME
         self.publish_field(self.a)
         hit = self.b.get(KEY)
         self.assertIsNotNone(hit)
-        self.assertEqual(FIELD_NAME, Path(hit[0]).name)
+        self.assertEqual(EMBEDDING_NAME, Path(hit[0]).name)
         self.assertEqual(b"a field", Path(hit[0]).read_bytes())
         self.assertFalse((Path(hit[0]).parent / RESULT_NAME).exists())
 
@@ -3111,10 +3111,10 @@ class TestAnEncodeJobsField(_Hosts):
         self.assertEqual(b"second", Path(self.b.get(KEY)[0]).read_bytes())
 
     def test_pull_places_a_field_and_then_calls_it_current(self):
-        from haversack.serve import FIELD_NAME
+        from haversack.serve import EMBEDDING_NAME
         self.publish_field(self.a)
         self.assertEqual(1, self.b.pull()["pulled"])
-        self.assertEqual(FIELD_NAME, Path(self.b.local.get(KEY)[0]).name)
+        self.assertEqual(EMBEDDING_NAME, Path(self.b.local.get(KEY)[0]).name)
         self.assertEqual({"pulled": 0, "current": 1}, {k: v for k, v in self.b.pull().items()
                                                         if k in ("pulled", "current")})
 
@@ -3141,30 +3141,30 @@ class TestAnEncodeJobsField(_Hosts):
         self.assertEqual(b"a field", field.read_bytes())
 
     def test_push_carries_a_local_field_into_the_store(self):
-        from haversack.serve import FIELD_NAME
+        from haversack.serve import EMBEDDING_NAME
         self.a.local.put(KEY, self.file("f", b"local field"), {"outputs": []},
-                         dict(self.FIELD_META), output_name=FIELD_NAME)
+                         dict(self.FIELD_META), output_name=EMBEDDING_NAME)
         self.assertEqual(1, self.a.push()["pushed"])
-        self.assertIn(FIELD_NAME, self.pointer()["files"])
+        self.assertIn(EMBEDDING_NAME, self.pointer()["files"])
         self.assertEqual(b"local field", Path(self.b.get(KEY)[0]).read_bytes())
 
 
 @pytest.mark.parametrize("backend", ["memory", "disk"])
-def test_an_encode_job_on_one_server_is_a_hit_on_another(tmp_path, backend):
+def test_an_embedding_job_on_one_server_is_a_hit_on_another(tmp_path, backend):
     """The whole path: a field computed on one server is served by another sharing the
     store, without its encoder running, and byte for byte."""
     from fastapi.testclient import TestClient
 
     from haversack.serve import LocalExecutor, create_app
-    from test_encode_jobs import FakeEncoder, post
+    from test_embed_jobs import FakeEncoder, post
     from test_serve import FakeSegmenter, wait_state
 
     store = MemoryStore() if backend == "memory" else DiskStore(tmp_path / "store")
     enc_a, enc_b = FakeEncoder(), FakeEncoder()
     ex_a = LocalExecutor(FakeSegmenter(steps=1), workdir=tmp_path / "wa", cache_dir=tmp_path / "ca",
-                         encode_fn=enc_a, result_store=store)
+                         embed_fn=enc_a, result_store=store)
     ex_b = LocalExecutor(FakeSegmenter(steps=1), workdir=tmp_path / "wb", cache_dir=tmp_path / "cb",
-                         encode_fn=enc_b, result_store=store)
+                         embed_fn=enc_b, result_store=store)
     try:
         client_a, client_b = TestClient(create_app(ex_a)), TestClient(create_app(ex_b))
         a = wait_state(client_a, post(client_a).json()["id"], ("done",))

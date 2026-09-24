@@ -242,7 +242,7 @@ class TestRadarGeometry(_RandomRadar):
         self.assertEqual(g["origin"], list(np.round(img.GetOrigin(), 9)))
         self.assertEqual(g["space"], "left-posterior-superior")
 
-    def test_a_slabbed_encode_is_the_whole_encode(self):
+    def test_a_slabbed_embedding_is_the_whole_embedding(self):
         import torch
         from haversack.encoders import radar
         model = radar.load(self.spec, W.directory(self.spec), torch.device("cpu"), torch.float32)
@@ -265,16 +265,16 @@ class TestRadarGeometry(_RandomRadar):
             radar.load(self.spec, d, torch.device("cpu"), torch.float32)
 
 
-class TestEncodeEndToEnd(_RandomRadar):
-    def test_encode_writes_a_field_feldglas_reads(self):
+class TestEmbedEndToEnd(_RandomRadar):
+    def test_embed_writes_a_field_feldglas_reads(self):
         pytest.importorskip("feldglas.store")
         import SimpleITK as sitk
         from feldglas.store import read_field
-        from haversack.encoders.pipeline import encode
+        from haversack.encoders.pipeline import embed
         ct = self.tmp / "ct.nii.gz"
         sitk.WriteImage(_sphere_ct(), str(ct))
         out = self.tmp / "f.zarr.zip"
-        r = encode("radar:test", str(ct), out, device="cpu")
+        r = embed("radar:test", str(ct), out, device="cpu")
         f = read_field(out)
         self.assertEqual([len(t) for t in f.tokens], r["tokens"])
         self.assertEqual([tuple(k) for k in f.kernels], [l.kernel for l in self.spec.lattices])
@@ -288,21 +288,21 @@ class TestEncodeEndToEnd(_RandomRadar):
         self.assertEqual(f.embedding.layers, ("deep", "mid", "fine"))
         self.assertEqual([c["doi"] for c in p.extra["attribution"]["cite"]], ["10.1126/science.aec6129"])
 
-    def test_encode_refuses_before_any_work(self):
-        from haversack.encoders.pipeline import encode
+    def test_embed_refuses_before_any_work(self):
+        from haversack.encoders.pipeline import embed
         with self.assertRaisesRegex(InputError, "zarr.zip"):
-            encode("radar:test", "nowhere.nii.gz", self.tmp / "f.npz")
+            embed("radar:test", "nowhere.nii.gz", self.tmp / "f.npz")
         W.remove(self.spec)
         with self.assertRaisesRegex(InputError, "weights fetch radar:test"):
-            encode("radar:test", "nowhere.nii.gz", self.tmp / "f.zarr.zip")
+            embed("radar:test", "nowhere.nii.gz", self.tmp / "f.zarr.zip")
 
     def test_fp16_on_the_cpu_is_refused(self):
         import SimpleITK as sitk
-        from haversack.encoders.pipeline import encode
+        from haversack.encoders.pipeline import embed
         ct = self.tmp / "ct.nii.gz"
         sitk.WriteImage(_sphere_ct(), str(ct))
         with self.assertRaisesRegex(InputError, "fp16 on the CPU"):
-            encode("radar:test", str(ct), self.tmp / "f.zarr.zip", device="cpu", dtype="fp16")
+            embed("radar:test", str(ct), self.tmp / "f.zarr.zip", device="cpu", dtype="fp16")
 
 
 class TestNnunetTiling(unittest.TestCase):
@@ -328,19 +328,19 @@ class TestNnunetTiling(unittest.TestCase):
 
 
 @pytest.mark.slow
-class TestNnunetEncode(unittest.TestCase):
+class TestNnunetEmbed(unittest.TestCase):
     """End to end on TotalSegmentator's real weights, where they are installed."""
 
-    def test_total_fast_encodes_the_sphere(self):
+    def test_total_fast_embeds_the_sphere(self):
         pytest.importorskip("feldglas.store")
         from haversack.errors import InputError as E
-        from haversack.encoders.pipeline import encode
+        from haversack.encoders.pipeline import embed
         import SimpleITK as sitk
         with tempfile.TemporaryDirectory() as d:
             ct = pathlib.Path(d) / "ct.nii.gz"
             sitk.WriteImage(_sphere_ct(size_xyz=(160, 160, 40), spacing=(1.0, 1.0, 3.0)), str(ct))
             try:
-                r = encode("ts.v2:total_fast", str(ct), pathlib.Path(d) / "f.zarr.zip", device="cpu")
+                r = embed("ts.v2:total_fast", str(ct), pathlib.Path(d) / "f.zarr.zip", device="cpu")
             except E as e:
                 if "not installed" in str(e):
                     pytest.skip(str(e))
@@ -369,8 +369,8 @@ class TestCommands(_WeightsRoot):
         self.assertIn("10.1148/ryai.230024", dois, "an nnU-Net encoder cites its task's makers")
         self.assertNotIn("10.1148/radiol.241613", dois, "the MRI paper is for MR models")
 
-    def test_encode_with_an_unknown_encoder_is_one_line(self):
-        code, _, err = self._run(["encode", "x.nii.gz", "-e", "nope:nope", "-o", str(self.tmp / "f.zarr.zip")])
+    def test_embed_with_an_unknown_encoder_is_one_line(self):
+        code, _, err = self._run(["embed", "x.nii.gz", "-e", "nope:nope", "-o", str(self.tmp / "f.zarr.zip")])
         self.assertEqual(code, 2)
         self.assertIn("no encoder", err)
         self.assertNotIn("Traceback", err)

@@ -406,8 +406,8 @@ the reference. Results of references are not path-addressable; fetch them throug
 
 ## Embedding fields
 
-A job of kind `encode` makes an embedding field instead of labels: `POST /v1/jobs` with
-`kind=encode`, `task` naming an ENCODER (`GET /v1/encoders`, or `haversack remote encoders`),
+A job of kind `embed` makes an embedding field instead of labels: `POST /v1/jobs` with
+`kind=embed`, `task` naming an ENCODER (`GET /v1/encoders`, or `haversack remote encoders`),
 and one image as input, sent or named exactly as for a segmentation. The field is the
 encoder's token lattices placed in the scan's world (`<name>.zarr.zip`, read by
 [feldglas](https://github.com/mhalle/feldglas)). The name is resolved as an encoder and never
@@ -422,21 +422,21 @@ lifetimes, and the same job routes. `GET /v1/jobs/{id}/result` sends the field a
 `application/zip`, named after the encoder and the job (`radar_pretrain_<id>.zarr.zip`), with its
 content digest as `ETag`;
 `?format=` is refused with a 422, since a field has no other form. Its status says `"kind":
-"encode"`, and its `result.outputs[0]` is `{"name": "field", "kind": "field", ...}`: a
+"embed"`, and its `result.outputs[0]` is `{"name": "embedding", "kind": "embedding", ...}`: a
 `result:` reference to it cannot be bound where an image or labels belong. A field's key
 includes the kind, so it never shares one with a segmentation of the same name, and no
 segmentation key changed when fields were added. A field has no path form yet and is not
 listed by `/v1/segmentations`; reach it through its job, whose `links` name `result` and
 `meta` only.
 
-A server fetches an encoder's pinned weights on its first encode job, digest-checked, as it
+A server fetches an encoder's pinned weights on its first embedding job, digest-checked, as it
 installs a segmentation task's weights on first use (`GET /v1/encoders` says whether they are
 installed); the command line does not, and wants `haversack weights fetch <encoder>`. An
-nnU-Net encoder uses its task's weights, installed the same way. On Modal, encoding is opt-in:
-deploy with `HAVERSACK_ENCODE=1` for an encoder GPU worker (`EncodeWorker`), whose image adds
-the `encode` extra and whose checkpoints live on the global `haversack-encoder-weights` volume
+nnU-Net encoder uses its task's weights, installed the same way. On Modal, embedding is opt-in:
+deploy with `HAVERSACK_EMBED=1` for an encoder GPU worker (`EmbedWorker`), whose image adds
+the `embed` extra and whose checkpoints live on the global `haversack-encoder-weights` volume
 (`HAVERSACK_ENCODER_VOLUME` to name another), apart from the segmentation weights. Without it
-`GET /v1/encoders` carries `"encodes": false` and a submit is a 501.
+`GET /v1/encoders` carries `"embeds": false` and a submit is a 501.
 
 ## Tasks and options
 
@@ -651,7 +651,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/version` | read | what is deployed |
 | GET | `/v1/tasks` | read | task names |
 | GET | `/v1/tasks/<task>` | read | describe a task |
-| GET | `/v1/encoders` | read | what `kind=encode` jobs encode with: lattices, license, citation, installed |
+| GET | `/v1/encoders` | read | the encoders `kind=embed` jobs run: lattices, license, citation, installed |
 | GET | `/v1/segments` | read | which tasks produce a segment, and with what label value |
 | POST | `/v1/tasks/<task>/prepare` | token | install a task's weights now |
 | GET | `/v1/sources` | read | the hosted sources (and `result`), their identifier grammar, and which have a path surface |
@@ -660,7 +660,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/jobs` | token | brief status of every known job |
 | GET | `/v1/jobs/<id>` | token | full status, result metadata, links |
 | GET | `/v1/jobs/<id>/events` | token | status snapshots as Server-Sent Events |
-| GET | `/v1/jobs/<id>/result` | token | the labels (`?format=nii.gz` converts), or an encode job's field |
+| GET | `/v1/jobs/<id>/result` | token | the labels (`?format=nii.gz` converts), or an embedding job's field |
 | HEAD | `/v1/jobs/<id>/result` | token | the same, no body: status, `ETag`, length (none with `?format=`, which a HEAD does not convert) |
 | GET | `/v1/jobs/<id>/meta.json` | token | the job's result: provenance and structure names |
 | HEAD | `/v1/jobs/<id>/meta.json` | token | the same, no body |

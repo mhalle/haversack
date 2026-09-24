@@ -46,7 +46,7 @@ def for_engine(name: str) -> dict | None:
 
 
 def for_encoder(spec) -> dict | None:
-    """An encoder's record (``haversack encode``): its own under ``encoders``, else - an nnU-Net
+    """An encoder's record (``haversack embed``): its own under ``encoders``, else - an nnU-Net
     encoder, whose network is a task's - its ecosystem's."""
     data = load()
     rec = data.get("encoders", {}).get(spec.attribution) or data["ecosystems"].get(spec.attribution)

@@ -2,8 +2,25 @@
 
 ## [Unreleased]
 
+- **An encoder's output is an EMBEDDING, and the commands and protocol say so.** 0.13.0 called
+  it "encode" everywhere, the word rankfield already uses for the ranked encoding of a
+  segmentation's logits - so "the encoder's budget" meant rankfield's and "the encoder
+  worker" meant RADAR's, one night apart. feldglas already names the format the embedding
+  field. Renamed outright, with no aliases, since no deployment ran the 0.13.0 protocol:
+  `haversack encode` is `haversack embed`, `haversack remote encode` is `remote embed`,
+  `RemoteClient.encode` is `RemoteClient.embed`, a job is `POST /v1/jobs` with `kind=embed`
+  (its status and meta say `"kind": "embed"`), its output is `{"name": "embedding", "kind":
+  "embedding"}` stored as `embedding.zarr.zip`, `haversack embed --json` reports it under
+  `"embedding"`, `GET /v1/encoders` says `"embeds"`, the extra is `haversack[embed]`, and a
+  Modal deployment turns the worker on with `HAVERSACK_EMBED=1` (`EmbedWorker`). An
+  embedding's key moves (`embed@epoch` and the kind are hashed into it): fields cached under
+  0.13.0 are computed again. The ENCODER - the network, `radar:pretrain`, `ts.v2:total_fast`
+  - keeps its name: `haversack encoders`, `/v1/encoders`, `HAVERSACK_ENCODER_WEIGHTS`. On the
+  ranked side, haversack's own names say "ranked": `network.ranked_encode_budget`,
+  `RANKED_ENCODE_BUDGET_FRACTION` / `_CEILING`, and the provenance field
+  `ranked_encode_budget_bytes` (it was `encode_memory_budget_bytes`; no key moves).
 - **The ranked encoder's budget counts the memory torch already holds for reuse.** Right
-  after a network, `network.encode_budget` read ZERO on an M2 (`lung_vessels` on a 0.625 mm
+  after a network, `network.ranked_encode_budget` read ZERO on an M2 (`lung_vessels` on a 0.625 mm
   CTPA: the host had 2.6 GiB available, under `device_budget_bytes`' 3 GiB headroom, while
   2.5-2.8 GiB of what the driver held was torch's cache of the network's freed
   activations), so every such encode ran one plane a slab. That was harmless while

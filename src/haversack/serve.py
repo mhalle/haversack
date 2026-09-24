@@ -130,14 +130,14 @@ ARTIFACT_PENDING_TTL = 900.0   # a pending marker older than this is a dead
 #: Defined in jobpolicy; imported here so the wire vocabulary has one source.
 from .jobpolicy import TERMINAL  # noqa: E402
 RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default artifact
-#: An encode job's output (2026-09-23): an embedding field, written by feldglas. A generation
+#: An embedding job's output (2026-09-23): an embedding field, written by feldglas. A generation
 #: holds exactly ONE primary output, labels or a field; the key keeps them apart (``result_key``'s
 #: ``kind``), and every "is this entry there" question asks ``primary_output`` rather than
 #: naming the labels file, so the lifetime code (leases, claims, pruning) is one code for both.
-FIELD_NAME = "field.zarr.zip"
-PRIMARY_NAMES = (RESULT_NAME, FIELD_NAME)
+EMBEDDING_NAME = "embedding.zarr.zip"
+PRIMARY_NAMES = (RESULT_NAME, EMBEDDING_NAME)
 #: What each kind of job publishes, and the suffix a download of it is named with.
-OUTPUT_OF_KIND = {"segment": RESULT_NAME, "encode": FIELD_NAME}
+OUTPUT_OF_KIND = {"segment": RESULT_NAME, "embed": EMBEDDING_NAME}
 
 
 def primary_output(where) -> "Path | None":
@@ -224,7 +224,7 @@ def result_key(identity, task, options, weights_versions, epoch=None, kind: str 
     :data:`CACHE_EPOCH` for the last component and when it moves.
 
     ``kind`` is what the job makes (2026-09-23): ``segment`` (labels, every key before that
-    day) or ``encode`` (an embedding field). It joins the payload only when it is not
+    day) or ``embed`` (an embedding field). It joins the payload only when it is not
     ``segment``, so no existing key moves - and it must join then: ``ts.v2:total_fast`` is a
     task AND an encoder, and one key for both would hand a label map to a field's reader.
     """
@@ -399,11 +399,11 @@ def weights_versions_of(segmenter, task) -> list:
 
 def versions_for(segmenter, task, kind: str = "segment") -> list:
     """The key's weights component for a job of ``kind``: ``weights_versions_of`` for a
-    segmentation, the encoder's own (``encoders.serving.field_versions``) for an encode job.
+    segmentation, the encoder's own (``encoders.serving.field_versions``) for an embedding job.
     The ONE place the choice is made, so submit, publication's re-key and every executor key
-    an encode job alike (a re-key through the segmentation's door would publish the field
+    an embedding job alike (a re-key through the segmentation's door would publish the field
     under a key nobody asks for - the _EngineShim lesson of 2026-09-12)."""
-    if kind == "encode":
+    if kind == "embed":
         from .encoders.serving import field_versions
         return field_versions(segmenter, task)
     return weights_versions_of(segmenter, task)
@@ -1705,7 +1705,7 @@ class ResultCache:
         row = {"key": key, "task": task, "identity": identity, "options": options,
                "computed": fields.get("computed"), "published": stamp / 1e9, "bytes": size}
         if fields.get("kind") not in (None, "segment"):
-            row["kind"] = fields["kind"]       # an encode job's field: said, and never linked as labels
+            row["kind"] = fields["kind"]       # an embedding job's field: said, and never linked as labels
             return row
         if resource_links(task, identity, options):    # asked first: two stats saved a row
             row["links"] = resource_links(task, identity, options,
@@ -1888,7 +1888,7 @@ class ResultCache:
         """
         import os
         where = self._generation_dir(key, gen)
-        # the publication's ONE primary output (labels or an encode job's field), named by
+        # the publication's ONE primary output (labels or an embedding job's field), named by
         # the caller: always demanding the labels made a field entry un-adoptable, so the
         # repair this method exists for could never finish for one (2026-09-23)
         primaries = [n for n in names if n in PRIMARY_NAMES]
@@ -2473,7 +2473,7 @@ def not_modified(request, etag: str, headers=None):
         # RFC 9110 13.1.2: If-None-Match uses the WEAK comparison - two tags match when
         # their opaque parts do, whatever `W/` either wears (8.8.3.2). Until 2026-09-21
         # the strings were compared whole, so `W/"<our tag>"` - what a proxy that
-        # re-encodes a body hands back, having weakened the tag as it must - was a 200
+        # re-embeds a body hands back, having weakened the tag as it must - was a 200
         # and the whole label volume again. The safe direction, and still wrong.
         tag = tag.strip()
         return tag[2:] if tag.startswith("W/") else tag
@@ -2659,14 +2659,14 @@ class LocalExecutor:
     ``keep_finished`` more finish after them.
     """
 
-    #: ``kind=encode`` jobs run here (2026-09-23): in-process, on this server's device.
-    encodes = True
+    #: ``kind=embed`` jobs run here (2026-09-23): in-process, on this server's device.
+    embeds = True
 
     def __init__(self, segmenter, *, workdir, max_pending: int = 16,
                  keep_finished: int = 50, segment_fn=None, fetch_idc_fn=None,
                  cache_dir=None, keep_cached: int = 500,
                  input_cache_bytes: int = 8 << 30, read_fn=None, sources=None,
-                 artifacts=("preview", "statistics"), jobs_ttl_h: float = 24.0, encode_fn=None,
+                 artifacts=("preview", "statistics"), jobs_ttl_h: float = 24.0, embed_fn=None,
                  result_store=None, sweep_interval_h: float = 24.0):
         self.segmenter = segmenter
         self.workdir = Path(workdir)
@@ -2674,8 +2674,8 @@ class LocalExecutor:
         self.max_pending = int(max_pending)
         self.keep_finished = int(keep_finished)
         self._segment = segment_fn or segmenter.segment
-        #: the encode job's work (``encoders.pipeline.encode_file``'s signature); tests inject one
-        self._encode = encode_fn
+        #: the embedding job's work (``encoders.pipeline.embed_file``'s signature); tests inject one
+        self._encode = embed_fn
         self._fetch_idc = fetch_idc_fn or _fetch_idc_series
         self.sources = _source_registry(sources)
         self.series_cache = SeriesCache(self.workdir / "series_cache", self._fetch_source,
@@ -2822,7 +2822,7 @@ class LocalExecutor:
                             version=r.get("version"),
                             # held to what THIS process renders; a record from before
                             # the list has none and gets the deployment's set
-                            deliverables=(() if r.get("kind") == "encode" else
+                            deliverables=(() if r.get("kind") == "embed" else
                                           wanted_deliverables(r.get("deliverables"),
                                                               self.artifacts)))
             self._jobs[rec.id] = rec
@@ -2873,13 +2873,13 @@ class LocalExecutor:
                deliverables=None, kind: str = "segment") -> JobRecord:
         # `deliverables`: the request's list (None: it named none). It goes on the
         # record and is never seen by `result_key` below - rendering a preview, or
-        # declining one, is not a different result (2026-09-20). An encode job renders
+        # declining one, is not a different result (2026-09-20). An embedding job renders
         # none: a preview and statistics are of labels (2026-09-23).
         rec = JobRecord(id=jid, task=task, options=options, dir=jdir, input_path=input_path,
                         source=list(source or [{"kind": "upload"}]), input_identity=tuple(identity),
                         input_paths=tuple(inputs), source_tokens=source_tokens or None,
                         refresh_input=bool(refresh_input), version=version, kind=kind,
-                        deliverables=(() if kind == "encode"
+                        deliverables=(() if kind == "embed"
                                       else wanted_deliverables(deliverables, self.artifacts)))
         if self.cache is not None and identity:
             rec.cache_key = result_key(identity, task, options, versions_for(self.segmenter, task, kind),
@@ -3356,28 +3356,28 @@ class LocalExecutor:
         return staged
 
     def _run_encode(self, rec: JobRecord, reporter) -> tuple:
-        """An encode job's compute: the staged input FILE (the encoder reads it itself, by its
+        """An embedding job's compute: the staged input FILE (the encoder reads it itself, by its
         own convention - a pre-read image is dropped, never used), the field written into the
         job's directory, and its published record. The field records the job's identity - the
         source identifier and the bytes' digest - not the scratch path the bytes sat at."""
-        from .encoders.pipeline import encode_file
+        from .encoders.pipeline import embed_file
         from .encoders.serving import field_payload, input_record
         take_pre_read(self.read_ahead, rec.id, fresh_bytes_wanted=True)   # nothing lingers pinned
         path = Path(rec.input_path)
         identity = input_record(rec.input_identity[0] if rec.input_identity else None, path)
         if self._encode is None:
             # a server installs on first use (encoders.serving.ensure_weights); an injected
-            # encode_fn brings its own
+            # embed_fn brings its own
             from .encoders.serving import ensure_weights
             reporter.stage("weights", rec.task)
             ensure_weights(rec.task, progress=lambda m: reporter.stage("weights", m))
-        reporter.stage("encode", rec.task)
-        work = self._encode or encode_file
-        report = work(rec.task, path, rec.dir / FIELD_NAME, identity=identity,
+        reporter.stage("embed", rec.task)
+        work = self._encode or embed_file
+        report = work(rec.task, path, rec.dir / EMBEDDING_NAME, identity=identity,
                       device=self.segmenter.policy.get("device", "auto"),
                       int8=bool(rec.options.get("int8")), cancel=rec.cancel_token,
                       task_weights=getattr(getattr(self.segmenter, "weights", None), "root", None))
-        out = Path(report["field"])
+        out = Path(report["embedding"])
         return out, field_payload(report, out)
 
     def _dispatch(self) -> None:
@@ -3455,7 +3455,7 @@ class LocalExecutor:
                             inp = preread
                         else:
                             inp = rec.input_path
-                if rec.kind == "encode":
+                if rec.kind == "embed":
                     rec.labels_path, rec.result = self._run_encode(rec, reporter)
                 else:
                     seg = self._segment(inp, run_name(rec.task, rec.version), progress=reporter,
@@ -3708,10 +3708,10 @@ class LocalExecutor:
              "finished": r.get("finished"), "input_identity": r.get("input_identity") or [],
              "options": r.get("options") or {}, "cached": bool(r.get("cached")),
              "evicted": True, "result_available": not gone}
-        if r.get("kind") == "encode":
+        if r.get("kind") == "embed":
             # as the live status says it: without it the links door read an evicted field as a
             # segmentation and minted a task-named encoder's LABEL paths (review, 2026-09-23)
-            d["kind"] = "encode"
+            d["kind"] = "embed"
         if r.get("input_refresh_skipped"):
             d["input_refresh_skipped"] = True
         if r.get("error"):
@@ -3740,7 +3740,7 @@ class LocalExecutor:
             key, rec.labels_path, rec.result,
             {"identity": list(rec.input_identity), "task": rec.task,
              "options": rec.options, "computed": rec.started,
-             "job": rec.id, **({"kind": rec.kind} if rec.kind == "encode" else {})},
+             "job": rec.id, **({"kind": rec.kind} if rec.kind == "embed" else {})},
             output_name=OUTPUT_OF_KIND.get(rec.kind, RESULT_NAME))
         if rec.kind == "segment" and hasattr(self.cache, "note_task"):
             try:
@@ -3804,8 +3804,8 @@ class LocalExecutor:
                 d["deliverables"] = list(rec.deliverables)
                 if rec.deliverables_unavailable:
                     d["deliverables_unavailable"] = dict(rec.deliverables_unavailable)
-        if rec.kind == "encode":
-            d["kind"] = "encode"           # said only when it is not a segmentation: no status moves
+        if rec.kind == "embed":
+            d["kind"] = "embed"           # said only when it is not a segmentation: no status moves
         if rec.cached:
             d["cached"] = True
         if not brief and rec.state == "done" and rec.result is not None:
@@ -4547,7 +4547,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
     @app.get("/v1/encoders", tags=["tasks"])
     def encoders():
-        """What this server encodes with (``POST /v1/jobs`` with ``kind=encode``): each
+        """What this server embeds with (``POST /v1/jobs`` with ``kind=embed``): each
         encoder's lattices, license, citation, and whether its weights are installed HERE -
         a downloaded checkpoint by its digest, an nnU-Net encoder by its task's install;
         None where this process cannot see the weights (an API that does not compute)."""
@@ -4565,9 +4565,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 except Exception:
                     installed = None
             rows.append(describe_encoder(spec, installed))
-        # whether a `kind=encode` job runs HERE at all: a deployment with no encoder worker still
+        # whether a `kind=embed` job runs HERE at all: a deployment with no encoder worker still
         # lists what the encoders are, and says so rather than letting a submit find out (501)
-        return {"encodes": bool(getattr(executor, "encodes", False)), "encoders": rows}
+        return {"embeds": bool(getattr(executor, "embeds", False)), "encoders": rows}
 
     @app.post("/v1/tasks/{task}/prepare", status_code=202, tags=["tasks"])
     def prepare_task(request: Request, task: str):
@@ -4852,8 +4852,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                      source: str = Form(None), deliverables: str = Form(None),
                      job_kind: str = Form("segment", alias="kind")):
         require_auth(request)
-        if job_kind not in ("segment", "encode"):
-            raise HTTPException(422, f"unknown job kind {job_kind!r}; a job is segment (the default) or encode")
+        if job_kind not in ("segment", "embed"):
+            raise HTTPException(422, f"unknown job kind {job_kind!r}; a job is segment (the default) or embed")
         try:
             opts = json.loads(options)
             if not isinstance(opts, dict):
@@ -4914,8 +4914,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 raise HTTPException(422, f"source kind {kind!r} is not enabled on this "
                                          "server (missing dependency)")
         kind = src[0].get("kind", "upload") if src else "upload"
-        if job_kind == "encode":
-            return await _submit_encode(request, task, opts, src, asked, file, no_cache,
+        if job_kind == "embed":
+            return await _submit_embed(request, task, opts, src, asked, file, no_cache,
                                         caller_asked_no_cache)
         written = task
         canonical = canon_task(task, unverified_ok=True)
@@ -4987,8 +4987,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 _discard(jdir)
             raise
 
-    async def _submit_encode(request, task, opts, src, asked, file, no_cache, caller_asked_no_cache):
-        """``POST /v1/jobs`` with ``kind=encode`` (2026-09-23): an embedding field of ONE image.
+    async def _submit_embed(request, task, opts, src, asked, file, no_cache, caller_asked_no_cache):
+        """``POST /v1/jobs`` with ``kind=embed`` (2026-09-23): an embedding field of ONE image.
 
         The name is an ENCODER, resolved by the encoder registry and never by the task catalog
         (``ts.v2:total_fast`` is both, and the kind decides). A pin (``@revision``) must be the
@@ -5003,12 +5003,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             spec = resolve_encoder(task)
         except InputError as e:
             raise HTTPException(404, str(e)) from None
-        if not getattr(executor, "encodes", False):
-            raise HTTPException(501, "this server runs no encode jobs (no encoder worker is deployed); "
-                                     "encode locally with `haversack encode`")
+        if not getattr(executor, "embeds", False):
+            raise HTTPException(501, "this server runs no embedding jobs (no encoder worker is deployed); "
+                                     "embed locally with `haversack embed`")
         if asked:
             raise HTTPException(422, {"code": "no_deliverables",
-                                      "message": "an encode job renders no deliverables: a preview "
+                                      "message": "an embedding job renders no deliverables: a preview "
                                                  "and statistics are of labels"})
         try:
             opts = encode_options(opts)
@@ -5022,7 +5022,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         try:
             return await _accept(request, jid, jdir, binding, spec.name, opts, src, file,
                                  no_cache, executor, seg, caller_asked_no_cache,
-                                 handed=handed, role_specs={}, wanted=None, job_kind="encode")
+                                 handed=handed, role_specs={}, wanted=None, job_kind="embed")
         except QueueFull as e:
             _discard(jdir)
             raise HTTPException(429, str(e), headers={"Retry-After": "30"}) from e
@@ -5296,8 +5296,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             kinds -= set(out.get("deliverables_unavailable") or ())
             # A field has no path form yet (its URL grammar is its own; phase 2's path
             # surface), and `resource_links` would mint the LABELS' urls for a task-named
-            # encoder such as ts.v2:total_fast - so an encode job is reached through itself.
-            by_path = ({} if out.get("kind") == "encode" else resource_links(
+            # encoder such as ts.v2:total_fast - so an embedding job is reached through itself.
+            by_path = ({} if out.get("kind") == "embed" else resource_links(
                 out.get("task"), out.get("input_identity"), out.get("options"),
                 preview="preview" in kinds, statistics="statistics" in kinds))
             if not by_path and "result" in links:
@@ -5339,7 +5339,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         def sse(payload: dict) -> str:
             # the status GET /v1/jobs/{id} answers, key and links included: SERVER.md says each
             # event IS that snapshot, and a client's wait() returns the last one - a raw record
-            # without them left `RemoteClient.encode`'s final status keyless (Modal smoke, 2026-09-23)
+            # without them left `RemoteClient.embed`'s final status keyless (Modal smoke, 2026-09-23)
             return f"event: status\ndata: {json.dumps(_with_links(payload))}\n\n"
 
         async def stream():
@@ -5437,9 +5437,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         stem = _task_stem(task_name)           # canonical eco:name is not filename-safe
         head = request.method == "HEAD"
         # What the bytes ARE, from the file the lookup handed back (either executor, entry or
-        # the job's own copy): an encode job's field is a zip, named and typed as one, and has
+        # the job's own copy): an embedding job's field is a zip, named and typed as one, and has
         # no NIfTI form - refused, where converting it used to be SimpleITK's 500 (2026-09-23).
-        is_field = Path(path).name == FIELD_NAME
+        is_field = Path(path).name == EMBEDDING_NAME
         if is_field:                           # radar:pretrain -> radar_pretrain: the family says which model
             stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(task_name))
         suffix, media = (".zarr.zip", "application/zip") if is_field else (".seg.nrrd", "application/octet-stream")

@@ -5,7 +5,7 @@ program manages every model's weights; feldglas owns the field format and the re
 called here only to write the file.
 
 Names take the task grammar, ``family[.version]:name[@revision]``: ``radar:pretrain``,
-``ts.v2:total_fast``. ``segment X`` and ``encode X`` name the same network where both exist - the
+``ts.v2:total_fast``. ``segment X`` and ``embed X`` name the same network where both exist - the
 verb decides labels or tokens.
 
 The structure is one generic pipeline (:mod:`.pipeline`) and one small module per algorithm family
@@ -13,7 +13,7 @@ The structure is one generic pipeline (:mod:`.pipeline`) and one small module pe
 :mod:`.registry`. A new need is a new spec FIELD, not a branch in the pipeline - the engine rule.
 
 Importing this package pulls in no torch: specs are data, and a family module is imported only when
-an encode runs.
+an embedding runs.
 """
 from .registry import ALIASES, ENCODERS, EncoderSpec, LatticeSpec, WeightsFile, resolve
 

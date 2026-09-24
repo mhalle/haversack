@@ -70,7 +70,7 @@ class TestEmit(unittest.TestCase):
         self.assertEqual(kinds[-1], inspect.Parameter.VAR_KEYWORD)
 
 
-class TestEncodeBudget(unittest.TestCase):
+class TestRankedEncodeBudget(unittest.TestCase):
     """The slab is sized from the device, capped at rankfield's default, and moves no byte."""
 
     def _budget_with_free(self, free, cache=0):
@@ -78,7 +78,7 @@ class TestEncodeBudget(unittest.TestCase):
         from unittest import mock
         with mock.patch("haversack.network.device_budget_bytes", return_value=free), \
                 mock.patch("haversack.network.reusable_cache_bytes", return_value=cache):
-            return network.encode_budget("mps")
+            return network.ranked_encode_budget("mps")
 
     def test_a_starved_host_still_has_the_cache_the_network_left(self):
         """2026-09-23, an M2 after lung_vessels' fine network: the fresh reading was 0 (host
@@ -88,20 +88,20 @@ class TestEncodeBudget(unittest.TestCase):
                          rf.DEFAULT_MEMORY_BUDGET)
         half = 300 << 20
         self.assertEqual(self._budget_with_free(half, cache=half),
-                         int(2 * half * network.ENCODE_BUDGET_FRACTION))
+                         int(2 * half * network.RANKED_ENCODE_BUDGET_FRACTION))
 
     def test_the_cache_is_not_counted_where_it_is_unknown(self):
         from unittest import mock
         self.assertEqual(network.reusable_cache_bytes("cpu"), 0)
         with mock.patch("haversack.network.reusable_cache_bytes", return_value=5 << 30):
-            self.assertEqual(network.encode_budget("cpu"), rf.DEFAULT_MEMORY_BUDGET)
+            self.assertEqual(network.ranked_encode_budget("cpu"), rf.DEFAULT_MEMORY_BUDGET)
 
     def test_unknown_budget_is_rankfields_default(self):
-        self.assertEqual(network.encode_budget("cpu"), rf.DEFAULT_MEMORY_BUDGET)
+        self.assertEqual(network.ranked_encode_budget("cpu"), rf.DEFAULT_MEMORY_BUDGET)
         self.assertEqual(self._budget_with_free(None), rf.DEFAULT_MEMORY_BUDGET)
 
     def test_a_share_of_what_is_free_never_above_rankfields_default(self):
-        self.assertEqual(self._budget_with_free(1 << 30), int((1 << 30) * network.ENCODE_BUDGET_FRACTION))
+        self.assertEqual(self._budget_with_free(1 << 30), int((1 << 30) * network.RANKED_ENCODE_BUDGET_FRACTION))
         self.assertEqual(self._budget_with_free(40 << 30), rf.DEFAULT_MEMORY_BUDGET)
 
     def test_a_full_device_still_encodes(self):
@@ -130,15 +130,15 @@ class TestEncodeBudget(unittest.TestCase):
         self.assertIsNone(seen["memory_budget"])        # the kernel measures nothing itself
 
 
-def test_segment_records_each_models_encode_budget(tmp_path, monkeypatch):
+def test_segment_records_each_models_ranked_encode_budget(tmp_path, monkeypatch):
     """Beside the accumulator placement, per model, and only when a field is emitted: the one
     measurement both used and recorded (a second reading after the encode would see its pool)."""
     pytest.importorskip("nnunetv2")
     from test_cascade_union import ORGANS, RIBS, _Crop, _Part, _run, _spec
     seen = []
-    real = network.encode_budget
+    real = network.ranked_encode_budget
     handed = iter([4321, 5432, 6543])        # one reading per model, each different
-    monkeypatch.setattr(network, "encode_budget", lambda device: seen.append(real(device))
+    monkeypatch.setattr(network, "ranked_encode_budget", lambda device: seen.append(real(device))
                         or next(handed))
     passed = []                              # what each emit actually handed the encoder
     real_emit = ranked.emit
@@ -155,10 +155,10 @@ def test_segment_records_each_models_encode_budget(tmp_path, monkeypatch):
     assert len(got) == 3 and seen == [rf.DEFAULT_MEMORY_BUDGET] * 3      # cpu: rankfield's default
     # the value recorded for each model is the one its encode was given, and only its own
     assert passed == [4321, 5432, 6543]
-    assert [m["encode_memory_budget_bytes"] for m in res.provenance["models"]] == passed
+    assert [m["ranked_encode_budget_bytes"] for m in res.provenance["models"]] == passed
     res, _ = _run(tmp_path, monkeypatch, [_Crop(), _Part(ORGANS._props, cover=(slice(None),) * 3),
                                           _Part(RIBS._props, cover=(slice(None),) * 3)], _spec())
-    assert all("encode_memory_budget_bytes" not in m for m in res.provenance["models"])
+    assert all("ranked_encode_budget_bytes" not in m for m in res.provenance["models"])
 
 
 class TestCaches(unittest.TestCase):

@@ -1,8 +1,8 @@
 """What the server needs to know of an encoder, without torch: its canonical name, the part of
 a result key its weights are, the options a job may state, and the record a finished field is
-published with. The compute is ``pipeline.encode_file``, in the worker.
+published with. The compute is ``pipeline.embed_file``, in the worker.
 
-An encode job is a job of KIND ``encode`` (2026-09-23; feldglas docs/embedding-field.md, "Encoding
+An embedding job is a job of KIND ``embed`` (2026-09-23; feldglas docs/embedding-field.md, "Encoding
 moves into haversack", phase 2): the same queue, cache, lifetimes and routes as a segmentation,
 with an embedding field as the primary output instead of labels. Names are resolved HERE, never
 through the task catalog: ``ts.v2:total_fast`` is a task and an encoder, and the verb decides.
@@ -12,11 +12,11 @@ from __future__ import annotations
 from ..errors import InputError
 from .registry import EncoderSpec, resolve
 
-#: The encode path's own cache epoch: bumped when the same input and weights would give other
+#: The embedding path's own cache epoch: bumped when the same input and weights would give other
 #: tokens (a preparation, tiling or placement change), and seen by no segmentation key.
-ENCODE_EPOCH = "1"
+EMBED_EPOCH = "1"
 
-#: What an encode job may state, and nothing else is accepted: ``int8`` changes the stored
+#: What an embedding job may state, and nothing else is accepted: ``int8`` changes the stored
 #: bytes. The device and precision follow the worker, as a segmentation's do.
 OPTIONS = {"int8": bool}
 
@@ -46,11 +46,11 @@ def field_versions(segmenter, name) -> list:
                     + (f"/{e['model']}" if e.get("model") else "") for e in entries] or ["unknown"]
         except Exception:
             out.append("unknown")
-    return out + [f"encode@epoch={ENCODE_EPOCH}"]
+    return out + [f"embed@epoch={EMBED_EPOCH}"]
 
 
 def installed_locally(spec: EncoderSpec, task_weights=None) -> bool:
-    """Whether ``spec`` can encode on THIS machine: its downloaded weights verified, or an
+    """Whether ``spec`` can embed on THIS machine: its downloaded weights verified, or an
     nnU-Net encoder's model folder resolvable under ``task_weights`` (default: the default
     root). The CLI's answer; a server answers from its own Segmenter's describe."""
     from . import weights as W
@@ -91,12 +91,12 @@ def ensure_weights(name, progress=None) -> list:
 
 
 def validate_options(options: dict) -> dict:
-    """The options of an encode job, checked against :data:`OPTIONS`; raises ``RequestError``."""
+    """The options of an embedding job, checked against :data:`OPTIONS`; raises ``RequestError``."""
     from ..errors import RequestError
     extra = sorted(set(options) - set(OPTIONS))
     if extra:
         raise RequestError("unknown_parameter",
-                           f"an encode job takes only {', '.join(sorted(OPTIONS))}; not {', '.join(extra)}",
+                           f"an embedding job takes only {', '.join(sorted(OPTIONS))}; not {', '.join(extra)}",
                            parameter=extra[0], known=sorted(OPTIONS))
     for k, t in OPTIONS.items():
         if k in options and not isinstance(options[k], t):
@@ -112,7 +112,7 @@ def field_payload(report: dict, path) -> dict:
     from pathlib import Path
     from ..content import digest_file
     p = Path(path)
-    return {"outputs": [{"name": "field", "kind": "field", "sha256": digest_file(p),
+    return {"outputs": [{"name": "embedding", "kind": "embedding", "sha256": digest_file(p),
                          "bytes": p.stat().st_size}],
             "encoder": report.get("encoder"), "revision": report.get("revision"),
             "license": report.get("license"), "model_grid": report.get("model_grid"),

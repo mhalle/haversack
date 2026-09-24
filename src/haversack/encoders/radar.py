@@ -91,7 +91,7 @@ def prepare(spec, image, model=None) -> Prepared:
     for ax in range(3):
         idx = torch.nonzero(nz.any(dim=tuple(a for a in range(3) if a != ax))).flatten()
         if not len(idx):
-            raise InputError("nothing above the window's floor in this image: no body to encode")
+            raise InputError("nothing above the window's floor in this image: no body to embed")
         lo.append(int(idx.min())); hi.append(int(idx.max()))
     lo = [max(l - e, 0) for l, e in zip(lo, o["crop_margin"])]
     hi = [min(m + e, s) for m, e, s in zip(hi, o["crop_margin"], x.shape[1:])]
