@@ -141,16 +141,40 @@ ENCODE_BUDGET_FRACTION = 0.5
 ENCODE_BUDGET_CEILING: int | None = None
 
 
+def reusable_cache_bytes(device) -> int:
+    """Bytes torch's allocator holds on ``device`` for tensors that no longer exist - memory
+    this process already has, which its next allocations take before asking the device or
+    the host for more. 0 where there is no such pool (cpu) or no backend.
+
+    MPS: what the driver holds less what live tensors hold. CUDA: reserved less allocated
+    (``mem_get_info``'s free leaves the reserved cache out, as the MPS reading counts it in)."""
+    device = torch.device(device)
+    if device.type == "mps" and torch.backends.mps.is_available():
+        return max(0, int(torch.mps.driver_allocated_memory() - torch.mps.current_allocated_memory()))
+    if device.type == "cuda" and torch.cuda.is_available():
+        return max(0, int(torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)))
+    return 0
+
+
 def encode_budget(device) -> int:
-    """Bytes the ranked encoder may size its slab to on ``device``: a share of what the device
-    has free right now, capped at rankfield's own default, which is also the answer where the
+    """Bytes the ranked encoder may size its slab to on ``device``: a share of what it can
+    take right now, capped at rankfield's own default, which is also the answer where the
     budget is unknown (cpu, or no backend). Adapts to the machine and never changes a byte of
-    the field, so a caller records it beside the accumulator placement, not as a deviation."""
+    the field, so a caller records it beside the accumulator placement, not as a deviation.
+
+    What it can take is the device's fresh budget PLUS torch's reusable cache: the encode
+    runs right after the network, whose freed activations sit in that cache, and its slab is
+    carved from them before anything new is asked of the host. Counting the cache as used
+    read ZERO on an M2 after ``lung_vessels``' fine network (2026-09-23: the driver held 3.1
+    GiB, 2.5-2.8 of it reusable; the host had 2.6 GiB available, under the 3 GiB headroom),
+    so every such encode ran one plane a slab - harmless while rankfield's selection was the
+    cost, 2.09 s against 0.75 s once its Metal kernel made the selection cheap."""
     from .ranked import DEFAULT_MEMORY_BUDGET
     ceiling = DEFAULT_MEMORY_BUDGET if ENCODE_BUDGET_CEILING is None else ENCODE_BUDGET_CEILING
     free = device_budget_bytes(torch.device(device))
     if free is None:
         return DEFAULT_MEMORY_BUDGET
+    free += reusable_cache_bytes(device)
     # a full device still encodes, a plane at a time (rankfield's floor), rather than refusing
     return max(1, min(ceiling, int(free * ENCODE_BUDGET_FRACTION)))
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+- **The ranked encoder's budget counts the memory torch already holds for reuse.** Right
+  after a network, `network.encode_budget` read ZERO on an M2 (`lung_vessels` on a 0.625 mm
+  CTPA: the host had 2.6 GiB available, under `device_budget_bytes`' 3 GiB headroom, while
+  2.5-2.8 GiB of what the driver held was torch's cache of the network's freed
+  activations), so every such encode ran one plane a slab. That was harmless while
+  rankfield's selection was the cost, and costs 2.09 s against 0.75 s once rankfield's Metal
+  kernel makes the selection cheap. `network.reusable_cache_bytes(device)` - the driver's
+  holding less live tensors on MPS, reserved less allocated on CUDA, where `mem_get_info`
+  also leaves that cache out - is added to the fresh reading; `device_budget_bytes` itself,
+  which the accumulator's placement reads too, is unchanged. Same run: the budget is
+  rankfield's full 1 GiB default, the peak footprint 5.87 GB as before, and the stored arrays
+  identical. With rankfield's kernel (its `metal-encode` branch) the fine stage's encode took
+  0.75-0.78 s in two runs, 14.1 s on 0.13.0; one run in three read 3.7 s while the machine
+  was swapping.
+
 ## [0.13.0] - 2026-09-23
 
 Embedding fields (`haversack encode`, and encode jobs on the server and on Modal);

@@ -73,10 +73,28 @@ class TestEmit(unittest.TestCase):
 class TestEncodeBudget(unittest.TestCase):
     """The slab is sized from the device, capped at rankfield's default, and moves no byte."""
 
-    def _budget_with_free(self, free):
+    def _budget_with_free(self, free, cache=0):
+        # both readings pinned: on a Mac the real MPS cache would otherwise leak into the sum
         from unittest import mock
-        with mock.patch("haversack.network.device_budget_bytes", return_value=free):
+        with mock.patch("haversack.network.device_budget_bytes", return_value=free), \
+                mock.patch("haversack.network.reusable_cache_bytes", return_value=cache):
             return network.encode_budget("mps")
+
+    def test_a_starved_host_still_has_the_cache_the_network_left(self):
+        """2026-09-23, an M2 after lung_vessels' fine network: the fresh reading was 0 (host
+        under its headroom) while 2.5 GiB of the driver's was torch's reusable cache - which
+        read as a 1-byte budget and a plane a slab. The cache is the encoder's to reuse."""
+        self.assertEqual(self._budget_with_free(0, cache=int(2.5 * (1 << 30))),
+                         rf.DEFAULT_MEMORY_BUDGET)
+        half = 300 << 20
+        self.assertEqual(self._budget_with_free(half, cache=half),
+                         int(2 * half * network.ENCODE_BUDGET_FRACTION))
+
+    def test_the_cache_is_not_counted_where_it_is_unknown(self):
+        from unittest import mock
+        self.assertEqual(network.reusable_cache_bytes("cpu"), 0)
+        with mock.patch("haversack.network.reusable_cache_bytes", return_value=5 << 30):
+            self.assertEqual(network.encode_budget("cpu"), rf.DEFAULT_MEMORY_BUDGET)
 
     def test_unknown_budget_is_rankfields_default(self):
         self.assertEqual(network.encode_budget("cpu"), rf.DEFAULT_MEMORY_BUDGET)
