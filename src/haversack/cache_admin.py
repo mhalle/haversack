@@ -208,6 +208,33 @@ def clean(category: str, *, older_than_days: float | None = None, item: str | No
     return {"removed": removed, "bytes": freed, "human": _human(freed), "dry_run": dry_run}
 
 
+# -- a server's token, given ------------------------------------------------------------
+#
+# The server side's own variable (2026-09-24): `haversack serve` and `haversack modal deploy`
+# read HAVERSACK_SERVER_TOKEN, `haversack remote` never does, and no server reads
+# HAVERSACK_TOKEN, the client's - so a token exported for a client can never quietly become
+# a server's, or switch a deployment from Modal proxy auth to a bearer token. A variable and
+# not only `--token`: a flag's value sits in the process list, where `ps` shows it to every
+# user of the machine, for as long as the command runs, and in shell history when typed.
+
+SERVER_TOKEN_ENV = "HAVERSACK_SERVER_TOKEN"
+TOKEN_FLAG_NOTE = ("note: a --token value is visible in the process list while this runs; "
+                   f"{SERVER_TOKEN_ENV} keeps it out")
+
+
+def server_token(flag: str | None) -> tuple[str | None, str | None]:
+    """``(token, where it came from)`` for a server: ``--token`` first, then
+    ``HAVERSACK_SERVER_TOKEN`` (surrounding whitespace dropped, since a token read from a
+    keychain or a file often ends in a newline no client sends; empty means unset), else
+    ``(None, None)`` - and what that means is each command's own (``serve`` generates one,
+    a Modal deploy keeps proxy auth)."""
+    import os
+    if flag:
+        return flag, "--token"
+    env = os.environ.get(SERVER_TOKEN_ENV, "").strip()
+    return (env, SERVER_TOKEN_ENV) if env else (None, None)
+
+
 # -- the local server's generated token ------------------------------------------------
 #
 # `haversack serve` without --token generates one and writes it here, readable by this

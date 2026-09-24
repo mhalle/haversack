@@ -22,16 +22,18 @@ tell the difference:
 - progress writes are rate-limited (~4/s) because each Dict write is an RPC; the
   server's SSE endpoint reads them through its poll branch (``supports_push=False``);
 - cancel is `FunctionCall.cancel()` - the container stops, billing stops;
-- auth is Modal proxy auth (on by default; ``HAVERSACK_PROXY_AUTH=0`` to disable for a
+- auth is Modal proxy auth by default (``HAVERSACK_PROXY_AUTH=0`` to disable for a
   smoke test) - per-person tokens minted and revoked in the Modal dashboard, zero
-  auth code here. The client sends them as Modal-Key / Modal-Secret headers.
+  auth code here, sent as Modal-Key / Modal-Secret headers. Or the local server's bearer
+  token instead (``HAVERSACK_TOKEN_SECRET``, see ``TOKEN_SECRET``), which is what
+  ``haversack remote --token`` sends.
 
 Deploy-time configuration is by environment variable because Modal resolves
 decorators at import: HAVERSACK_GPU (default L40S - wins `total` outright; A10 is the
 economical fast-mode choice), HAVERSACK_APP_NAME, HAVERSACK_SCALEDOWN (seconds, default 120 -
 conservative: a forgotten/left-up deploy idles at most ~2 min of GPU (~$0.07 on L40S)
 before scaling down; raise it to keep a busy server warmer), HAVERSACK_PROXY_AUTH,
-HAVERSACK_SNAPSHOT (memory snapshots, default ON - measured 2026-08-24: cold spawn->start
+HAVERSACK_TOKEN_SECRET, HAVERSACK_SNAPSHOT (memory snapshots, default ON - measured 2026-08-24: cold spawn->start
 10-14 s -> 6.4-6.7 s, one 35 s snapshot-creation run per deploy), HAVERSACK_CACHE_VOLUME (the
 result cache's volume, default ``<app name>-cache`` - see ``CACHE_VOLUME``).
 
@@ -74,6 +76,13 @@ APP_NAME = os.environ.get("HAVERSACK_APP_NAME", "haversack-serve")
 CACHE_VOLUME = os.environ.get("HAVERSACK_CACHE_VOLUME") or f"{APP_NAME}-cache"
 GPU = os.environ.get("HAVERSACK_GPU", "L40S")
 PROXY_AUTH = os.environ.get("HAVERSACK_PROXY_AUTH", "1") not in ("0", "false", "no")
+#: The NAME of a Modal Secret whose ``HAVERSACK_TOKEN`` is the authed api's bearer token
+#: (2026-09-24). Set, the api checks ``Authorization: Bearer`` exactly as ``haversack serve
+#: --token`` does - a token computes, and the proxy no longer stands in front - so the
+#: bundled client, which sends only a bearer token, reaches the deployment. The token itself
+#: never enters an image: the Secret is attached to the api function alone, and only its
+#: name is a knob. Unset, proxy auth decides as before.
+TOKEN_SECRET = os.environ.get("HAVERSACK_TOKEN_SECRET", "")
 SCALEDOWN = int(os.environ.get("HAVERSACK_SCALEDOWN", "120"))
 GPU_SNAPSHOT = os.environ.get("HAVERSACK_GPU_SNAPSHOT", "0") not in ("0", "false", "no", "")
 SNAPSHOT = (os.environ.get("HAVERSACK_SNAPSHOT", "1") not in ("0", "false", "no")) or GPU_SNAPSHOT
@@ -174,6 +183,10 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   # never disagrees with its deploy. test_every_import_time_knob_reaches_
                   # the_container keeps this list and the reads below in step.
                   "HAVERSACK_APP_NAME", "HAVERSACK_GPU", "HAVERSACK_PROXY_AUTH",
+                  # A container that did not see the token's Secret name would still find
+                  # the token in its env (``_api_token`` reads it whenever present), but a
+                  # container must never disagree with its deploy about auth.
+                  "HAVERSACK_TOKEN_SECRET",
                   "HAVERSACK_SCALEDOWN", "HAVERSACK_GPU_SNAPSHOT", "HAVERSACK_SNAPSHOT",
                   "HAVERSACK_MAX_CONTAINERS", "HAVERSACK_INPUTS_GB", "HAVERSACK_API_MIRROR_GB",
                   # Which volume is the result cache (2026-09-20). Unforwarded it would be
@@ -185,6 +198,11 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   # which a container that re-imports this module must see the same way
                   "HAVERSACK_EMBED", "HAVERSACK_ENCODER_VOLUME",
                   *_engines.engine_env_vars())
+
+#: Read in a container but delivered by a Modal Secret, never by the image env: forwarding
+#: one would bake a credential into an image. test_every_import_time_knob_reaches_the_container
+#: exempts exactly these from the forwarding rule and fails if one is ever forwarded.
+_SECRET_VARS = ("HAVERSACK_TOKEN",)
 
 # Base image (the ASGI api container + the nnU-Net GPU Worker). uv-NATIVE: the nnU-Net
 # worker's deps come from pyproject extras - `torch` (torch/nnunetv2/scipy/scikit-image),
@@ -2541,21 +2559,44 @@ class ModalExecutor:
                                 "volume reload was refused); retry shortly")
 
 
+def _api_token() -> str | None:
+    """The authed api's bearer token: the Secret's ``HAVERSACK_TOKEN`` when the deploy named
+    one (``TOKEN_SECRET``). It fails CLOSED both ways: a deploy that asked for a token and
+    whose container has none refuses to start rather than serve every route open, and a
+    token present in the container is enforced even if its Secret's name did not arrive.
+    Surrounding whitespace is dropped - a token pasted into a Secret often ends in a newline,
+    which no client would send."""
+    token = os.environ.get("HAVERSACK_TOKEN", "").strip() or None
+    if TOKEN_SECRET and token is None:
+        raise RuntimeError(f"HAVERSACK_TOKEN_SECRET names the Modal Secret {TOKEN_SECRET!r}, "
+                           "but this container has no HAVERSACK_TOKEN: give that Secret a "
+                           "HAVERSACK_TOKEN key (refusing to serve without the token)")
+    return token
+
+
+#: Attached to the api function only: no worker and no image ever holds the token.
+#: ``required_keys`` makes a deploy fail at once if the Secret lacks the key.
+_API_SECRETS = ([modal.Secret.from_name(TOKEN_SECRET, required_keys=["HAVERSACK_TOKEN"])]
+                if TOKEN_SECRET else [])
+
+
 @app.function(cpu=2.0, memory=2048, scaledown_window=300, image=api_image,
               volumes={SCRATCH_ROOT: scratch_vol, WEIGHTS_ROOT: weights_vol,
-                       CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol})
+                       CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
+              secrets=_API_SECRETS)
 @modal.concurrent(max_inputs=100)
-@modal.asgi_app(requires_proxy_auth=PROXY_AUTH)
+@modal.asgi_app(requires_proxy_auth=PROXY_AUTH and not TOKEN_SECRET)
 def api():
     _pkg_dir()
     os.environ["TOTALSEG_WEIGHTS_PATH"] = WEIGHTS_ROOT
     from haversack import Segmenter
     from haversack.serve import create_app
 
+    token = _api_token()
     ex = ModalExecutor()
     # catalog/describe only - jobs run on the Worker; device string is cosmetic here
     ex.segmenter = Segmenter(device="cpu", weights=WEIGHTS_ROOT)
-    return create_app(ex)
+    return create_app(ex, token=token)
 
 
 if PUBLIC:

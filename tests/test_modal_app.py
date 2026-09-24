@@ -636,7 +636,12 @@ def test_every_import_time_knob_reaches_the_container():
     # scan and not by a line of its own: read another way (os.getenv, a helper) it would
     # drop out of `read`, and the rule would pass it unforwarded
     assert "HAVERSACK_CACHE_VOLUME" in read, "the scan does not see how the cache is named"
-    missing = sorted(read - set(modal_app._RUNTIME_KNOBS))
+    # A credential arrives by Secret (the api's bearer token, 2026-09-24): exempt from the
+    # rule, and held to its opposite - it must never be forwarded into an image.
+    secret_vars = set(modal_app._SECRET_VARS)
+    assert "HAVERSACK_TOKEN" in read & secret_vars, "the scan does not see the token's read"
+    assert not secret_vars & set(modal_app._RUNTIME_KNOBS), "a credential is baked into an image"
+    missing = sorted(read - secret_vars - set(modal_app._RUNTIME_KNOBS))
     assert not missing, f"read at import but never forwarded into the container: {missing}"
 
 

@@ -6579,16 +6579,17 @@ def main_serve(args) -> int:
                        jobs_ttl_h=getattr(args, "jobs_ttl_hours", 24.0),
                        result_store=getattr(args, "result_store", None) or None,
                        sweep_interval_h=getattr(args, "sweep_interval_hours", 24.0))
-    # The token: given, generated, or - only when asked for in so many words - none.
-    # A generated token goes to a file only this user can read, and the bundled client
-    # on this machine reads it back, so personal use needs no ceremony while a proxy or
-    # tunnel in front of the server exposes something that still demands a token.
-    from .cache_admin import (_alive, _is_loopback, serve_token_path,  # noqa: PLC2701
-                              write_serve_token)
-    token = getattr(args, "token", None)
+    # The token: given (--token, then HAVERSACK_SERVER_TOKEN), generated, or - only when
+    # asked for in so many words - none. A generated token goes to a file only this user can
+    # read, and the bundled client on this machine reads it back, so personal use needs no
+    # ceremony while a proxy or tunnel in front of the server exposes something that still
+    # demands a token.
+    from .cache_admin import (TOKEN_FLAG_NOTE, _alive, _is_loopback,  # noqa: PLC2701
+                              serve_token_path, server_token, write_serve_token)
+    token, token_source = server_token(getattr(args, "token", None))
     generated = False
     if getattr(args, "no_token", False):
-        token = None
+        token, token_source = None, None
         print(f"warning: serving on {args.host}:{args.port} WITHOUT a token - this server is "
               "open to anything that can reach the port, a proxy or tunnel included",
               file=sys.stderr, flush=True)
@@ -6635,5 +6636,9 @@ def main_serve(args) -> int:
     if generated:
         print(f"token: {token}\n  written to {token_file} (this user only); `haversack remote` "
               "on this machine uses it by itself, other machines pass --token", flush=True)
+    elif token_source:
+        print(f"token: from {token_source}", flush=True)
+        if token_source == "--token":
+            print(TOKEN_FLAG_NOTE, file=sys.stderr, flush=True)
     server.run(sockets=[sock])
     return 0

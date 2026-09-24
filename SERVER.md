@@ -40,15 +40,22 @@ it, and left it in `~/.cache/haversack/serve/<port>.token`, readable by you alon
 stamped with the server's process id, and `haversack remote` on the same machine read it
 back without being told. The client uses that file only for a loopback address whose port
 has a live server behind it; a file a crashed server left is ignored, and every server
-start clears one for its port. For other machines, choose the token and pass it on both
-sides:
+start clears one for its port. For other machines, choose the token and give it to both
+sides - through the environment, so it stays out of shell history and out of the process
+list, where `ps` shows a command's arguments to every user of the machine:
 
 ```bash
-haversack serve --host 0.0.0.0 --token choose-a-secret
-HAVERSACK_SERVER=http://gpu-box:8790 haversack remote --token choose-a-secret submit scan.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
+export HAVERSACK_SERVER_TOKEN=choose-a-secret        # the server's: serve and modal deploy
+haversack serve --host 0.0.0.0
+export HAVERSACK_TOKEN=choose-a-secret               # the client's, on the other machine
+HAVERSACK_SERVER=http://gpu-box:8790 haversack remote submit scan.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
 ```
 
-`remote` takes the token from `--token`, then `HAVERSACK_TOKEN`, then the local file.
+A server takes its token from `--token`, then `HAVERSACK_SERVER_TOKEN`, and `serve` generates
+one when neither is given (a `--token` value prints a note that it is visible in the process
+list). `remote` takes the token from `--token`, then `HAVERSACK_TOKEN`, then the local file.
+The two variables are separate on purpose: no server reads `HAVERSACK_TOKEN`, so a token
+exported for the client never becomes a server's - nor changes a Modal deployment's auth.
 
 ## Reads and computes
 
@@ -64,7 +71,8 @@ routinely put on a network by a reverse proxy or a tunnel, and it must still fac
 then. `--no-token` is the one way to run open, and open means open: anything that reaches
 the port computes, a web page you have open included, and nothing in the server pretends
 otherwise. It exists for a machine you trust end to end and for nothing else. On Modal,
-auth is the platform's proxy tokens.
+auth is the platform's proxy tokens unless the deploy is given a token, and then it is
+this same rule (see "Deploying on Modal").
 
 **A plain GET is a read; `Prefer` is the intent to compute.** Fetching a result by its path
 (below) returns it if the cache holds it and 404 "not materialized" otherwise; on a key
@@ -593,18 +601,30 @@ reports which engines are enabled, and `GET /v1/tasks/{task}` names each task's 
 ## Deploying to Modal
 
 ```bash
-haversack modal deploy [--gpu L40S] [--app-name haversack-serve] [--cache-volume NAME] [--scaledown 120] [--no-proxy-auth]
+haversack modal deploy [--gpu L40S] [--app-name haversack-serve] [--cache-volume NAME] [--scaledown 120] [--token T | --no-proxy-auth]
 modal app stop haversack-serve --yes
 ```
 
 The deploy prints the URL. Modal is the queue there: submits spawn, the autoscaler drains
 them onto up to `HAVERSACK_MAX_CONTAINERS` warm workers (default 1, so parallel requests run
 serially on one warm GPU - the economical posture), and a worker lingers `--scaledown`
-seconds after its last job. Auth is Modal proxy auth: per-person tokens minted and revoked in
-the Modal dashboard, sent as `Modal-Key` and `Modal-Secret` headers, with no auth code in
-haversack. The bundled `haversack remote` client sends a bearer token only, so today it
-reaches a Modal deployment only when that deployment was made with `--no-proxy-auth`, which
-is for smoke tests: anyone with the URL can spend the GPU.
+seconds after its last job. Auth is one of three, and the deploy prints which:
+
+- **A bearer token**, when the deploy has one (`--token`, else `HAVERSACK_SERVER_TOKEN`): the
+  same rule as the local server - the token computes - and what `haversack remote` sends
+  (`HAVERSACK_TOKEN`). The deploy stores it in the Modal Secret `<app name>-token` (through
+  Modal's API, never on a command line) under the key `HAVERSACK_TOKEN`, and only the api
+  function mounts it: no image and no worker holds it. Proxy auth is off for the api then;
+  every route stays behind the token except what the anonymous twin serves. Redeploy with a
+  new value to rotate it - and stop the app first (`modal app stop`), because a container
+  reads the Secret when it starts and a redeploy does not stop a warm one: an api container
+  left from before keeps taking the old token until it scales down. A container that was asked for a token and finds none refuses to
+  start rather than serve open.
+- **Modal proxy auth**, the default without a token: per-person tokens minted and revoked in
+  the Modal dashboard, sent as `Modal-Key` and `Modal-Secret` headers. Every route needs
+  them, reads included. The bundled client does not send them.
+- **None**, with `--no-proxy-auth` and no token: for smoke tests only - anyone with the URL
+  can spend the GPU.
 
 Deploy-time knobs, all environment variables because Modal resolves decorators at import:
 `HAVERSACK_GPU` (default L40S; A10 is the economical fast-mode choice), `HAVERSACK_APP_NAME`,

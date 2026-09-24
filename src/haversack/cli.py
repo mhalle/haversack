@@ -730,7 +730,8 @@ def _command_line() -> click.Group:
                                'with --result-store; a store nothing sweeps only grows')),
             click.Option(['--token'],
                          help=('the bearer token that gates computation (reads stay open); '
-                               'generated when omitted')),
+                               'HAVERSACK_SERVER_TOKEN when omitted, which keeps it out of '
+                               'the process list; generated when neither is given')),
             click.Option(['--allow-transpose'], is_flag=True,
                          help=('serve tasks whose plans permute the axes '
                                '(dentalsegmentator:base, totalvibe:vibe_sagittal, '
@@ -793,6 +794,12 @@ def _command_line() -> click.Group:
             click.Option(['--scaledown'], type=int,
                          help=('seconds a warm worker lingers after its last job (Modal caps at '
                                '1200)')),
+            click.Option(['--token'],
+                         help=('gate computation with this bearer token, as `haversack serve '
+                               '--token` does, in place of Modal proxy auth, so `haversack '
+                               'remote` reaches the deployment; stored in the Modal Secret '
+                               '<app name>-token. Prefer HAVERSACK_SERVER_TOKEN, read when this '
+                               'is omitted: a flag\'s value shows in the process list')),
             click.Option(['--no-proxy-auth'], is_flag=True,
                          help=('deploy WITHOUT auth - smoke tests only; anyone with the URL can '
                                'spend your GPU credit')),
@@ -1107,7 +1114,39 @@ def _cmd_modal(args) -> int:
         env["HAVERSACK_SCALEDOWN"] = str(args.scaledown)
     if args.no_proxy_auth:
         env["HAVERSACK_PROXY_AUTH"] = "0"
+    # Auth is decided here, out loud, and from nothing but --token / HAVERSACK_SERVER_TOKEN:
+    # the lower-level knob naming the Secret is dropped from what the deploy inherits, and so
+    # are both token variables, which the deploy process has no use for.
+    from .cache_admin import TOKEN_FLAG_NOTE, server_token
+    token, token_source = server_token(args.token)
+    for k in ("HAVERSACK_TOKEN_SECRET", "HAVERSACK_SERVER_TOKEN", "HAVERSACK_TOKEN"):
+        env.pop(k, None)
+    app_name = env.get("HAVERSACK_APP_NAME") or "haversack-serve"
+    if token:
+        if token_source == "--token":
+            print(TOKEN_FLAG_NOTE, file=sys.stderr)
+        secret = f"{app_name}-token"
+        _put_token_secret(secret, token)
+        env["HAVERSACK_TOKEN_SECRET"] = secret
+        print(f"auth: bearer token from {token_source} (Modal Secret {secret})", file=sys.stderr)
+    elif args.no_proxy_auth:
+        print("auth: NONE - anyone with the URL can compute", file=sys.stderr)
+    else:
+        print("auth: Modal proxy auth (Modal-Key / Modal-Secret)", file=sys.stderr)
     return subprocess.call([sys.executable, "-m", "modal", "deploy", apppath], env=env)
+
+
+def _put_token_secret(name: str, token: str) -> None:
+    """Create or overwrite the Modal Secret ``name`` as ``{HAVERSACK_TOKEN: token}``, through
+    the SDK so the value never becomes a command's argument (``modal secret create`` would
+    take it on its command line). The key is the client's variable name, so one value serves
+    both ends; the api function alone mounts it (``modal_app.TOKEN_SECRET``)."""
+    import modal
+    from modal.exception import NotFoundError
+    try:
+        modal.Secret.from_name(name).update({"HAVERSACK_TOKEN": token})
+    except NotFoundError:
+        modal.Secret.objects.create(name, {"HAVERSACK_TOKEN": token})
 
 
 def _cmd_serve(args) -> int:

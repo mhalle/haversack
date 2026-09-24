@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **A Modal deployment can take the local server's bearer token, and `haversack remote`
+  reaches it.** `haversack modal deploy --token T`, or `HAVERSACK_SERVER_TOKEN` in its
+  environment, stores the token in the Modal Secret `<app name>-token` (through Modal's API,
+  never a command line) and gates the api the way `haversack serve --token` does, in place of
+  Modal proxy auth - whose `Modal-Key` / `Modal-Secret` headers the bundled client never
+  sent, so until now it could reach a deployment only with no auth at all. Only the api
+  function mounts the Secret; no image, worker or anonymous twin holds the token, and a
+  container asked for one that finds none refuses to start instead of serving open. The
+  deploy prints which auth it chose. Without a token nothing changes: proxy auth, as before.
+- **`HAVERSACK_SERVER_TOKEN` is the server side's token variable** - read by `haversack
+  serve` and `haversack modal deploy` after `--token`, and by nothing else. A token passed as
+  `--token` sits in the process list, where `ps` shows it to every user of the machine, for
+  as long as the command runs (a note says so); the variable does not. The client keeps
+  `HAVERSACK_TOKEN`, which no server reads, so a token exported for `remote` can never
+  become a server's or switch a deployment's auth mode.
 - **Cached embeddings are listed, and have a path.** `GET /v1/embeddings` (`haversack remote
   embeddings`, `RemoteClient.embeddings` / `iter_embeddings`) is the segmentations listing
   asking for the other kind: the same token, paging and computed `identity` filter, `encoder`

@@ -398,8 +398,11 @@ none, the server generates one, prints it, and leaves it in a file only you can 
 (`127.0.0.1`, `localhost`) - so personal use has no ceremony,
 and a proxy or tunnel in front of the server still faces a token. (`--no-token` runs open,
 with no protection of any kind; it is for a machine you trust end to end.) To reach it from other
-machines, bind it to a network interface with a token of your choosing, `--host 0.0.0.0
---token <secret>`, and pass that to `remote --token`. The client:
+machines, bind it to a network interface with a token of your choosing, `--host 0.0.0.0` with
+`HAVERSACK_SERVER_TOKEN=<secret>` in its environment (or `--token <secret>`, which the process
+list shows), and give the client the same value as `HAVERSACK_TOKEN` (or `remote --token`).
+`haversack modal deploy` takes the token the same two ways, and `haversack remote` then reaches
+the Modal deployment too. The client:
 
 ```bash
 export HAVERSACK_SERVER=http://127.0.0.1:8790
