@@ -828,7 +828,8 @@ def _command_line() -> click.Group:
             click.Option(['--task'], required=True,
                          help='a task name the server lists (`haversack remote tasks`)'),
             click.Option(['-o', '--output'],
-                         help='where to save the labels (default: <input>_<task>.seg.nrrd)'),
+                         help='where to save the labels (default: <input>_<task>.seg.nrrd); a '
+                              '.nii.gz or .nii name gets NIfTI, without the segment names'),
             click.Option(['--deliverables'], metavar='LIST',
                          help=('what the server renders beside the labels, comma-separated: '
                                'preview, statistics - or "none" for the labels alone '
@@ -873,7 +874,9 @@ def _command_line() -> click.Group:
         short_help="download a finished job's labels",
         params=[
             click.Argument(['job_id'], help='the id `submit --no-wait` printed'),
-            click.Option(['-o', '--output'], required=True, help='where to save the labels'),
+            click.Option(['-o', '--output'], required=True,
+                         help='where to save the labels; a .nii.gz or .nii name gets NIfTI, '
+                              'without the segment names'),
         ])
     remote.add_command(remote_fetch)
     remote_cancel = _Command(

@@ -821,6 +821,14 @@ seg 0.9, below). A server started without `--result-store` runs as before.
 
 ### Also
 
+- **Fixed: `haversack remote submit -o labels.nii.gz` wrote a `.seg.nrrd` under a NIfTI
+  name.** The client asked for the server's own bytes whatever the output was called, so every
+  reader refused the file (0.12.4 did the same). A `.nii.gz` or `.nii` name now asks for the
+  server's NIfTI conversion - the label values survive, the segment names do not - and a
+  `.nrrd` or `.zarr.zip` name that does not match what the job produced (labels or an
+  embedding field) is refused before anything is written, naming the suffix to use. Any other
+  name gets the server's bytes, as before. `remote fetch` and `remote encode` go through the
+  same download. On a real server, `.nii.gz`, `.nii` and `.seg.nrrd` were voxel-identical.
 - **American spelling everywhere, held by a test.** 105 British spellings (center, neighbor,
   millimeters, labeled, color and license, among others, in their British forms) are gone from
   the package, its docs, tests and tools, and `tests/test_american_spelling.py` fails on any new

@@ -183,16 +183,36 @@ class RemoteClient:
         return self._json("DELETE", f"/v1/jobs/{job_id}")
 
     def fetch(self, job_id: str, output) -> Path:
+        """Download a finished job's result to ``output``, in the format its name says.
+
+        The server holds labels as ``.seg.nrrd`` and a field as ``.zarr.zip``, and converts
+        labels to NIfTI on request (``?format=nii.gz``; the label values survive, the segment
+        names do not). This asked for nothing, so ``-o labels.nii.gz`` wrote NRRD bytes under
+        a NIfTI name that every reader then refused (found 2026-09-23; the same in 0.12.4).
+        Now a ``.nii.gz`` or ``.nii`` name asks for the conversion, a ``.nrrd`` or
+        ``.zarr.zip`` name must match what the server sends or nothing is written, and any
+        other name gets the server's bytes as before."""
         import os
         out = Path(output)
+        name = out.name.lower()
+        nifti = name.endswith((".nii.gz", ".nii"))
         out.parent.mkdir(parents=True, exist_ok=True)
         part = out.with_name(out.name + ".part")
         n = 0
         try:
-            with self._http.stream("GET", f"/v1/jobs/{job_id}/result") as r:
+            with self._http.stream("GET", f"/v1/jobs/{job_id}/result",
+                                   params={"format": "nii.gz"} if nifti else None) as r:
                 if r.status_code >= 400:
                     r.read()
                     raise RemoteError(f"result -> {r.status_code}: {r.text}")
+                # the server types a field as a zip and labels as anything else
+                field = r.headers.get("Content-Type", "").startswith("application/zip")
+                if name.endswith(".zarr.zip") and not field:
+                    raise RemoteError(f"job {job_id}'s result is a label map, not an embedding "
+                                      f"field: name the output .seg.nrrd, or .nii.gz for NIfTI")
+                if name.endswith(".nrrd") and field:
+                    raise RemoteError(f"job {job_id}'s result is an embedding field: name the "
+                                      f"output .zarr.zip")
                 declared = r.headers.get("Content-Length")
                 with open(part, "wb") as f:
                     for chunk in r.iter_bytes():
@@ -204,6 +224,19 @@ class RemoteClient:
         if declared is not None and n != int(declared):
             part.unlink(missing_ok=True)   # truncated: leave no partial file
             raise RemoteError(f"result truncated: got {n} of {declared} bytes")
+        if name.endswith(".nii"):          # the server sends NIfTI gzipped whatever is asked
+            import gzip
+            import shutil
+            plain = out.with_name(out.name + ".plain")
+            try:
+                with gzip.open(part, "rb") as src, open(plain, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+            except BaseException:
+                plain.unlink(missing_ok=True)       # no partial file, as for a truncation
+                raise
+            finally:
+                part.unlink(missing_ok=True)
+            part = plain
         os.replace(part, out)              # complete: publish atomically
         return out
 

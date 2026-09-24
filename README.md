@@ -408,7 +408,9 @@ haversack remote submit scan.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
 ```
 
 `submit` uploads, shows progress, and downloads the labels; `--no-wait` returns a job id for
-`status`, `fetch`, and `cancel`. `haversack remote results` lists what the server has already
+`status`, `fetch`, and `cancel`. The output's name picks the format, as for `segment`:
+`-o labels.nii.gz` (or `.nii`) gets the server's NIfTI conversion, which keeps the label values
+and drops the segment names. `haversack remote results` lists what the server has already
 computed, newest first - `--identity idc:<crdc_series_uuid>` for one input (or several: repeat
 it), `--task` for one task - so a cohort can ask what is done before submitting anything. The
 endpoints are under `/v1/` (`/v1/health`, `/v1/tasks`,
