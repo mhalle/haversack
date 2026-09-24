@@ -13,9 +13,15 @@
   also leaves that cache out - is added to the fresh reading; `device_budget_bytes` itself,
   which the accumulator's placement reads too, is unchanged. Same run: the budget is
   rankfield's full 1 GiB default, the peak footprint 5.87 GB as before, and the stored arrays
-  identical. With rankfield's kernel (its `metal-encode` branch) the fine stage's encode took
-  0.75-0.78 s in two runs, 14.1 s on 0.13.0; one run in three read 3.7 s while the machine
-  was swapping.
+  identical. With rankfield 0.3.6's kernel the fine stage's encode took 0.75-0.78 s in two
+  runs, 14.1 s on 0.13.0; one run in three read 3.7 s while the machine was swapping.
+- rankfield is pinned at `v0.3.6` (floor `>=0.3.6` in the duckn and encode extras) and feldglas
+  at `v0.1.3`, in `pyproject.toml` and CI's list.
+  rankfield 0.3.6 runs its encoder's selection as a Metal kernel on MPS and as one stable sort
+  when every class is kept (depth >= K) - byte-identical to its torch path, which stays the
+  reference: a K=5 field's encode went 13.2 s -> 0.74 s on an M2, 1.12 -> 0.49 s on an A10.
+  feldglas 0.1.3 is 0.1.2 with the same rankfield pin, which uv needs to resolve
+  `haversack[encode]`.
 
 ## [0.13.0] - 2026-09-23
 

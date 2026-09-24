@@ -46,8 +46,8 @@ jobs:
             torch nnunetv2 scipy scikit-image 'SimpleITK>=2.3' obstore 'click>=8.5' pytest \
             fastapi httpx python-multipart matplotlib modal pydicom 'zarr>=3' \
             'duckn @ git+https://github.com/mhalle/duckn.git@v0.5.1' \
-            'rankfield @ git+https://github.com/mhalle/rankfield.git@v0.3.5' \
-            'feldglas @ git+https://github.com/mhalle/feldglas.git@v0.1.2' \
+            'rankfield @ git+https://github.com/mhalle/rankfield.git@v0.3.6' \
+            'feldglas @ git+https://github.com/mhalle/feldglas.git@v0.1.3' \
             'provender @ git+https://github.com/mhalle/provender.git@v0.1.6' nibabel
       - name: Run tests
         env:
