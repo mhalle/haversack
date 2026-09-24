@@ -528,6 +528,7 @@ embeds too (see SERVER.md, "Embedding fields"):
 ```bash
 haversack remote encoders
 haversack remote embed idc:<uuid> -e radar:pretrain -o ct.radar.zarr.zip
+haversack remote embeddings --identity idc:<uuid>    # what it has cached, with each one's path
 ```
 
 ## What haversack does not do yet

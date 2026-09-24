@@ -63,6 +63,8 @@ def _app_routes(tmp_path) -> set:
             if len(parts) > 2 and parts[2] in prefixes:
                 parts[2] = "<source>"
                 p = "/".join(parts)
+            if p.endswith(".zarr.zip"):   # an embedding's segment names an ENCODER (2026-09-24)
+                p = p.replace("{task}", "<encoder>").replace("_int8", "")
             p = (p.replace("{ident:path}", "<identifier>").replace("{task}", "<task>")
                   .replace("{jid}", "<id>").replace("{digest}", "<digest>")
                   .replace("_res-1mm", ""))

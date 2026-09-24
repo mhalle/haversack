@@ -2262,12 +2262,17 @@ class ModalExecutor:
             have = installed_versions(self.segmenter, task)
         return have
 
-    def weights_versions(self, task) -> list:
+    def weights_versions(self, task, kind: str = "segment") -> list:
         """What ``resource_key`` keys ``task`` on - the listing asks it once a task a
         request and derives its keys itself (``serve.result_key``), where asking
         ``resource_key`` key by key described the task again for every option set and
-        every identity (2026-09-20). One door, so the two cannot disagree."""
-        return self._fresh_weights_versions(task)
+        every identity (2026-09-20). One door, so the two cannot disagree. ``kind="embed"``
+        is what an embedding's key takes (2026-09-24: the embeddings listing and path),
+        the same versions ``submit`` keys an embedding job on."""
+        # the kind only when it is not a segmentation, as submit passes it: a segmentation's
+        # call is exactly what it was, for every caller and double of the one-argument form
+        return (self._fresh_weights_versions(task) if kind == "segment"
+                else self._fresh_weights_versions(task, kind))
 
     def resource_key(self, identity, task: str, opts=None) -> str:
         """The key of one identity - what the path surface asks - or of several: the
@@ -2566,11 +2571,13 @@ if PUBLIC:
         os.environ["TOTALSEG_WEIGHTS_PATH"] = WEIGHTS_ROOT
         from haversack import Segmenter
         from haversack.serve import (create_public_app, installed_versions,
-                                 result_key, weights_versions_of)
+                                 result_key, versions_for, weights_versions_of)
         seg = Segmenter(device="cpu", weights=WEIGHTS_ROOT)
 
-        def weights_fn(task):
-            return weights_versions_of(seg, task)
+        def weights_fn(task, kind="segment"):
+            # an embedding keys on its encoder's versions (2026-09-24), a label map as before
+            return (weights_versions_of(seg, task) if kind == "segment"
+                    else versions_for(seg, task, kind))
 
         def key_fn(identity, task, opts=None):
             ids = (identity,) if isinstance(identity, str) else tuple(identity)

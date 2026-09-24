@@ -911,6 +911,25 @@ def _command_line() -> click.Group:
                          help='the rows as one JSON document instead of a table'),
         ])
     remote.add_command(remote_results)
+    remote_embeddings = _Command(
+        'embeddings', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+        short_help='the embedding fields the server holds, newest first',
+        help=('Lists cached embedding fields (GET /v1/embeddings; needs the token): when each was '
+              'published, its encoder, its input and its path - a plain GET of it downloads the '
+              'field - or its key, for one with no path (an upload). --identity is computed by the '
+              'server, as for `remote results`.'),
+        params=[
+            click.Option(['--identity'], multiple=True,
+                         help=('only embeddings of this input: <source>:<identifier>, or a '
+                               'content digest (sha256:<hex>). Repeat for several inputs')),
+            click.Option(['--encoder'], help='only embeddings by this encoder'),
+            click.Option(['--limit'], type=int, default=100, show_default=True,
+                         help=("stop after this many; 0 follows the server's cursors to the "
+                               'end')),
+            click.Option(['--json'], is_flag=True,
+                         help='the rows as one JSON document instead of a table'),
+        ])
+    remote.add_command(remote_embeddings)
 
     docs = _Command(
         'docs', callback=_dispatch(_cmd_docs, 'docs'),
@@ -1214,6 +1233,25 @@ def _cmd_remote(args) -> int:
                      .strftime("%Y-%m-%dT%H:%M:%SZ") if when else "-")
             where = (e.get("links") or {}).get("labels") or f"key:{e.get('key')}"
             print("\t".join([stamp, str(e.get("task")),
+                             ",".join(map(str, e.get("identity") or [])) or "-", where]))
+    elif args.rcmd == "embeddings":
+        import datetime
+        import itertools
+        if args.limit < 0:
+            from .errors import InputError
+            raise InputError("--limit must be 0 (every embedding) or more")
+        rows = c.iter_embeddings(identity=list(args.identity) or None, encoder=args.encoder,
+                                 page_size=min(args.limit, 1000) if args.limit else 1000)
+        rows = list(itertools.islice(rows, args.limit) if args.limit else rows)
+        if args.json:
+            print(json.dumps({"embeddings": rows}, indent=2))
+            return 0
+        for e in rows:
+            when = e.get("published") or e.get("computed")
+            stamp = (datetime.datetime.fromtimestamp(when, datetime.timezone.utc)
+                     .strftime("%Y-%m-%dT%H:%M:%SZ") if when else "-")
+            where = (e.get("links") or {}).get("embedding") or f"key:{e.get('key')}"
+            print("\t".join([stamp, str(e.get("encoder")),
                              ",".join(map(str, e.get("identity") or [])) or "-", where]))
     elif args.rcmd == "status":
         print(json.dumps(c.status(args.job_id), indent=2))

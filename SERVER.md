@@ -425,9 +425,29 @@ content digest as `ETag`;
 "embed"`, and its `result.outputs[0]` is `{"name": "embedding", "kind": "embedding", ...}`: a
 `result:` reference to it cannot be bound where an image or labels belong. A field's key
 includes the kind, so it never shares one with a segmentation of the same name, and no
-segmentation key changed when fields were added. A field has no path form yet and is not
-listed by `/v1/segmentations`; reach it through its job, whose `links` name `result` and
+segmentation key changed when fields were added. A job's own `links` name `result` and
 `meta` only.
+
+Cached fields are listed by `GET /v1/embeddings` (`haversack remote embeddings`), never by
+`/v1/segmentations`: the same listing, token, paging (`limit`, `cursor`) and computed
+`identity` filter, with `encoder` in place of `task`. Each row has `key`, `encoder`,
+`identity`, `options`, `computed`, `published`, `bytes`, and `links.embedding` when the field
+has a path - one source identity (never an upload's digest), default options or `int8`:
+
+```
+GET /v1/embeddings?identity=idc:<crdc_series_uuid>&encoder=radar:pretrain
+GET /v1/idc/<crdc_series_uuid>/radar:pretrain/embedding.zarr.zip         the field
+GET /v1/idc/<crdc_series_uuid>/radar:pretrain/embedding_int8.zarr.zip    its int8 form
+```
+
+The path is a READ, anonymous as a cached label map is: 200 with the field (its content
+digest as `ETag`, 304 on a matching `If-None-Match`, `HEAD` the same without a body), 202 while
+an embedding job for it runs, 404 otherwise - with `Cache-Control: no-store`, and naming the
+job to submit. It computes nothing, whatever `Prefer` says: a field is computed by
+`POST /v1/jobs` with `kind=embed`, which answers a cached one as cheaply. Its segment is an
+ENCODER, so `.../ts.v2:total_fast/embedding.zarr.zip` is that encoder's field and never the
+task's labels. The anonymous twin serves the same paths, and the listing when its operator
+opted into one.
 
 A server fetches an encoder's pinned weights on its first embedding job, digest-checked, as it
 installs a segmentation task's weights on first use (`GET /v1/encoders` says whether they are
@@ -656,6 +676,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | POST | `/v1/tasks/<task>/prepare` | token | install a task's weights now |
 | GET | `/v1/sources` | read | the hosted sources (and `result`), their identifier grammar, and which have a path surface |
 | GET | `/v1/segmentations` | token | cached results, newest first: `identity`, `task`, `limit`, `cursor` |
+| GET | `/v1/embeddings` | token | cached embedding fields, newest first: `identity`, `encoder`, `limit`, `cursor` |
 | POST | `/v1/jobs` | token | submit |
 | GET | `/v1/jobs` | token | brief status of every known job |
 | GET | `/v1/jobs/<id>` | token | full status, result metadata, links |
@@ -686,9 +707,11 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | HEAD | `/v1/<source>/<identifier>/<task>/statistics.json` | read | probe: rendered, rendering, absent |
 | GET | `/v1/<source>/<identifier>/<task>/statistics.tsv` | read | the same as a table |
 | HEAD | `/v1/<source>/<identifier>/<task>/statistics.tsv` | read | probe: rendered, rendering, absent |
+| GET | `/v1/<source>/<identifier>/<encoder>/embedding.zarr.zip` | read | an embedding field; computes nothing |
+| HEAD | `/v1/<source>/<identifier>/<encoder>/embedding.zarr.zip` | read | probe: cached, in flight, absent |
 
 Every path-addressed route that names a file also exists with the `_res-1mm` token
-before the extension.
+before the extension - an embedding's with `_int8` instead.
 
 ## Reference
 

@@ -102,7 +102,10 @@ def validate_options(options: dict) -> dict:
         if k in options and not isinstance(options[k], t):
             raise RequestError("invalid_parameter", f"{k} must be {t.__name__}, not {type(options[k]).__name__}",
                                parameter=k)
-    return dict(options)
+    # A switch left off is the default, and keys as the default: `{"int8": false}` and `{}` are
+    # the same bytes, and keyed apart they were two results - one of which no path or identity
+    # filter could ever find, since both ask for the default by `{}` (2026-09-24).
+    return {k: v for k, v in options.items() if not (OPTIONS[k] is bool and v is False)}
 
 
 def field_payload(report: dict, path) -> dict:

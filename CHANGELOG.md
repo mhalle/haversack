@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **Cached embeddings are listed, and have a path.** `GET /v1/embeddings` (`haversack remote
+  embeddings`, `RemoteClient.embeddings` / `iter_embeddings`) is the segmentations listing
+  asking for the other kind: the same token, paging and computed `identity` filter, `encoder`
+  in place of `task`, a row kept only when its meta says it is an embedding, and a key round
+  trip through the encoder's own versions, so a field keyed under weights the server no longer
+  runs is not offered. A row with one source identity has `links.embedding`,
+  `/v1/<source>/<id>/<encoder>/embedding.zarr.zip` (`embedding_int8.zarr.zip` for int8): a
+  READ door beside the labels' - 200 with an `ETag` and 304, `HEAD`, 202 while a job for it
+  runs, 404 `no-store` otherwise, and a 503 rather than a 404 from a stale Modal view. It
+  computes nothing, whatever `Prefer` says: an embedding is computed by `POST /v1/jobs
+  kind=embed`, whose cache hit costs the same. The anonymous twin serves the same paths.
+  Before this a field was reachable only through the job that made it. Modal's
+  `weights_versions` and the twin's `weights_fn` take the kind, as `submit` already keyed.
+- **`{"int8": false}` is the default embedding, not a second one.** The options were kept as
+  sent, so an explicit `false` keyed apart from `{}` - the same bytes, computed twice, and
+  never found by a path, which asks for the default by `{}`.
 - **An encoder's output is an EMBEDDING, and the commands and protocol say so.** 0.13.0 called
   it "encode" everywhere, the word rankfield already uses for the ranked encoding of a
   segmentation's logits - so "the encoder's budget" meant rankfield's and "the encoder

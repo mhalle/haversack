@@ -366,6 +366,29 @@ def resource_links(task, identity, options, *, preview=False, statistics=False) 
     return links
 
 
+#: An embedding's options as they appear in its path, as ``GRID_TOKENS`` are a label map's
+#: (2026-09-24): ``embedding.zarr.zip`` for the defaults, ``embedding_int8.zarr.zip`` for int8
+#: tokens. The menu is ``encoders.serving.OPTIONS``, and nothing outside it has a path.
+EMBEDDING_TOKENS = {"int8": {"int8": True}}
+
+
+def embedding_links(encoder, identity, options) -> dict:
+    """The path-surface URL of a finished embedding - ``{}`` when it has none. The same rule
+    of addressability as :func:`resource_links` (one source identity, never a content digest,
+    options on the menu); the one place this grammar is written, for the listing and anyone
+    else, so a client follows links instead of assembling them."""
+    ident = list(identity or [])
+    if len(ident) != 1 or ":" not in str(ident[0]) or is_digest(ident[0]):
+        return {}
+    opts = options or {}
+    tok = next((t for t, o in EMBEDDING_TOKENS.items() if o == opts), None)
+    if opts and tok is None:
+        return {}
+    infix = f"_{tok}" if tok else ""
+    prefix, one = str(ident[0]).split(":", 1)
+    return {"embedding": f"/v1/{prefix}/{one}/{encoder}/embedding{infix}.zarr.zip"}
+
+
 def weights_versions_of(segmenter, task) -> list:
     """The key's model component, from the install sidecars via describe(), plus the
     task's engine's own cache epoch when it declares one (``Engine.cache_epoch``).
@@ -4059,6 +4082,33 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         return result_key((identity,), task, opts,
                           weights_versions_of(seg, task))
 
+    def canon_encoder(name) -> str | None:
+        """The encoder ``name`` resolves to, or None: the encoder registry decides, never the
+        task catalog (``ts.v2:total_fast`` is both, and the route decides which it means)."""
+        from .encoders.serving import canonical
+        return canonical(name)
+
+    def embed_versions(encoder: str) -> list:
+        """What an embedding of ``encoder`` is keyed on, from wherever this executor says keys
+        come from: Modal's api and its twin read them stale-proof, and take the kind
+        (``weights_versions(name, kind=)``); an executor that takes no kind - a local server,
+        an operator's twin - is answered from the encoder registry, as ``_accept`` keys an
+        embedding job. The same versions the job was keyed on, or the key is never found."""
+        wv = getattr(executor, "weights_versions", None)
+        if wv is not None:
+            try:
+                return wv(encoder, kind="embed")
+            except TypeError:
+                pass
+        try:
+            return versions_for(seg, encoder, "embed")
+        except Exception:                  # an nnU-Net encoder on a twin with no describe()
+            return ["unknown"]
+
+    def embed_key(identities, encoder: str, opts: dict) -> str:
+        """An embedding's key: ``result_key`` with the kind, over ``embed_versions``."""
+        return result_key(tuple(identities), encoder, opts, embed_versions(encoder), kind="embed")
+
     def norm_ident(prefix: str, ident: str) -> str:
         """An identifier as the path surface keys it: stripped, and an IDC series UUID in
         lower case. Shared by the surface and the listing's identity filter, which must
@@ -4684,6 +4734,33 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(422, f"{ident!r} is not a valid {prefix} identifier")
         return srcobj.identity(ident)
 
+    def _listing_page(request, limit: int, cursor, identity):
+        """What every listing checks before it looks at the cache - authorization (the twin
+        lists anonymously, by its operator's opt-in), the page size, the cursor, the number
+        of identities - and the position to resume after. One statement for both listings,
+        so the segmentations' and the embeddings' rules cannot drift."""
+        if not read_only:
+            require_auth(request)
+        if not 1 <= limit <= LIST_LIMIT_MAX:
+            raise HTTPException(422, f"limit must be between 1 and {LIST_LIMIT_MAX}")
+        after = None
+        if cursor is not None:
+            try:
+                after = decode_cursor(cursor)
+            except ValueError:
+                raise HTTPException(422, "cursor: not one this server issued; start again "
+                                         "without it") from None
+        if identity and len(identity) > LIST_IDENTITIES_MAX:
+            raise HTTPException(422, f"at most {LIST_IDENTITIES_MAX} identities a request")
+        return after
+
+    def _hosted_elsewhere(idents) -> bool:
+        """An entry whose input came from a hosted source this app does not mount: its path
+        would 404 here, so no listing offers it."""
+        ident0 = str((idents or [""])[0])
+        pfx = ident0.split(":", 1)[0] if ":" in ident0 else None
+        return pfx in _ALL_SOURCE_PREFIXES and pfx not in sources
+
     @app.get("/v1/segmentations", tags=["results"], responses={
         422: {"description": "a filter or page the listing refuses: an identity that is "
                              "neither <source>:<identifier> for a mounted source nor a "
@@ -4723,24 +4800,12 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         options, or from several inputs, is in the plain and the ``task`` listing only. A
         sync route on purpose: the lookup blocks (on Modal it can wait out a volume
         reload), and FastAPI runs a sync route on a worker thread, off the event loop."""
-        if not read_only:
-            require_auth(request)
-        if not 1 <= limit <= LIST_LIMIT_MAX:
-            raise HTTPException(422, f"limit must be between 1 and {LIST_LIMIT_MAX}")
-        after = None
-        if cursor is not None:
-            try:
-                after = decode_cursor(cursor)
-            except ValueError:
-                raise HTTPException(422, "cursor: not one this server issued; start again "
-                                         "without it") from None
+        after = _listing_page(request, limit, cursor, identity)
         want = None
         if task is not None:
             want = canon_task(task)
             if want is None:
                 raise HTTPException(422, unknown_task(task))
-        if identity and len(identity) > LIST_IDENTITIES_MAX:
-            raise HTTPException(422, f"at most {LIST_IDENTITIES_MAX} identities a request")
         lister = getattr(executor, "cache_list", None)
         if lister is None:
             return {"segmentations": [], "next_cursor": None}
@@ -4793,10 +4858,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 # (review, 2026-09-23)
                 return False
             idents = e.get("identity") if isinstance(e.get("identity"), list) else []
-            ident0 = str((idents or [""])[0])          # on THIS app's mounted sources
-            pfx = ident0.split(":", 1)[0] if ":" in ident0 else None
-            if pfx in _ALL_SOURCE_PREFIXES and pfx not in sources:
-                return False               # a hosted source this app does not mount
+            if _hosted_elsewhere(idents):  # on THIS app's mounted sources only
+                return False
             t = e.get("task")
             canonical = canonical_of(t) if t is not None else None
             if t is not None and canonical is None:
@@ -4832,6 +4895,104 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         rows, position = lister(keys=keys, limit=limit, after=after, accept=accept,
                                 match=of_wanted_task if want is not None else None)
         return {"segmentations": rows,
+                "next_cursor": encode_cursor(position) if position is not None else None}
+
+    @app.get("/v1/embeddings", tags=["results"], responses={
+        422: {"description": "a filter or page the listing refuses: an identity that is "
+                             "neither <source>:<identifier> for a mounted source nor a "
+                             "content digest, more than 100 identities, an unknown encoder, "
+                             "a limit outside 1-1000, a cursor this server did not issue"},
+        503: {"description": "this server's view of the result cache could not be "
+                             "refreshed (Modal: a volume reload was refused); retry"}})
+    def list_embeddings(
+            request: Request,
+            identity: list[str] | None = Query(None, description=(
+                "only embeddings of this input: <source>:<identifier> or a content digest. "
+                "Repeat it for several inputs - the answer is the union. Computed, not "
+                "searched, as for /v1/segmentations")),
+            encoder: str | None = Query(None, description="only embeddings by this encoder"),
+            limit: int = Query(LIST_LIMIT_DEFAULT, description=(
+                f"rows on this page, 1-{LIST_LIMIT_MAX}")),
+            cursor: str | None = Query(None, description=(
+                "the previous page's next_cursor, as given"))):
+        """Cached embedding fields this server can still resolve, newest published first, a
+        page at a time: ``{"embeddings": [...], "next_cursor": ...}`` (2026-09-24). Each row:
+        ``key``, ``encoder``, ``identity``, ``options``, ``computed``, ``published``,
+        ``bytes``, and ``links.embedding`` - its path - when it has one: a single source
+        identity, never an upload's digest, as for labels.
+
+        The segmentations listing's machinery, asking for the other kind: the same cache
+        scan, cursor and parallel reads, a row kept only when its ``meta.json`` says it is
+        an embedding (the segmentations listing keeps only what says it is not), and a key
+        round trip through the encoder's own versions (``embed_versions``), so an embedding
+        keyed under weights this server no longer runs is not offered. The identity filter
+        derives each encoder's key under each path option set - ``{}`` and int8 - and
+        looks those up. Authorized, or the twin's operator opt-in, as the segmentations'."""
+        after = _listing_page(request, limit, cursor, identity)
+        want = None
+        if encoder is not None:
+            want = canon_encoder(encoder)
+            if want is None:
+                raise HTTPException(422, f"no encoder {encoder!r}; GET /v1/encoders lists them")
+        lister = getattr(executor, "cache_list", None)
+        if lister is None:
+            return {"embeddings": [], "next_cursor": None}
+        wv_memo: dict = {}                 # versions per encoder, once per request
+        canon_memo: dict = {}
+
+        def key_of(identities, name: str, opts: dict) -> str:
+            if name not in wv_memo:
+                wv_memo[name] = embed_versions(name)
+            return result_key(tuple(identities), name, opts, wv_memo[name], kind="embed")
+
+        def canonical_of(t) -> str | None:
+            if t not in canon_memo:
+                canon_memo[t] = canon_encoder(t)
+            return canon_memo[t]
+
+        def of_wanted_encoder(e: dict) -> bool:
+            t = e.get("task")
+            return want is None or (t is not None and canonical_of(t) == want)
+
+        def accept(e: dict) -> bool:
+            if e.get("kind") != "embed":
+                return False               # a label map, or a kind this server does not know
+            idents = e.get("identity") if isinstance(e.get("identity"), list) else []
+            if _hosted_elsewhere(idents):
+                return False
+            t = e.get("task")
+            canonical = canonical_of(t) if t is not None else None
+            if canonical is None or not of_wanted_encoder(e):
+                return False
+            key = e.get("key")
+            if idents and key:
+                try:
+                    if key_of(idents, canonical, e.get("options") or {}) != key:
+                        return False       # keyed under versions this server no longer runs
+                except Exception:
+                    pass
+            return True
+
+        keys = None
+        if identity:
+            from .encoders.registry import ENCODERS
+            wanted = list(dict.fromkeys(listed_identity(i) for i in identity))
+            served = [want] if want is not None else sorted(ENCODERS)
+            menu = [{}] + [dict(o) for o in EMBEDDING_TOKENS.values()]
+            keys = [key_of((i,), n, o) for i in wanted for n in served for o in menu]
+        rows, position = lister(keys=keys, limit=limit, after=after, accept=accept,
+                                match=of_wanted_encoder if want is not None else None)
+        out = []
+        for r in rows:
+            name = canonical_of(r.get("task")) or r.get("task")
+            row = {"key": r.get("key"), "encoder": name, "identity": r.get("identity"),
+                   "options": r.get("options"), "computed": r.get("computed"),
+                   "published": r.get("published"), "bytes": r.get("bytes")}
+            links = embedding_links(name, r.get("identity"), r.get("options"))
+            if links:
+                row["links"] = links
+            out.append(row)
+        return {"embeddings": out,
                 "next_cursor": encode_cursor(position) if position is not None else None}
 
     @app.get("/v1/tasks/{task}", tags=["tasks"])
@@ -6018,6 +6179,52 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                     headers=_progress_headers(snap.get("progress")))
 
         _grid_routes(_register_resource)
+
+        def _register_embedding(tok: str, eopts: dict):
+            @app.head(base + f"/embedding{tok}.zarr.zip", tags=["results"])
+            @app.get(base + f"/embedding{tok}.zarr.zip", tags=["results"])
+            @_absence_is_never_stored
+            async def embedding(request: Request, ident: str, task: str):
+                """An embedding field by path (2026-09-24): the READ door beside the labels',
+                ``task`` being the ENCODER. 200 with the field (304 on a matching
+                If-None-Match), 202 while an embedding job for it runs, 404 when there is
+                none. It computes nothing, whatever Prefer says: an embedding is computed by
+                ``POST /v1/jobs`` with ``kind=embed`` (``haversack remote embed``), whose
+                cache hit costs what this does - a second way to start a GPU job would be a
+                second set of door checks to keep equal. Anonymous, as a cached label map is."""
+                ident = norm(ident)
+                if not re.fullmatch(pat, ident):
+                    raise HTTPException(422, f"{ident!r} is not a valid {prefix} identifier")
+                encoder = canon_encoder(task)
+                if encoder is None:
+                    raise HTTPException(404, f"no encoder {task!r}; GET /v1/encoders lists them")
+                key = await asyncio.to_thread(embed_key, (srcobj.identity(ident),), encoder,
+                                              dict(eopts))
+                since = time.monotonic()
+                # off the loop: on Modal a lookup waits out any reload in progress
+                hit = await asyncio.to_thread(executor.cache_get, key)
+                if hit is None and executor.find_inflight(key) is None:
+                    # a miss is believed only from a view newer than this request: on Modal a
+                    # refused reload leaves an old one, and that is a 503, never a 404
+                    hit = await asyncio.to_thread(confirm_absent, key, since)
+                if hit is None:
+                    if executor.find_inflight(key) is not None:
+                        return JSONResponse({"state": "materializing"}, status_code=202,
+                                            headers=_progress_headers(None))
+                    raise HTTPException(404, "not materialized; compute it with POST /v1/jobs "
+                                             "kind=embed (haversack remote embed "
+                                             f"{prefix}:{ident} --encoder {encoder})")
+                headers = _resource_headers(key, hit[1])
+                fresh = not_modified(request, headers["ETag"], headers)
+                if fresh is not None:
+                    return fresh
+                stem = re.sub(r"[^A-Za-z0-9._-]+", "_", encoder)
+                return FileResponse(hit[0], media_type="application/zip", headers=headers,
+                                    filename=f"{stem}_{ident[:8]}{tok}.zarr.zip")
+
+        _register_embedding("", {})
+        for etok, eopts in EMBEDDING_TOKENS.items():
+            _register_embedding("_" + etok, dict(eopts))
 
         def _register_evict(tok: str, gopts: dict):
             paths = [base + f"/labels{tok}.seg.nrrd"]

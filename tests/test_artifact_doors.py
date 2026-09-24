@@ -100,7 +100,9 @@ def _everything_rendered(tmp_path, monkeypatch):
 def _urls(app, door: str, jid: str) -> list:
     """The file URLs of one door, from the route table, with the parameters filled in."""
     lead = "/v1/jobs/" if door == "job" else "/v1/idc/"
-    paths = sorted(p for p in _file_routes(app) if p.startswith(lead))
+    # an embedding's path names an ENCODER in the task's place: not one of this result's
+    # files (tests/test_embeddings_listing.py holds it to GET/HEAD/304 on its own)
+    paths = sorted(p for p in _file_routes(app) if p.startswith(lead) and not p.endswith(".zarr.zip"))
     return [p.replace("{ident:path}", U).replace("{task}", "total_fast").replace("{jid}", jid)
             for p in paths]
 

@@ -139,6 +139,31 @@ class RemoteClient:
             if not cursor:
                 return
 
+    def embeddings(self, *, identity=None, encoder: str | None = None,
+                   limit: int | None = None, cursor: str | None = None) -> dict:
+        """One page of the embedding fields the server holds (``GET /v1/embeddings``,
+        authorized): ``{"embeddings": [...], "next_cursor": ...}``, newest published first.
+        ``identity`` and paging as in :meth:`segmentations`; ``encoder`` keeps one encoder's.
+        A row with a path has ``links.embedding``, which a plain GET downloads."""
+        ids = [identity] if isinstance(identity, str) else list(identity or [])
+        params = [("identity", i) for i in ids]
+        for k, v in (("encoder", encoder), ("limit", limit), ("cursor", cursor)):
+            if v is not None:
+                params.append((k, v))
+        return self._json("GET", "/v1/embeddings", params=params)
+
+    def iter_embeddings(self, *, identity=None, encoder: str | None = None,
+                        page_size: int | None = None):
+        """Every row of :meth:`embeddings`, following the server's cursors to the end."""
+        cursor = None
+        while True:
+            page = self.embeddings(identity=identity, encoder=encoder, limit=page_size,
+                                   cursor=cursor)
+            yield from page.get("embeddings") or []
+            cursor = page.get("next_cursor")
+            if not cursor:
+                return
+
     def submit(self, image, task: str, *, deliverables=None, kind: str | None = None, **options) -> str:
         """``image`` is a local file to upload, or ``"<source>:<identifier>"``
         (e.g. ``"idc:<crdc_series_uuid>"``) to have the server fetch the input
