@@ -174,6 +174,24 @@ def test_refusals_name_their_cause(tmp_path, monkeypatch):
     ex.close()
 
 
+def test_a_store_that_cannot_place_itself_is_refused(tmp_path, monkeypatch):
+    """A FastSurfer store records no frame: served, nobody could restore it onto the input
+    (seen on the 2026-09-25 smoke). Refused before any job exists; its labels still are."""
+    seg, store, ex, client = make(tmp_path, monkeypatch)
+    before = set((tmp_path / "work").iterdir())
+    monkeypatch.setattr(ranked_output, "store_places_itself", lambda task: False)
+    r = post(client)
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "no_frame", r.text
+    assert store.calls == [] and set((tmp_path / "work").iterdir()) == before
+    ex.close()
+
+
+def test_fastsurfer_stores_are_the_unplaced_ones():
+    assert not ranked_output.store_places_itself("fastsurfer:asegdkt")
+    assert ranked_output.store_places_itself("ts.v2:total_fast")
+    assert ranked_output.supports_store_output("fastsurfer:asegdkt")   # still written locally
+
+
 def test_an_unknown_kind_names_the_kinds_by_their_wire_names(tmp_path, monkeypatch):
     """The refusal of `kind=ranked` listed "segment, embed or ranked" - the old name, the one
     it had just refused - after the kind became `rankfield` (seen on a smoke, 2026-09-25)."""

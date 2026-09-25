@@ -1991,6 +1991,11 @@ def _cmd_segment(args) -> int:
                 raise InputError("a ranked store output is available for nnU-Net tasks and "
                                  "FastSurfer only: this task's engine returns labels, not the "
                                  "distribution a store holds")
+            from .ranked_output import store_places_itself
+            if not store_places_itself(args.task) and not args.quiet:
+                print("note: this store records no frame (the engine infers on its own conformed "
+                      "grid): `haversack restore` needs --spacing, and places the labels in the "
+                      "conformed grid, not on the input", file=sys.stderr)
             img = resolve(inputs[0])
             r, out = segment_to_store(
                 img, args.task, args.output, case=source_stem(inputs[0]),

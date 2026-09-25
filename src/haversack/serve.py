@@ -5431,6 +5431,15 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 raise HTTPException(422, {"code": "no_distribution",
                                           "message": f"{task} has no rank field: its engine returns "
                                                      "labels, not the distribution a store holds"})
+            from .ranked_output import store_places_itself
+            if not store_places_itself(task):
+                # Served, such a store could not be put back on its input by anyone who
+                # fetched it: refused until its frame can be recorded (2026-09-25).
+                raise HTTPException(422, {"code": "no_frame",
+                                          "message": f"{task}'s rank field records no frame (its engine "
+                                                     "infers on its own conformed grid), so it could not "
+                                                     "be restored onto the input; its labels are served "
+                                                     "as kind=segment"})
             wanted = None
         # The pin travels with the job so the worker's catalog installs that version or
         # refuses it. One this server cannot verify yet must not be answered from cache or
