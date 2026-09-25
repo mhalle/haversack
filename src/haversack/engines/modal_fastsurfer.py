@@ -45,7 +45,8 @@ def _fs_image():
     fs_image = (
         modal.Image.debian_slim(python_version="3.12")
         .apt_install("git")                       # uv needs git for the git source in pyproject
-        # duckn (rankfield, zarr, duckn): this worker writes FastSurfer's ranked stores
+        # duckn (rankfield, zarr, duckn, pydicom): this worker writes FastSurfer's ranked stores,
+        # and the input copy of what it fetches (docs/input-copy.md)
         .uv_sync(extras=["fastsurfer", "duckn"], frozen=False)
         .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack", copy=True)
     )

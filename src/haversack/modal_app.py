@@ -172,6 +172,11 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   # Which cloud the idc: source fetches from first; a deployment
                   # in Google Cloud sets gcp and reads IDC's mirror without egress.
                   "HAVERSACK_IDC_CLOUD",
+                  # The input copy (docs/input-copy.md), read by input_copy at each store: off,
+                  # and compressed. Unforwarded, `HAVERSACK_INPUT_COPY=0` never reached a
+                  # container, and a compressed cache - the reason to choose it on Modal is a
+                  # worker's RAM-backed series cache - would silently stay uncompressed.
+                  "HAVERSACK_INPUT_COPY", "HAVERSACK_INPUT_COPY_COMPRESSION",
                   # EVERY other knob this module reads at import, because the container
                   # re-imports it and a missing one silently takes its default there.
                   # The app name did (2026-09-12): a deploy with --app-name ran its
@@ -214,6 +219,8 @@ _SECRET_VARS = ("HAVERSACK_TOKEN",)
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
+    # duckn (duckn, zarr, rankfield, pydicom): the worker writes ranked stores, and the input
+    # copy of what it fetches (docs/input-copy.md)
     .uv_sync(extras=["torch", "serve", "cuda", "duckn"], frozen=False)
     .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
     .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
@@ -251,6 +258,8 @@ image = (
 api_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")                       # uv sync resolves the whole lock (engine git sources)
+    # duckn: the api keys ranked stores (above), and stores uploads as input copies
+    # (docs/input-copy.md)
     .uv_sync(extras=["serve", "duckn"], frozen=False)
     .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
     .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")

@@ -147,8 +147,15 @@ def read_label_map(path, *, require_names: bool = True) -> LabelMap:
     """
     import SimpleITK as sitk
     file = _the_file(path)
+    from .input_copy import NotACopy, is_copy, read_copy
     try:
-        image = sitk.ReadImage(str(file))
+        # a nameless label map uploaded as a compressed volume is kept as its input copy
+        # (docs/input-copy.md) - the same voxels and geometry; a .seg.nrrd, which carries its
+        # names, never is
+        image = read_copy(file) if is_copy(file) else sitk.ReadImage(str(file))
+    except NotACopy:
+        from .duckn_io import read_duckn_image
+        image = read_duckn_image(file)
     except RuntimeError as e:
         from .io import _sitk_reason
         raise InputError(f"cannot read {file} as a label map: {_sitk_reason(e)}") from None

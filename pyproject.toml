@@ -87,11 +87,11 @@ test = ["pytest", "pydicom", "fastapi", "httpx", "python-multipart"]
 # still installs (the stack is core since 2026-09-03).
 torch = []
 # The SynthStrip engine: the model + conform live in the standalone `synthstrip-torch`
-# package (like fastsurfer-lean; git rev in [tool.uv.sources]), which brings torch + surfa +
-# numpy<2 + SimpleITK. scipy is haversack's (the post-restore mask cleanup). surfa's reorient
-# needs numpy<2 - genuinely incompatible with the torch extra's numpy>=2, so this extra is
-# declared conflicting below and uv forks them into ONE universal lock; materialize this engine
-# on its own: `UV_PROJECT_ENVIRONMENT=.venvs/synthstrip uv sync --extra synthstrip`.
+# package (like fastsurfer-lean; git tag in [tool.uv.sources]), which brings torch + surfa +
+# SimpleITK. scipy is haversack's (the post-restore mask cleanup). Until synthstrip-torch 0.1.1
+# (2026-09-25) it pinned numpy<2 for surfa's reorient, and this extra conflicted with core and
+# lived in its own environment; 0.1.1 takes surfa at upstream's unreleased NumPy 2 fix
+# (8aa4a5f6), measured bit-identical, and the engine installs beside the others.
 synthstrip = ["synthstrip-torch", "scipy"]
 # The FastSurfer engine, installed pip-style from our slimmed fork `fastsurfer-lean`
 # (mhalle/fastsurfer-lean - FastSurfer's parcellation CNN only, packaging fixed so
@@ -120,7 +120,7 @@ monai = ["monai>=1.4", "torch>=2.7", "nibabel", "itk", "pytorch-ignite", "einops
 # beside the torch extra. The dev env adds it: `uv sync --extra torch ... --extra duckn`.
 # zarr 3.3 and duckn need Python 3.12, which is the project's floor (0.6.1: one floor, no
 # per-package markers - the extra was empty on 3.10 and rankfield-only on 3.11).
-duckn = ["duckn", "zarr>=3.3", "rankfield>=0.3.6"]      # the ranked encoding + restore (github, a tag)
+duckn = ["duckn", "zarr>=3.3", "rankfield>=0.3.6", "pydicom>=2.4"]      # the ranked encoding + restore (github, a tag)
 # `haversack embed` (2026-09-23): an encoder's token lattices written as an embedding field. The
 # field format is feldglas's, and feldglas is its one author - haversack hands it the tokens and
 # writes through `feldglas.store` (zarr + duckn's own models, like the ranked stores). The networks
@@ -151,7 +151,7 @@ artifacts = ["src/haversack/data/*.json", "src/haversack/data/*.md", "src/havers
 
 [tool.uv]
 # Engines own their environments (docs: "one environment per engine") when their deps
-# genuinely conflict (synthstrip's numpy<2; voxtell's torch<2.9 against core's, until
+# genuinely conflict (synthstrip's numpy<2 until synthstrip-torch 0.1.1; voxtell's torch<2.9 against core's, until
 # override-dependencies lifted it - voxtell keeps its own environment until it is shown to
 # install beside the others); those are
 # declared here so uv resolves them in separate forks of ONE universal lock. fastsurfer left
@@ -164,25 +164,15 @@ artifacts = ["src/haversack/data/*.json", "src/haversack/data/*.md", "src/havers
 # overridden (2026-09-12). Verified on Modal: a VoxTell worker on torch 2.14.0+cu130 (L40S)
 # segmented an NLST chest CT - four prompts, plausible volumes, ~8 GB GPU memory of 46.
 # An override replaces EVERY torch requirement in the graph - synthstrip-torch's and monai's
-# too, both since run on 2.14 on Modal (SynthStrip beside surfa's numpy 1.26; two MONAI
+# too, both since run on 2.14 on Modal (SynthStrip, then beside surfa's numpy 1.26; two MONAI
 # bundles) - so all engines resolve one torch (2.14 today).
 override-dependencies = ["torch>=2.10"]
+# synthstrip left every group 2026-09-25 (synthstrip-torch 0.1.1 runs on numpy 2); the two
+# groups that existed only for its numpy<2 - against duckn and embed - went with it.
 conflicts = [
     [
-      { extra = "synthstrip" },
       { extra = "voxtell" },
       { extra = "monai" },
-    ],
-    # duckn's zarr needs numpy>=2; synthstrip's surfa needs numpy<2. Everything else in the
-    # main environment already sits on numpy 2, so this only says what was already true.
-    [
-      { extra = "duckn" },
-      { extra = "synthstrip" },
-    ],
-    # the same numpy split: a field is written through zarr and duckn
-    [
-      { extra = "embed" },
-      { extra = "synthstrip" },
     ],
 ]
 
@@ -215,7 +205,7 @@ duckn = { git = "https://github.com/mhalle/duckn.git", tag = "v0.5.1" }
 feldglas = { git = "https://github.com/mhalle/feldglas.git", tag = "v0.1.3" }
 # synthstrip-torch = our standalone SynthStrip inference package (StripModel + surfa conform
 # + SDT; weights fetched from MGH at runtime). Import namespace: synthstrip_torch.
-synthstrip-torch = { git = "https://github.com/mhalle/synthstrip-torch.git", rev = "1b871fb1f98fbe60ed1efe87de34a8703a106b44" }
+synthstrip-torch = { git = "https://github.com/mhalle/synthstrip-torch.git", tag = "v0.1.1" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

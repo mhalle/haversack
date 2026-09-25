@@ -9,8 +9,9 @@
   formats the store is written in (`ranked=rf<rankfield>/seg<duckn seg>/h<rules>`), served as
   a zip by its job and, for a hosted input, by a read-only path
   (`/v1/<source>/<id>/<task>/ranked.duckn.zip`). No options, no deliverables; a server without
-  the `duckn` extra answers 501, and Modal runs the job on the task's own worker - every
-  Modal image now carries the `duckn` extra. No existing key moves.
+  the `duckn` extra answers 501, and Modal runs the job on the task's own worker - the api,
+  nnU-Net and FastSurfer images now carry the `duckn` extra (and SynthStrip's, below). No
+  existing key moves.
 - **What a store holds changed: the task's field, not its models'.** A cascade's crop stage is
   left out; a multi-model task's parts are composed into one layer (`ts.v2:total`'s five), whose
   winner is the painted label at every model-grid voxel and whose gaps across models are each
@@ -22,6 +23,45 @@
   a multi-layer cascade store is still refused whole (its stages sit on different grids since
   the upstream crop), which the one-layer store no longer is. The ranked store is now
   documented (README, SERVER.md).
+- **Cached inputs are kept decoded.** A DICOM series was decoded on every job that read it -
+  13 s for a 709-slice CT on a Modal worker, 45 s cold from a volume another container wrote -
+  whether or not it had been read a minute earlier. The series cache and the input store now keep
+  each image input as its *input copy* instead of its files: the volume `io.read_image` produced,
+  written once when the input is stored as a single uncompressed zarr chunk in a zip, with duckn's
+  geometry and the DICOM tags SimpleITK reports (series-level in `extensions.dicom`, per-slice in
+  the slice axis' samples, in duckn's `dicom-spec` encoding), and read back by mapping that chunk -
+  0.25 s for the same CT, voxels identical, geometry identical (within 1e-12 for a tilted series).
+  One form per entry: the original exists only while it is transcoded, and nothing downstream is
+  handed it. Label maps and anything the reader refuses keep their files; `HAVERSACK_INPUT_COPY=0`
+  keeps originals. Results and keys do not move. A fetched input cached before this is fetched
+  again once (its entry name now carries the reader version); `GET /v1/inputs/{digest}` gains
+  `stored_form` and `stored_bytes`. The content store's raw-NRRD fast copy is gone. pydicom joins
+  the `duckn` extra (as a data dictionary: SimpleITK's tag keys to keywords); every Modal image
+  that stores inputs carries the extra, and one without it still reads uncompressed copies.
+  `docs/input-copy.md` is the specification.
+- An operator may store input copies compressed: `HAVERSACK_INPUT_COPY_COMPRESSION=zstd` (zstd
+  level 3 through blosc with bit shuffling, in 32-slice chunks). Across seven local datasets the
+  copies were 3.1-5.8x smaller (the 709-slice CT 270 MB instead of 837 MB; int32 CTs 4.5-4.9x),
+  and a read took 2-3x the mapped one; on Modal the difference was 0.3-0.5 s a read on that CT
+  (measured with plain zstd, which reads alike). A cold read from a volume was no faster either
+  way, since the volume's own latency swamps the bytes. It is the
+  choice where cache room is the constraint - a Modal worker's series cache is RAM - and applies
+  only to copies written after it is set. `GET /v1/inputs/{digest}` reports
+  `stored_compression`. Both input-copy variables are now forwarded into Modal containers;
+  `HAVERSACK_INPUT_COPY=0` had never reached them.
+- SynthStrip runs on NumPy 2 and installs beside the other engines. synthstrip-torch 0.1.1 drops
+  its `numpy<2` cap, which existed because surfa 0.6.3 (its last release) breaks in `reorient`
+  on NumPy 2; it takes surfa at upstream's unreleased fix instead (`8aa4a5f6`). On CPU, NumPy
+  2.5.3 with that surfa gives the same distance field and mask bit for bit as NumPy 1.26 with
+  surfa 0.6.3. The `synthstrip` extra leaves every uv conflict group, so it no longer needs its
+  own environment, and SynthStrip's Modal image takes the `duckn` extra and reads compressed
+  input copies. synthstrip-torch is marked unsupported: kept runnable, not developed.
+- VoxTell and the MONAI bundles are documented as experimental: off unless a deployment sets
+  `HAVERSACK_VOXTELL=1` / `HAVERSACK_MONAI=1` (as they already were - neither has an in-process
+  runner), Modal-only, heavy, and not maintained for general use. They showed the engine model
+  can carry a free-text prompter and a foreign model zoo; they are not what most users need.
+  A VISTA3D evaluation against TotalSegmentator (four CTs, median Dice 0.82-0.92, pelvic
+  structures reported on chest-only scans, non-commercial weights) found no case for adding it.
 
 - **A Modal deployment can take the local server's bearer token, and `haversack remote`
   reaches it.** `haversack modal deploy --token T`, or `HAVERSACK_SERVER_TOKEN` in its

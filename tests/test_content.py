@@ -252,13 +252,6 @@ def test_an_absurdly_long_key_still_falls_back_to_a_hash(tmp_path):
     assert cache._entry("idc:" + "x" * 400).name.startswith("h_")
 
 
-# -- the decoded fast path --------------------------------------------------
-
-def _decoder():
-    from haversack.serve import decode_for_fast_read
-    return decode_for_fast_read
-
-
 def _real_volume(tmp_path, name="scan.nii.gz"):
     sitk = pytest.importorskip("SimpleITK")
     import numpy as np
@@ -268,105 +261,8 @@ def _real_volume(tmp_path, name="scan.nii.gz"):
     return p
 
 
-def test_the_decoded_copy_never_changes_what_the_digest_addresses(tmp_path):
-    """The digest is over the bytes the client sent. A faster copy may sit
-    beside them; it may not replace them, or a client could no longer compute
-    the digest it is meant to refer to."""
-    from haversack.serve import SeriesCache
-    src = _real_volume(tmp_path)
-    store = ContentStore(SeriesCache(tmp_path / "s", lambda k, e: None),
-                         decode=_decoder())
-    d = store.put_file(src)
-    fast = store.fast_path(d)
-    assert fast != store.resolve(d)                       # a different file
-    assert digest_file(store.resolve(d)) == d             # originals untouched
-    assert digest_file(src) == d
-
-
-def test_the_decoded_copy_reads_back_identically(tmp_path):
-    sitk = pytest.importorskip("SimpleITK")
-    import numpy as np
-    from haversack.serve import SeriesCache
-    src = _real_volume(tmp_path)
-    store = ContentStore(SeriesCache(tmp_path / "s", lambda k, e: None),
-                         decode=_decoder())
-    d = store.put_file(src)
-    a = sitk.GetArrayFromImage(sitk.ReadImage(str(store.resolve(d))))
-    b = sitk.GetArrayFromImage(sitk.ReadImage(str(store.fast_path(d))))
-    assert np.array_equal(a, b)
-
-
-def test_it_is_materialized_once_and_lazily(tmp_path):
-    """Lazy, so a preloaded input nobody runs never pays for a decode; once, so
-    the second reader gets it free."""
-    from haversack.serve import SeriesCache
-    calls = []
-
-    def counting(src, dst):
-        calls.append(src)
-        return _decoder()(src, dst)
-
-    src = _real_volume(tmp_path)
-    store = ContentStore(SeriesCache(tmp_path / "s", lambda k, e: None),
-                         decode=counting)
-    d = store.put_file(src)
-    assert calls == []                                    # nothing on ingest
-    first, second = store.fast_path(d), store.fast_path(d)
-    assert first == second and len(calls) == 1
-
-
-def test_a_store_without_a_decoder_just_reads_the_original(tmp_path):
-    from haversack.serve import SeriesCache
-    src = _real_volume(tmp_path)
-    store = ContentStore(SeriesCache(tmp_path / "s", lambda k, e: None))
-    d = store.put_file(src)
-    assert store.fast_path(d) == store.resolve(d)
-
-
-def test_a_failing_decode_degrades_to_the_original(tmp_path):
-    """It is a cache. Anything that goes wrong costs a re-decode, never an
-    answer."""
-    from haversack.serve import SeriesCache
-
-    def boom(src, dst):
-        raise RuntimeError("no")
-
-    src = _real_volume(tmp_path)
-    store = ContentStore(SeriesCache(tmp_path / "s", lambda k, e: None), decode=boom)
-    d = store.put_file(src)
-    assert store.fast_path(d) == store.resolve(d)
-
-
-def test_the_lru_budget_can_see_the_decoded_copy(tmp_path):
-    """An eviction policy that cannot see half of what it stores is not one."""
-    from haversack.serve import SeriesCache
-    cache = SeriesCache(tmp_path / "s", lambda k, e: None)
-    store = ContentStore(cache, decode=_decoder())
-    d = store.put_file(_real_volume(tmp_path))
-    entry = cache.path(d).parent
-    before = int((entry / cache.MARKER).read_text(encoding="utf-8"))
-    store.fast_path(d)
-    assert int((entry / cache.MARKER).read_text(encoding="utf-8")) > before
-
-
-def test_a_crash_leftover_is_never_served_as_the_decoded_copy(tmp_path):
-    """The decoder writes to a temp name and renames, so the rename is what
-    makes a complete file visible. Finding the copy by SCANNING the directory
-    defeats that: a `.partial` left by a crash mid-write gets handed to a reader
-    as though it were the whole volume."""
-    from haversack.content import DECODED_NAME
-    from haversack.serve import SeriesCache
-    cache = SeriesCache(tmp_path / "s", lambda k, e: None)
-    store = ContentStore(cache, decode=_decoder())
-    d = store.put_file(_real_volume(tmp_path))
-    leftover = cache.path(d).parent / "decoded" / ".partial.nrrd"
-    leftover.parent.mkdir(parents=True, exist_ok=True)
-    leftover.write_bytes(b"TRUNCATED")
-
-    got = store.fast_path(d)
-    assert got.name == DECODED_NAME
-    sitk = pytest.importorskip("SimpleITK")
-    assert sitk.ReadImage(str(got)).GetSize()          # and it is readable
+# The decoded fast path's tests (a raw NRRD beside the original, made lazily) went with it on
+# 2026-09-25: an entry keeps ONE form now, the input copy - tests/test_input_copy.py.
 
 
 def test_content_we_cannot_identify_is_never_stored(tmp_path, store):

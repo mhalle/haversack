@@ -800,6 +800,14 @@ def test_the_idc_cloud_knob_is_forwarded_to_the_container():
     assert "HAVERSACK_IDC_CLOUD" in modal_app._RUNTIME_KNOBS
 
 
+def test_the_input_copy_knobs_are_forwarded_to_the_container():
+    """input_copy reads both at every store, inside the worker or api container, from its own
+    module - which the import-time knob scan does not read - so only this holds them forwarded.
+    The names are input_copy's own constants: a rename there must not leave this passing."""
+    from haversack import input_copy, modal_app
+    assert {input_copy.ENV, input_copy.COMPRESSION_ENV} <= set(modal_app._RUNTIME_KNOBS)
+
+
 def test_the_transpose_knob_is_forwarded_to_the_container():
     """The Worker reads HAVERSACK_ALLOW_TRANSPOSE at construction, but the
     container gets only what _RUNTIME_KNOBS forwards at deploy. Unforwarded, the

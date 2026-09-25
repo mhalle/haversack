@@ -307,7 +307,8 @@ def _command_line() -> click.Group:
         "haversack", context_settings=_CONTEXT, params=[_version_option()],
         help=('Medical-image segmentation with many model families behind one command: '
               'TotalSegmentator, MOOSE, MRSegmentator, stock nnU-Net, FastSurfer, SynthStrip, '
-              'VoxTell, MONAI bundles. Runs on Apple Silicon (MPS), CUDA or CPU; also a local '
+              'and (experimental, opt-in) VoxTell and MONAI bundles. Runs on Apple Silicon (MPS), '
+              'CUDA or CPU; also a local '
               'REST server and a client for one.'),
         epilog=_verbatim("""examples:
   haversack tasks                                          what can be segmented

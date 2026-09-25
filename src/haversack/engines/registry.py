@@ -27,9 +27,9 @@ do honestly, and they are worth stating so the question stops being reopened:
    are declared statically - an optional engine's in an adapter module that is
    imported only when that engine is enabled. An engine that appeared at runtime
    could not have a Modal worker at all.
-3. Engines live in mutually conflicting environments - synthstrip pins
-   ``numpy<2`` where the torch extra resolves past 2 - so "the set of installed
-   engines" is not a coherent question to ask one interpreter.
+3. Engines live in mutually conflicting environments - voxtell and monai are
+   declared conflicting (and synthstrip pinned ``numpy<2`` until 2026-09-25) - so
+   "the set of installed engines" is not a coherent question to ask one interpreter.
 
 What DOES keep the cost down is this row owning every per-engine fact that code
 outside the engine needs. Each field below was added because a consumer was

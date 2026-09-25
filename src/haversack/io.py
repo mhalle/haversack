@@ -167,11 +167,35 @@ def read_image(path):
     This is the task-independent half of :func:`read` - reorientation is the
     task's decision (see :func:`reader_reorients`), so a pre-reader staging
     inputs ahead of the pipeline uses this and lets ``pipeline.segment`` apply
-    orientation itself, exactly as it does for any caller-held image."""
+    orientation itself, exactly as it does for any caller-held image.
+
+    An input copy (:mod:`haversack.input_copy`, a cached input decoded once) is read by its
+    own mapped reader, and falls back to the generic duckn path should its layout be any
+    other than the one that reader was written for."""
+    return _read_image(path, tags=False)[0]
+
+
+def read_image_and_tags(path):
+    """:func:`read_image`, plus the DICOM tags SimpleITK reports for it: ``(image,
+    per_slice)``, ``per_slice`` a list of ``{"gggg|eeee": value}`` dicts - one per slice, in
+    the volume's z order, for a DICOM series (the series reader's own per-slice dictionaries,
+    from the SAME decode); the file's one dictionary for a single file; ``[]`` for a volume
+    that carries none (a duckn store). What the input copy records (:mod:`haversack.dicom_tags`)."""
+    return _read_image(path, tags=True)
+
+
+def _read_image(path, *, tags: bool):
     sitk = _sitk()
     p = Path(path)
     from .duckn_io import is_duckn_store, read_duckn_image
-    if is_duckn_store(p):                 # a duckn/zarr volume (directory or zarr zip)
+    from .input_copy import NotACopy, is_copy, read_copy
+    per_slice: list = []
+    if is_copy(p):
+        try:
+            image = read_copy(p)
+        except NotACopy:                  # another layout: duckn's own reader
+            image = read_duckn_image(p)
+    elif is_duckn_store(p):               # a duckn/zarr volume (directory or zarr zip)
         image = read_duckn_image(p)
     elif p.is_dir():
         reader = sitk.ImageSeriesReader()
@@ -183,11 +207,17 @@ def read_image(path):
             loose = [q for q in sorted(p.iterdir())
                      if q.is_file() and not q.name.startswith(".")]
             if len(loose) == 1:
-                return read_image(loose[0])
+                return _read_image(loose[0], tags=tags)
             raise InputError(f"no DICOM series found in {p}"
                              + (f" ({len(loose)} non-DICOM files)" if loose else ""))
         reader.SetFileNames(files)
+        if tags:
+            # the per-slice dictionaries come from the same decode (measured: no cost)
+            reader.MetaDataDictionaryArrayUpdateOn()
         image = reader.Execute()
+        if tags:
+            per_slice = [{k: reader.GetMetaData(i, k) for k in reader.GetMetaDataKeys(i)}
+                         for i in range(len(files))]
         # The reader decodes and stacks; the geometry comes from the tags. See
         # _series_geometry for why its own claim cannot be trusted.
         origin, direction, spacing = _series_geometry(files)
@@ -202,9 +232,11 @@ def read_image(path):
             if "orthonormal" not in str(e):
                 raise InputError(f"cannot read {p} as an image: {_sitk_reason(e)}") from None
             image = _read_with_snapped_affine(p, e)
+        if tags:
+            per_slice = [{k: image.GetMetaData(k) for k in image.GetMetaDataKeys()}]
     if image.GetDimension() != 3:
         raise InputError(f"expected a 3D image; {p} has {image.GetDimension()} dimensions")
-    return image
+    return image, per_slice
 
 
 def _read_with_snapped_affine(p, itk_error, tol: float = 1e-3):
