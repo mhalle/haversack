@@ -5330,7 +5330,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         require_auth(request)
         if job_kind not in ("segment", "embed", "rankfield"):
             raise HTTPException(422, f"unknown job kind {job_kind!r}; a job is segment (the default), "
-                                     "embed or ranked")
+                                     "embed or rankfield")
         try:
             opts = json.loads(options)
             if not isinstance(opts, dict):
@@ -5416,20 +5416,20 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             # and exists only for a task whose engine hands over a distribution.
             from .ranked_output import supports_store_output
             if not getattr(executor, "ranked_stores", False):
-                raise HTTPException(501, "this server writes no ranked stores (the duckn extra is not "
+                raise HTTPException(501, "this server writes no rank fields (the duckn extra is not "
                                          "installed where its jobs run); write one locally with "
                                          "`haversack segment ... -o <name>.duckn.zip`")
             if asked:
                 raise HTTPException(422, {"code": "no_deliverables",
-                                          "message": "a ranked job renders no deliverables: a preview "
+                                          "message": "a rankfield job renders no deliverables: a preview "
                                                      "and statistics are of labels"})
             if opts:
                 raise HTTPException(422, {"code": "no_options",
-                                          "message": "a ranked store takes no options (its depth and "
+                                          "message": "a rank field takes no options (its depth and "
                                                      f"clip are the store's own rule); got {sorted(opts)}"})
             if not supports_store_output(task):
                 raise HTTPException(422, {"code": "no_distribution",
-                                          "message": f"{task} has no ranked store: its engine returns "
+                                          "message": f"{task} has no rank field: its engine returns "
                                                      "labels, not the distribution a store holds"})
             wanted = None
         # The pin travels with the job so the worker's catalog installs that version or

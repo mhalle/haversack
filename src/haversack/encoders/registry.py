@@ -133,8 +133,10 @@ def resolve(name: str) -> EncoderSpec:
     base = ALIASES.get(base, base)
     spec = ENCODERS.get(base)
     if spec is None:
-        near = sorted(n for n in ENCODERS if n.split(":")[0] == base.split(":")[0]) or sorted(ENCODERS)
-        raise InputError(f"no encoder {name!r}; haversack embeds with: {', '.join(near)}")
+        # every encoder, not only the family asked about: `radar:nope` used to answer
+        # "embeds with: radar:pretrain" alone, as if the nnU-Net encoders did not exist
+        # (seen on a smoke deployment, 2026-09-25)
+        raise InputError(f"no encoder {name!r}; haversack embeds with: {', '.join(sorted(ENCODERS))}")
     if pin and not spec.revision.startswith(pin):
         raise InputError(f"{name!r}: this haversack runs {spec.name} at revision {spec.revision[:12]}, not {pin}")
     return spec

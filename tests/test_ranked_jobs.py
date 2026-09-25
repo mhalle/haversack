@@ -174,6 +174,19 @@ def test_refusals_name_their_cause(tmp_path, monkeypatch):
     ex.close()
 
 
+def test_an_unknown_kind_names_the_kinds_by_their_wire_names(tmp_path, monkeypatch):
+    """The refusal of `kind=ranked` listed "segment, embed or ranked" - the old name, the one
+    it had just refused - after the kind became `rankfield` (seen on a smoke, 2026-09-25)."""
+    seg, store, ex, client = make(tmp_path, monkeypatch)
+    for kind in ("ranked", "nope"):
+        r = client.post("/v1/jobs", data={"task": "total_fast", "kind": kind},
+                        files={"file": ("ct.nii.gz", b"x")})
+        assert r.status_code == 422
+        msg = r.json()["detail"]
+        assert "rankfield" in msg and "or ranked" not in msg, msg
+    ex.close()
+
+
 def test_a_server_that_cannot_write_a_store_says_so_before_any_job_exists(tmp_path, monkeypatch):
     seg, store, ex, client = make(tmp_path, monkeypatch)
     monkeypatch.setattr(ranked_output, "store_extra_missing", lambda: ["duckn"])

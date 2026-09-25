@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- **`haversack embed` finishes cleanly again.** Since the embedding rename it wrote the field and
+  then failed printing its summary (exit 1). Refusals name things by their current names: an
+  unknown job kind lists `rankfield`, rank-field refusals say "rank field", and an unknown
+  encoder lists every encoder rather than its own family's.
 - **Faster submits and finishes on Modal.** Profiled on a deployment with three fresh IDC CTs:
   a submit answered from the result cache copied the result into the api container to read its
   record, and concurrent ones queued behind each other's copies (1-4 s each); it now reads the

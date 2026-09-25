@@ -2125,7 +2125,7 @@ def _cmd_embed(args) -> int:
     if args.as_json:
         print(_json.dumps(r, indent=1))
     else:
-        print(f"{r['field']}: {r['encoder']} on {r['device']} ({r['dtype']}{', int8' if r['int8'] else ''}), "
+        print(f"{r['embedding']}: {r['encoder']} on {r['device']} ({r['dtype']}{', int8' if r['int8'] else ''}), "
               f"model grid {tuple(r['model_grid'])}, {sum(r['tokens'])} tokens, {r['bytes'] / 1e6:.1f} MB, "
               f"{r['seconds']['total']} s; license {r['license']}")
     return 0

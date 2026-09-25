@@ -288,6 +288,25 @@ class TestEmbedEndToEnd(_RandomRadar):
         self.assertEqual(f.embedding.layers, ("deep", "mid", "fine"))
         self.assertEqual([c["doi"] for c in p.extra["attribution"]["cite"]], ["10.1126/science.aec6129"])
 
+    def test_the_embed_command_says_what_it_wrote(self):
+        """The command's closing line read ``r['field']`` after the result key became
+        ``embedding`` (the 2026-09-24 rename): every ``haversack embed`` without --json wrote
+        its field and then died with a KeyError, exit 1 (found 2026-09-25)."""
+        import contextlib
+        import io
+
+        import SimpleITK as sitk
+        from haversack import cli
+        ct = self.tmp / "ct.nii.gz"
+        sitk.WriteImage(_sphere_ct(), str(ct))
+        out = self.tmp / "f.zarr.zip"
+        so, se = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(so), contextlib.redirect_stderr(se):
+            code = cli.main(["embed", str(ct), "-e", "radar:test", "-o", str(out), "--device", "cpu", "-q"])
+        self.assertEqual(code, 0, se.getvalue())
+        self.assertIn(str(out), so.getvalue())
+        self.assertIn("radar:test on cpu", so.getvalue())
+
     def test_embed_refuses_before_any_work(self):
         from haversack.encoders.pipeline import embed
         with self.assertRaisesRegex(InputError, "zarr.zip"):
@@ -374,6 +393,14 @@ class TestCommands(_WeightsRoot):
         self.assertEqual(code, 2)
         self.assertIn("no encoder", err)
         self.assertNotIn("Traceback", err)
+
+    def test_an_unknown_encoder_names_every_encoder(self):
+        """``radar:nope`` listed the radar family alone, as if haversack embedded with
+        nothing else (seen on a smoke deployment, 2026-09-25)."""
+        with self.assertRaises(InputError) as e:
+            resolve("radar:nope")
+        for name in ENCODERS:
+            self.assertIn(name, str(e.exception))
 
     def test_weights_fetch_from_a_wrong_file_is_refused(self):
         bad = self.tmp / "bad.pth"
