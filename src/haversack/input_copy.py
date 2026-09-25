@@ -209,9 +209,12 @@ def _source_size(content) -> tuple[int, int]:
     return len(files), sum(q.stat().st_size for q in files)
 
 
-def _metadata(image, per_slice, *, source, source_digest, source_size=(None, None), how="uncompressed"):
+def _metadata(image, per_slice, *, source, source_digest, source_size=(None, None), how="uncompressed",
+              n: int | None = None):
     """The duckn metadata of the copy, through duckn's own models: the geometry is
-    ``from_sitk``'s (LPS - no flip either way), the rest is filled into its fields."""
+    ``from_sitk``'s (LPS - no flip either way), the rest is filled into its fields. ``n`` is the
+    number of slices when ``image`` is only the geometry (a streamed copy's one-slice stand-in:
+    duckn states an axis by its direction and spacing, never its length)."""
     import haversack
     import SimpleITK as sitk
     from duckn.models import SampleMetadata
@@ -225,7 +228,7 @@ def _metadata(image, per_slice, *, source, source_digest, source_size=(None, Non
     z = meta.axes[0]
     if thick is not None:
         z.thickness = thick
-    n = int(vol.raw.shape[0])
+    n = int(vol.raw.shape[0]) if n is None else int(n)
     if (any(slices) or thick_each) and len(per_slice) == n:
         z.samples = [SampleMetadata(thickness=(thick_each[i] if thick_each else None),
                                     metadata=({"dicom": slices[i]} if slices and slices[i] else None))
@@ -266,6 +269,91 @@ def _write(vol, out: Path, how: str = "uncompressed") -> None:
         store.close()
 
 
+def _geometry_image(stream):
+    """A one-slice image carrying the stream's geometry and pixel type - what ``from_sitk``
+    needs to state the copy's geometry, without the volume."""
+    import SimpleITK as sitk
+    image = sitk.Image([int(stream.shape[2]), int(stream.shape[1]), 1], stream.pixel_id)
+    image.SetOrigin(stream.origin)
+    image.SetSpacing(stream.spacing)
+    image.SetDirection(stream.direction)
+    return image
+
+
+def _write_streamed(stream, out: Path, attributes) -> list:
+    """Write ``stream`` as the compressed copy at ``out``, a chunk per slab, and return each
+    slab's sha256 for the check. The chunks go to a zarr directory beside ``out`` first, because
+    the attributes (the per-slice tags) are known only once the last slab is read; the directory
+    is then packed into the stored zip the reader takes (zarr.json, c/<k>/0/0), and removed."""
+    import hashlib
+
+    import numpy as np
+    import shutil
+    import tempfile
+    import zipfile
+
+    import zarr
+    from zarr.codecs import BloscCodec
+    from zarr.storage import LocalStore
+    z, y, x = (int(v) for v in stream.shape)
+    k_slices = min(CHUNK_SLICES, z)
+    work = Path(tempfile.mkdtemp(prefix=".stream-", dir=out.parent))
+    try:
+        arr = zarr.create_array(
+            LocalStore(str(work)), shape=(z, y, x), dtype=stream.dtype, chunks=(k_slices, y, x),
+            compressors=[BloscCodec(cname="zstd", clevel=ZSTD_LEVEL, shuffle=BLOSC_SHUFFLE)],
+            fill_value=0, config={"write_empty_chunks": True})
+        digests, per_slice, at = [], [], 0
+        for slab, tags in stream.slabs(k_slices):
+            if slab.dtype != stream.dtype or slab.shape[1:] != (y, x):
+                raise ValueError(f"slab at {at}: {slab.dtype} {slab.shape}, not the stream's")
+            arr[at:at + len(slab)] = slab
+            digests.append(hashlib.sha256(np.ascontiguousarray(slab).tobytes()).hexdigest())
+            per_slice.extend(tags)
+            at += len(slab)
+        if at != z:
+            raise ValueError(f"the source gave {at} slices, not {z}")
+        arr.update_attributes(attributes(per_slice or stream.tags))
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as zf:
+            zf.write(work / "zarr.json", "zarr.json")
+            for k in range(len(digests)):
+                zf.write(work / "c" / str(k) / "0" / "0", f"c/{k}/0/0")
+        return digests
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _check_streamed(path: Path, stream, digests: list) -> None:
+    """The streamed copy is the stream, checked a chunk at a time (never the whole volume):
+    its layout, dtype and shape; each chunk's sha256 against its slab's; its geometry, read the
+    way the reader states it, against the source's within :data:`GEOMETRY_TOLERANCE`."""
+    import hashlib
+
+    import numpy as np
+
+    import zarr
+    from zarr.storage import ZipStore
+    meta, how, _, dt, shape = _layout(path)
+    if how != "zstd" or tuple(shape) != tuple(stream.shape) \
+            or dt.newbyteorder("=") != np.dtype(stream.dtype).newbyteorder("="):
+        raise ValueError("the copy's layout is not the stream's")
+    store = ZipStore(str(path), mode="r")
+    try:
+        arr = zarr.open_array(store, mode="r")
+        k_slices = arr.chunks[0]
+        for k, want in enumerate(digests):
+            got = np.ascontiguousarray(arr[k * k_slices:(k + 1) * k_slices])
+            if hashlib.sha256(got.tobytes()).hexdigest() != want:
+                raise ValueError(f"chunk {k} does not read back as the slab written")
+    finally:
+        store.close()
+    origin, spacing, direction = _geometry_of(_duckn(meta))
+    for got, want in ((origin, stream.origin), (spacing, stream.spacing),
+                      (direction, stream.direction)):
+        if not np.allclose(got, want, rtol=0, atol=GEOMETRY_TOLERANCE):
+            raise ValueError("the copy's geometry is not the source's")
+
+
 def transcode(content, entry, *, source=None, source_digest=None) -> Path | None:
     """Write ``entry``'s copy of ``content`` and return its path - or None, when the input is
     not one to transcode (:func:`wanted`), the reader refuses it, or the copy does not read back
@@ -278,6 +366,23 @@ def transcode(content, entry, *, source=None, source_digest=None) -> Path | None
     from .errors import InputError
     if not wanted(content):
         return None
+    # Slab by slab where the source allows it (2026-09-25): memory bounded by a slab, where the
+    # whole-volume path below holds the volume several times over (~3 GB at peak for a
+    # 709-slice CT, in an api container with 2 GB). The compressed form only - it is stored in
+    # whole-slice chunks already; the uncompressed form is one chunk.
+    try:
+        if compression() == "zstd":
+            from .input_stream import stream_of
+            stream = stream_of(content)
+            if stream is not None:
+                return _transcode_streamed(stream, content, entry, source=source,
+                                           source_digest=source_digest)
+    except InputError:
+        return None                          # refused: the original stays, and fails at read
+    except Exception as e:                   # noqa: BLE001 - the whole path below decides
+        import sys
+        print(f"warning: {source or content} is copied whole: the slab reader could not plan it "
+              f"({type(e).__name__}: {e})", file=sys.stderr, flush=True)
     try:
         image, per_slice = nio.read_image_and_tags(content)
     except InputError:
@@ -313,6 +418,34 @@ def transcode(content, entry, *, source=None, source_digest=None) -> Path | None
         import sys
         print(f"warning: no input copy for {source or content}: {type(e).__name__}: {e}",
               file=sys.stderr, flush=True)
+        partial.unlink(missing_ok=True)
+        return None
+
+
+def _transcode_streamed(stream, content, entry, *, source, source_digest) -> Path | None:
+    """:func:`transcode` for a slab source: written a chunk per slab, checked a chunk at a time,
+    placed as the whole path places. Any failure keeps the original, as there."""
+    from duckn.models import duckn_attrs
+    final = copy_path(entry)
+    final.parent.mkdir(parents=True, exist_ok=True)
+    partial = final.with_name("." + COPY_NAME + ".partial")
+    geometry = _geometry_image(stream)
+    size = _source_size(content)
+    n = int(stream.shape[0])
+
+    def attributes(per_slice):
+        vol = _metadata(geometry, per_slice, source=source, source_digest=source_digest,
+                        source_size=size, how="zstd", n=n)
+        return duckn_attrs(vol.metadata)
+    try:
+        digests = _write_streamed(stream, partial, attributes)
+        _check_streamed(partial, stream, digests)
+        os.replace(partial, final)
+        return final
+    except Exception as e:                 # noqa: BLE001 - any failure keeps the original
+        import sys
+        print(f"warning: no input copy for {source or content}: {type(e).__name__}: {e}; "
+              "the original is kept", file=sys.stderr, flush=True)
         partial.unlink(missing_ok=True)
         return None
 
@@ -480,18 +613,27 @@ def _to_sitk(attrs: dict, raw):
         pass
     else:
         return to_sitk(Volume(raw=raw, metadata=DucknMetadata(**attrs)))
-    import numpy as np
     import SimpleITK as sitk
+    origin, spacing, direction = _geometry_of(attrs)
+    image = sitk.GetImageFromArray(raw)
+    image.SetSpacing(spacing)
+    image.SetOrigin(origin)
+    image.SetDirection(direction)
+    return image
+
+
+def _geometry_of(attrs: dict):
+    """``(origin, spacing, direction)`` as SimpleITK states them, from the one layout this module
+    writes: LPS space, axes z, y, x, each ``space_direction`` the direction cosine times the
+    spacing. A test holds this equal to duckn's ``to_sitk`` on the same file."""
+    import numpy as np
     if attrs.get("space") not in ("left-posterior-superior", "LPS"):
         raise NotACopy("without duckn only an LPS copy can be read")
     vecs = [np.asarray(a["space_direction"], dtype=np.float64) for a in attrs["axes"]][::-1]
     spacing = [float(np.linalg.norm(v)) for v in vecs]      # x, y, z
     cols = np.stack([v / s for v, s in zip(vecs, spacing)], axis=1)
-    image = sitk.GetImageFromArray(raw)
-    image.SetSpacing(spacing)
-    image.SetOrigin([float(v) for v in attrs["space_origin"]])
-    image.SetDirection([float(v) for v in cols.ravel()])
-    return image
+    return ([float(v) for v in attrs["space_origin"]], spacing,
+            [float(v) for v in cols.ravel()])
 
 
 def slice_tags(path, keyword: str) -> list:

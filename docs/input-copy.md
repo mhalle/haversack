@@ -415,3 +415,53 @@ blosc-zstd bitshuffle form this section chose - because the measurements above f
 room matters and cost ~0.3-0.9 s a read against the 12-13 s decode it replaces either way.
 `uncompressed` stays for a host that wants the mapped read, or runs VoxTell or MONAI: their images lack
 zarr, so they cannot read a compressed copy (both are experimental and opt-in).
+
+## 14. Written a slab at a time (2026-09-25)
+
+The whole-volume transcode held the volume several times over - the SimpleITK image, the array
+duckn writes from, the copy read back and compared - and peaked at 3.3 GB for the 709-slice CT, in
+an api container that has 2 GB (the api transcodes uploads). The compressed copy is stored in
+whole-slice chunks, so a source that can hand over a slab of slices is written a chunk per slab
+and checked a chunk at a time (`input_stream.py`, `input_copy._transcode_streamed`):
+
+- **Sources**: a DICOM series (one file per slice) and a gzipped NIfTI (one sequential
+  decompression after SimpleITK reads the header alone). Anything else - several series, a
+  multi-frame file, a scaled, 4-D or type-converting NIfTI, a header SimpleITK will not read
+  alone, any other format, and the uncompressed form (one chunk) - takes the whole path, which is
+  unchanged.
+- **The same image the reader makes**: geometry from `io._series_geometry` (which also refuses
+  what the reader refuses), every slab read in the FIRST file's pixel type (a whole series read
+  takes it; a slab starting at a fractional-slope slice would otherwise read as float), and each
+  slab's per-slice tag dictionaries.
+- **The listing is pydicom's, header only.** GDCM's `GetGDCMSeriesFileNames` reads the files to
+  list them: 920 MB peak and ~500 MB kept resident on the 709-slice CT, more than the slabs. Sorting
+  by position along the slice normal gives GDCM's order (four real series; a test against GDCM on
+  descending positions under shuffled names).
+- **Checked, then placed**: each chunk read back and hashed against its slab, the layout, dtype,
+  shape and geometry as the reader states them; a source that ends early, a slab that is not the
+  stream's shape, or any failure keeps the original, as the whole path does. The chunks are
+  written to a `.stream-*` zarr directory beside the partial file (the attributes hold every
+  slice's tags, known only at the end) and packed into the stored zip, then removed.
+
+Measured locally (M2; each transcode in a fresh process; `zarr.json` equal bar the reader's
+version stamp and every chunk byte-equal to the whole path's on all seven):
+
+| dataset | whole: time, peak | streamed: time, peak |
+|---|---|---|
+| idc-torso1 CT, 709 slices | 7.1 s, 3311 MB | 9.2 s, 526 MB |
+| NLST chest CT, 249 slices | 2.1 s, 1784 MB | 2.3 s, 325 MB |
+| C3N-00704 CTPA, 418 slices | 4.7 s, 2599 MB | 4.9 s, 350 MB |
+| MSB-02664 CT, 409 slices | 4.3 s, 2597 MB | 4.6 s, 346 MB |
+| CT_Abdo.nii.gz | 0.30 s, 248 MB | 0.42 s, 130 MB |
+| ct_RAS.nii.gz | 0.79 s, 1128 MB | 1.5 s, 288 MB |
+| ds000114 T1.nii.gz | 0.33 s, 343 MB | 0.46 s, 147 MB |
+
+It is slower by 5-90 %: the whole path's zarr write compresses its chunks in parallel, the slab
+path one chunk after another. A transcode happens once per input; overlapping the next slab's
+read with this one's compression would recover most of it, not built. The slabs themselves reach
+~300 MB on the large CT (imports ~115 MB); the rest of its peak is the pack and the check.
+
+Tests: `tests/test_input_stream.py` (15: streamed = whole on five series shapes and three NIfTIs,
+GDCM's order, the fallbacks, the check, a short source, peak memory in a subprocess). 13 of 13
+mutants killed; two survive as they must - a sanity mutant, and routing a refused series to the
+whole path, which refuses it too (an economy, not a behavior).

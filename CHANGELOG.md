@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **An input copy is written a slab at a time.** Transcoding a DICOM series or a gzipped NIfTI
+  held the volume several times over - 3.3 GB at peak for a 709-slice CT, where Modal's api
+  container (which transcodes uploads) has 2 GB. The compressed copy is written a chunk of 32
+  slices at a time and checked the same way: 526 MB for that CT, 130-350 MB for six others, every
+  chunk byte-identical to the whole-volume path's, at 5-90 % more time (compression is no longer
+  parallel across chunks). Other formats and the uncompressed form take the whole path as before.
 - **A task's ranked store is a cached result, and holds the task's own field.** `POST /v1/jobs`
   with `kind=rankfield` (`haversack remote submit ... -o <name>.duckn.zip`) computes a task's
   output distribution - the store `segment -o x.duckn.zip` writes - and caches it as labels

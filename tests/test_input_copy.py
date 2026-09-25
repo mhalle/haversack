@@ -219,6 +219,10 @@ def test_what_cannot_be_copied_keeps_its_original(tmp_path, monkeypatch):
     assert labels.get_or_fetch("result:" + "a" * 64).name == "series"
     # a failed copy (its read-back disagrees) keeps the original, and leaves no partial file
     monkeypatch.setattr(ic, "read_copy", lambda *a, **k: sitk.Image(1, 1, 1, sitk.sitkInt16))
+
+    def disagree(*a):                        # the slab path's check (2026-09-25)
+        raise ValueError("chunk 0 does not read back as the slab written")
+    monkeypatch.setattr(ic, "_check_streamed", disagree)
     broken = _fetching_cache(tmp_path / "b", lambda d: write_series(d))
     got = broken.get_or_fetch("fixture:b")
     assert got.name == "series" and not list(ic.copy_path(broken.entry("fixture:b")).parent.glob("*"))

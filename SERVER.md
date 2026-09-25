@@ -349,7 +349,8 @@ than the raw volume for the CTs and MR measured, read in up to about a second.
 `HAVERSACK_INPUT_COPY_COMPRESSION=uncompressed` stores them uncompressed instead - the fastest read (a
 fraction of a second), at 3-5x the room, and readable without duckn or zarr, which the
 experimental VoxTell and MONAI images lack. `HAVERSACK_INPUT_COPY=0` keeps originals. The setting
-applies to copies written after it is set; a cache may hold both forms. On Modal, both variables are forwarded from the
+applies to copies written after it is set; a cache may hold both forms. A DICOM series or a gzipped NIfTI is
+compressed a slab of slices at a time, so its transcode needs a few hundred MB, not several times the volume. On Modal, both variables are forwarded from the
 deploying shell. The format and its rules are in `docs/input-copy.md`.
 
 ## Results as inputs

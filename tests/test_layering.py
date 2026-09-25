@@ -32,7 +32,7 @@ PIPELINE = {"io", "preprocess", "frame", "network", "pipeline", "cli", "tasks", 
             "weights_fetch", "trainers", "result", "cache", "segmenter", "weights", "progress", "job",
             "serve", "client", "modal_app", "sources", "ecosystems", "preview", "statistics",
             "schemas", "content", "objectcache", "jobstore", "jobpolicy", "filelock", "fetchlib", "attribution", "cache_admin", "ranked_store", "ranked_build",
-            "ranked_output", "ranked_compose", "view", "ranked_restore", "duckn_io", "input_copy",
+            "ranked_output", "ranked_compose", "view", "ranked_restore", "duckn_io", "input_copy", "input_stream",
             "segments", "labelmap",
             # the encoders subpackage (2026-09-23): each family module is pipeline - it reads images
             # and loads weights - and a new one must be classified here like any other module
