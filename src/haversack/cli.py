@@ -830,7 +830,9 @@ def _command_line() -> click.Group:
                          help='a task name the server lists (`haversack remote tasks`)'),
             click.Option(['-o', '--output'],
                          help='where to save the labels (default: <input>_<task>.seg.nrrd); a '
-                              '.nii.gz or .nii name gets NIfTI, without the segment names'),
+                              '.nii.gz or .nii name gets NIfTI, without the segment names; a '
+                              '.duckn.zip name asks for the task\'s ranked store instead - its '
+                              'output distribution, cached like its labels'),
             click.Option(['--deliverables'], metavar='LIST',
                          help=('what the server renders beside the labels, comma-separated: '
                                'preview, statistics - or "none" for the labels alone '
@@ -1294,8 +1296,20 @@ def _cmd_remote(args) -> int:
         print(json.dumps(c.cancel(args.job_id)))
     elif args.rcmd == "submit":
         wanted = _deliverables_arg(getattr(args, "deliverables", None))
+        # a .duckn.zip output asks for the task's ranked store, not its labels (2026-09-24)
+        low = str(args.output or "").lower()
+        if low.endswith(".duckn"):
+            from .errors import InputError
+            raise InputError(f"{args.output}: a remote ranked store downloads as one file; "
+                             "name it .duckn.zip")
+        # passed only when set: a segmentation's call is exactly what it was
+        by_kind = {"kind": "ranked"} if low.endswith(".duckn.zip") else {}
+        if by_kind and wanted:
+            from .errors import InputError
+            raise InputError("a ranked store renders no deliverables (a preview and statistics "
+                             "are of labels): drop --deliverables, or name a labels output")
         if args.no_wait:
-            print(c.submit(args.input, args.task, deliverables=wanted))
+            print(c.submit(args.input, args.task, deliverables=wanted, **by_kind))
             return 0
         stem = args.input[4:16] if args.input.startswith("idc:") else args.input.rsplit(".nii", 1)[0].rstrip("/")
         out = args.output or f"{stem}_{args.task}.seg.nrrd"
@@ -1308,7 +1322,7 @@ def _cmd_remote(args) -> int:
             if line != _last.get("line"):
                 print(line, file=sys.stderr, flush=True)
                 _last["line"] = line
-        final = c.run(args.input, args.task, out, on_status=show, deliverables=wanted)
+        final = c.run(args.input, args.task, out, on_status=show, deliverables=wanted, **by_kind)
         if final["state"] == "done":
             print("  done      100%", file=sys.stderr, flush=True)
             # asked for and not delivered is a deviation, and deviations are never silent

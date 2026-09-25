@@ -263,3 +263,65 @@ def test_an_artifact_cannot_take_a_stores_name(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         ex.cache.add_artifact(s["key"], RANKED_NAME, src)
     ex.close()
+
+
+# -- the client and the command line --------------------------------------------------
+
+def _client(client):
+    from haversack.client import RemoteClient
+    sent = []
+    real = client.request
+
+    def request(method, url, **kw):
+        if method == "POST":
+            sent.append(dict(kw.get("data") or {}))
+        return real(method, url, **kw)
+    client.request = request
+    rc = RemoteClient("http://testserver")
+    rc._http = client
+    return rc, sent
+
+
+def test_the_client_fetches_a_store_and_refuses_a_name_that_misstates_it(tmp_path, monkeypatch):
+    from haversack.client import RemoteError
+    seg, store, ex, client = make(tmp_path, monkeypatch)
+    rc, sent = _client(client)
+    src = tmp_path / "scan.nii.gz"
+    src.write_bytes(volume_bytes(9))
+    out = tmp_path / "s.duckn.zip"
+    final = rc.ranked(src, "total_fast", out)
+    assert final["state"] == "done" and final["kind"] == "ranked"
+    assert sent[-1]["kind"] == "ranked" and json.loads(sent[-1]["options"]) == {}
+    assert zipfile.is_zipfile(out)
+    for wrong in ("s.zarr.zip", "s.seg.nrrd"):
+        with pytest.raises(RemoteError, match="ranked store"):
+            rc.fetch(final["id"], tmp_path / wrong)
+        assert not (tmp_path / wrong).exists()
+    labels = rc.run(src, "total_fast", tmp_path / "l.seg.nrrd")
+    assert "kind" not in sent[-1]
+    with pytest.raises(RemoteError, match="label map"):
+        rc.fetch(labels["id"], tmp_path / "l.duckn.zip")
+    ex.close()
+
+
+def test_remote_submit_asks_for_a_store_by_the_outputs_name(tmp_path, monkeypatch, capsys):
+    from haversack import cli
+    from haversack.client import RemoteClient
+    from haversack.errors import InputError
+    seen = []
+    monkeypatch.setattr(RemoteClient, "run", lambda self, *a, **k: seen.append(k.get("kind"))
+                        or {"state": "done"})
+    monkeypatch.setattr(RemoteClient, "submit", lambda self, *a, **k: seen.append(k.get("kind"))
+                        or "jid")
+    base = ["remote", "--server", "http://x", "--token", "t", "submit", "idc:1", "--task", "total_fast"]
+    assert cli.main(base + ["-o", str(tmp_path / "a.duckn.zip")]) == 0
+    assert cli.main(base + ["-o", str(tmp_path / "a.seg.nrrd")]) == 0
+    assert cli.main(base + ["-o", str(tmp_path / "a.duckn.zip"), "--no-wait"]) == 0
+    assert seen == ["ranked", None, "ranked"]
+    capsys.readouterr()
+    for bad, why in ((["-o", str(tmp_path / "a.duckn")], "name it .duckn.zip"),
+                     (["-o", str(tmp_path / "a.duckn.zip"), "--deliverables", "preview"],
+                      "renders no deliverables")):
+        assert cli.main(base + bad) != 0
+        assert why in capsys.readouterr().err
+    assert seen == ["ranked", None, "ranked"]

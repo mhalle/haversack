@@ -178,8 +178,9 @@ class RemoteClient:
         result.
 
         ``kind="embed"`` makes the job an embedding field of ``image`` with the ENCODER named
-        ``task`` (``GET /v1/encoders``), whose only option is ``int8``; None sends nothing,
-        which is a segmentation - the form every server before 2026-09-23 understands."""
+        ``task`` (``GET /v1/encoders``), whose only option is ``int8``; ``kind="ranked"`` makes
+        it the task's ranked store (2026-09-24; no options, no deliverables); None sends
+        nothing, which is a segmentation - the form every server before 2026-09-23 understands."""
         data = {"task": task, "options": json.dumps(options)}
         if kind is not None:
             data["kind"] = kind
@@ -210,13 +211,14 @@ class RemoteClient:
     def fetch(self, job_id: str, output) -> Path:
         """Download a finished job's result to ``output``, in the format its name says.
 
-        The server holds labels as ``.seg.nrrd`` and a field as ``.zarr.zip``, and converts
+        The server holds labels as ``.seg.nrrd``, a field as ``.zarr.zip`` and a ranked store
+        as ``.duckn.zip`` (named so in its Content-Disposition; both zips), and converts
         labels to NIfTI on request (``?format=nii.gz``; the label values survive, the segment
         names do not). This asked for nothing, so ``-o labels.nii.gz`` wrote NRRD bytes under
         a NIfTI name that every reader then refused (found 2026-09-23; the same in 0.12.4).
-        Now a ``.nii.gz`` or ``.nii`` name asks for the conversion, a ``.nrrd`` or
-        ``.zarr.zip`` name must match what the server sends or nothing is written, and any
-        other name gets the server's bytes as before."""
+        Now a ``.nii.gz`` or ``.nii`` name asks for the conversion, a ``.nrrd``, ``.zarr.zip``
+        or ``.duckn.zip`` name must match what the server sends or nothing is written, and
+        any other name gets the server's bytes as before."""
         import os
         out = Path(output)
         name = out.name.lower()
@@ -230,14 +232,18 @@ class RemoteClient:
                 if r.status_code >= 400:
                     r.read()
                     raise RemoteError(f"result -> {r.status_code}: {r.text}")
-                # the server types a field as a zip and labels as anything else
-                field = r.headers.get("Content-Type", "").startswith("application/zip")
-                if name.endswith(".zarr.zip") and not field:
-                    raise RemoteError(f"job {job_id}'s result is a label map, not an embedding "
-                                      f"field: name the output .seg.nrrd, or .nii.gz for NIfTI")
-                if name.endswith(".nrrd") and field:
-                    raise RemoteError(f"job {job_id}'s result is an embedding field: name the "
-                                      f"output .zarr.zip")
+                # the server types a field and a store as a zip, labels as anything else, and
+                # names a store's download .duckn.zip
+                zipped = r.headers.get("Content-Type", "").startswith("application/zip")
+                store = zipped and ".duckn.zip" in r.headers.get("Content-Disposition", "")
+                field = zipped and not store
+                what = ("a ranked store: name the output .duckn.zip" if store else
+                        "an embedding field: name the output .zarr.zip" if field else
+                        "a label map: name the output .seg.nrrd, or .nii.gz for NIfTI")
+                if ((name.endswith(".zarr.zip") and not field)
+                        or (name.endswith(".duckn.zip") and not store)
+                        or (name.endswith(".nrrd") and zipped)):
+                    raise RemoteError(f"job {job_id}'s result is {what}")
                 declared = r.headers.get("Content-Length")
                 with open(part, "wb") as f:
                     for chunk in r.iter_bytes():
@@ -319,11 +325,16 @@ class RemoteClient:
             raise RemoteError(f"job {jid} failed: {final.get('error', 'unknown')}")
         return final
 
+    def ranked(self, image, task: str, output, *, on_status=None) -> dict:
+        """The task's ranked store of ``image`` into ``output`` (``<name>.duckn.zip``): submit a
+        ranked job, wait, fetch. Returns the final status; raises on a failed job."""
+        return self.run(image, task, output, on_status=on_status, kind="ranked")
+
     def run(self, image, task: str, output, *, on_status=None, deliverables=None,
-            **options) -> dict:
+            kind: str | None = None, **options) -> dict:
         """submit + wait + fetch: the whole round trip. Returns the final status.
-        ``deliverables`` as in :meth:`submit`."""
-        jid = self.submit(image, task, deliverables=deliverables, **options)
+        ``deliverables`` and ``kind`` as in :meth:`submit`."""
+        jid = self.submit(image, task, deliverables=deliverables, kind=kind, **options)
         final = self.wait(jid, on_status=on_status)
         if final["state"] == "done":
             self.fetch(jid, output)

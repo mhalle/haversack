@@ -466,6 +466,55 @@ the `embed` extra and whose checkpoints live on the global `haversack-encoder-we
 (`HAVERSACK_ENCODER_VOLUME` to name another), apart from the segmentation weights. Without it
 `GET /v1/encoders` carries `"embeds": false` and a submit is a 501.
 
+## Ranked stores
+
+`POST /v1/jobs` with `kind=ranked` (`haversack remote submit IN --task TASK -o <name>.duckn.zip`)
+computes a task's RANKED STORE instead of its labels: its output distribution on the model
+grid - each voxel's classes in rank order with their logit gaps, a distance field to the
+nearest surface, and duckn segmentation metadata naming every class - in one zarr zip
+(`<name>.duckn.zip`). Labels onto any grid, margins, surfaces and measurements can be derived
+from it without running the network again (`haversack restore` does the labels).
+
+The store is the TASK's field, one layer:
+
+- a single-model task's store is its model's own softmax field;
+- a cascade's is its final stage - the crop stage decided the box and is left out (the box is
+  in the provenance);
+- a union's (`ts.v2:total`: five models painted in order) is its models composed into one
+  field. At every voxel its winner is the painted label; inside the winning model its classes
+  keep that model's own gaps; across models the gaps are each model's painting margin, sized as
+  that model's own field sizes them. So the scores are NOT one softmax - the store says
+  `scores: composed`, carries no tail, and a probability read from it has no meaning. Restored
+  linearly onto the input grid, `total`'s composed store differs from its direct labels at
+  0.013 % of voxels, and scored against upstream TotalSegmentator it matched as well as the
+  direct labels did (mean Dice 0.9363 against 0.9360, one CT).
+
+The name is a catalog task, resolved and pinned as a segmentation's; the input is bound as a
+segmentation's. There are no options - depth and clip are the store's own rule - and no
+deliverables: a request with either is a 422, as is a task whose engine returns labels only
+(stores exist for nnU-Net tasks and FastSurfer). A server without the `duckn` extra answers 501
+before any job exists.
+
+Everything else is a segmentation's: the queue, single flight, the result cache and its
+lifetimes. `GET /v1/jobs/{id}/result` sends the store as `application/zip` named
+`<task>_<id>.duckn.zip`, its content digest as `ETag`; `?format=` is a 422. Its status says
+`"kind": "ranked"` and `result.outputs[0]` is `{"name": "ranked", "kind": "ranked", ...}`, so
+a `result:` reference cannot bind it where an image belongs. Its key is the task's weights
+versions, the kind, and the formats the store is written in
+(`ranked=rf<rankfield format>/seg<duckn seg version>/h<haversack's store rules>`): a new format
+recomputes stores and nothing else, and no label key changed when stores were added. A store
+is never listed as a segmentation.
+
+A store of one hosted input has a path, a READ like an embedding's (anonymous, 200/304/HEAD,
+202 while its job runs, 404 `no-store` naming the job to submit, never a computation):
+
+```
+GET /v1/idc/<crdc_series_uuid>/ts.v2:total/ranked.duckn.zip
+```
+
+On Modal a ranked job runs on its task's own worker (nnU-Net or FastSurfer); every image
+carries the `duckn` extra, since the api keys stores and the workers write them.
+
 ## Tasks and options
 
 `GET /v1/tasks` lists catalog names; `GET /v1/tasks/{task}` describes one: its `engine`,

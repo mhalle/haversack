@@ -494,6 +494,27 @@ Silicon haversack caps PyTorch's MPS allocator at the device's recommended worki
 because past it Metal returns zeros instead of an error; a real shortfall then raises, and
 SynthStrip retries in fp16 before refusing.
 
+## Ranked stores: the output distribution
+
+Named `.duckn.zip` (or `.duckn`, a directory), `segment`'s output is the task's **ranked
+store** instead of its labels: its output distribution on the model grid - every voxel's
+classes in rank order with their logit gaps, a distance field to the nearest surface, and
+duckn segmentation metadata naming each class. Labels onto any grid can be restored from it
+later without the network (`haversack restore STORE -o labels.seg.nrrd [--spacing 1.0]`). It
+needs the `duckn` extra, and exists for nnU-Net tasks and FastSurfer.
+
+```bash
+haversack segment ct.nii.gz --task ts.v2:total_fast -o ct_total_fast.duckn.zip
+haversack restore ct_total_fast.duckn.zip -o labels_1mm.seg.nrrd --spacing 1.0
+haversack remote submit idc:<crdc_series_uuid> --task ts.v2:total -o total.duckn.zip   # a server's, cached
+```
+
+A store holds the TASK's field, one layer. A cascade's is its final stage (its crop stage
+only chose the box). A multi-model task such as `ts.v2:total` is composed into one field:
+its winner is the painted label at every voxel, and its gaps across models are each model's
+painting margin rather than one softmax - so a composed store says `scores: composed` and
+has no probabilities to read. SERVER.md, "Ranked stores", has the rule and what was measured.
+
 ## Embedding fields: `embed`
 
 `haversack embed` runs an image encoder over a CT and writes its token lattices as an

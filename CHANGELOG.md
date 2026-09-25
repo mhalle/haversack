@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- **A task's ranked store is a cached result, and holds the task's own field.** `POST /v1/jobs`
+  with `kind=ranked` (`haversack remote submit ... -o <name>.duckn.zip`) computes a task's
+  output distribution - the store `segment -o x.duckn.zip` writes - and caches it as labels
+  and embeddings are cached: a third result kind, keyed on the task's weights versions and the
+  formats the store is written in (`ranked=rf<rankfield>/seg<duckn seg>/h<rules>`), served as
+  a zip by its job and, for a hosted input, by a read-only path
+  (`/v1/<source>/<id>/<task>/ranked.duckn.zip`). No options, no deliverables; a server without
+  the `duckn` extra answers 501, and Modal runs the job on the task's own worker - every
+  Modal image now carries the `duckn` extra. No existing key moves.
+- **What a store holds changed: the task's field, not its models'.** A cascade's crop stage is
+  left out; a multi-model task's parts are composed into one layer (`ts.v2:total`'s five), whose
+  winner is the painted label at every model-grid voxel and whose gaps across models are each
+  model's painting margin, scaled to match its own field and encoded at clip 16 without a tail
+  (`scores: composed`: not one softmax, no probabilities). Its linear restore differs from the
+  direct labels at 0.013 % of voxels on a 418 M-voxel CT and scored as well against upstream
+  TotalSegmentator (mean Dice 0.9363 against 0.9360). The distance field is computed on the
+  task's field, seams between models included. A store written before this restores as it did;
+  a multi-layer cascade store is still refused whole (its stages sit on different grids since
+  the upstream crop), which the one-layer store no longer is. The ranked store is now
+  documented (README, SERVER.md).
+
 - **A Modal deployment can take the local server's bearer token, and `haversack remote`
   reaches it.** `haversack modal deploy --token T`, or `HAVERSACK_SERVER_TOKEN` in its
   environment, stores the token in the Modal Secret `<app name>-token` (through Modal's API,
