@@ -2,11 +2,6 @@
 
 ## [Unreleased]
 
-- **FastSurfer rank fields are refused on the server.** Its store records no frame - FastSurfer
-  infers on its own conformed grid, which the frame record cannot describe - so a served store
-  could not be restored onto the input, and a restore at a named spacing lands misplaced. The
-  server answers `no_frame` (422) until the frame can carry that placement; the command line
-  still writes one and says what it cannot do.
 - **`haversack embed` finishes cleanly again.** Since the embedding rename it wrote the field and
   then failed printing its summary (exit 1). Refusals name things by their current names: an
   unknown job kind lists `rankfield`, rank-field refusals say "rank field", and an unknown

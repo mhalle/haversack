@@ -329,25 +329,6 @@ def supports_store_output(task) -> bool:
     return name == registry.NNUNETV2 or name in RANKED_ENGINES
 
 
-#: Engines whose store records no frame (2026-09-25). FastSurfer infers on its own conformed
-#: grid - rotated and resampled in world space from the input - and a frame record can only
-#: describe a model grid that shares the input's axes (``frame.Frame``). Its store is valid,
-#: but ``restore`` cannot put it back on the input grid, and a named spacing restores it
-#: misplaced (81 % foreground agreement with the served labels on the ds000114 T1). Until the
-#: frame can carry a general placement, a server refuses these stores and the command line
-#: says so.
-UNPLACED_ENGINES = frozenset({"fastsurfer"})
-
-
-def store_places_itself(task) -> bool:
-    """Whether ``task``'s store records the frame that restores it onto its input."""
-    from haversack.engines import registry
-    try:
-        return registry.engine_for_task(task).name not in UNPLACED_ENGINES
-    except Exception:                                  # noqa: BLE001
-        return True
-
-
 def input_source(spec) -> dict:
     """A duckn provenance source naming the input: a data-source identifier (``idc:...``,
     ``tcia:...``) as it was given, or a local file by name and format - so the case is

@@ -508,12 +508,9 @@ The store is the TASK's field, one layer:
 
 The name is a catalog task, resolved and pinned as a segmentation's; the input is bound as a
 segmentation's. There are no options - depth and clip are the store's own rule - and no
-deliverables: a request with either is a 422, as is a task whose engine returns labels only.
-Stores are served for nnU-Net tasks. A FastSurfer task is refused with `no_frame`: FastSurfer
-infers on its own conformed grid, which a store cannot yet place back on the input, so a served
-store could not be restored in place (its labels are served as usual; `haversack segment ... -o
-<name>.duckn.zip` still writes one locally, restorable with `--spacing`). A server without the
-`duckn` extra answers 501 before any job exists.
+deliverables: a request with either is a 422, as is a task whose engine returns labels only
+(stores exist for nnU-Net tasks and FastSurfer). A server without the `duckn` extra answers 501
+before any job exists.
 
 Everything else is a segmentation's: the queue, single flight, the result cache and its
 lifetimes. `GET /v1/jobs/{id}/result` sends the store as `application/zip` named
@@ -539,7 +536,7 @@ A store of one hosted input has a path, a READ like an embedding's (anonymous, 2
 GET /v1/idc/<crdc_series_uuid>/ts.v2:total/rankfield.duckn.zip
 ```
 
-On Modal a ranked job runs on its task's own worker; the api's image
+On Modal a ranked job runs on its task's own worker (nnU-Net or FastSurfer); the api's image
 carries the `duckn` extra, since it keys stores, and so do the workers that write them.
 
 ## Tasks and options
