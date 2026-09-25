@@ -180,7 +180,7 @@ def read_image_and_tags(path):
     per_slice)``, ``per_slice`` a list of ``{"gggg|eeee": value}`` dicts - one per slice, in
     the volume's z order, for a DICOM series (the series reader's own per-slice dictionaries,
     from the SAME decode); the file's one dictionary for a single file; ``[]`` for a volume
-    that carries none (a duckn store). What the input copy records (:mod:`haversack.dicom_tags`)."""
+    that carries none (a duckn store). What the input copy records (:mod:`duckn.dicom_tags`)."""
     return _read_image(path, tags=True)
 
 

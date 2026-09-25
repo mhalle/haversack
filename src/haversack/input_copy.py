@@ -50,8 +50,10 @@ FORMATS = {"none": 1, "zstd": 2}
 #: The reader's version, the input side's ``CACHE_EPOCH``: bump whenever ``io.read_image`` would
 #: produce different voxels, geometry or tags from the same original bytes. A copy written under
 #: another version is STALE - its original is gone, so it cannot be redone: a fetched input is
-#: fetched again, an upload counts as evicted (410 input_gone).
-READER_VERSION = 1
+#: fetched again, an upload counts as evicted (410 input_gone). 2 (2026-09-25): the tags come from
+#: ``duckn.dicom_tags``, which leaves binary-VR values out where haversack's own converter kept
+#: SimpleITK's strings of them - bumped before any deployment held a copy, so it cost nothing.
+READER_VERSION = 2
 #: The operator's switch: ``HAVERSACK_INPUT_COPY=0`` keeps originals, as before this existed.
 ENV = "HAVERSACK_INPUT_COPY"
 #: How new copies are stored: ``none`` (the default: one mapped chunk, the fastest read) or
@@ -176,7 +178,7 @@ def _is_dicom(p: Path) -> bool:
 
 def _thickness(per_slice):
     """(axis thickness, per-sample thicknesses or None) from Slice Thickness (spec §2)."""
-    from .dicom_tags import SLICE_THICKNESS
+    from duckn.dicom_tags import SLICE_THICKNESS
     values = [d.get(SLICE_THICKNESS) for d in per_slice]
     try:
         nums = [float(v) for v in values if v not in (None, "")]
@@ -190,7 +192,7 @@ def _thickness(per_slice):
 
 
 def _sample_units(per_slice):
-    from .dicom_tags import RESCALE_TYPE
+    from duckn.dicom_tags import RESCALE_TYPE
     values = {d.get(RESCALE_TYPE, "").strip() for d in per_slice}
     return values.pop() if len(values) == 1 and "" not in values else None
 
@@ -212,7 +214,7 @@ def _metadata(image, per_slice, *, source, source_digest, source_size=(None, Non
     from duckn.models import SampleMetadata
     from duckn.sitk_adapter import from_sitk
 
-    from .dicom_tags import tags_from_sitk
+    from duckn.dicom_tags import tags_from_sitk
     vol = from_sitk(image)
     meta = vol.metadata
     series, slices = tags_from_sitk(per_slice) if per_slice else ({}, [])
@@ -439,13 +441,13 @@ def _decoded(p: Path, dt, shape):
 def _with_tags(image, attrs: dict):
     tags = ((attrs.get("extensions") or {}).get("dicom") or {}).get("tags") or {}
     if tags:
-        from .dicom_tags import to_sitk_strings
         try:
+            from duckn.dicom_tags import to_sitk_strings
             restored = to_sitk_strings(tags)
         except ImportError:
-            # an environment without pydicom's data dictionary (an engine image that cannot take
-            # the duckn extra): the tags are provenance, never needed to compute - the image
-            # is read without them rather than not at all
+            # an environment without duckn or pydicom's data dictionary (an engine image without
+            # the duckn extra): the tags are provenance, never needed to compute - the image is
+            # read without them rather than not at all
             restored = {}
         for key, value in restored.items():
             image.SetMetaData(key, value)

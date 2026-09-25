@@ -56,6 +56,11 @@
   surfa 0.6.3. The `synthstrip` extra leaves every uv conflict group, so it no longer needs its
   own environment, and SynthStrip's Modal image takes the `duckn` extra and reads compressed
   input copies. synthstrip-torch is marked unsupported: kept runnable, not developed.
+- The DICOM tag converter the input copy uses moved into duckn (`duckn.dicom_tags`, duckn 0.5.2),
+  so the dicom extension's encoding rules live beside its specification; haversack's own copy is
+  gone. duckn's converter leaves binary-VR values out (SimpleITK's strings of them are not the
+  spec's base64), so the input copy's reader version is 2: a copy written by the first version is
+  fetched again once. duckn is pinned at v0.5.2 and feldglas at v0.1.4 (which pins the same duckn).
 - VoxTell and the MONAI bundles are documented as experimental: off unless a deployment sets
   `HAVERSACK_VOXTELL=1` / `HAVERSACK_MONAI=1` (as they already were - neither has an in-process
   runner), Modal-only, heavy, and not maintained for general use. They showed the engine model

@@ -1,7 +1,8 @@
 # The input copy: a decoded, single-file form of a cached input
 
 *Specification, 2026-09-25; built the same day on branch `claude/input-copy`
-(`haversack.input_copy`, `haversack.dicom_tags`, the caches in `serve.py`). The decisions in §2
+(`haversack.input_copy`, the caches in `serve.py`; the tag converter, first `haversack.dicom_tags`, is
+`duckn.dicom_tags` since duckn 0.5.2). The decisions in §2
 are the user's; the numbers in §3 were measured the same day (Modal and an M2, one CT). §11
 records what building it changed.*
 
@@ -282,9 +283,10 @@ In duckn (a release, then a pin bump here and in CI, with feldglas kept equal):
 - **Reading a copy needs neither duckn nor pydicom.** An engine image that cannot take the duckn
   extra (VoxTell's, MONAI's; SynthStrip's until its numpy<2 went, 2026-09-25) reads copies another container wrote: without duckn the one layout
   this module writes (LPS, z/y/x, direction x spacing) is converted directly - held bit for bit
-  to duckn's `to_sitk` by a test, tilted series included - and without pydicom the tags are not
-  restored (provenance, never needed to compute). WRITING needs both, so an environment without
-  them keeps originals (`input_copy.enabled`).
+  to duckn's `to_sitk` by a test, tilted series included - and without duckn or pydicom the tags
+  are not restored (provenance, never needed to compute; since duckn 0.5.2 the converter is
+  `duckn.dicom_tags`, so a duckn-free read restores none). WRITING needs both, so an environment
+  without them keeps originals (`input_copy.enabled`). A compressed copy also needs zarr.
 - **`GET /v1/inputs/{digest}`** reports the original's members and bytes (recorded in the copy)
   and adds `stored_form: "input_copy"` and `stored_bytes`.
 - **The content store's raw-NRRD copy (`decode_for_fast_read`, `content.nrrd`) is gone**, and

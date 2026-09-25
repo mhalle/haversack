@@ -33,7 +33,7 @@ pydicom = pytest.importorskip("pydicom")
 pytest.importorskip("duckn")
 pytest.importorskip("zarr")
 
-from haversack import dicom_tags as dt  # noqa: E402
+from duckn import dicom_tags as dt  # noqa: E402
 from haversack import input_copy as ic  # noqa: E402
 from haversack import io as nio  # noqa: E402
 from haversack.content import ContentStore  # noqa: E402
@@ -341,7 +341,9 @@ def test_a_file_that_only_looks_like_a_copy_is_read_by_duckn(tmp_path):
 
 def test_without_duckn_the_copy_reads_exactly_as_duckn_reads_it(tmp_path, monkeypatch):
     """An engine environment that cannot install duckn (VoxTell's, MONAI's) still reads a copy
-    another container wrote - with the geometry duckn's to_sitk gives, and no other."""
+    another container wrote - with the geometry duckn's to_sitk gives, and no other. It reads no
+    DICOM tags back: the converter is duckn's (``duckn.dicom_tags``, since duckn 0.5.2), and the
+    tags are provenance, never needed to compute."""
     import builtins
     copy = ic.transcode(write_series(tmp_path / "s", tilt_mm=0.03), tmp_path / "entry")
     with_duckn = ic.read_copy(copy)
@@ -354,7 +356,8 @@ def test_without_duckn_the_copy_reads_exactly_as_duckn_reads_it(tmp_path, monkey
     monkeypatch.setattr(builtins, "__import__", no_duckn)
     without = ic.read_copy(copy)
     assert _same(without, with_duckn)             # bit for bit: the same arithmetic as duckn's
-    assert without.GetMetaData("0008|0060") == "CT"
+    assert with_duckn.GetMetaData("0008|0060") == "CT"
+    assert not without.HasMetaDataKey("0008|0060")
 
 
 def test_a_label_map_kept_as_a_copy_still_reads_as_one(tmp_path):
