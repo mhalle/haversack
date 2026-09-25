@@ -4215,8 +4215,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
     def ranked_key(identities, task: str) -> str:
         """A ranked store's key (2026-09-24): ``result_key`` with the kind, no options, over the
-        versions the job was keyed on - from the executor that states them (Modal's api and its
-        twin read them stale-proof and take the kind), else ``versions_for``, as ``_accept``."""
+        versions the job was keyed on (:func:`ranked_versions`)."""
+        return result_key(tuple(identities), task, {}, ranked_versions(task), kind="ranked")
+
+    def ranked_versions(task: str) -> list:
+        """The versions a ranked store of ``task`` is keyed on - from the executor that states
+        them (Modal's api and its twin read them stale-proof and take the kind), else
+        ``versions_for``, as ``_accept``. Split from :func:`ranked_key` (2026-09-25) so the
+        listing reads them once a task a request, as the other listings do."""
         import inspect
         wv = getattr(executor, "weights_versions", None)
         if wv is not None:
@@ -4239,7 +4245,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 versions = versions_for(seg, task, "ranked")
             except Exception:              # no describe() and no versions function: no key
                 versions = ["unknown"]
-        return result_key(tuple(identities), task, {}, versions, kind="ranked")
+        return versions
 
     def norm_ident(prefix: str, ident: str) -> str:
         """An identifier as the path surface keys it: stripped, and an IDC series UUID in
@@ -5134,6 +5140,111 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 row["links"] = links
             out.append(row)
         return {"embeddings": out,
+                "next_cursor": encode_cursor(position) if position is not None else None}
+
+    @app.get("/v1/ranked", tags=["results"], responses={
+        422: {"description": "a filter or page the listing refuses: an identity that is "
+                             "neither <source>:<identifier> for a mounted source nor a "
+                             "content digest, more than 100 identities, an unknown task, a "
+                             "limit outside 1-1000, a cursor this server did not issue"},
+        503: {"description": "this server's view of the result cache could not be "
+                             "refreshed (Modal: a volume reload was refused); retry"}})
+    def list_ranked(
+            request: Request,
+            identity: list[str] | None = Query(None, description=(
+                "only stores of this input: <source>:<identifier> or a content digest. "
+                "Repeat it for several inputs - the answer is the union. Computed, not "
+                "searched, as for /v1/segmentations")),
+            task: str | None = Query(None, description="only stores of this task"),
+            limit: int = Query(LIST_LIMIT_DEFAULT, description=(
+                f"rows on this page, 1-{LIST_LIMIT_MAX}")),
+            cursor: str | None = Query(None, description=(
+                "the previous page's next_cursor, as given"))):
+        """Cached ranked stores this server can still resolve, newest published first, a page
+        at a time: ``{"ranked": [...], "next_cursor": ...}`` (2026-09-25). Each row: ``key``,
+        ``task``, ``identity``, ``computed``, ``published``, ``bytes``, and ``links.ranked`` -
+        its path - when it has one: a single source identity, never an upload's digest.
+
+        The third listing over one machinery: the same cache scan, cursor and parallel reads
+        as ``/v1/segmentations`` and ``/v1/embeddings``, a row kept only when its ``meta.json``
+        says it is a ranked store, and a key round trip through the task's store versions
+        (:func:`ranked_versions` - the task's weights and the formats a store is written in),
+        so a store keyed under weights or formats this server no longer writes is not offered.
+        A store takes no options, so the identity filter derives one key a task. Authorized,
+        or the twin's operator opt-in, as the other two."""
+        after = _listing_page(request, limit, cursor, identity)
+        want = None
+        if task is not None:
+            want = canon_task(task)
+            if want is None:
+                raise HTTPException(422, unknown_task(task))
+        lister = getattr(executor, "cache_list", None)
+        if lister is None:
+            return {"ranked": [], "next_cursor": None}
+        wv_memo: dict = {}                 # store versions per task, once per request
+        canon_memo: dict = {}
+
+        def key_of(identities, canonical: str) -> str:
+            if canonical not in wv_memo:
+                wv_memo[canonical] = ranked_versions(canonical)
+            return result_key(tuple(identities), canonical, {}, wv_memo[canonical], kind="ranked")
+
+        def canonical_of(t) -> str | None:
+            if t not in canon_memo:
+                try:
+                    canon_memo[t] = canon_task(str(t))
+                except HTTPException:      # one odd row must not refuse the listing
+                    canon_memo[t] = None
+            return canon_memo[t]
+
+        def of_wanted_task(e: dict) -> bool:
+            t = e.get("task")
+            return want is None or (t is not None and canonical_of(t) == want)
+
+        def accept(e: dict) -> bool:
+            if e.get("kind") != "ranked":
+                return False               # labels, a field, or a kind this server does not know
+            idents = e.get("identity") if isinstance(e.get("identity"), list) else []
+            if _hosted_elsewhere(idents):
+                return False
+            t = e.get("task")
+            canonical = canonical_of(t) if t is not None else None
+            if canonical is None or not of_wanted_task(e):
+                return False
+            key = e.get("key")
+            if idents and key:
+                try:
+                    if key_of(idents, canonical) != key:
+                        return False       # keyed under versions this server no longer writes
+                except Exception:
+                    pass
+            return True
+
+        keys = None
+        if identity:
+            wanted = list(dict.fromkeys(listed_identity(i) for i in identity))
+            if want is not None:
+                served = [want]
+            else:
+                try:
+                    served = list(dict.fromkeys(filter(None, map(canonical_of, seg.tasks()))))
+                except Exception as e:     # noqa: BLE001 - a fault, not "nothing computed"
+                    raise HTTPException(503, "this server cannot list its tasks right "
+                                             "now") from e
+            keys = [key_of((i,), t) for i in wanted for t in served]
+        rows, position = lister(keys=keys, limit=limit, after=after, accept=accept,
+                                match=of_wanted_task if want is not None else None)
+        out = []
+        for r in rows:
+            name = canonical_of(r.get("task")) or r.get("task")
+            row = {"key": r.get("key"), "task": name, "identity": r.get("identity"),
+                   "computed": r.get("computed"), "published": r.get("published"),
+                   "bytes": r.get("bytes")}
+            links = ranked_links(name, r.get("identity"), r.get("options"))
+            if links:
+                row["links"] = links
+            out.append(row)
+        return {"ranked": out,
                 "next_cursor": encode_cursor(position) if position is not None else None}
 
     @app.get("/v1/tasks/{task}", tags=["tasks"])

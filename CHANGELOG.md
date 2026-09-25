@@ -40,6 +40,12 @@
   the `duckn` extra (as a data dictionary: SimpleITK's tag keys to keywords); every Modal image
   that stores inputs carries the extra, and one without it still reads uncompressed copies.
   `docs/input-copy.md` is the specification.
+- **Ranked stores are listed**: `GET /v1/ranked` (`haversack remote ranked`,
+  `RemoteClient.ranked_stores`) is the segmentations and embeddings listing for the third kind -
+  filters by `identity` and `task`, cursors, newest published first, `links.ranked` for a store
+  with a path, and a key round trip so a store keyed under weights or formats this server no
+  longer writes is not offered. The anonymous twin lists them when its operator opts in, as
+  the other two.
 - **Input copies are compressed by default** (`HAVERSACK_INPUT_COPY_COMPRESSION`, default `zstd`;
   `uncompressed` for the other form): the smallest form measured, at a read of up to about a second
   against the DICOM decode it replaces. The experimental VoxTell and MONAI images cannot read a

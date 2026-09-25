@@ -519,7 +519,14 @@ a `result:` reference cannot bind it where an image belongs. Its key is the task
 versions, the kind, and the formats the store is written in
 (`ranked=rf<rankfield format>/seg<duckn seg version>/h<haversack's store rules>`): a new format
 recomputes stores and nothing else, and no label key changed when stores were added. A store
-is never listed as a segmentation.
+is never listed as a segmentation; stores are listed by `GET /v1/ranked` (`haversack remote
+ranked`), the third listing over the same machinery - `identity`, `task`, `limit`, `cursor`,
+newest published first, each row with `links.ranked` when it has a path, a store keyed under
+weights or formats this server no longer writes left out:
+
+```
+GET /v1/ranked?identity=idc:<crdc_series_uuid>&task=ts.v2:total
+```
 
 A store of one hosted input has a path, a READ like an embedding's (anonymous, 200/304/HEAD,
 202 while its job runs, 404 `no-store` naming the job to submit, never a computation):
@@ -528,8 +535,8 @@ A store of one hosted input has a path, a READ like an embedding's (anonymous, 2
 GET /v1/idc/<crdc_series_uuid>/ts.v2:total/ranked.duckn.zip
 ```
 
-On Modal a ranked job runs on its task's own worker (nnU-Net or FastSurfer); every image
-carries the `duckn` extra, since the api keys stores and the workers write them.
+On Modal a ranked job runs on its task's own worker (nnU-Net or FastSurfer); the api's image
+carries the `duckn` extra, since it keys stores, and so do the workers that write them.
 
 ## Tasks and options
 
@@ -764,6 +771,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/sources` | read | the hosted sources (and `result`), their identifier grammar, and which have a path surface |
 | GET | `/v1/segmentations` | token | cached results, newest first: `identity`, `task`, `limit`, `cursor` |
 | GET | `/v1/embeddings` | token | cached embedding fields, newest first: `identity`, `encoder`, `limit`, `cursor` |
+| GET | `/v1/ranked` | token | cached ranked stores, newest first: `identity`, `task`, `limit`, `cursor` |
 | POST | `/v1/jobs` | token | submit |
 | GET | `/v1/jobs` | token | brief status of every known job |
 | GET | `/v1/jobs/<id>` | token | full status, result metadata, links |
