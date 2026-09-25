@@ -27,10 +27,11 @@
   13 s for a 709-slice CT on a Modal worker, 45 s cold from a volume another container wrote -
   whether or not it had been read a minute earlier. The series cache and the input store now keep
   each image input as its *input copy* instead of its files: the volume `io.read_image` produced,
-  written once when the input is stored as a single uncompressed zarr chunk in a zip, with duckn's
-  geometry and the DICOM tags SimpleITK reports (series-level in `extensions.dicom`, per-slice in
-  the slice axis' samples, in duckn's `dicom-spec` encoding), and read back by mapping that chunk -
-  0.25 s for the same CT, voxels identical, geometry identical (within 1e-12 for a tilted series).
+  written once when the input is stored as a zarr zip (compressed by default - above; with
+  `HAVERSACK_INPUT_COPY_COMPRESSION=none`, one uncompressed chunk read by mapping it, 0.25 s for
+  the same CT), with duckn's geometry and the DICOM tags SimpleITK reports (series-level in
+  `extensions.dicom`, per-slice in the slice axis' samples, in duckn's `dicom-spec` encoding) -
+  voxels identical, geometry identical (within 1e-12 for a tilted series).
   One form per entry: the original exists only while it is transcoded, and nothing downstream is
   handed it. Label maps and anything the reader refuses keep their files; `HAVERSACK_INPUT_COPY=0`
   keeps originals. Results and keys do not move. A fetched input cached before this is fetched
@@ -39,7 +40,11 @@
   the `duckn` extra (as a data dictionary: SimpleITK's tag keys to keywords); every Modal image
   that stores inputs carries the extra, and one without it still reads uncompressed copies.
   `docs/input-copy.md` is the specification.
-- An operator may store input copies compressed: `HAVERSACK_INPUT_COPY_COMPRESSION=zstd` (zstd
+- **Input copies are compressed by default** (`HAVERSACK_INPUT_COPY_COMPRESSION`, default `zstd`;
+  `none` for the uncompressed form): the smallest form measured, at a read of up to about a second
+  against the DICOM decode it replaces. The experimental VoxTell and MONAI images cannot read a
+  compressed copy (no zarr); a deployment that runs them sets `none`.
+- Input copies may be stored compressed: `HAVERSACK_INPUT_COPY_COMPRESSION=zstd` (zstd
   level 3 through blosc with bit shuffling, in 32-slice chunks). Across seven local datasets the
   copies were 3.1-5.8x smaller (the 709-slice CT 270 MB instead of 837 MB; int32 CTs 4.5-4.9x),
   and a read took 2-3x the mapped one; on Modal the difference was 0.3-0.5 s a read on that CT

@@ -337,19 +337,19 @@ field promotes a job's result into the store, so one job's output becomes anothe
 without the bytes passing through the client. No route ever hands input bytes back. All of it is authorized only.
 
 **Inputs are kept decoded.** A cached image input - a fetched series or an upload - is stored
-as its *input copy*: the volume decoded once, as one uncompressed array (a duckn zarr zip) with
+as its *input copy*: the volume decoded once, as a compressed array (a duckn zarr zip) with
 its geometry and the DICOM tags SimpleITK reports, in place of the files it came from. A job then
 reads it in a fraction of a second where a DICOM series is a full decode every time (13 s for a
 709-slice CT on Modal). It never changes a result: the image a job receives is the same, and so
 is every key. Label maps (a `.seg.nrrd`, a `result:` reference) keep their files, and so does
 anything the reader refuses. `GET /v1/inputs/{digest}` still describes what the digest names -
 `members` and `bytes` of the upload - and adds `stored_form: "input_copy"`, `stored_compression`
-and `stored_bytes`. An operator can keep originals instead with `HAVERSACK_INPUT_COPY=0`, or store
-the copies compressed with `HAVERSACK_INPUT_COPY_COMPRESSION=zstd` (zstd through blosc with bit
-shuffling): 3-5x smaller for the CTs and MR measured, and read in up to about a second instead of
-a fraction of one - the choice where cache room is the
-constraint (a Modal worker keeps fetched series in RAM). The setting applies to copies written
-after it is set; a cache may hold both forms. On Modal, both variables are forwarded from the
+and `stored_bytes`. Copies are compressed (zstd through blosc with bit shuffling): 3-5x smaller
+than the raw volume for the CTs and MR measured, read in up to about a second.
+`HAVERSACK_INPUT_COPY_COMPRESSION=none` stores them uncompressed instead - the fastest read (a
+fraction of a second), at 3-5x the room, and readable without duckn or zarr, which the
+experimental VoxTell and MONAI images lack. `HAVERSACK_INPUT_COPY=0` keeps originals. The setting
+applies to copies written after it is set; a cache may hold both forms. On Modal, both variables are forwarded from the
 deploying shell. The format and its rules are in `docs/input-copy.md`.
 
 ## Results as inputs

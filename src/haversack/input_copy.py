@@ -2,15 +2,16 @@
 
 A job reads its input every time it runs, and for a DICOM series that is a full decode: 13 s
 for a 709-slice CT on a Modal worker, 45 s cold from a volume another container wrote. The copy
-is the image ``io.read_image`` produced, written once when the cache stores the input - one
-uncompressed zarr chunk in a zip, with duckn's geometry and the DICOM tags SimpleITK reported -
-and read back by mapping that chunk (0.25 s for the same CT), with voxels and geometry identical.
+is the image ``io.read_image`` produced, written once when the cache stores the input - zstd
+through blosc with bit shuffling, in chunks of :data:`CHUNK_SLICES` whole slices in a zip, with
+duckn's geometry and the DICOM tags SimpleITK reported - and read back through zarr, which decodes
+the chunks in parallel, with voxels and geometry identical. Compressed by default (2026-09-25):
+3.1x smaller for that CT and 3.4-5.8x for six other datasets, at a read ~2-3x the uncompressed
+form's (0.3-0.9 s for that CT; docs/input-copy.md §13) - against the 13 s DICOM decode it
+replaces either way, and cache room is what a Modal worker's RAM series cache runs out of.
 
-An operator may store it compressed instead (``HAVERSACK_INPUT_COPY_COMPRESSION=zstd``): zstd
-through blosc with bit shuffling, in chunks of :data:`CHUNK_SLICES` slices decoded in parallel by
-zarr - 3.1x smaller for that CT and 3.4-5.8x for six other datasets, a read ~2-3x the mapped one
-(measured 2026-09-25, docs/input-copy.md §13). It is the choice for a cache whose room is the
-constraint: a Modal worker's series cache is RAM.
+``HAVERSACK_INPUT_COPY_COMPRESSION=none`` stores one uncompressed chunk instead, read by mapping
+it (0.15-0.25 s for that CT) - the fastest read, and one that needs neither duckn nor zarr.
 
 An entry holds one form: the copy, or - when the reader refuses the input, or anything about
 the copy fails - the original, which is then read (and refused) as it always was. The original
@@ -56,10 +57,12 @@ FORMATS = {"none": 1, "zstd": 2}
 READER_VERSION = 2
 #: The operator's switch: ``HAVERSACK_INPUT_COPY=0`` keeps originals, as before this existed.
 ENV = "HAVERSACK_INPUT_COPY"
-#: How new copies are stored: ``none`` (the default: one mapped chunk, the fastest read) or
-#: ``zstd``. A cache may hold both; the reader reads each by its own layout, so changing this
-#: rewrites nothing and invalidates nothing.
+#: How new copies are stored: ``zstd`` (the default since 2026-09-25: blosc-zstd, the smallest
+#: at the same read time of everything measured) or ``none`` (one mapped chunk: the fastest read,
+#: and one that needs neither duckn nor zarr). A cache may hold both; the reader reads each by its
+#: own layout, so changing this rewrites nothing and invalidates nothing.
 COMPRESSION_ENV = "HAVERSACK_INPUT_COPY_COMPRESSION"
+DEFAULT_COMPRESSION = "zstd"
 #: The compressed form's codec and chunking (2026-09-25, docs/input-copy.md §13, seven datasets):
 #: blosc's zstd with bit shuffling was 1.2-1.4x smaller than plain zstd on every one, at the same
 #: read and write time; level 3, as levels 1 and 6 moved size by 5-8 % and write time by 2x; 32
@@ -96,7 +99,7 @@ def enabled() -> bool:
 def compression() -> str:
     """How a new copy is stored, from :data:`COMPRESSION_ENV`; a value it does not know raises,
     naming the ones it does (a copy is then not written, and the warning says why)."""
-    value = os.environ.get(COMPRESSION_ENV, "none").strip().lower() or "none"
+    value = os.environ.get(COMPRESSION_ENV, DEFAULT_COMPRESSION).strip().lower() or DEFAULT_COMPRESSION
     if value not in FORMATS:
         raise ValueError(f"{COMPRESSION_ENV}={value!r}: expected one of {', '.join(FORMATS)}")
     return value

@@ -96,6 +96,13 @@ def _same(a, b, exact=True):
                for g in geo)
 
 
+@pytest.fixture
+def mapped(monkeypatch):
+    """The uncompressed, mapped form - not the default since 2026-09-25, so a test of its layout
+    or of its duckn-free read asks for it."""
+    monkeypatch.setenv(ic.COMPRESSION_ENV, "none")
+
+
 def _nifti(path: Path, gz=True) -> Path:
     img = sitk.GetImageFromArray(np.arange(4 * 5 * 6, dtype=np.int16).reshape(4, 5, 6))
     img.SetSpacing((0.8, 0.9, 2.5))
@@ -127,7 +134,7 @@ def test_a_compressed_single_file_is_copied_and_a_raw_one_is_not(tmp_path):
     assert ic.transcode(raw, tmp_path / "e2") is None          # already its efficient form
 
 
-def test_the_file_is_one_stored_chunk_with_the_stated_metadata(tmp_path):
+def test_the_file_is_one_stored_chunk_with_the_stated_metadata(tmp_path, mapped):
     series = write_series(tmp_path / "s")
     copy = ic.transcode(series, tmp_path / "entry", source="fixture:1", source_digest="sha256:x")
     with zipfile.ZipFile(copy) as z:
@@ -294,7 +301,7 @@ def _rewrite(copy: Path, edit) -> Path:
     lambda m: m["attributes"]["duckn"].update(value_transforms=[{"type": "linear", "slope": 2.0, "intercept": 0}]),
     lambda m: m["attributes"]["duckn"]["axes"][0].pop("space_direction"),
 ], ids=["zstd-codec", "blosc-over-raw-bytes", "chunked", "rescale", "no-geometry"])
-def test_the_mapped_reader_refuses_any_other_layout(tmp_path, edit):
+def test_the_mapped_reader_refuses_any_other_layout(tmp_path, edit, mapped):
     copy = ic.transcode(write_series(tmp_path / "s"), tmp_path / "entry")
     bad = _rewrite(copy, edit)
     with pytest.raises(ic.NotACopy):
@@ -339,7 +346,7 @@ def test_a_file_that_only_looks_like_a_copy_is_read_by_duckn(tmp_path):
     assert _same(nio.read_image(copy), ref)
 
 
-def test_without_duckn_the_copy_reads_exactly_as_duckn_reads_it(tmp_path, monkeypatch):
+def test_without_duckn_the_copy_reads_exactly_as_duckn_reads_it(tmp_path, monkeypatch, mapped):
     """An engine environment that cannot install duckn (VoxTell's, MONAI's) still reads a copy
     another container wrote - with the geometry duckn's to_sitk gives, and no other. It reads no
     DICOM tags back: the converter is duckn's (``duckn.dicom_tags``, since duckn 0.5.2), and the
@@ -475,6 +482,7 @@ def test_a_compressed_copy_has_its_own_layout_and_version(tmp_path, zstd):
 def test_either_form_reads_whatever_the_setting_says_now(tmp_path, monkeypatch):
     series = write_series(tmp_path / "s")
     ref = nio.read_image(series)
+    monkeypatch.setenv(ic.COMPRESSION_ENV, "none")
     plain = ic.transcode(series, tmp_path / "a")
     monkeypatch.setenv(ic.COMPRESSION_ENV, "zstd")
     packed = ic.transcode(series, tmp_path / "b")
@@ -497,7 +505,7 @@ def test_a_version_that_disagrees_with_the_layout_is_stale(tmp_path, zstd, monke
     monkeypatch.setattr(ic, "FORMATS", {"none": 1, "zstd": 1})     # as a version-1 reader sees it
     assert ic.stale(packed)
     monkeypatch.setattr(ic, "FORMATS", {"none": 2, "zstd": 2})
-    monkeypatch.delenv(ic.COMPRESSION_ENV)
+    monkeypatch.setenv(ic.COMPRESSION_ENV, "none")
     plain = ic.transcode(write_series(tmp_path / "t"), tmp_path / "b")
     monkeypatch.setattr(ic, "FORMATS", {"none": 1, "zstd": 2})
     assert ic.stale(plain)                                          # says 2, is a mapped chunk
@@ -513,3 +521,14 @@ def test_a_compressed_copy_missing_a_chunk_is_refused(tmp_path, zstd):
                 dst.writestr(i.filename, src.read(i.filename))
     with pytest.raises(ic.NotACopy):
         ic.read_copy(out)
+
+
+def test_the_default_is_the_compressed_form(tmp_path, monkeypatch):
+    """Compressed by default (2026-09-25): with the setting unset, a copy is the blosc-zstd
+    layout, and `none` still gives the mapped one."""
+    monkeypatch.delenv(ic.COMPRESSION_ENV, raising=False)
+    series = write_series(tmp_path / "s")
+    assert ic.compression() == ic.DEFAULT_COMPRESSION == "zstd"
+    assert ic.stored_compression(ic.transcode(series, tmp_path / "a")) == "zstd"
+    monkeypatch.setenv(ic.COMPRESSION_ENV, "none")
+    assert ic.stored_compression(ic.transcode(series, tmp_path / "b")) == "none"

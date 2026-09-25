@@ -3121,7 +3121,7 @@ def test_a_dicom_series_is_stored_as_one_tree(tmp_path):
     assert is_copy(stored) and read_image(stored).GetSize()[2] == 3
     status = client.get(f"/v1/inputs/{body['digest']}").json()
     assert status["members"] == 3 and status["stored_form"] == "input_copy"
-    assert status["stored_compression"] == "none"
+    assert status["stored_compression"] == "zstd"            # compressed by default
 
 
 def test_a_release_does_not_throw_the_result_cache_away(monkeypatch):
