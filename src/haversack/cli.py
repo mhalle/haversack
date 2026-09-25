@@ -38,14 +38,8 @@ def _need_store_extra():
     """The three packages of the ranked-store extra, checked by name before anything is
     imported or computed - a missing one is a one-line answer, not a traceback after the
     network has run."""
-    import importlib.util
-
-    def absent(name):
-        try:
-            return importlib.util.find_spec(name) is None
-        except ModuleNotFoundError:          # a finder that refuses the name outright
-            return True
-    missing = [n for n in ("rankfield", "zarr", "duckn") if absent(n)]
+    from .ranked_output import store_extra_missing
+    missing = store_extra_missing()
     if missing:
         from .errors import InputError
         raise InputError(f"{STORE_EXTRA_HINT} - missing {', '.join(missing)}")

@@ -38,6 +38,20 @@ DISTANCE_VOXELS = 2.0            # truncation of the emitted distance field, in 
 STORE_RULES = 1
 
 
+def store_extra_missing() -> list:
+    """The packages of the ranked-store extra (the duckn extra: rankfield, zarr, duckn) that
+    are not installed - by name, importing nothing. The one answer to "can this environment
+    write a store", for the CLI's refusal and a server's ``kind=ranked`` door alike."""
+    import importlib.util
+
+    def absent(name):
+        try:
+            return importlib.util.find_spec(name) is None
+        except ModuleNotFoundError:          # a finder that refuses the name outright
+            return True
+    return [n for n in ("rankfield", "zarr", "duckn") if absent(n)]
+
+
 def ranked_tag() -> str:
     """What a cached store's key carries beyond the task's weights: the formats its bytes are
     written in, READ from the libraries that write them - rankfield's encoding and duckn's seg

@@ -135,9 +135,16 @@ RESULT_NAME = "labels.seg.nrrd"          # the information-preserving default ar
 #: ``kind``), and every "is this entry there" question asks ``primary_output`` rather than
 #: naming the labels file, so the lifetime code (leases, claims, pruning) is one code for both.
 EMBEDDING_NAME = "embedding.zarr.zip"
-PRIMARY_NAMES = (RESULT_NAME, EMBEDDING_NAME)
+#: A ranked job's output (2026-09-24): the task's ranked store - its output distribution on the
+#: model grid, the field every restore and surface of its labels can be derived from (a duckn
+#: zarr zip; haversack.ranked_output). A third primary output under the same lifetime rules.
+RANKED_NAME = "ranked.duckn.zip"
+PRIMARY_NAMES = (RESULT_NAME, EMBEDDING_NAME, RANKED_NAME)
 #: What each kind of job publishes, and the suffix a download of it is named with.
-OUTPUT_OF_KIND = {"segment": RESULT_NAME, "embed": EMBEDDING_NAME}
+OUTPUT_OF_KIND = {"segment": RESULT_NAME, "embed": EMBEDDING_NAME, "ranked": RANKED_NAME}
+#: The kinds whose output is not a label map: no deliverables (a preview and statistics are of
+#: labels), no label paths, no NIfTI conversion, and a status that says what the output is.
+NOT_LABELS = ("embed", "ranked")
 
 
 def primary_output(where) -> "Path | None":
@@ -389,6 +396,17 @@ def embedding_links(encoder, identity, options) -> dict:
     return {"embedding": f"/v1/{prefix}/{one}/{encoder}/embedding{infix}.zarr.zip"}
 
 
+def ranked_links(task, identity, options) -> dict:
+    """The path-surface URL of a finished ranked store - ``{}`` when it has none: one source
+    identity, never a content digest, and no options (a store takes none). The one place this
+    grammar is written, as :func:`embedding_links` is for fields."""
+    ident = list(identity or [])
+    if len(ident) != 1 or ":" not in str(ident[0]) or is_digest(ident[0]) or options:
+        return {}
+    prefix, one = str(ident[0]).split(":", 1)
+    return {"ranked": f"/v1/{prefix}/{one}/{task}/{RANKED_NAME}"}
+
+
 def weights_versions_of(segmenter, task) -> list:
     """The key's model component, from the install sidecars via describe(), plus the
     task's engine's own cache epoch when it declares one (``Engine.cache_epoch``).
@@ -429,6 +447,11 @@ def versions_for(segmenter, task, kind: str = "segment") -> list:
     if kind == "embed":
         from .encoders.serving import field_versions
         return field_versions(segmenter, task)
+    if kind == "ranked":
+        # the task's own model identity, as its labels key on, plus what a store's bytes are
+        # written in (ranked_output.ranked_tag: rankfield's format, duckn's seg, our rules)
+        from .ranked_output import ranked_tag
+        return weights_versions_of(segmenter, task) + [ranked_tag()]
     return weights_versions_of(segmenter, task)
 
 
@@ -2359,10 +2382,23 @@ def result_payload(seg, labels_path) -> dict:
     timings = getattr(seg, "timings", None)
     if timings:
         out["timings"] = {k: round(float(v), 3) for k, v in timings.items()}
-    p = Path(labels_path)
-    if p.exists():
+    p = Path(labels_path) if labels_path is not None else None
+    if p is not None and p.exists():
         out["outputs"] = [{"name": "labels", "sha256": digest_file(p),
                            "bytes": p.stat().st_size}]
+    return out
+
+
+def ranked_payload(seg, path) -> dict:
+    """A finished ranked job's public result (``result.json``): the store's digest first, as every
+    result's is (``etag_of``, ``same_output`` and ``result:`` read ``outputs[0]``), with ``kind:
+    ranked`` so a reference cannot bind a store where an image or labels belong - and the run's
+    names, volumes and provenance, which the store was computed with."""
+    from .content import digest_file
+    out = result_payload(seg, None)               # names, volumes, provenance, timings; no labels file
+    p = Path(path)
+    out["outputs"] = [{"name": "ranked", "kind": "ranked", "sha256": digest_file(p),
+                       "bytes": p.stat().st_size}]
     return out
 
 
@@ -2685,6 +2721,14 @@ class LocalExecutor:
     #: ``kind=embed`` jobs run here (2026-09-23): in-process, on this server's device.
     embeds = True
 
+    @property
+    def ranked_stores(self) -> bool:
+        """Whether ``kind=ranked`` jobs run here (2026-09-24): in-process, when the packages a
+        store is written with are installed (the duckn extra). Asked at the submit door, so a
+        server without them refuses at once rather than failing a queued job."""
+        from .ranked_output import store_extra_missing
+        return not store_extra_missing()
+
     def __init__(self, segmenter, *, workdir, max_pending: int = 16,
                  keep_finished: int = 50, segment_fn=None, fetch_idc_fn=None,
                  cache_dir=None, keep_cached: int = 500,
@@ -2845,7 +2889,7 @@ class LocalExecutor:
                             version=r.get("version"),
                             # held to what THIS process renders; a record from before
                             # the list has none and gets the deployment's set
-                            deliverables=(() if r.get("kind") == "embed" else
+                            deliverables=(() if r.get("kind") in NOT_LABELS else
                                           wanted_deliverables(r.get("deliverables"),
                                                               self.artifacts)))
             self._jobs[rec.id] = rec
@@ -2902,7 +2946,7 @@ class LocalExecutor:
                         source=list(source or [{"kind": "upload"}]), input_identity=tuple(identity),
                         input_paths=tuple(inputs), source_tokens=source_tokens or None,
                         refresh_input=bool(refresh_input), version=version, kind=kind,
-                        deliverables=(() if kind == "embed"
+                        deliverables=(() if kind in NOT_LABELS
                                       else wanted_deliverables(deliverables, self.artifacts)))
         if self.cache is not None and identity:
             rec.cache_key = result_key(identity, task, options, versions_for(self.segmenter, task, kind),
@@ -3403,6 +3447,24 @@ class LocalExecutor:
         out = Path(report["embedding"])
         return out, field_payload(report, out)
 
+    def _run_ranked(self, rec: JobRecord, inp, entries, reporter) -> tuple:
+        """A ranked job's compute (2026-09-24): the task's store, written into the job's
+        directory through THIS server's warm Segmenter - the same models, device lock and
+        cancellation a segmentation gets - and its published record. The store names its input by
+        the job's identity (source identifier or digest), never the scratch path it sat at."""
+        from .ranked_output import segment_to_store
+        ident = rec.input_identity[0] if rec.input_identity else None
+        source = ({"type": "image", "identifier": str(ident)} if ident else None)
+
+        def run(image, task, **kw):
+            return self._segment(image, task, cancel=rec.cancel_token, **kw)
+        reporter.stage("ranked", rec.task)
+        seg, out = segment_to_store(inp, run_name(rec.task, rec.version), rec.dir / RANKED_NAME,
+                                    case=rec.id, source=source, quiet=True, run=run,
+                                    progress=reporter)
+        record_inputs(seg, entries, rec.input_identity, self.series_cache)
+        return Path(out), ranked_payload(seg, out)
+
     def _dispatch(self) -> None:
         while True:
             with self._cv:
@@ -3480,6 +3542,8 @@ class LocalExecutor:
                             inp = rec.input_path
                 if rec.kind == "embed":
                     rec.labels_path, rec.result = self._run_encode(rec, reporter)
+                elif rec.kind == "ranked":
+                    rec.labels_path, rec.result = self._run_ranked(rec, inp, entries, reporter)
                 else:
                     seg = self._segment(inp, run_name(rec.task, rec.version), progress=reporter,
                                         cancel=rec.cancel_token, **rec.options)
@@ -3731,10 +3795,10 @@ class LocalExecutor:
              "finished": r.get("finished"), "input_identity": r.get("input_identity") or [],
              "options": r.get("options") or {}, "cached": bool(r.get("cached")),
              "evicted": True, "result_available": not gone}
-        if r.get("kind") == "embed":
+        if r.get("kind") in NOT_LABELS:
             # as the live status says it: without it the links door read an evicted field as a
             # segmentation and minted a task-named encoder's LABEL paths (review, 2026-09-23)
-            d["kind"] = "embed"
+            d["kind"] = r["kind"]
         if r.get("input_refresh_skipped"):
             d["input_refresh_skipped"] = True
         if r.get("error"):
@@ -3763,7 +3827,7 @@ class LocalExecutor:
             key, rec.labels_path, rec.result,
             {"identity": list(rec.input_identity), "task": rec.task,
              "options": rec.options, "computed": rec.started,
-             "job": rec.id, **({"kind": rec.kind} if rec.kind == "embed" else {})},
+             "job": rec.id, **({"kind": rec.kind} if rec.kind in NOT_LABELS else {})},
             output_name=OUTPUT_OF_KIND.get(rec.kind, RESULT_NAME))
         if rec.kind == "segment" and hasattr(self.cache, "note_task"):
             try:
@@ -3827,8 +3891,8 @@ class LocalExecutor:
                 d["deliverables"] = list(rec.deliverables)
                 if rec.deliverables_unavailable:
                     d["deliverables_unavailable"] = dict(rec.deliverables_unavailable)
-        if rec.kind == "embed":
-            d["kind"] = "embed"           # said only when it is not a segmentation: no status moves
+        if rec.kind in NOT_LABELS:
+            d["kind"] = rec.kind          # said only when it is not a segmentation: no status moves
         if rec.cached:
             d["cached"] = True
         if not brief and rec.state == "done" and rec.result is not None:
@@ -4108,6 +4172,24 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
     def embed_key(identities, encoder: str, opts: dict) -> str:
         """An embedding's key: ``result_key`` with the kind, over ``embed_versions``."""
         return result_key(tuple(identities), encoder, opts, embed_versions(encoder), kind="embed")
+
+    def ranked_key(identities, task: str) -> str:
+        """A ranked store's key (2026-09-24): ``result_key`` with the kind, no options, over the
+        versions the job was keyed on - from the executor that states them (Modal's api and its
+        twin read them stale-proof and take the kind), else ``versions_for``, as ``_accept``."""
+        wv = getattr(executor, "weights_versions", None)
+        versions = None
+        if wv is not None:
+            try:
+                versions = wv(task, kind="ranked")
+            except TypeError:
+                versions = None
+        if versions is None:
+            try:
+                versions = versions_for(seg, task, "ranked")
+            except Exception:              # a twin with no describe(): no key is findable
+                versions = ["unknown"]
+        return result_key(tuple(identities), task, {}, versions, kind="ranked")
 
     def norm_ident(prefix: str, ident: str) -> str:
         """An identifier as the path surface keys it: stripped, and an IDC series UUID in
@@ -5013,8 +5095,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                      source: str = Form(None), deliverables: str = Form(None),
                      job_kind: str = Form("segment", alias="kind")):
         require_auth(request)
-        if job_kind not in ("segment", "embed"):
-            raise HTTPException(422, f"unknown job kind {job_kind!r}; a job is segment (the default) or embed")
+        if job_kind not in ("segment", "embed", "ranked"):
+            raise HTTPException(422, f"unknown job kind {job_kind!r}; a job is segment (the default), "
+                                     "embed or ranked")
         try:
             opts = json.loads(options)
             if not isinstance(opts, dict):
@@ -5093,6 +5176,29 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                        "tasks, e.g. " + ", ".join(names[:4]))
             raise HTTPException(404, why)
         task = canonical
+        if job_kind == "ranked":
+            # The task's ranked store (2026-09-24): its output distribution, not its labels. It
+            # takes no options - depth and clip are the store's own rule (ranked_output), and an
+            # option is a key; asks for no deliverables - a preview and statistics are of labels;
+            # and exists only for a task whose engine hands over a distribution.
+            from .ranked_output import supports_store_output
+            if not getattr(executor, "ranked_stores", False):
+                raise HTTPException(501, "this server writes no ranked stores (the duckn extra is not "
+                                         "installed where its jobs run); write one locally with "
+                                         "`haversack segment ... -o <name>.duckn.zip`")
+            if asked:
+                raise HTTPException(422, {"code": "no_deliverables",
+                                          "message": "a ranked job renders no deliverables: a preview "
+                                                     "and statistics are of labels"})
+            if opts:
+                raise HTTPException(422, {"code": "no_options",
+                                          "message": "a ranked store takes no options (its depth and "
+                                                     f"clip are the store's own rule); got {sorted(opts)}"})
+            if not supports_store_output(task):
+                raise HTTPException(422, {"code": "no_distribution",
+                                          "message": f"{task} has no ranked store: its engine returns "
+                                                     "labels, not the distribution a store holds"})
+            wanted = None
         # The pin travels with the job so the worker's catalog installs that version or
         # refuses it. One this server cannot verify yet must not be answered from cache or
         # by joining a flight either: both are keyed on the version that IS installed,
@@ -5130,7 +5236,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             return await _accept(request, jid, jdir, binding, task, opts, src,
                                  file, no_cache, executor, seg,
                                  caller_asked_no_cache, version=version,
-                                 handed=handed, role_specs=declared, wanted=wanted)
+                                 handed=handed, role_specs=declared, wanted=wanted,
+                                 job_kind=job_kind)
         except QueueFull as e:
             _discard(jdir)
             raise HTTPException(429, str(e), headers={"Retry-After": "30"}) from e
@@ -5458,9 +5565,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             # A field has no path form yet (its URL grammar is its own; phase 2's path
             # surface), and `resource_links` would mint the LABELS' urls for a task-named
             # encoder such as ts.v2:total_fast - so an embedding job is reached through itself.
-            by_path = ({} if out.get("kind") == "embed" else resource_links(
-                out.get("task"), out.get("input_identity"), out.get("options"),
-                preview="preview" in kinds, statistics="statistics" in kinds))
+            by_path = ({} if out.get("kind") == "embed" else
+                       ranked_links(out.get("task"), out.get("input_identity"), out.get("options"))
+                       if out.get("kind") == "ranked" else resource_links(
+                           out.get("task"), out.get("input_identity"), out.get("options"),
+                           preview="preview" in kinds, statistics="statistics" in kinds))
             if not by_path and "result" in links:
                 # A result with NO PATH - an upload, a `result:` reference, a
                 # multi-input job, options off the grid menu - reaches its artifacts
@@ -5601,12 +5710,18 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # the job's own copy): an embedding job's field is a zip, named and typed as one, and has
         # no NIfTI form - refused, where converting it used to be SimpleITK's 500 (2026-09-23).
         is_field = Path(path).name == EMBEDDING_NAME
+        is_store = Path(path).name == RANKED_NAME     # a ranked job's store (2026-09-24): likewise
         if is_field:                           # radar:pretrain -> radar_pretrain: the family says which model
             stem = re.sub(r"[^A-Za-z0-9._-]+", "_", str(task_name))
-        suffix, media = (".zarr.zip", "application/zip") if is_field else (".seg.nrrd", "application/octet-stream")
+        suffix, media = ((".zarr.zip", "application/zip") if is_field else
+                         (".duckn.zip", "application/zip") if is_store else
+                         (".seg.nrrd", "application/octet-stream"))
         if is_field and format is not None:
             raise HTTPException(422, f"format={format!r}: an embedding field is served only as itself "
                                      "(a .zarr.zip); `feldglas` reads it")
+        if is_store and format is not None:
+            raise HTTPException(422, f"format={format!r}: a ranked store is served only as itself (a "
+                                     ".duckn.zip); its labels are the task's segmentation job")
         if head and format in ("nii.gz", "nii"):
             from fastapi import Response
             probe = Response(status_code=200, media_type="application/gzip")
@@ -6225,6 +6340,40 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         _register_embedding("", {})
         for etok, eopts in EMBEDDING_TOKENS.items():
             _register_embedding("_" + etok, dict(eopts))
+
+        @app.head(base + f"/{RANKED_NAME}", tags=["results"])
+        @app.get(base + f"/{RANKED_NAME}", tags=["results"])
+        @_absence_is_never_stored
+        async def ranked_store(request: Request, ident: str, task: str):
+            """A task's ranked store by path (2026-09-24): the READ door beside its labels, as the
+            embedding's is. 200 with the store (304 on a matching If-None-Match), 202 while a
+            ranked job for it runs, 404 when there is none. It computes nothing, whatever Prefer
+            says: a store is computed by ``POST /v1/jobs`` with ``kind=ranked``. Anonymous, as a
+            cached label map is."""
+            ident = norm(ident)
+            if not re.fullmatch(pat, ident):
+                raise HTTPException(422, f"{ident!r} is not a valid {prefix} identifier")
+            canonical = canon_task(task)
+            if canonical is None:
+                raise HTTPException(404, unknown_task(task))
+            key = await asyncio.to_thread(ranked_key, (srcobj.identity(ident),), canonical)
+            since = time.monotonic()
+            hit = await asyncio.to_thread(executor.cache_get, key)
+            if hit is None and executor.find_inflight(key) is None:
+                hit = await asyncio.to_thread(confirm_absent, key, since)
+            if hit is None:
+                if executor.find_inflight(key) is not None:
+                    return JSONResponse({"state": "materializing"}, status_code=202,
+                                        headers=_progress_headers(None))
+                raise HTTPException(404, "not materialized; compute it with POST /v1/jobs "
+                                         f"kind=ranked (haversack remote segment {prefix}:{ident} "
+                                         f"{canonical} -o <name>.duckn.zip)")
+            headers = _resource_headers(key, hit[1])
+            fresh = not_modified(request, headers["ETag"], headers)
+            if fresh is not None:
+                return fresh
+            return FileResponse(hit[0], media_type="application/zip", headers=headers,
+                                filename=f"{_task_stem(canonical)}_{ident[:8]}.duckn.zip")
 
         def _register_evict(tok: str, gopts: dict):
             paths = [base + f"/labels{tok}.seg.nrrd"]

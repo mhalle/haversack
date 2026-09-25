@@ -729,9 +729,12 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | HEAD | `/v1/<source>/<identifier>/<task>/statistics.tsv` | read | probe: rendered, rendering, absent |
 | GET | `/v1/<source>/<identifier>/<encoder>/embedding.zarr.zip` | read | an embedding field; computes nothing |
 | HEAD | `/v1/<source>/<identifier>/<encoder>/embedding.zarr.zip` | read | probe: cached, in flight, absent |
+| GET | `/v1/<source>/<identifier>/<task>/ranked.duckn.zip` | read | a task's ranked store; computes nothing |
+| HEAD | `/v1/<source>/<identifier>/<task>/ranked.duckn.zip` | read | probe: cached, in flight, absent |
 
 Every path-addressed route that names a file also exists with the `_res-1mm` token
-before the extension - an embedding's with `_int8` instead.
+before the extension - an embedding's with `_int8` instead, and a ranked store's with none (a
+store takes no options).
 
 ## Reference
 

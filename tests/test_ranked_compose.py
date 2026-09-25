@@ -86,6 +86,21 @@ def test_a_gap_between_two_parts_is_the_later_parts_own_claim():
     np.testing.assert_allclose(-d2[0, 0], b[0][0, 0], rtol=0.03)     # the log curve's quantum
 
 
+def test_a_gap_to_background_is_the_painting_parts_own_claim():
+    """Where one part claims by c and every later part declines firmly, the composed gap from
+    its label to background is c - the part's own foreground-over-background gap - so the
+    surface a linear restore finds is where the part's own field puts it."""
+    a = np.zeros((2,) + SHAPE)
+    a[1] = np.linspace(0.5, 3.0, SHAPE[2])            # part a claims by 0.5 .. 3.0 along x
+    b = np.zeros((2,) + SHAPE)
+    b[0] = 9.0                                        # part b declines firmly everywhere
+    parts = [_part("a", a, [0, 1]), _part("b", b, [0, 2])]
+    ranks, support, meta, labels = _compose(parts)
+    field = rankfield.RankField(ranks=ranks, support=support, tail=None, meta=meta, labels=labels)
+    d0 = rankfield.deficit(field, labels.index(0))
+    np.testing.assert_allclose(-d0[0, 0], a[1][0, 0], rtol=0.03)
+
+
 def test_encoding_slab_by_slab_is_encoding_the_whole_field():
     parts = _union(3)
     whole = _compose(parts, slab=SHAPE[0])
