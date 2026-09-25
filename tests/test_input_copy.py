@@ -13,7 +13,11 @@ What these hold, against the ways it could go wrong:
 - the mapped reader refuses every other layout (and the generic duckn reader takes over), and
   reads without duckn exactly as duckn does;
 - the tags follow duckn's dicom-spec: keywords, JSON-native values, VM arrays, series vs per
-  slice, the convention-captured tags left to the convention fields.
+  slice, the convention-captured tags left to the convention fields;
+- stored compressed (``HAVERSACK_INPUT_COPY_COMPRESSION=zstd``) the copy is the same image with
+  the same tags, in its own layout and format version; either form reads whatever the setting
+  says now, an unknown setting keeps the original, and a file whose version and layout disagree
+  is stale.
 """
 from __future__ import annotations
 
@@ -295,6 +299,22 @@ def test_the_mapped_reader_refuses_any_other_layout(tmp_path, edit):
         ic.read_copy(bad)
 
 
+@pytest.mark.parametrize("compressed", [False, True], ids=["mapped", "zstd"])
+def test_a_deflated_zip_is_refused(tmp_path, monkeypatch, compressed):
+    """The mapped reader takes the member's bytes at its offset as the voxels: a DEFLATED member
+    would hand it deflate output under the array's size. Either layout must be a stored zip."""
+    if compressed:
+        monkeypatch.setenv(ic.COMPRESSION_ENV, "zstd")
+    copy = ic.transcode(write_series(tmp_path / "s"), tmp_path / "entry")
+    out = tmp_path / "x" / ic.COPY_DIR / ic.COPY_NAME
+    out.parent.mkdir(parents=True)
+    with zipfile.ZipFile(copy) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for i in src.infolist():
+            dst.writestr(i.filename, src.read(i.filename))
+    with pytest.raises(ic.NotACopy):
+        ic.read_copy(out)
+
+
 def test_a_file_that_only_looks_like_a_copy_is_read_by_duckn(tmp_path):
     """Fallback, never an error: a well-formed duckn store under the copy's name whose layout
     the mapped reader does not take (two chunks) is read by duckn's own reader, correctly."""
@@ -411,3 +431,79 @@ def test_the_prefetcher_stores_the_copy_too(tmp_path):
     assert cache.prefetch("fixture:pre")
     entry = cache.entry("fixture:pre")
     assert ic.is_copy(cache.path("fixture:pre")) and not (entry / "series").exists()
+
+
+# -- compressed copies ---------------------------------------------------------------------------
+
+@pytest.fixture
+def zstd(monkeypatch):
+    monkeypatch.setenv(ic.COMPRESSION_ENV, "zstd")
+    monkeypatch.setattr(ic, "CHUNK_SLICES", 4)          # 6 slices: a full chunk and a short one
+
+
+@pytest.mark.parametrize("tilt", [0.0, 0.03], ids=["straight", "tilted"])
+def test_a_compressed_copy_is_the_same_image_with_the_same_tags(tmp_path, zstd, tilt):
+    series = write_series(tmp_path / "s", tilt_mm=tilt)
+    ref = nio.read_image(series)
+    copy = ic.transcode(series, tmp_path / "entry")
+    got = nio.read_image(copy)
+    assert _same(got, ref, exact=not tilt)
+    assert got.GetMetaData("0008|0060") == "CT" and got.GetMetaData("0018|0060") == "120"
+    assert ic.slice_tags(copy, "XRayTubeCurrent") == [100 + 10 * i for i in range(6)]
+    assert ic.stored_compression(copy) == "zstd" and not ic.stale(copy)
+
+
+def test_a_compressed_copy_has_its_own_layout_and_version(tmp_path, zstd):
+    copy = ic.transcode(write_series(tmp_path / "s"), tmp_path / "entry")
+    with zipfile.ZipFile(copy) as z:
+        names = sorted(i.filename for i in z.infolist())
+        assert all(i.compress_type == zipfile.ZIP_STORED for i in z.infolist())
+        meta = json.loads(z.read("zarr.json"))
+    assert names == ["c/0/0/0", "c/1/0/0", "zarr.json"]
+    assert meta["chunk_grid"]["configuration"]["chunk_shape"] == [4, 6, 5]
+    assert [c["name"] for c in meta["codecs"]] == ["bytes", "zstd"]
+    assert meta["codecs"][1]["configuration"]["level"] == ic.ZSTD_LEVEL
+    assert meta["attributes"]["duckn"]["extensions"]["haversack"]["version"] == ic.FORMATS["zstd"] == 2
+
+
+def test_either_form_reads_whatever_the_setting_says_now(tmp_path, monkeypatch):
+    series = write_series(tmp_path / "s")
+    ref = nio.read_image(series)
+    plain = ic.transcode(series, tmp_path / "a")
+    monkeypatch.setenv(ic.COMPRESSION_ENV, "zstd")
+    packed = ic.transcode(series, tmp_path / "b")
+    assert (ic.stored_compression(plain), ic.stored_compression(packed)) == ("none", "zstd")
+    for setting in ("zstd", "none"):
+        monkeypatch.setenv(ic.COMPRESSION_ENV, setting)
+        for copy in (plain, packed):
+            assert not ic.stale(copy) and _same(nio.read_image(copy), ref)
+
+
+def test_an_unknown_setting_keeps_the_original(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(ic.COMPRESSION_ENV, "lz77")
+    cache = _fetching_cache(tmp_path, lambda d: write_series(d))
+    assert cache.get_or_fetch("fixture:odd").name == "series"
+    assert ic.COMPRESSION_ENV in capsys.readouterr().err
+
+
+def test_a_version_that_disagrees_with_the_layout_is_stale(tmp_path, zstd, monkeypatch):
+    packed = ic.transcode(write_series(tmp_path / "s"), tmp_path / "a")
+    monkeypatch.setattr(ic, "FORMATS", {"none": 1, "zstd": 1})     # as a version-1 reader sees it
+    assert ic.stale(packed)
+    monkeypatch.setattr(ic, "FORMATS", {"none": 2, "zstd": 2})
+    monkeypatch.delenv(ic.COMPRESSION_ENV)
+    plain = ic.transcode(write_series(tmp_path / "t"), tmp_path / "b")
+    monkeypatch.setattr(ic, "FORMATS", {"none": 1, "zstd": 2})
+    assert ic.stale(plain)                                          # says 2, is a mapped chunk
+
+
+def test_a_compressed_copy_missing_a_chunk_is_refused(tmp_path, zstd):
+    packed = ic.transcode(write_series(tmp_path / "s"), tmp_path / "entry")
+    out = tmp_path / "x" / ic.COPY_DIR / ic.COPY_NAME
+    out.parent.mkdir(parents=True)
+    with zipfile.ZipFile(packed) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as dst:
+        for i in src.infolist():
+            if i.filename != "c/1/0/0":
+                dst.writestr(i.filename, src.read(i.filename))
+    with pytest.raises(ic.NotACopy):
+        ic.read_copy(out)

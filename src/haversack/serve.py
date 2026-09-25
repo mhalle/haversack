@@ -4351,7 +4351,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                       "message": "not held by this server"})
         where = store.resolve(digest)
         kind = "tree" if digest.startswith(content.TREE) else "blob"
-        from .input_copy import info, is_copy
+        from .input_copy import info, is_copy, stored_compression
         if is_copy(where):
             # the entry keeps its input copy INSTEAD of the uploaded bytes (docs/input-copy.md):
             # members and bytes still describe the content the digest names, recorded when it
@@ -4359,6 +4359,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             h = info(where)
             return {"digest": digest, "kind": kind, "members": h.get("source_files"),
                     "bytes": h.get("source_bytes"), "stored_form": "input_copy",
+                    "stored_compression": stored_compression(where),
                     "stored_bytes": where.stat().st_size}
         files = sorted(p for p in where.rglob("*") if p.is_file()) \
             if where.is_dir() else [where]

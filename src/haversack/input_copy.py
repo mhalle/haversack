@@ -6,6 +6,11 @@ is the image ``io.read_image`` produced, written once when the cache stores the 
 uncompressed zarr chunk in a zip, with duckn's geometry and the DICOM tags SimpleITK reported -
 and read back by mapping that chunk (0.25 s for the same CT), with voxels and geometry identical.
 
+An operator may store it compressed instead (``HAVERSACK_INPUT_COPY_COMPRESSION=zstd``): zstd in
+chunks of :data:`CHUNK_SLICES` slices, decoded in parallel by zarr - 2.6x smaller, read in ~0.6-1 s
+for that CT (measured 2026-09-25, docs/input-copy.md §13). It is the choice for a cache whose room
+is the constraint: a Modal worker's series cache is RAM.
+
 An entry holds one form: the copy, or - when the reader refuses the input, or anything about
 the copy fails - the original, which is then read (and refused) as it always was. The original
 exists only inside :func:`transcode`, as its input; nothing downstream is handed it.
@@ -18,6 +23,9 @@ The file (``<entry>/decoded/input.duckn.zip``):
                 (``extensions.dicom``), per-slice tags (``axes[0].samples[i].metadata.dicom``),
                 and what this file is (``extensions.haversack``)
     c/0/0/0     the voxels, C order, little-endian, stored (not deflated)
+
+or, compressed (format version 2): chunks of ``CHUNK_SLICES`` whole slices, codecs ``bytes`` then
+``zstd``, one zip member per chunk (``c/<k>/0/0``), the zip itself still stored.
 
 Imports nothing heavy at module level: ``io`` asks :func:`is_copy` on every read.
 """
@@ -34,6 +42,9 @@ COPY_NAME = "input.duckn.zip"
 #: meaning changes (a field moves, the layout changes).
 KIND = "input_copy"
 FORMAT_VERSION = 1
+#: The file's format version by its compression: a compressed copy is a different layout, and a
+#: reader that knows only version 1 must see it as stale (refetch), never try to map it.
+FORMATS = {"none": 1, "zstd": 2}
 #: The reader's version, the input side's ``CACHE_EPOCH``: bump whenever ``io.read_image`` would
 #: produce different voxels, geometry or tags from the same original bytes. A copy written under
 #: another version is STALE - its original is gone, so it cannot be redone: a fetched input is
@@ -41,6 +52,14 @@ FORMAT_VERSION = 1
 READER_VERSION = 1
 #: The operator's switch: ``HAVERSACK_INPUT_COPY=0`` keeps originals, as before this existed.
 ENV = "HAVERSACK_INPUT_COPY"
+#: How new copies are stored: ``none`` (the default: one mapped chunk, the fastest read) or
+#: ``zstd``. A cache may hold both; the reader reads each by its own layout, so changing this
+#: rewrites nothing and invalidates nothing.
+COMPRESSION_ENV = "HAVERSACK_INPUT_COPY_COMPRESSION"
+#: zstd's level and the slices per chunk (measured on a 709-slice CT: level 3 in 32-slice chunks
+#: was the fastest read at 2.6x; a single compressed chunk decodes on one thread, 2.4 s).
+ZSTD_LEVEL = 3
+CHUNK_SLICES = 32
 #: How far the copy's geometry may differ from the reader's: duckn stores each axis as direction
 #: x spacing and a reader takes it apart again, which is exact for an axis-aligned grid and off by
 #: one unit in the last place for a tilted series' sheared direction (1.1e-16 measured - a sample
@@ -65,6 +84,15 @@ def enabled() -> bool:
         return all(importlib.util.find_spec(m) is not None for m in ("duckn", "zarr", "pydicom"))
     except (ImportError, ValueError):
         return False
+
+
+def compression() -> str:
+    """How a new copy is stored, from :data:`COMPRESSION_ENV`; a value it does not know raises,
+    naming the ones it does (a copy is then not written, and the warning says why)."""
+    value = os.environ.get(COMPRESSION_ENV, "none").strip().lower() or "none"
+    if value not in FORMATS:
+        raise ValueError(f"{COMPRESSION_ENV}={value!r}: expected one of {', '.join(FORMATS)}")
+    return value
 
 
 def copy_path(entry) -> Path:
@@ -171,7 +199,7 @@ def _source_size(content) -> tuple[int, int]:
     return len(files), sum(q.stat().st_size for q in files)
 
 
-def _metadata(image, per_slice, *, source, source_digest, source_size=(None, None)):
+def _metadata(image, per_slice, *, source, source_digest, source_size=(None, None), how="none"):
     """The duckn metadata of the copy, through duckn's own models: the geometry is
     ``from_sitk``'s (LPS - no flip either way), the rest is filled into its fields."""
     import haversack
@@ -198,7 +226,7 @@ def _metadata(image, per_slice, *, source, source_digest, source_size=(None, Non
     ext = dict(meta.extensions or {})
     if series or slices:
         ext["dicom"] = {"version": DICOM_EXTENSION_VERSION, "tags": series}
-    ext["haversack"] = {"kind": KIND, "version": FORMAT_VERSION, "reader_version": READER_VERSION,
+    ext["haversack"] = {"kind": KIND, "version": FORMATS[how], "reader_version": READER_VERSION,
                         "source": source, "source_digest": source_digest,
                         "source_files": source_size[0], "source_bytes": source_size[1],
                         "reader": {"haversack": haversack.__version__,
@@ -207,15 +235,20 @@ def _metadata(image, per_slice, *, source, source_digest, source_size=(None, Non
     return vol
 
 
-def _write(vol, out: Path) -> None:
+def _write(vol, out: Path, how: str = "none") -> None:
     import zarr
     from duckn.models import duckn_attrs
     from zarr.storage import ZipStore
     shape = tuple(int(n) for n in vol.raw.shape)
+    if how == "zstd":
+        from zarr.codecs import ZstdCodec
+        chunks, compressors = (min(CHUNK_SLICES, shape[0]),) + shape[1:], [ZstdCodec(level=ZSTD_LEVEL)]
+    else:
+        chunks, compressors = shape, None
     store = ZipStore(str(out), mode="w")
     try:
-        arr = zarr.create_array(store, shape=shape, dtype=vol.raw.dtype, chunks=shape,
-                                compressors=None, attributes=duckn_attrs(vol.metadata),
+        arr = zarr.create_array(store, shape=shape, dtype=vol.raw.dtype, chunks=chunks,
+                                compressors=compressors, attributes=duckn_attrs(vol.metadata),
                                 fill_value=0, config={"write_empty_chunks": True})
         arr[:] = vol.raw
     finally:
@@ -242,9 +275,10 @@ def transcode(content, entry, *, source=None, source_digest=None) -> Path | None
     final.parent.mkdir(parents=True, exist_ok=True)
     partial = final.with_name("." + COPY_NAME + ".partial")
     try:
+        how = compression()
         vol = _metadata(image, per_slice, source=source, source_digest=source_digest,
-                        source_size=_source_size(content))
-        _write(vol, partial)
+                        source_size=_source_size(content), how=how)
+        _write(vol, partial, how)
         back = read_copy(partial, check_name=False)
         same = (np.array_equal(sitk.GetArrayViewFromImage(back), sitk.GetArrayViewFromImage(image))
                 and back.GetPixelID() == image.GetPixelID()
@@ -266,7 +300,10 @@ def transcode(content, entry, *, source=None, source_digest=None) -> Path | None
 # -- reading -----------------------------------------------------------------------------
 
 def _layout(path: Path):
-    """``(zarr.json dict, chunk data offset, dtype, shape)``, or NotACopy for any other layout."""
+    """``(zarr.json dict, how, chunk data offset, dtype, shape)`` for one of the two layouts this
+    module writes - ``how`` "none" (one stored chunk, mapped at the offset) or "zstd" (slabs of
+    whole slices, decoded by zarr; offset None) - or NotACopy for any other."""
+    import math
     import struct
     import zipfile
 
@@ -274,18 +311,28 @@ def _layout(path: Path):
     try:
         with zipfile.ZipFile(path) as z:
             meta = json.loads(z.read("zarr.json"))
-            info = z.getinfo("c/0/0/0")
-    except (KeyError, zipfile.BadZipFile, ValueError) as e:
+            members = {i.filename: i for i in z.infolist()}
+    except (zipfile.BadZipFile, ValueError, KeyError) as e:
         raise NotACopy(f"{path}: {e}") from None
     shape = tuple(int(n) for n in meta.get("shape") or ())
     codecs = meta.get("codecs") or []
-    grid = ((meta.get("chunk_grid") or {}).get("configuration") or {}).get("chunk_shape")
-    if (meta.get("node_type") != "array" or len(shape) != 3 or tuple(grid or ()) != shape
-            or len(codecs) != 1 or codecs[0].get("name") != "bytes"
-            or info.compress_type != zipfile.ZIP_STORED):
-        raise NotACopy(f"{path}: not one stored, uncompressed chunk")
+    grid = tuple(((meta.get("chunk_grid") or {}).get("configuration") or {}).get("chunk_shape") or ())
+    if meta.get("node_type") != "array" or len(shape) != 3 or not codecs \
+            or codecs[0].get("name") != "bytes":
+        raise NotACopy(f"{path}: not an input copy's array")
     endian = (codecs[0].get("configuration") or {}).get("endian", "little")
     dt = np.dtype(meta["data_type"]).newbyteorder("<" if endian == "little" else ">")
+    stored = all(i.compress_type == zipfile.ZIP_STORED for i in members.values())
+    names = {n for n in members if n.startswith("c/")}
+    if len(codecs) == 2 and codecs[1].get("name") == "zstd":
+        k = grid[0] if len(grid) == 3 else 0
+        want = {f"c/{i}/0/0" for i in range(math.ceil(shape[0] / k))} if k else None
+        if not stored or not k or grid[1:] != shape[1:] or names != want:
+            raise NotACopy(f"{path}: not whole-slice zstd chunks, one member each")
+        return meta, "zstd", None, dt, shape
+    info = members.get("c/0/0/0")
+    if len(codecs) != 1 or grid != shape or info is None or names != {"c/0/0/0"} or not stored:
+        raise NotACopy(f"{path}: not one stored, uncompressed chunk")
     if info.file_size != int(np.prod(shape)) * dt.itemsize:
         raise NotACopy(f"{path}: the chunk holds {info.file_size} bytes, not the array's")
     with open(path, "rb") as f:
@@ -294,7 +341,12 @@ def _layout(path: Path):
     if local[:4] != b"PK\x03\x04":
         raise NotACopy(f"{path}: no local header where the index points")
     name_len, extra_len = struct.unpack("<HH", local[26:30])
-    return meta, info.header_offset + 30 + name_len + extra_len, dt, shape
+    return meta, "none", info.header_offset + 30 + name_len + extra_len, dt, shape
+
+
+def stored_compression(path) -> str:
+    """How a copy is stored - "none" or "zstd" - read from its layout, not from what it says."""
+    return _layout(Path(path))[1]
 
 
 def _duckn(meta: dict):
@@ -315,24 +367,25 @@ def stale(path) -> bool:
     is gone, so it cannot be redone - the cache treats the entry as absent."""
     try:
         h = info(path)
+        how = stored_compression(path)
     except NotACopy:
         return True
-    return h.get("kind") != KIND or h.get("version") != FORMAT_VERSION \
+    return h.get("kind") != KIND or h.get("version") != FORMATS[how] \
         or h.get("reader_version") != READER_VERSION
 
 
 def read_copy(path, *, check_name: bool = True):
     """The copy as a SimpleITK image: the chunk mapped at its offset (no copy, no CRC until
-    SimpleITK takes the buffer), the geometry through duckn's ``to_sitk``, the series-level DICOM
-    tags restored as ``gggg|eeee`` strings. NotACopy for any file this does not fully understand
-    - never a guess."""
+    SimpleITK takes the buffer) - or, compressed, every chunk decoded by zarr - the geometry
+    through duckn's ``to_sitk``, the series-level DICOM tags restored as ``gggg|eeee`` strings.
+    NotACopy for any file this does not fully understand - never a guess."""
     import mmap
 
     import numpy as np
     p = Path(path)
     if check_name and not is_copy(p):
         raise NotACopy(f"{p} is not named as an input copy")
-    meta, start, dt, shape = _layout(p)
+    meta, how, start, dt, shape = _layout(p)
     attrs = _duckn(meta)
     if attrs.get("value_transforms"):
         raise NotACopy(f"{p}: a stored rescale - not a calibrated copy")
@@ -340,6 +393,9 @@ def read_copy(path, *, check_name: bool = True):
     if (attrs.get("space") is None or attrs.get("space_origin") is None or len(axes) != 3
             or any(a.get("space_direction") is None for a in axes)):
         raise NotACopy(f"{p}: the geometry is not stated in full")
+    if how == "zstd":
+        image = _to_sitk(attrs, _decoded(p, dt, shape))
+        return _with_tags(image, attrs)
     n = int(np.prod(shape))
     with open(p, "rb") as f:
         mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
@@ -349,6 +405,31 @@ def read_copy(path, *, check_name: bool = True):
             del raw
         finally:
             mm.close()
+    return _with_tags(image, attrs)
+
+
+def _decoded(p: Path, dt, shape):
+    """A compressed copy's voxels, through zarr (its codec pipeline decodes the chunks in
+    parallel). An environment without zarr cannot read one: NotACopy, and ``io`` then tries
+    duckn's reader, which says what to install."""
+    try:
+        import zarr
+        from zarr.storage import ZipStore
+    except ImportError as e:
+        raise NotACopy(f"{p}: a compressed copy needs zarr to read ({e})") from None
+    store = ZipStore(str(p), mode="r")
+    try:
+        raw = zarr.open_array(store, mode="r")[...]
+    except Exception as e:                 # noqa: BLE001 - a chunk that does not decode
+        raise NotACopy(f"{p}: {type(e).__name__}: {e}") from None
+    finally:
+        store.close()
+    if raw.shape != shape or raw.dtype.newbyteorder("=") != dt.newbyteorder("="):
+        raise NotACopy(f"{p}: decoded {raw.shape} {raw.dtype}, not the stated array")
+    return raw
+
+
+def _with_tags(image, attrs: dict):
     tags = ((attrs.get("extensions") or {}).get("dicom") or {}).get("tags") or {}
     if tags:
         from .dicom_tags import to_sitk_strings

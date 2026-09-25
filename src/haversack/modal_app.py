@@ -172,6 +172,11 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   # Which cloud the idc: source fetches from first; a deployment
                   # in Google Cloud sets gcp and reads IDC's mirror without egress.
                   "HAVERSACK_IDC_CLOUD",
+                  # The input copy (docs/input-copy.md), read by input_copy at each store: off,
+                  # and compressed. Unforwarded, `HAVERSACK_INPUT_COPY=0` never reached a
+                  # container, and a compressed cache - the reason to choose it on Modal is a
+                  # worker's RAM-backed series cache - would silently stay uncompressed.
+                  "HAVERSACK_INPUT_COPY", "HAVERSACK_INPUT_COPY_COMPRESSION",
                   # EVERY other knob this module reads at import, because the container
                   # re-imports it and a missing one silently takes its default there.
                   # The app name did (2026-09-12): a deploy with --app-name ran its

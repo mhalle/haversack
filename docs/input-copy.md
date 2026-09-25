@@ -193,6 +193,12 @@ reader:
 **Invalidation.** A refetch (`no-cache`, `refresh_input`) rewrites the entry. Eviction and
 `cache clean` remove it. **Operator switch:** `HAVERSACK_INPUT_COPY=0` stores originals only -
 the behavior before this change, for a host that wants the DICOM kept.
+**Compression:** `HAVERSACK_INPUT_COPY_COMPRESSION=zstd` stores new copies compressed (§13):
+zstd level 3 in chunks of 32 whole slices, one zip member each, still a stored zip, format
+version 2. It is read through zarr, whose codec pipeline decodes the chunks in parallel - no
+mapping. Existing copies are not rewritten; a cache holds whichever form each entry was written
+in, and the reader takes each by its layout. A reader that knows only version 1 sees a version-2
+copy as stale and fetches again, never misreads it.
 
 ### 7a. What keeping one form costs
 
@@ -313,3 +319,46 @@ failure is explained below and is not the copy's.
   With the input proven identical, that is the other deployment - another container and another
   branch's build - not the copy. Comparing labels across deployments is the wrong check for an
   input change; compare in one container.
+
+## 13. Compressed copies (2026-09-25)
+
+`HAVERSACK_INPUT_COPY_COMPRESSION=zstd` stores new copies as zstd level 3 in chunks of 32 whole
+slices, one member per chunk, in a stored zip; `extensions.haversack.version` is 2 (`FORMATS`),
+so a version-1 reader treats it as stale rather than mapping it. The reader takes each file by its
+layout, so a cache may hold both forms and the setting can change at any time. An unknown value
+keeps the original and says why. Both input-copy variables are forwarded into Modal containers
+(`HAVERSACK_INPUT_COPY=0` had never reached them).
+
+**Chosen locally** (M2, 8 cores, the 709-slice CT, warm): one compressed chunk decodes on one
+thread (zstd-3 2.4 s); whole-slice chunks decode in parallel through zarr - zstd-3 in 32-slice
+chunks 0.64 s at 2.6x, blosc-zstd bitshuffle 0.84 s at 3.1x, gzip-6 1.1 s but an 8 s write. zstd
+was taken over blosc for being a core zarr v3 codec every reader has.
+
+**Measured on Modal** (L40S containers, 17 CPUs each, torn down afterwards):
+
+| | uncompressed (mapped) | zstd |
+|---|---|---|
+| file | 836.8 MB | 322.1 MB (2.6x) |
+| transcode, written to a volume | 18.2 s | 14.9 s |
+| read from `/dev/shm` (a worker's series cache), 12 containers | 0.24-0.43 s | 0.49-0.85 s |
+| warm re-read from the volume | 0.24-0.43 s | 0.54-0.88 s |
+| cold first read from the volume, imports warmed, 8 containers | 0.81, 0.97, 1.0, 1.4, 2.5, 8.8, 9.4, 16.5 s | 0.69, 1.0, 1.1, 1.1, 2.6, 6.3, 10.7, 11.8 s |
+| `read+canonical` in a deployed worker's job | 0.85 s, 0.68 s | 1.0 s, 1.29 s |
+
+- **Cold reads are the volume's latency, not its bytes**: the medians are equal (1.9 s) and both
+  tails reach 10-17 s, in the same containers. A first round that did not warm the imports
+  first seemed to favor zstd (medians 5.3 vs 1.5 s); with the imports warmed, that difference
+  disappeared. Compression does not make a cold volume read faster.
+- **What it buys is room**: the worker's `/dev/shm` series cache (`HAVERSACK_SHM_CACHE_GB`, 8 GiB by
+  default) holds about 10 copies of this CT uncompressed and about 26 compressed, and the inputs
+  volume holds 2.6x as many uploads.
+- **What it costs**: about 0.3-0.5 s a read on this CT, against the 12.5 s DICOM decode either form
+  replaces.
+- **Exactness**: every read, in every container, hashed to the DICOM read's voxels
+  (`e29f1dcb...`), with the 61 series tags restored; the deployed worker's own zstd copy in
+  `/dev/shm` held the same hash and no `series/` beside it. The deployment's labels differ from
+  the uncompressed deployment's in 7,858 of 418 M voxels - across deployments, as §12 found for
+  two uncompressed ones; the input is proven identical.
+- **Tests**: 7 new in `test_input_copy.py`, the knob forwarding in `test_modal_app.py`, the status
+  field in `test_serve.py`. 11 of 11 mutants killed (the last, a deflated zip accepted, by a test
+  added for it); a comment mutant survived as it must. Fast suite 2609 passed / 4 skipped.

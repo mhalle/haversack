@@ -343,9 +343,13 @@ reads it in a fraction of a second where a DICOM series is a full decode every t
 709-slice CT on Modal). It never changes a result: the image a job receives is the same, and so
 is every key. Label maps (a `.seg.nrrd`, a `result:` reference) keep their files, and so does
 anything the reader refuses. `GET /v1/inputs/{digest}` still describes what the digest names -
-`members` and `bytes` of the upload - and adds `stored_form: "input_copy"` and `stored_bytes`.
-An operator can keep originals instead with `HAVERSACK_INPUT_COPY=0`. The format and its rules
-are in `docs/input-copy.md`.
+`members` and `bytes` of the upload - and adds `stored_form: "input_copy"`, `stored_compression`
+and `stored_bytes`. An operator can keep originals instead with `HAVERSACK_INPUT_COPY=0`, or store
+the copies compressed with `HAVERSACK_INPUT_COPY_COMPRESSION=zstd`: about 2.6x smaller for a CT,
+and read in roughly a second instead of a fraction of one - the choice where cache room is the
+constraint (a Modal worker keeps fetched series in RAM). The setting applies to copies written
+after it is set; a cache may hold both forms. On Modal, both variables are forwarded from the
+deploying shell. The format and its rules are in `docs/input-copy.md`.
 
 ## Results as inputs
 

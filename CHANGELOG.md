@@ -18,6 +18,14 @@
   the `duckn` extra (as a data dictionary: SimpleITK's tag keys to keywords); every Modal image
   that stores inputs carries the extra, and one that cannot (SynthStrip) still reads copies.
   `docs/input-copy.md` is the specification.
+- An operator may store input copies compressed: `HAVERSACK_INPUT_COPY_COMPRESSION=zstd` (zstd
+  level 3 in 32-slice chunks). On Modal the 709-slice CT's copy is 322 MB instead of 837 MB, and
+  a read takes about 0.5-0.9 s from a worker's RAM cache instead of 0.25-0.45 s; a cold read from
+  a volume was no faster either way, since the volume's own latency swamps the bytes. It is the
+  choice where cache room is the constraint - a Modal worker's series cache is RAM - and applies
+  only to copies written after it is set. `GET /v1/inputs/{digest}` reports
+  `stored_compression`. Both input-copy variables are now forwarded into Modal containers;
+  `HAVERSACK_INPUT_COPY=0` had never reached them.
 
 - **A Modal deployment can take the local server's bearer token, and `haversack remote`
   reaches it.** `haversack modal deploy --token T`, or `HAVERSACK_SERVER_TOKEN` in its
