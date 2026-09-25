@@ -1929,10 +1929,20 @@ def read_only_app(store, *, local_dir, prefix: str = "", segmenter=None,
             return None
         return doc
 
-    def weights_fn(task):
-        doc = recorded(task)
-        # a component no writer could have used: the key names nothing, the read is a miss
-        return doc["weights"] if doc else ["not-recorded-in-this-store"]
+    def weights_fn(task, kind="segment"):
+        """What a key of ``kind`` is made from (review, 2026-09-25: this took no kind, so a
+        rank field or an embedding was reachable only by accident). A segmentation and a
+        rank field read the task's recorded weights - a rank field adds the formats it is
+        written in, as every writer's key does; an embedding reads what its publication
+        recorded under ``embed:<encoder>``."""
+        doc = recorded(f"embed:{task}" if kind == "embed" else task)
+        if not doc:
+            # a component no writer could have used: the key names nothing, the read is a miss
+            return ["not-recorded-in-this-store"]
+        if kind == "rankfield":
+            from .ranked_output import ranked_tag
+            return list(doc["weights"]) + [ranked_tag()]
+        return doc["weights"]
 
     def key_fn(identity, task, opts=None):
         ids = (identity,) if isinstance(identity, str) else tuple(identity)

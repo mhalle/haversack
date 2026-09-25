@@ -54,6 +54,10 @@ INPUT_NOT_ON_HAND = ("not rendered for this stored result, and the input image i
                      "with its deliverables")
 RENDER_BUSY = ("another render of this result is still running and does not include it; "
                "submit again when it has finished")
+#: A render that ran and produced nothing (2026-09-25): said on the job, so its link goes -
+#: the job used to keep linking a preview that would never exist, and say nothing.
+RENDER_FAILED = "could not be rendered for this result"
+RENDER_EMPTY = "nothing to render: the result holds no structure this deliverable can show"
 #: A deliverable is rendered INTO a result's cache entry and served FROM it - by path, or
 #: through the job (``/v1/jobs/<id>/preview.png``, 2026-09-21). A result with no entry has
 #: nowhere for one to land, so its job says so rather than list what no door will serve.

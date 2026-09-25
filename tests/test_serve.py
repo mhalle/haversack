@@ -670,10 +670,12 @@ def test_idc_identifier_fields_are_explicit(tmp_path, monkeypatch):
                            "source": json.dumps([{"kind": "idc", **fields}])})
 
     r = post({"series_instance_uid": "1.3.6.1.4.1.14519.5.2.1.2932.1975.25507"})
-    assert r.status_code == 422 and "/v1/resolve" in r.json()["detail"]
+    assert r.status_code == 422 and "crdc_series_uuid" in r.json()["detail"]
+    assert "/v1/resolve" not in r.json()["detail"]     # no route by that name exists
     assert "idc_version" in r.json()["detail"]     # the reserved shape names its version slot
     r = post({"series_instance_uid": "1.3.6.1.4.1.14519", "idc_version": 21})
-    assert r.status_code == 422 and "/v1/resolve" in r.json()["detail"]
+    assert r.status_code == 422 and "crdc_series_uuid" in r.json()["detail"]
+    assert "/v1/resolve" not in r.json()["detail"]     # no route by that name exists
     r = post({"crdc_series_uuid": "0be27d1c-9410-47ff-9c9f-a44b26a4bd55", "idc_version": 21})
     assert r.status_code == 422 and "already pinned" in r.json()["detail"]
     r = post({"series": "0be27d1c-9410-47ff-9c9f-a44b26a4bd55"})

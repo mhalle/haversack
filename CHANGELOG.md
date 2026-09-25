@@ -40,6 +40,24 @@
   the `duckn` extra (as a data dictionary: SimpleITK's tag keys to keywords); every Modal image
   that stores inputs carries the extra, and one without it still reads uncompressed copies.
   `docs/input-copy.md` is the specification.
+- **The review's second batch** (each pinned by a test that fails on c93b699; 13 of 13 mutants
+  killed):
+  - The embedding worker makes input copies: its image lacked pydicom (the `embed` extra has
+    none), so every cached `idc:` embedding paid the full DICOM read. It also no longer pre-reads
+    the next job's image, which the encoder discarded.
+  - The anonymous twin reloads its weights volume (throttled) when a key would be `unknown`: a
+    task a worker installed after the twin started had every result 404 on the anonymous path.
+  - A read-only result-store server reaches rank fields and nnU-Net encoders' embeddings: every
+    kind now records what a reader keys it on (only segmentations did), and the reader's versions
+    function takes the kind.
+  - Each deliverable renders on its own, and one that fails or has nothing to show is said on
+    the job (`deliverables_unavailable`), so its link goes: a failed preview used to cost the
+    statistics too, and the job kept linking both.
+  - Advice the server can follow: a missing deliverable's 404 says a plain submit renders it
+    only where a cache hit renders (the local server); on Modal it says to recompute with
+    `Cache-Control: no-cache`. A rank field's or an embedding's job artifact 404 says only a
+    segmentation renders deliverables. IDC refusals no longer point at a `/v1/resolve` that does
+    not exist.
 - **Fixes from the 2026-09-25 server review** (four adversarial reviewers, one black-box against
   the live deployment; each fix pinned by a test that fails on 9c69466, 10 of 10 mutants killed):
   - On Modal a submit of a key already computing JOINS that job, as the local server does and as

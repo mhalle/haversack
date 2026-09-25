@@ -55,7 +55,8 @@ def _run(m, jobs, monkeypatch, jid, *, deliverables="absent", offered=BOTH):
         seen.pairs += 1
         return ("pair",)
 
-    def overlap(pair, task, artifacts, *, preview_out, statistics_out, place, finish):
+    def overlap(pair, task, artifacts, *, preview_out, statistics_out, place, finish,
+                unavailable=None):
         seen.artifacts = tuple(artifacts)
         seen.marker = jobs.get(f"artifacts:key-{jid}")
         finish([])

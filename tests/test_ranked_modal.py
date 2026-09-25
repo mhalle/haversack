@@ -130,7 +130,9 @@ def test_every_image_that_writes_or_keys_a_store_carries_the_duckn_extra():
     # second uv_sync - shipped without it: a 500 on every ranked submit, found by deploying.
     serving = [e for e in images if "serve" in e]
     assert len(serving) >= 2, images
-    assert all(("duckn" in e or "embed" in e) for e in serving), serving
+    # the `duckn` extra itself, not `embed` standing in for it (review, 2026-09-25): `embed`
+    # has no pydicom, so the embedding worker made no input copies
+    assert all("duckn" in e for e in serving), serving
     fs = _extras_of_uv_syncs(SRC / "engines" / "modal_fastsurfer.py")
     assert fs and all("duckn" in e for e in fs), fs
 

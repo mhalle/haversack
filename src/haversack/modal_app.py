@@ -917,12 +917,19 @@ def _prefetch_next(current_jid: str, stop, cache, read_ahead, vol_lock,
                             continue
                         print(f"[prefetch] {series[:13]} staged in {time.time() - t_f:.1f}s "
                               f"(parallel to {current_jid})", flush=True)
+                    if engine == EMBED_WORKER:
+                        # staged, not read (review, 2026-09-25): an encoder reads its input
+                        # itself, so a pre-read image is thrown away when the job starts -
+                        # seconds of CPU and hundreds of MB beside the GPU, for nothing
+                        return
                     t_r = time.time()
                     if fill_read_ahead(series, cache=cache,
                                        read_ahead=read_ahead):
                         print(f"[read-ahead] {series[:13]} read in {time.time() - t_r:.1f}s "
                               f"(parallel to {current_jid})", flush=True)
                     return                     # one-ahead only
+                if engine == EMBED_WORKER:
+                    return                     # an upload has nothing to stage; see above
                 # upload: bytes already sit on the jobs volume - copy the file to
                 # tmpfs under the lock (a reload racing save+commit could drop a
                 # result; and reading a stable local copy sidesteps any question
@@ -1819,10 +1826,14 @@ class _WorkerBase:
             finally:
                 _clear_pending_marker(cache_key, jid)
 
+        def _unavailable(failed: dict) -> None:
+            had = (jobs_dict.get(jid) or {}).get("deliverables_unavailable") or {}
+            _emit(jid, {"deliverables_unavailable": {**had, **failed}})
+
         artifact_overlap(pair, task, ARTIFACTS if names is None else names,
                          preview_out=Path("/dev/shm") / f"preview_{jid}.png",
                          statistics_out=Path("/dev/shm") / f"stats_{jid}.json",
-                         place=_place, finish=_finish)
+                         place=_place, finish=_finish, unavailable=_unavailable)
 
     # -- engine hooks; _execute_job calls these. Engines that ship their weights
     # in their image have nothing to install, so these are the defaults.
@@ -1956,11 +1967,13 @@ class Worker(_WorkerBase):
 
 if EMBED:
     # The encoder worker's image: the nnU-Net worker's plus the `embed` extra (feldglas, the
-    # field's writer; duckn, zarr, nibabel), and the encoder weights root on its volume.
+    # field's writer; duckn, zarr, nibabel), and the encoder weights root on its volume. And the
+    # `duckn` extra (review, 2026-09-25): `embed` has no pydicom, so this worker made no input
+    # copies and every cached idc: embedding paid the full DICOM read the copy exists to save.
     encode_image = (
         modal.Image.debian_slim(python_version="3.12")
         .apt_install("git")
-        .uv_sync(extras=["torch", "serve", "cuda", "embed"], frozen=False)
+        .uv_sync(extras=["torch", "serve", "cuda", "embed", "duckn"], frozen=False)
         .env({**{k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ},
               "HAVERSACK_ENCODER_WEIGHTS": ENCODERS_ROOT})
         .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
@@ -2147,8 +2160,35 @@ def _twin_weights_versions(seg, task, kind: str = "segment") -> list:
     Module-level so a test can hold it; nested in ``public`` it was reachable by no test, and a
     twin keying stores without their tag would 404 every one (review, 2026-09-25)."""
     from haversack.serve import versions_for, weights_versions_of
-    return (weights_versions_of(seg, task) if kind == "segment"
-            else versions_for(seg, task, kind))
+
+    def derive():
+        return (weights_versions_of(seg, task) if kind == "segment"
+                else versions_for(seg, task, kind))
+    wv = derive()
+    # The twin's weights volume is frozen at container start (review, 2026-09-25): a task a
+    # worker installed since keyed "unknown" here, and every result of it 404ed on the
+    # anonymous path for the container's life. Reload - throttled, as the api's
+    # _fresh_weights_versions is - and derive again.
+    if any("unknown" in str(v) for v in wv) and _reload_twin_weights():
+        wv = derive()
+    return wv
+
+
+_twin_reload = {"at": 0.0}
+_twin_reload_lock = threading.Lock()
+
+
+def _reload_twin_weights() -> bool:
+    """Reload the weights volume at most once per 30 s per container; True when it reloaded."""
+    with _twin_reload_lock:
+        if time.time() - _twin_reload["at"] < 30.0:
+            return False
+        _twin_reload["at"] = time.time()
+        try:
+            weights_vol.reload()
+        except Exception:                       # noqa: BLE001 - a refused reload keys as before
+            return False
+    return True
 
 
 def _spawn_worker(task: str, jid: str, source_tokens=None, kind: str = "segment"):
@@ -2250,6 +2290,9 @@ class ModalExecutor:
     #: What this deployment renders: the default of a request that names no deliverables,
     #: and the most one may name (the submit door refuses the rest), as on the local server
     artifacts = ARTIFACTS
+    #: A cache hit renders nothing here (``_unrendered_on_hit``): only a computing worker
+    #: does, so a missing deliverable's 404 advises a recompute (review, 2026-09-25)
+    renders_on_hit = False
 
     def _pending_marker(self, key: str):
         """The live ``artifacts:`` marker for ``key`` - one Dict get - or None."""

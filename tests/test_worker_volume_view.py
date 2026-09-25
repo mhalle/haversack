@@ -135,7 +135,8 @@ def _other_threads(m, ctx, stop, key, placed, errors):
     png = Path(m.SCRATCH_ROOT).parent / "preview.png"
     png.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    def overlap(pair, task, artifacts, *, preview_out, statistics_out, place, finish):
+    def overlap(pair, task, artifacts, *, preview_out, statistics_out, place, finish,
+                unavailable=None):
         out = png.with_name(f"render-{len(placed)}.png")    # /dev/shm is Linux-only
         shutil.copyfile(png, out)
         ok = place("preview.png", out)
@@ -304,7 +305,8 @@ def test_the_artifact_thread_touches_the_cache_volume_only_under_the_lock(worker
     png = Path(m.CACHE_ROOT).parent / "p.png"
     png.write_bytes(b"\x89PNG\r\n\x1a\n")
 
-    def overlap(pair, task, artifacts, *, preview_out, statistics_out, place, finish):
+    def overlap(pair, task, artifacts, *, preview_out, statistics_out, place, finish,
+                unavailable=None):
         out = png.with_name("render.png")
         shutil.copyfile(png, out)
         finish([("preview", 0.0)] if place("preview.png", out) else [])

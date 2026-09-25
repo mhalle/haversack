@@ -2644,7 +2644,7 @@ def publish_completion(*, segmenter, task, identity, options, cache_key,
 
 
 def artifact_overlap(pair, task, artifacts, *, preview_out, statistics_out,
-                     place, finish):
+                     place, finish, unavailable=None):
     """The overlap thread's body, shared by both executors: render and
     compute from the in-RAM pair (no input or disk dependence), hand each
     file to ``place(name, path) -> bool`` (atomic within the cache; False
@@ -2657,30 +2657,49 @@ def artifact_overlap(pair, task, artifacts, *, preview_out, statistics_out,
     deployment's set (``jobpolicy.wanted_deliverables``) - and nothing outside it is
     rendered: a declined preview costs no render. The renderers live here, so the two
     names are spelled here too; the files they land as are ``jobpolicy.DELIVERABLES``'s,
-    and a test drives each name of that table through this function."""
-    placed = []
-    try:
-        from .preview import render_preview
-        from .statistics import compute_statistics
+    and a test drives each name of that table through this function.
+
+    Each deliverable is rendered on its own (review, 2026-09-25): one ``try`` around both
+    let a preview's failure cost the statistics too, and neither was said anywhere - the
+    job kept linking both, and both 404ed. What did not render is handed to
+    ``unavailable({name: why})`` BEFORE ``finish``, so a reader who sees no pending render
+    also sees why."""
+    from .jobpolicy import RENDER_EMPTY, RENDER_FAILED
+    placed, failed = [], {}
+
+    def one(name, render):
         # the seconds are the render's own: `place` can wait on a lock the
         # worker holds, and counting that wait here once passed a 2-minute
         # jobs-Dict sweep off as a 127 s preview (2026-09-19)
+        t0 = time.time()
+        try:
+            out = render()
+        except Exception as e:                 # noqa: BLE001 - said, never raised
+            failed[name] = f"{RENDER_FAILED} ({type(e).__name__}: {e})"
+            return
+        dt = time.time() - t0
+        if not out:
+            failed[name] = RENDER_EMPTY
+        elif place(DELIVERABLES[name], out):
+            placed.append((name, dt))
+
+    try:
+        from .preview import render_preview
+        from .statistics import compute_statistics
         if "preview" in artifacts:
-            t0 = time.time()
-            png = render_preview(None, None, preview_out, title=task, pair=pair)
-            dt = time.time() - t0
-            if png and place(DELIVERABLES["preview"], png):
-                placed.append(("preview", dt))
+            one("preview", lambda: render_preview(None, None, preview_out, title=task, pair=pair))
         if "statistics" in artifacts:
-            t0 = time.time()
-            sj = compute_statistics(None, None, statistics_out, pair=pair)
-            dt = time.time() - t0
-            if sj and place(DELIVERABLES["statistics"], sj):
-                placed.append(("statistics", dt))
-    except Exception:
-        pass
+            one("statistics", lambda: compute_statistics(None, None, statistics_out, pair=pair))
+    except Exception as e:                     # noqa: BLE001 - an import, say
+        for name in artifacts:
+            if name not in dict(placed):
+                failed.setdefault(name, f"{RENDER_FAILED} ({type(e).__name__}: {e})")
     finally:
-        finish(placed)
+        try:
+            if failed and unavailable is not None:
+                unavailable(failed)
+        finally:
+            finish(placed)
 
 
 @dataclass
@@ -2757,6 +2776,10 @@ class LocalExecutor:
     :class:`QueueFull` (HTTP 429). Finished jobs and their files are kept until
     ``keep_finished`` more finish after them.
     """
+
+    #: A cache hit renders what its result lacks (``_render_on_hit``): the 404 of a missing
+    #: deliverable may advise a plain submit. Modal renders only where it computes.
+    renders_on_hit = True
 
     #: ``kind=embed`` jobs run here (2026-09-23): in-process, on this server's device.
     embeds = True
@@ -3703,13 +3726,23 @@ class LocalExecutor:
         def _finish(placed) -> None:
             self._release_pending(cache_key, owner)
 
+        def _unavailable(failed: dict) -> None:
+            with self._cv:
+                rec = self._jobs.get(owner)
+                if rec is None:
+                    return
+                rec.deliverables_unavailable = {**(rec.deliverables_unavailable or {}),
+                                                **failed}
+                self._persist(rec)
+            self._emit(rec)
+
         artifact_overlap(
             pair, task, self.artifacts if names is None else names,
             preview_out=jdir / "preview.png",
             statistics_out=jdir / "statistics.json",
             place=lambda name, path: self.cache.add_artifact(
                 cache_key, name, path, generation=generation),
-            finish=_finish)
+            finish=_finish, unavailable=_unavailable)
 
     def _prefetch_next(self) -> None:
         """Best-effort: download the HEAD queued idc job's series into the
@@ -3876,10 +3909,20 @@ class LocalExecutor:
              "options": rec.options, "computed": rec.started,
              "job": rec.id, **({"kind": rec.kind} if rec.kind in NOT_LABELS else {})},
             output_name=OUTPUT_OF_KIND.get(rec.kind, RESULT_NAME))
-        if rec.kind == "segment" and hasattr(self.cache, "note_task"):
+        # every kind notes what a reader keys it on (review, 2026-09-25): only a segmentation
+        # did, so a read-only server reached a task's rank field only if a segmentation of
+        # it had been published too, and an nnU-Net encoder's embedding never
+        if rec.kind in ("segment", "rankfield") and hasattr(self.cache, "note_task"):
             try:
                 self.cache.note_task(rec.task, versions_for(self.segmenter, rec.task),
                                      installed_versions(self.segmenter, rec.task))
+            except Exception as e:             # noqa: BLE001 - see the docstring
+                print(f"warning: could not record {rec.task}'s versions in the result store: "
+                      f"{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        if rec.kind == "embed" and hasattr(self.cache, "note_task"):
+            try:
+                self.cache.note_task(f"embed:{rec.task}",
+                                     versions_for(self.segmenter, rec.task, "embed"))
             except Exception as e:             # noqa: BLE001
                 print(f"warning: could not record {rec.task}'s versions in the result "
                       f"store ({type(e).__name__}: {e}); read-only servers will miss it "
@@ -5622,16 +5665,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 # different crdc uuids across IDC data releases; accepting it is a
                 # resolution step, which is /v1/resolve's job when it lands.
                 if "series_instance_uid" in src_entry:
-                    raise HTTPException(422, "series_instance_uid (+ optional idc_version, "
-                                             "default latest) is not supported yet; "
-                                             "resolution arrives with /v1/resolve - "
-                                             "today pass crdc_series_uuid")
+                    raise HTTPException(422, "series_instance_uid (+ optional idc_version) is "
+                                             "not accepted yet: pass crdc_series_uuid, IDC's "
+                                             "version-pinned series id")
                 if "series" in src_entry:
-                    raise HTTPException(422, "ambiguous field 'series': be explicit - "
-                                             "crdc_series_uuid (IDC storage id, "
-                                             "8-4-4-4-12 hex), or series_instance_uid "
-                                             "(+ optional idc_version) once /v1/resolve "
-                                             "lands")
+                    raise HTTPException(422, "ambiguous field 'series': pass "
+                                             "crdc_series_uuid (IDC's storage id, "
+                                             "8-4-4-4-12 hex)")
                 if "idc_version" in src_entry:
                     raise HTTPException(422, "idc_version goes with series_instance_uid; "
                                              "a crdc_series_uuid is already pinned to one "
@@ -5650,8 +5690,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 _check_identifier(sources[kind], ident,
                                   (source_tokens_of(request) or {}).get(kind))
             except InputError as e:
-                hint = (" (expected 8-4-4-4-12 hex; a dotted value would be a DICOM "
-                        "SeriesInstanceUID, which needs /v1/resolve)") if kind == "idc" else ""
+                hint = (" (expected IDC's crdc_series_uuid, 8-4-4-4-12 hex; a dotted value is "
+                        "a DICOM SeriesInstanceUID, which is not accepted)") if kind == "idc" else ""
                 raise HTTPException(422, str(e) + hint) from None
             if getattr(sources[kind], "pins_at_submit", False) is True:
                 # A source whose identifier names its bytes only through a lookup (a
@@ -6088,10 +6128,17 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # stored result's missing artifact does not either, Prefer or not: it has no
         # job to stage an input under. So the answer is a definitive 404 that names
         # the door which does.
+        # The door that renders it, as THIS server has it (review, 2026-09-25): a local
+        # server renders what a cache hit lacks; Modal renders only where a result is
+        # computed, so there the lever is a recompute - the old advice was refused there.
+        lever = (f'with deliverables ["{what}"] renders it'
+                 if getattr(executor, "renders_on_hit", False) else
+                 f'with deliverables ["{what}"] and Cache-Control: no-cache recomputes the '
+                 "result with it (this server renders only where a result is computed)")
         raise HTTPException(404, f"no {what} for this result: it was not asked for when "
                                  "the result was computed, or could not be rendered; an "
                                  "authorized POST /v1/jobs of the same input and task "
-                                 f'with deliverables ["{what}"] renders it')
+                                 + lever)
 
     def _absence_is_never_stored(route):
         """A result route whose 404s say ``Cache-Control: no-store`` - as its 202s
@@ -6196,7 +6243,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 key, labels, file, what, deadline=None if w is None else time.time() + w,
                 look_again=lambda: _job_result(jid)[1],
                 confirmed=confirmed if _confirm is not None and key else None,
-                why=(status.get("deliverables_unavailable") or {}).get(what))
+                why=(f"a {status.get('kind')} job has no {what}: only a segmentation "
+                     "renders deliverables" if status.get("kind") in NOT_LABELS else
+                     (status.get("deliverables_unavailable") or {}).get(what)))
             return await _artifact_answer(request, view, shared=False, path=found)
 
         # two routes, one function: FastAPI names an operation after its first method,
@@ -6874,6 +6923,10 @@ def create_public_app(key_fn, cache_get, tasks_fn, inflight=None, sources=None,
     ``weights_fn(task)`` (optional) is the weights-versions list ``key_fn`` keys ``task``
     on - ``result_key``'s fourth argument: with it the listing reads a task's versions once
     a request instead of once a key, and MUST then derive exactly what ``key_fn`` would.
+    Optional for labels only: a rank field's or an embedding's key is derived from it (a
+    rank field's from ``weights_fn(task)`` plus its format tag; either kind's from
+    ``weights_fn(name, kind=...)`` when it takes the kind), so a twin without it finds none
+    of either (review, 2026-09-25).
     ``artifact_state(key, name)`` (optional) is the writer's pending-render signal -
     "pending" while a render that will place deliverable ``name`` into ``key``'s entry is
     still running, else "absent" - read-only like ``inflight``. With it an artifact that is
