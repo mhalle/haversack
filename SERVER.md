@@ -611,7 +611,8 @@ without it those tasks are listed and described but refuse to run. On Modal the 
 The nnU-Net engine is always on. The others are switched on per deployment by environment
 variable, `HAVERSACK_FASTSURFER=1`, `HAVERSACK_SYNTHSTRIP=1`, `HAVERSACK_VOXTELL=1`,
 `HAVERSACK_MONAI=1`, and each needs its runtime installed in the environment the server runs
-in - SynthStrip's pins numpy below 2, so it runs from its own environment. `GET /v1/version`
+in (`--extra fastsurfer`, `--extra synthstrip`, ...). VoxTell and MONAI conflict with each
+other, so they cannot share one environment. `GET /v1/version`
 reports which engines are enabled, and `GET /v1/tasks/{task}` names each task's engine.
 
 ## Deploying to Modal
