@@ -1124,7 +1124,10 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
                                     for key, sc in schemes.items()} or None),
         haversack={"haversack_version": dict(items)[order[0]["name"]].get("haversack"),
                    "engine": engine, "task": meta["task"], "case": case,
-                   "source_file": Path(meta["image"]).name, "part_order": order},
+                   # what the emit says the input is called (ranked_output.main): a file's name,
+                   # or the job's identity on a server - never an in-memory image's repr
+                   "source_file": meta.get("source_file", Path(str(meta.get("image") or "")).name
+                                           or None), "part_order": order},
         # duckn specifies where "what produced this" goes: provenance.processing, each step
         # naming its software. Writing it here rather than inventing a field means a duckn
         # reader finds the generator in the place the spec says to look. `sources` and

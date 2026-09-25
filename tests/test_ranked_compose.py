@@ -24,6 +24,7 @@ def _part(name, logits, lut, depth=4, clip=8.0, grid=SHAPE):
     code = rankfield.encode(torch.as_tensor(logits, dtype=torch.float32), depth=depth, clip=clip)
     meta = dict(code.meta, labels=[int(v) for v in lut], model_grid=list(grid),
                 envelope={"start": [0, 0, 0], "stop": list(grid)}, spacing_zyx=[1.5, 1.5, 1.5],
+                frame={"source": {"origin": [0.0, 0.0, 0.0]}},
                 softmax={"weights": name, "classes": len(lut)})
     return name, (code.ranks, code.support), meta, np.asarray(logits)
 
@@ -119,12 +120,33 @@ def test_the_batch_decode_is_rankfields_deficit():
         np.testing.assert_array_equal(got[ch], rankfield.deficit(field, ch))
 
 
-def test_parts_on_different_grids_are_refused():
+@pytest.mark.parametrize("key, value", [
+    ("envelope", {"start": [1, 0, 0], "stop": list(SHAPE)}),
+    ("model_grid", [8, 9, 8]),
+    ("spacing_zyx", [1.5, 1.5, 3.0]),
+    ("frame", {"source": {"origin": [0.0, 0.0, 12.0]}}),     # placed elsewhere, same shape
+])
+def test_parts_on_different_grids_are_refused(key, value):
     parts = _union(5)
-    other = dict(parts[1][2], envelope={"start": [1, 0, 0], "stop": list(SHAPE)})
+    other = dict(parts[1][2], **{key: value})
     moved = [parts[0], (parts[1][0], parts[1][1], other, parts[1][3])]
-    with pytest.raises(InputError, match="same grid|share one grid"):
+    with pytest.raises(InputError, match="share one grid"):
         _compose(moved)
+
+
+def test_parts_that_do_not_state_their_grid_are_refused():
+    """Two parts that both lack a key used to compare equal and be composed (review, 2026-09-25)."""
+    parts = _union(5)
+    bare = [(n, a, {k: v for k, v in m.items() if k != "frame"}, lg) for n, a, m, lg in parts]
+    with pytest.raises(InputError, match="does not state its grid"):
+        _compose(bare)
+
+
+def test_the_store_names_each_models_labels():
+    parts = _union(6)
+    _r, _s, meta, _l = _compose(parts)
+    assert [p["labels"] for p in meta["composed"]["parts"]] == [m["labels"] for _n, _a, m, _lg in parts]
+    assert [p["softmax"] for p in meta["composed"]["parts"]] == [m["softmax"] for _n, _a, m, _lg in parts]
 
 
 def test_one_part_is_not_a_union():

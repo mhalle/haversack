@@ -337,3 +337,29 @@ def test_upgrading_the_segment_metadata_keeps_every_scheme(tmp_path, monkeypatch
     upgrader.upgrade(out)
     with rs.open_store(out) as st:
         assert rs.read_segmentation(st.root).labeling_scheme == seg.labeling_scheme
+
+
+def test_a_crop_from_another_task_is_a_crop_stage_however_it_is_shaped(tmp_path, monkeypatch):
+    """teeth crops from craniofacial_structures' RESULT - a cascade whose final stage was emitted
+    through the ordinary path, with no role, and read as a second model of teeth: composed with
+    teeth's own labels where the boxes agreed, refused as an --envelope problem where they did
+    not (review, 2026-09-25). Everything a crop-from-task run emits is a crop stage now."""
+    from haversack.tasks import TaskCatalog
+    cranio = TaskCatalog("ts").get("craniofacial_structures")
+    teeth = TaskCatalog("ts").get("teeth")
+    out, seg, blocks = _store(
+        tmp_path, monkeypatch, "ts.v2:teeth",
+        [_Found(118, 91), _Found(max(cranio.label_map) + 1, 2), _Found(max(teeth.label_map) + 1, 1)],
+        keep_stages=False)
+    assert [b["part"] for b in blocks] == ["ts.v2:teeth"]
+    assert blocks[0].get("scores") != "composed" and blocks[0]["labels_named_by"] == "ts.v2:teeth"
+    assert _verify(out)
+
+
+def test_a_cascade_whose_crop_finds_nothing_says_so(tmp_path, monkeypatch):
+    """No lung in the scan: lung_vessels' crop finds none of its classes, its final model never
+    runs, and only the crop stage was emitted. That left the build a bare StopIteration."""
+    from haversack.errors import InputError
+    with pytest.raises(InputError, match="no field to store"):
+        _store(tmp_path, monkeypatch, "ts.v2:lung_vessels", [_Found(118, 1), _Found(5, 1)],
+               keep_stages=False)

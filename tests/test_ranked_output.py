@@ -158,3 +158,29 @@ def test_a_store_output_is_offered_for_nnunet_and_fastsurfer_only():
     assert supports_store_output("ts.v2:total_fast")
     assert supports_store_output("fastsurfer:asegdkt")
     assert not supports_store_output("synthstrip:mask")
+
+
+def test_a_store_names_its_input_by_what_it_was_given_never_an_images_repr(tmp_path, monkeypatch):
+    """A server's input may be an image the read-ahead already decoded; its str() is a dump
+    with a memory address, and the store wrote it as `source_file` (review, 2026-09-25). The
+    store's provenance also reports the clip the stored field was encoded at - a composed
+    union's 16, where it said the emit's 8."""
+    import SimpleITK as sitk
+
+    from haversack import pipeline
+    for name, want in ((None, None), ("idc:1234", "idc:1234")):
+        d = tmp_path / str(name).replace(":", "_")
+        d.mkdir()
+        organs, ribs = _ShapedStub(ORGANS._props), _StubModel(RIBS._props)
+        spec, store, cache = _two_part_task(d, [organs, ribs])
+        monkeypatch.setattr(pipeline, "as_store", lambda *a, **k: store)
+        image = sitk.ReadImage(str(_write_ct(d)))
+        _seg, out = segment_to_store(image, spec, d / "m.duckn", models=cache, device="cpu",
+                                     envelope_mm=None, convention="corner", folds=(0,),
+                                     quiet=True, image_name=name)
+        with rs.open_store(out) as st:
+            attrs = st.root.attrs.asdict()["duckn"]
+        hv = attrs["extensions"]["haversack"]
+        assert hv["source_file"] == want and hv["case"] == "case"
+        steps = attrs["extensions"]["provenance"]["processing"]
+        assert {s["parameters"]["clip"] for s in steps if "clip" in s.get("parameters", {})} == {16.0}

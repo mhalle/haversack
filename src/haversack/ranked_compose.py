@@ -54,10 +54,20 @@ MARGIN_SCALE = 0.5
 #: stored winner (``ranks[0]``) knows the order, so every other kept class is held this far
 #: behind it: far below any step of the table, and enough to keep the part's own order.
 TIE_FLOOR = 1e-4
-#: The rule's name as the store states it, and its version: a change that moves a composed field's
-#: bytes bumps ``RULE_VERSION`` (it is part of ``ranked_output.ranked_tag``, so stores recompute).
+#: The rule's name as the store states it, and its version: bump ``RULE_VERSION`` for a change
+#: to the rule itself. The key carries it WITH the numbers above (:func:`rule_tag`, read into
+#: ``ranked_output.ranked_tag``), so changing the clip, the scale or the tie floor re-keys every
+#: store too - no counter has to be remembered for them (review, 2026-09-25: the first version's
+#: comment said RULE_VERSION was keyed, and nothing was).
 RULE = "painting"
 RULE_VERSION = 1
+
+
+def rule_tag() -> str:
+    """The composition rule as a store's key carries it: its name and version and every number
+    that moves a composed field's bytes."""
+    return (f"{RULE}{RULE_VERSION}-clip{COMPOSED_CLIP:g}-scale{MARGIN_SCALE:g}"
+            f"-tie{TIE_FLOOR:g}")
 
 
 def _torch():
@@ -97,10 +107,22 @@ def _ordered(d, ranks, z0, z1, device):
     return held.scatter_(0, win.unsqueeze(0), 0.0)
 
 
+#: What places a part: composed voxel by voxel, two parts must agree on all of it. ``frame``
+#: carries the source grid, the crop and the world placement; the others the model grid's shape,
+#: the envelope inside it and its spacing.
+GRID_KEYS = ("model_grid", "envelope", "spacing_zyx", "frame")
+
+
 def _check_one_grid(parts):
     first = parts[0][2]
+    for name, _arrays, meta in parts:
+        missing = [k for k in GRID_KEYS if k not in meta]
+        if missing:
+            # two parts that both lack a key would compare equal: say it instead
+            raise InputError(f"part {name!r} does not state its grid ({', '.join(missing)}): it "
+                             "cannot be composed with another")
     for name, _arrays, meta in parts[1:]:
-        for key in ("model_grid", "envelope", "spacing_zyx"):
+        for key in GRID_KEYS:
             if meta.get(key) != first.get(key):
                 raise InputError(
                     f"part {name!r} is not on part {parts[0][0]!r}'s grid ({key} differs): a union's "

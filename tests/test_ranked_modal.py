@@ -144,3 +144,158 @@ def test_the_worker_runs_the_ranked_branch_and_publishes_its_record():
     calls = {(getattr(c.func, "attr", None) or getattr(c.func, "id", None))
              for c in ast.walk(fn) if isinstance(c, ast.Call)}
     assert "_ranked" in calls and "ranked_payload" in calls
+
+
+# -- the worker branch, driven (review 2026-09-25: a static "the call is somewhere" check was all
+# -- that held it, and a ranked job running _compute, publishing under the labels' key or
+# -- overwriting its store with labels all survived the suite) ----------------------------------
+
+from test_worker_volume_view import _Ctx, _submit, worker  # noqa: E402,F401 - the fixture
+
+
+class _RankedCtx(_Ctx):
+    """A worker whose ranked hook writes a small zip; its compute and a label save must not run."""
+
+    def __init__(self):
+        super().__init__()
+        self.ranked_calls = []
+        from haversack.engines import registry
+        # enough of a Segmenter for the key: an installed version and the engine's row
+        self.seg = types.SimpleNamespace(
+            describe=lambda t: {"weights_installed": [{"id": 297, "version": "v2.0.0"}]},
+            engine_for=registry.engine_for_task)
+
+    def _compute(self, *a, **k):
+        raise AssertionError("a ranked job ran the segmentation compute")
+
+    def _ranked(self, input_path, meta, out, on_progress, token):
+        import zipfile
+        self.ranked_calls.append(meta["id"])
+        with zipfile.ZipFile(out, "w") as z:
+            z.writestr("zarr.json", "{}")
+
+        class Seg:
+            schema = types.SimpleNamespace(names={1: "liver"})
+            provenance = {}
+
+            def volumes_ml(self):
+                return {"liver": 1.0}
+
+            def save(self, path):
+                raise AssertionError("a ranked job saved labels over its store")
+        return Seg()
+
+
+def test_a_ranked_job_on_the_worker_publishes_its_store_under_the_stores_key(worker):
+    from haversack.serve import RANKED_NAME, ResultCache, result_key, versions_for
+    m, jobs, scratch, cache = worker
+    _submit(m, jobs, "rk")
+    jobs["rk"]["kind"] = "ranked"
+    ctx = _RankedCtx()
+    m._execute_job(ctx, "rk")
+    rec = jobs["rk"]
+    assert rec["state"] == "done", rec.get("error")
+    assert ctx.ranked_calls == ["rk"]
+    assert rec["result"]["outputs"][0]["kind"] == "ranked"
+    assert "inputs" in rec["result"]["provenance"]            # record_inputs ran, as locally
+    want = result_key(("sha256:rk",), "ts.v2:total_fast", {},
+                      versions_for(ctx.seg, "ts.v2:total_fast", "ranked"), kind="ranked")
+    assert rec["cache_key"] == want                           # re-keyed as a STORE, not labels
+    hit = ResultCache(m.CACHE_ROOT).get(want)
+    assert hit is not None and Path(hit[0]).name == RANKED_NAME
+    import json as _json
+    meta = _json.loads((Path(hit[0]).parent / "meta.json").read_text())
+    assert meta["kind"] == "ranked"
+
+
+def test_a_ranked_cache_hit_on_modal_says_its_kind(monkeypatch, tmp_path):
+    m, fake = _swap_dict(monkeypatch)
+    monkeypatch.setattr(m, "scratch_vol", types.SimpleNamespace(commit=lambda: None))
+    monkeypatch.setattr(m, "_spawn_worker", lambda *a, **k: types.SimpleNamespace(object_id="x"))
+    monkeypatch.setattr(m, "_emit", lambda jid, d: None)
+    ex = m.ModalExecutor()
+    monkeypatch.setattr(ex, "_fresh_weights_versions", lambda task, kind="segment": [kind])
+    stored = tmp_path / "k" / "g-1" / "ranked.duckn.zip"
+    stored.parent.mkdir(parents=True)
+    stored.write_bytes(b"PK")
+    monkeypatch.setattr(ex, "cache_get", lambda key: (stored, {"outputs": [{"kind": "ranked"}]}))
+    meta = ex.submit("h", tmp_path / "h", None, "ts.v2:total_fast", {}, identity=("idc:1",),
+                     kind="ranked")
+    assert meta["cached"] and meta["kind"] == "ranked" and meta["deliverables"] == []
+    assert ex.status_of("h")["kind"] == "ranked"
+
+
+def test_versions_are_remembered_per_kind(monkeypatch):
+    """One memo entry per (kind, task): a segmentation's versions answered for a store's key
+    (or the reverse) would key the api's path and the worker's re-key apart for up to 30 s."""
+    from haversack import modal_app as m
+    from haversack import serve
+    monkeypatch.setattr(m.ModalExecutor, "_wv_cache", {})
+    monkeypatch.setattr(serve, "versions_for", lambda seg, task, kind="segment": [kind])
+    ex = m.ModalExecutor()
+    assert ex._fresh_weights_versions("ts.v2:total_fast") == ["segment"]
+    assert ex._fresh_weights_versions("ts.v2:total_fast", "ranked") == ["ranked"]
+    assert ex._fresh_weights_versions("ts.v2:total_fast", "embed") == ["embed"]
+    assert ex._fresh_weights_versions("ts.v2:total_fast") == ["segment"]
+
+
+def test_the_worker_hands_the_pin_to_the_store(monkeypatch, tmp_path):
+    from haversack import modal_app as m
+    from haversack import ranked_output
+    seen = {}
+    monkeypatch.setattr(ranked_output, "segment_to_store",
+                        lambda image, task, out, **kw: seen.update(task=task, name=kw.get("image_name"))
+                        or ("seg", out))
+    W = m.Worker._get_user_cls()
+    w = W.__new__(W)
+    w.seg = types.SimpleNamespace(segment=lambda *a, **k: "seg")
+    w._ranked("in.nii.gz", {"id": "r", "task": "ts.v2:total_fast", "version": "v2.0.0",
+                            "input_identity": ["idc:1"]}, tmp_path / "s.duckn.zip", None, None)
+    assert seen == {"task": "ts.v2:total_fast@v2.0.0", "name": "idc:1"}
+
+
+def test_the_fastsurfer_worker_hands_the_ranked_sink_to_its_runner():
+    """Driven in a subprocess: importing an adapter registers a Modal class, which this process
+    must not carry. Without `probabilities=` every FastSurfer store job on Modal would fail with
+    'produced no ranked output' - and no test touched this hook (review, 2026-09-25)."""
+    import json
+    import os
+    import subprocess
+    import sys
+    code = "\n".join([
+        "import json",
+        "from haversack import modal_app",
+        "from haversack.engines import modal_fastsurfer as mf, fastsurfer",
+        "seen = []",
+        "fastsurfer.segment = lambda image, **k: seen.append(sorted(k)) or 'S'",
+        "U = mf.FastSurferWorker._get_user_cls()",
+        "w = U.__new__(U)",
+        "r = U._ranked_run(w, 'tok')('img', 'fastsurfer:asegdkt', probabilities='P', progress='R')",
+        "print(json.dumps([r, seen, fastsurfer.segment.__name__]))"])
+    code = code.replace("seen.append(sorted(k))", "seen.append({x: str(v) for x, v in sorted(k.items())})")
+    env = {**os.environ, "HAVERSACK_FASTSURFER": "1",
+           "PYTHONPATH": os.pathsep.join(p for p in (str(SRC.parent), os.environ.get("PYTHONPATH")) if p)}
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True,
+                       timeout=300)
+    assert r.returncode == 0, r.stderr[-3000:]
+    out, seen, _ = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out == "S" and seen == [{"device": "cuda", "probabilities": "P"}]
+
+
+
+def test_the_twin_keys_each_kind_through_the_one_door(monkeypatch):
+    """The Modal twin's versions function (``public``'s weights_fn): a store keys on the task's
+    versions PLUS its format tag, as submit and the worker's re-key do - without the tag the twin
+    404'd every store it held."""
+    from haversack import modal_app as m
+    from haversack import serve
+    monkeypatch.setattr(serve, "weights_versions_of", lambda seg, task: ["297=v2"])
+    got = {k: m._twin_weights_versions("seg", "ts.v2:total_fast", k) for k in ("segment", "ranked")}
+    assert got["segment"] == ["297=v2"]
+    assert got["ranked"] == serve.versions_for("seg", "ts.v2:total_fast", "ranked")
+    assert got["ranked"][:-1] == ["297=v2"] and got["ranked"][-1].startswith("ranked=")
+    # and the twin's endpoint uses it: parsed calls, not text
+    tree = ast.parse((SRC / "modal_app.py").read_text(encoding="utf-8"))
+    public = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "public")
+    assert "_twin_weights_versions" in {getattr(c.func, "id", None) for c in ast.walk(public)
+                                        if isinstance(c, ast.Call)}

@@ -368,6 +368,11 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             return worth_cropping(env, saving=1.0 - model.tiles(env.extent) / model.tiles(shape))
         return env
 
+    #: how many crop-from-task runs are in progress (2026-09-25): everything such a run emits is a
+    #: crop stage of THIS task, however the run is shaped inside (teeth crops from
+    #: craniofacial_structures, itself a cascade whose final stage would otherwise read as teeth's)
+    crop_runs = [0]
+
     def emit_probabilities(model, logits, frame, env, *, lut, part, weights=None, label_task=None,
                            role=None):
         """Encode this part's output distribution while the logits are still here.
@@ -392,7 +397,10 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         ``role`` is ``"crop"`` for a cascade's crop stage (2026-09-24): a stated fact, so the store
         can leave the stage out - its classes decide the final stage's box and are not the task's
         output - without recognizing it by name. A part the task's labels come from states none.
+        Inside a crop-from-task run every emit is a crop stage (``crop_runs``), whatever its shape.
         """
+        if crop_runs[0]:
+            role = "crop"
         from . import ranked
         t = time.perf_counter()
         # WHICH softmax these logits came from. Margins are comparable only within one
@@ -549,9 +557,14 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                 crop = step.crop_from_task
                 if ":" not in crop and ":" in spc.name:       # a registry names its own tasks bare
                     crop = f"{spc.name.partition(':')[0]}:{crop}"
-                # upstream runs the crop task whole, its labels on the input image
-                labels_in, src, _ = run_task_canonical(resolve(crop), f"{tag}:{step.crop_from_task}",
-                                                       out_grid="input", restore="nearest")
+                # upstream runs the crop task whole, its labels on the input image; whatever it
+                # emits is this task's crop stage, never its output (crop_runs)
+                crop_runs[0] += 1
+                try:
+                    labels_in, src, _ = run_task_canonical(resolve(crop), f"{tag}:{step.crop_from_task}",
+                                                           out_grid="input", restore="nearest")
+                finally:
+                    crop_runs[0] -= 1
             else:
                 t = time.perf_counter()
                 report.enter_part(i, f"{tag} stage {i + 1}/{len(stages)}: model {step.weights_id}"

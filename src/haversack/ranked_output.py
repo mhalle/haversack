@@ -59,7 +59,10 @@ def ranked_tag() -> str:
     its own; no number here has to be remembered for it."""
     import duckn
     import rankfield
-    return f"ranked=rf{rankfield.FORMAT_VERSION}/seg{duckn.SEG_VERSION}/h{STORE_RULES}"
+
+    from .ranked_compose import rule_tag
+    return (f"ranked=rf{rankfield.FORMAT_VERSION}/seg{duckn.SEG_VERSION}/h{STORE_RULES}"
+            f"/{rule_tag()}")
 
 
 CENTERING = {"corner": "node", "center": "cell"}
@@ -172,13 +175,16 @@ def _emit_junction(part, code, out, dist_meta):
 
 
 def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=None, *, quiet=False, run=None,
-         **segment_kw):
+         image_name=None, **segment_kw):
     """Emit ``task``'s ranked output for ``image`` into ``outdir`` (arrays as ``.npy``, the
     parts' metadata in ``meta.json``) and return the :class:`~haversack.result.Segmentation`.
     ``segment_kw`` goes to :func:`haversack.pipeline.segment` (device, dtype, grid, ...).
 
     ``run``, when given, is the segmentation to use - ``run(image, task, probabilities=spec,
     progress=..., **kw)``, a server's warm :meth:`Segmenter.segment` - instead of one built here.
+    ``image_name`` is what the store calls its input (``source_file``): a server passes the job's
+    identity, since its ``image`` is a scratch path or an image read ahead into memory, whose
+    ``str()`` is a dump with an address in it (review, 2026-09-25). Default: a path's file name.
 
     What lands is the TASK's field (2026-09-24): a cascade's crop stages are left out (they only
     decided the final stage's box), and a union's parts are composed into one field
@@ -223,14 +229,28 @@ def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=None, *, quiet=Fals
         raise RuntimeError(f"{task} produced no ranked output: its engine took no "
                            "probabilities sink, so there is nothing to build a store from")
     metas = _task_field(out, metas, depth, device=segment_kw.get("device"), say=say)
+    if not metas:
+        # only crop stages were emitted: a cascade whose crop found none of its classes, whose
+        # final model therefore never ran (upstream's empty result). The task has no field.
+        from .errors import InputError
+        raise InputError(f"{task}: its crop found none of the classes it crops to, so the task's "
+                         "result is empty (all background) and its final model never ran - there "
+                         "is no field to store")
     for part, m in metas.items():
         code = _Code(out, part, m)
         dist_meta = _emit_distance(part, code, out)
         m.update(dist_meta)
         m.update(_emit_junction(part, code, out, dist_meta))
 
+    # the clip and depth the STORED field was encoded at: a composed union's are its own (clip
+    # 16), and the store's provenance said 8 for one (review, 2026-09-25)
+    stored = next(iter(metas.values()))
+    path_like = isinstance(image, (str, Path))
+    if image_name is None and path_like:
+        image_name = Path(str(image)).name
     (out / "meta.json").write_text(json.dumps(
-        {"image": str(image), "task": task, "depth": depth, "clip": clip,
+        {"image": str(image) if path_like else None, "source_file": image_name, "task": task, "depth": int(stored.get("depth", depth)),
+         "clip": float(stored.get("clip", clip)),
          "envelope_mm": envelope_mm,
          "parts": metas, "provenance": seg.provenance, "timings": seg.timings},
         indent=1, default=str), encoding="utf-8")
@@ -325,7 +345,7 @@ def input_source(spec) -> dict:
 
 def segment_to_store(image, task, out, *, case=None, depth=6, clip=8.0, parts="all",
                      distance_voxels=DISTANCE_VOXELS, allow_unnamed=False, names=None,
-                     quiet=False, source=None, run=None, **segment_kw):
+                     quiet=False, source=None, run=None, image_name=None, **segment_kw):
     """Segment ``image`` with ``task`` and write the ranked store at ``out`` (``.duckn`` or
     ``.duckn.zip``); returns ``(segmentation, out)``.
 
@@ -349,16 +369,18 @@ def segment_to_store(image, task, out, *, case=None, depth=6, clip=8.0, parts="a
     staging = Path(tempfile.mkdtemp(prefix=out.name + ".emit-", dir=out.parent))
     try:
         envelope_mm = segment_kw.pop("envelope_mm", None)          # segment()'s default: none
-        seg = main(image, task, staging, depth, clip, envelope_mm, quiet=quiet, run=run, **segment_kw)
+        seg = main(image, task, staging, depth, clip, envelope_mm, quiet=quiet, run=run,
+                   image_name=image_name, **segment_kw)
         # Names the run reports are the model's own, so the store may declare the labeling
         # scheme they belong to - unless the run could not name its classes and fell back to
         # `label <v>` (a MONAI region head), or the caller brought names of its own.
         model_names = names is None and not (seg.provenance or {}).get("labels_unnamed")
         if names is None:
             names = {int(v): str(n) for v, n in seg.schema.names.items()}
+        path_like = isinstance(image, (str, Path))
         if case is None:
-            case = Path(str(image)).name.split(".")[0] or "case"
-        if source is None:
+            case = (Path(str(image)).name.split(".")[0] if path_like else "") or "case"
+        if source is None and path_like:        # an in-memory image names nothing; say nothing
             source = input_source(image)
         build(staging, out, case, parts, allow_unnamed, distance_voxels, names=names, quiet=quiet,
               source=source, model_names=model_names)

@@ -1842,6 +1842,7 @@ class _WorkerBase:
         source = {"type": "image", "identifier": str(ident)} if ident else None
         seg, _ = segment_to_store(input_path, run_name(meta["task"], meta.get("version")), out,
                                   case=meta["id"], source=source, quiet=True,
+                                  image_name=str(ident) if ident else None,
                                   run=self._ranked_run(token), progress=on_progress)
         return seg
 
@@ -2117,6 +2118,17 @@ def _worker_classes() -> dict:
     adapter loaded at all and simply is not here - which is the point: its image was
     never built either."""
     return {n: c for n, c in ENGINE_WORKERS.items() if _engines.enabled(n)}
+
+
+def _twin_weights_versions(seg, task, kind: str = "segment") -> list:
+    """What the anonymous twin keys ``task`` on, per kind: a label map on its weights versions
+    as always, an embedding on its encoder's (2026-09-24), a ranked store on the task's plus the
+    store's format tag - ``serve.versions_for``, the door every executor keys a kind through.
+    Module-level so a test can hold it; nested in ``public`` it was reachable by no test, and a
+    twin keying stores without their tag would 404 every one (review, 2026-09-25)."""
+    from haversack.serve import versions_for, weights_versions_of
+    return (weights_versions_of(seg, task) if kind == "segment"
+            else versions_for(seg, task, kind))
 
 
 def _spawn_worker(task: str, jid: str, source_tokens=None, kind: str = "segment"):
@@ -2652,14 +2664,11 @@ if PUBLIC:
         _pkg_dir()
         os.environ["TOTALSEG_WEIGHTS_PATH"] = WEIGHTS_ROOT
         from haversack import Segmenter
-        from haversack.serve import (create_public_app, installed_versions,
-                                 result_key, versions_for, weights_versions_of)
+        from haversack.serve import create_public_app, installed_versions, result_key
         seg = Segmenter(device="cpu", weights=WEIGHTS_ROOT)
 
         def weights_fn(task, kind="segment"):
-            # an embedding keys on its encoder's versions (2026-09-24), a label map as before
-            return (weights_versions_of(seg, task) if kind == "segment"
-                    else versions_for(seg, task, kind))
+            return _twin_weights_versions(seg, task, kind)
 
         def key_fn(identity, task, opts=None):
             ids = (identity,) if isinstance(identity, str) else tuple(identity)

@@ -44,13 +44,16 @@ class FakeStore:
     """``segment_to_store``'s signature: runs the server's own segmenter through ``run`` (as the
     real one does), then writes a small zip whose bytes depend on the task and the input."""
 
-    def __init__(self):
-        self.calls = []
+    def __init__(self, gate=None):
+        self.calls, self.gate = [], gate
 
     def __call__(self, image, task, out, *, case=None, source=None, quiet=False, run=None,
                  progress=None, **kw):
+        if self.gate is not None:
+            self.gate.wait(timeout=5)
         seg = run(image, task, probabilities="the-spec", progress=progress)
-        self.calls.append({"image": str(image), "task": task, "source": source, "case": case})
+        self.calls.append({"image": str(image), "task": task, "source": source, "case": case,
+                           "image_name": kw.get("image_name")})
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
             z.writestr("zarr.json", json.dumps({"task": task, "source": source}))
@@ -86,8 +89,21 @@ def test_a_stores_versions_are_its_tasks_and_the_formats_it_is_written_in():
     seg = FakeSegmenter()
     v = serve_mod.versions_for(seg, "total_fast", "ranked")
     assert v[:-1] == serve_mod.weights_versions_of(seg, "total_fast")
+    from haversack.ranked_compose import rule_tag
     assert v[-1] == (f"ranked=rf{rankfield.FORMAT_VERSION}/seg{duckn.SEG_VERSION}"
-                     f"/h{ranked_output.STORE_RULES}")
+                     f"/h{ranked_output.STORE_RULES}/{rule_tag()}")
+
+
+def test_every_number_of_the_composition_rule_is_in_the_key(monkeypatch):
+    """The rule's version, clip, scale and tie floor each move a composed store's bytes, so
+    each must move its key (review, 2026-09-25: none did; a comment claimed the version did)."""
+    from haversack import ranked_compose as rc
+    base = ranked_output.ranked_tag()
+    for name, value in (("RULE_VERSION", 2), ("COMPOSED_CLIP", 8.0), ("MARGIN_SCALE", 1.0),
+                        ("TIE_FLOOR", 1e-3)):
+        with monkeypatch.context() as mp:
+            mp.setattr(rc, name, value)
+            assert ranked_output.ranked_tag() != base, name
 
 
 # -- the job ---------------------------------------------------------------------
@@ -325,3 +341,162 @@ def test_remote_submit_asks_for_a_store_by_the_outputs_name(tmp_path, monkeypatc
         assert cli.main(base + bad) != 0
         assert why in capsys.readouterr().err
     assert seen == ["ranked", None, "ranked"]
+
+
+
+# -- review round, 2026-09-25 ------------------------------------------------------------
+
+def test_the_store_is_handed_the_jobs_name_case_pin_and_inputs(tmp_path, monkeypatch):
+    """What the store is built with: the job's identity as its input's name (never a scratch
+    path, never an image read ahead into memory, whose str() is a dump with an address in it),
+    the job's id as its case, the pinned run name, and a record that carries provenance.inputs."""
+    from test_serve import FakeSeg
+    # a fresh record: FakeSeg's provenance is a CLASS attribute every test shares, and one an
+    # earlier job filled made "inputs is there" pass with record_inputs deleted (mutation, 09-25)
+    monkeypatch.setattr(FakeSeg, "provenance", {"device": "fake"})
+    seg, store, ex, client = make(tmp_path, monkeypatch)
+    s = wait_state(client, post(client, fill=21).json()["id"], ("done", "failed"))
+    assert s["state"] == "done", s
+    call = store.calls[0]
+    assert call["case"] == s["id"]
+    assert call["image_name"] == s["input_identity"][0]
+    inputs = s["result"]["provenance"].get("inputs") or []
+    assert inputs and s["input_identity"][0] in json.dumps(inputs)
+    # a pinned job (the door's pin handling is a segmentation's): the store runs the pinned name
+    jid, jdir = ex.new_job_dir()
+    src = jdir / "input_scan.nii.gz"
+    src.write_bytes(volume_bytes(5))
+    ex.submit(jid, jdir, src, "total_fast", {}, identity=("sha256:pinned",), version="v9",
+              kind="ranked", no_cache=True)
+    assert wait_state(client, jid, ("done", "failed"))["state"] == "done"
+    assert store.calls[-1]["task"] == "total_fast@v9"
+    ex.close()
+
+
+def test_the_path_door_says_202_while_its_store_computes(tmp_path, monkeypatch):
+    import threading
+    gate = threading.Event()
+    store, ex, client = _idc(tmp_path, monkeypatch)
+    store.gate = gate
+    r = client.post("/v1/jobs", data={"task": "total_fast", "kind": "ranked",
+                                      "source": json.dumps([{"kind": "idc", "crdc_series_uuid": IDC}])})
+    jid = r.json()["id"]
+    wait_state(client, jid, ("running",))
+    got = client.get(f"/v1/idc/{IDC}/total_fast/{RANKED_NAME}")
+    gate.set()
+    assert got.status_code == 202 and got.json()["state"] == "materializing"
+    s = wait_state(client, jid, ("done",))
+    done = client.get(f"/v1/idc/{IDC}/{s['task']}/{RANKED_NAME}")
+    assert done.status_code == 200
+    assert done.headers["content-disposition"].endswith('.duckn.zip"')
+    ex.close()
+
+
+def test_the_path_doors_404_names_a_command_that_exists(tmp_path, monkeypatch):
+    from haversack import cli
+    store, ex, client = _idc(tmp_path, monkeypatch)
+    r = client.get(f"/v1/idc/{IDC}/total_fast/{RANKED_NAME}")
+    assert r.status_code == 404 and "haversack remote submit" in r.text and "--task" in r.text
+    assert "submit" in cli._command_line().commands["remote"].commands
+    ex.close()
+
+
+def test_a_multi_input_ranked_job_is_refused_before_anything_is_staged(tmp_path, monkeypatch):
+    seg, store, ex, client = make(tmp_path, monkeypatch)
+    monkeypatch.setattr(serve_mod, "_validate_request", lambda *a, **k: [
+        ("image", {"kind": "upload"}), ("mask", {"kind": "upload"})])
+    before = set((tmp_path / "work").iterdir())
+    r = post(client)
+    assert r.status_code == 422 and "multi_input" in r.text
+    assert set((tmp_path / "work").iterdir()) == before and store.calls == []
+    ex.close()
+
+
+@pytest.mark.parametrize("takes_kind", [False, True], ids=["one-argument", "with-kind"])
+def test_a_twin_with_a_one_argument_versions_function_serves_the_store(tmp_path, monkeypatch,
+                                                                       takes_kind):
+    """The anonymous twin's ``weights_fn(task)`` (create_public_app's documented form, and the
+    object-store twin's) states a task's weights; the store's key adds its format tag. It used to
+    fall back to a describe() the twin does not have, key on ["unknown"] and 404 every store."""
+    from haversack.serve import create_public_app, weights_versions_of
+    store, ex, client = _idc(tmp_path, monkeypatch)
+    s = _submit_idc(client)
+    path = f"/v1/idc/{IDC}/{s['task']}/{RANKED_NAME}"
+    assert client.get(path).status_code == 200
+    seg = ex.segmenter
+
+    def one_arg(task):                                # one argument, as documented
+        return weights_versions_of(seg, task)
+
+    def with_kind(task, kind="segment"):              # Modal's twin: the kind decides
+        return weights_versions_of(seg, task) if kind == "segment" else \
+            serve_mod.versions_for(seg, task, kind)
+    weights_fn = with_kind if takes_kind else one_arg
+    twin = TestClient(create_public_app(
+        key_fn=lambda identity, task, opts=None: result_key((identity,), task, opts or {},
+                                                           weights_fn(task)),
+        cache_get=ex.cache.get, tasks_fn=seg.tasks, weights_fn=weights_fn))
+    got = twin.get(path)
+    assert got.status_code == 200, got.text
+    assert got.content == client.get(path).content
+    ex.close()
+
+
+def test_the_client_and_cli_refuse_names_that_misstate_a_kind(tmp_path, monkeypatch):
+    from haversack import cli
+    from haversack.client import RemoteClient, RemoteError
+    from haversack.encoders import serving  # noqa: F401 - the embed door's module
+    seg, store, ex, client = make(tmp_path, monkeypatch)
+    rc, sent = _client(client)
+    # a label map downloaded under a store's name is refused (and the reverse is tested above);
+    # an embedding field is a zip too, and must not pass for a store
+    field = tmp_path / "f.zarr.zip"
+    import zipfile as _z
+    with _z.ZipFile(field, "w") as z:
+        z.writestr("zarr.json", "{}")
+
+    class FakeResp:
+        status_code = 200
+        headers = {"Content-Type": "application/zip",
+                   "Content-Disposition": 'attachment; filename="radar_pretrain_x.zarr.zip"'}
+
+        def iter_bytes(self):
+            yield field.read_bytes()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(rc._http, "stream", lambda *a, **k: FakeResp())
+    with pytest.raises(RemoteError, match="embedding field"):
+        rc.fetch("x", tmp_path / "wrong.duckn.zip")
+    # the command line asks for a store only by a .duckn.zip name: a .zarr.zip is not one
+    seen = []
+    monkeypatch.setattr(RemoteClient, "run", lambda self, *a, **k: seen.append(k.get("kind"))
+                        or {"state": "done"})
+    base = ["remote", "--server", "http://x", "--token", "t", "submit", "idc:1", "--task", "total_fast"]
+    assert cli.main(base + ["-o", str(tmp_path / "a.zarr.zip")]) == 0
+    assert seen == [None]
+    ex.close()
+
+
+
+def test_a_store_has_a_path_only_for_one_hosted_identity():
+    from haversack.serve import ranked_links
+    assert ranked_links("t", ["idc:1"], {}) == {"ranked": f"/v1/idc/1/t/{RANKED_NAME}"}
+    assert ranked_links("t", ["idc:1", "idc:2"], {}) == {}
+    assert ranked_links("t", ["image=idc:1", "mask=idc:2"], {}) == {}
+    assert ranked_links("t", ["sha256:" + "0" * 64], {}) == {}
+    assert ranked_links("t", ["idc:1"], {"depth": 3}) == {}
+
+
+def test_the_store_extra_is_each_package_a_store_is_written_with(monkeypatch):
+    import importlib.util
+    real = importlib.util.find_spec
+    for name in ("rankfield", "zarr", "duckn"):
+        with monkeypatch.context() as mp:
+            mp.setattr(importlib.util, "find_spec", lambda n, *a, _gone=name: None if n == _gone
+                       else real(n, *a))
+            assert ranked_output.store_extra_missing() == [name]
+    assert ranked_output.store_extra_missing() == []

@@ -3461,6 +3461,7 @@ class LocalExecutor:
         reporter.stage("ranked", rec.task)
         seg, out = segment_to_store(inp, run_name(rec.task, rec.version), rec.dir / RANKED_NAME,
                                     case=rec.id, source=source, quiet=True, run=run,
+                                    image_name=str(ident) if ident else None,
                                     progress=reporter)
         record_inputs(seg, entries, rec.input_identity, self.series_cache)
         return Path(out), ranked_payload(seg, out)
@@ -4177,17 +4178,27 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         """A ranked store's key (2026-09-24): ``result_key`` with the kind, no options, over the
         versions the job was keyed on - from the executor that states them (Modal's api and its
         twin read them stale-proof and take the kind), else ``versions_for``, as ``_accept``."""
+        import inspect
         wv = getattr(executor, "weights_versions", None)
-        versions = None
         if wv is not None:
             try:
+                takes_kind = "kind" in inspect.signature(wv).parameters
+            except (TypeError, ValueError):
+                takes_kind = False
+            # A one-argument versions function - an operator's twin, the object-store twin -
+            # states a TASK's weights; a store keys on those plus its format tag, which is what
+            # versions_for(kind="ranked") is. The first version swallowed the TypeError and
+            # fell back to a describe() the twin does not have: ["unknown"], a key no store
+            # has, so the twin 404'd every store it held (review, 2026-09-25).
+            if takes_kind:
                 versions = wv(task, kind="ranked")
-            except TypeError:
-                versions = None
-        if versions is None:
+            else:
+                from .ranked_output import ranked_tag
+                versions = list(wv(task)) + [ranked_tag()]
+        else:
             try:
                 versions = versions_for(seg, task, "ranked")
-            except Exception:              # a twin with no describe(): no key is findable
+            except Exception:              # no describe() and no versions function: no key
                 versions = ["unknown"]
         return result_key(tuple(identities), task, {}, versions, kind="ranked")
 
@@ -5220,6 +5231,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # and accepting it leaves the caller believing a knob was turned).
         declared: dict = {}                # role -> what the task says it takes
         binding = _validate_request(seg, task, src, opts, declared=declared)
+        if job_kind == "ranked" and len(binding) > 1:
+            # A store names its input (provenance.sources, source_file), and several inputs - a
+            # CT and a result: mask - would be recorded as the first alone, in its role-tagged
+            # form (review, 2026-09-25). Refused until a store can name each role.
+            raise HTTPException(422, {"code": "multi_input",
+                                      "message": f"{task} takes {len(binding)} inputs, and a ranked "
+                                                 "store of a multi-input task is not built yet; "
+                                                 "its labels are (kind=segment)"})
         if not executor.accepting:
             raise HTTPException(429, "queue is full, retry later",
                                 headers={"Retry-After": "30"})
@@ -6366,8 +6385,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     return JSONResponse({"state": "materializing"}, status_code=202,
                                         headers=_progress_headers(None))
                 raise HTTPException(404, "not materialized; compute it with POST /v1/jobs "
-                                         f"kind=ranked (haversack remote segment {prefix}:{ident} "
-                                         f"{canonical} -o <name>.duckn.zip)")
+                                         f"kind=ranked (haversack remote submit {prefix}:{ident} "
+                                         f"--task {canonical} -o <name>.duckn.zip)")
             headers = _resource_headers(key, hit[1])
             fresh = not_modified(request, headers["ETag"], headers)
             if fresh is not None:
