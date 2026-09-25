@@ -288,10 +288,12 @@ def _rewrite(copy: Path, edit) -> Path:
 
 @pytest.mark.parametrize("edit", [
     lambda m: m["codecs"].append({"name": "zstd", "configuration": {"level": 1}}),
+    lambda m: m["codecs"].append({"name": "blosc", "configuration": {
+        "cname": "lz4", "clevel": 5, "shuffle": "shuffle", "typesize": 2, "blocksize": 0}}),
     lambda m: m["chunk_grid"]["configuration"].update(chunk_shape=[1] + m["shape"][1:]),
     lambda m: m["attributes"]["duckn"].update(value_transforms=[{"type": "linear", "slope": 2.0, "intercept": 0}]),
     lambda m: m["attributes"]["duckn"]["axes"][0].pop("space_direction"),
-], ids=["compressed", "chunked", "rescale", "no-geometry"])
+], ids=["zstd-codec", "blosc-over-raw-bytes", "chunked", "rescale", "no-geometry"])
 def test_the_mapped_reader_refuses_any_other_layout(tmp_path, edit):
     copy = ic.transcode(write_series(tmp_path / "s"), tmp_path / "entry")
     bad = _rewrite(copy, edit)
@@ -461,8 +463,9 @@ def test_a_compressed_copy_has_its_own_layout_and_version(tmp_path, zstd):
         meta = json.loads(z.read("zarr.json"))
     assert names == ["c/0/0/0", "c/1/0/0", "zarr.json"]
     assert meta["chunk_grid"]["configuration"]["chunk_shape"] == [4, 6, 5]
-    assert [c["name"] for c in meta["codecs"]] == ["bytes", "zstd"]
-    assert meta["codecs"][1]["configuration"]["level"] == ic.ZSTD_LEVEL
+    assert [c["name"] for c in meta["codecs"]] == ["bytes", "blosc"]
+    blosc = meta["codecs"][1]["configuration"]
+    assert (blosc["cname"], blosc["clevel"], blosc["shuffle"]) == ("zstd", ic.ZSTD_LEVEL, "bitshuffle")
     assert meta["attributes"]["duckn"]["extensions"]["haversack"]["version"] == ic.FORMATS["zstd"] == 2
 
 

@@ -6,10 +6,11 @@ is the image ``io.read_image`` produced, written once when the cache stores the 
 uncompressed zarr chunk in a zip, with duckn's geometry and the DICOM tags SimpleITK reported -
 and read back by mapping that chunk (0.25 s for the same CT), with voxels and geometry identical.
 
-An operator may store it compressed instead (``HAVERSACK_INPUT_COPY_COMPRESSION=zstd``): zstd in
-chunks of :data:`CHUNK_SLICES` slices, decoded in parallel by zarr - 2.6x smaller, read in ~0.6-1 s
-for that CT (measured 2026-09-25, docs/input-copy.md §13). It is the choice for a cache whose room
-is the constraint: a Modal worker's series cache is RAM.
+An operator may store it compressed instead (``HAVERSACK_INPUT_COPY_COMPRESSION=zstd``): zstd
+through blosc with bit shuffling, in chunks of :data:`CHUNK_SLICES` slices decoded in parallel by
+zarr - 3.1x smaller for that CT and 3.4-5.8x for six other datasets, a read ~2-3x the mapped one
+(measured 2026-09-25, docs/input-copy.md §13). It is the choice for a cache whose room is the
+constraint: a Modal worker's series cache is RAM.
 
 An entry holds one form: the copy, or - when the reader refuses the input, or anything about
 the copy fails - the original, which is then read (and refused) as it always was. The original
@@ -25,7 +26,8 @@ The file (``<entry>/decoded/input.duckn.zip``):
     c/0/0/0     the voxels, C order, little-endian, stored (not deflated)
 
 or, compressed (format version 2): chunks of ``CHUNK_SLICES`` whole slices, codecs ``bytes`` then
-``zstd``, one zip member per chunk (``c/<k>/0/0``), the zip itself still stored.
+``blosc`` (cname zstd, bitshuffle), one zip member per chunk (``c/<k>/0/0``), the zip itself still
+stored.
 
 Imports nothing heavy at module level: ``io`` asks :func:`is_copy` on every read.
 """
@@ -56,9 +58,12 @@ ENV = "HAVERSACK_INPUT_COPY"
 #: ``zstd``. A cache may hold both; the reader reads each by its own layout, so changing this
 #: rewrites nothing and invalidates nothing.
 COMPRESSION_ENV = "HAVERSACK_INPUT_COPY_COMPRESSION"
-#: zstd's level and the slices per chunk (measured on a 709-slice CT: level 3 in 32-slice chunks
-#: was the fastest read at 2.6x; a single compressed chunk decodes on one thread, 2.4 s).
+#: The compressed form's codec and chunking (2026-09-25, docs/input-copy.md §13, seven datasets):
+#: blosc's zstd with bit shuffling was 1.2-1.4x smaller than plain zstd on every one, at the same
+#: read and write time; level 3, as levels 1 and 6 moved size by 5-8 % and write time by 2x; 32
+#: slices a chunk, as 16-64 read alike and one whole-volume chunk decodes on one thread (2.4 s).
 ZSTD_LEVEL = 3
+BLOSC_SHUFFLE = "bitshuffle"
 CHUNK_SLICES = 32
 #: How far the copy's geometry may differ from the reader's: duckn stores each axis as direction
 #: x spacing and a reader takes it apart again, which is exact for an axis-aligned grid and off by
@@ -241,8 +246,9 @@ def _write(vol, out: Path, how: str = "none") -> None:
     from zarr.storage import ZipStore
     shape = tuple(int(n) for n in vol.raw.shape)
     if how == "zstd":
-        from zarr.codecs import ZstdCodec
-        chunks, compressors = (min(CHUNK_SLICES, shape[0]),) + shape[1:], [ZstdCodec(level=ZSTD_LEVEL)]
+        from zarr.codecs import BloscCodec
+        chunks = (min(CHUNK_SLICES, shape[0]),) + shape[1:]
+        compressors = [BloscCodec(cname="zstd", clevel=ZSTD_LEVEL, shuffle=BLOSC_SHUFFLE)]
     else:
         chunks, compressors = shape, None
     store = ZipStore(str(out), mode="w")
@@ -301,7 +307,7 @@ def transcode(content, entry, *, source=None, source_digest=None) -> Path | None
 
 def _layout(path: Path):
     """``(zarr.json dict, how, chunk data offset, dtype, shape)`` for one of the two layouts this
-    module writes - ``how`` "none" (one stored chunk, mapped at the offset) or "zstd" (slabs of
+    module writes - ``how`` "none" (one stored chunk, mapped at the offset) or "zstd" (blosc slabs of
     whole slices, decoded by zarr; offset None) - or NotACopy for any other."""
     import math
     import struct
@@ -324,7 +330,8 @@ def _layout(path: Path):
     dt = np.dtype(meta["data_type"]).newbyteorder("<" if endian == "little" else ">")
     stored = all(i.compress_type == zipfile.ZIP_STORED for i in members.values())
     names = {n for n in members if n.startswith("c/")}
-    if len(codecs) == 2 and codecs[1].get("name") == "zstd":
+    # any blosc configuration: zarr decodes it exactly or fails, and a failure is NotACopy
+    if len(codecs) == 2 and codecs[1].get("name") == "blosc":
         k = grid[0] if len(grid) == 3 else 0
         want = {f"c/{i}/0/0" for i in range(math.ceil(shape[0] / k))} if k else None
         if not stored or not k or grid[1:] != shape[1:] or names != want:

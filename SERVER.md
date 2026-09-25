@@ -345,8 +345,9 @@ is every key. Label maps (a `.seg.nrrd`, a `result:` reference) keep their files
 anything the reader refuses. `GET /v1/inputs/{digest}` still describes what the digest names -
 `members` and `bytes` of the upload - and adds `stored_form: "input_copy"`, `stored_compression`
 and `stored_bytes`. An operator can keep originals instead with `HAVERSACK_INPUT_COPY=0`, or store
-the copies compressed with `HAVERSACK_INPUT_COPY_COMPRESSION=zstd`: about 2.6x smaller for a CT,
-and read in roughly a second instead of a fraction of one - the choice where cache room is the
+the copies compressed with `HAVERSACK_INPUT_COPY_COMPRESSION=zstd` (zstd through blosc with bit
+shuffling): 3-5x smaller for the CTs and MR measured, and read in up to about a second instead of
+a fraction of one - the choice where cache room is the
 constraint (a Modal worker keeps fetched series in RAM). The setting applies to copies written
 after it is set; a cache may hold both forms. On Modal, both variables are forwarded from the
 deploying shell. The format and its rules are in `docs/input-copy.md`.

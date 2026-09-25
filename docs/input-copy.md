@@ -194,7 +194,7 @@ reader:
 `cache clean` remove it. **Operator switch:** `HAVERSACK_INPUT_COPY=0` stores originals only -
 the behavior before this change, for a host that wants the DICOM kept.
 **Compression:** `HAVERSACK_INPUT_COPY_COMPRESSION=zstd` stores new copies compressed (§13):
-zstd level 3 in chunks of 32 whole slices, one zip member each, still a stored zip, format
+zstd level 3 through blosc with bit shuffling, in chunks of 32 whole slices, one zip member each, still a stored zip, format
 version 2. It is read through zarr, whose codec pipeline decodes the chunks in parallel - no
 mapping. Existing copies are not rewritten; a cache holds whichever form each entry was written
 in, and the reader takes each by its layout. A reader that knows only version 1 sees a version-2
@@ -322,8 +322,8 @@ failure is explained below and is not the copy's.
 
 ## 13. Compressed copies (2026-09-25)
 
-`HAVERSACK_INPUT_COPY_COMPRESSION=zstd` stores new copies as zstd level 3 in chunks of 32 whole
-slices, one member per chunk, in a stored zip; `extensions.haversack.version` is 2 (`FORMATS`),
+`HAVERSACK_INPUT_COPY_COMPRESSION=zstd` stores new copies as zstd level 3 - since the dataset
+sweep below, through blosc with bit shuffling - in chunks of 32 whole slices, one member per chunk, in a stored zip; `extensions.haversack.version` is 2 (`FORMATS`),
 so a version-1 reader treats it as stale rather than mapping it. The reader takes each file by its
 layout, so a cache may hold both forms and the setting can change at any time. An unknown value
 keeps the original and says why. Both input-copy variables are forwarded into Modal containers
@@ -332,9 +332,12 @@ keeps the original and says why. Both input-copy variables are forwarded into Mo
 **Chosen locally** (M2, 8 cores, the 709-slice CT, warm): one compressed chunk decodes on one
 thread (zstd-3 2.4 s); whole-slice chunks decode in parallel through zarr - zstd-3 in 32-slice
 chunks 0.64 s at 2.6x, blosc-zstd bitshuffle 0.84 s at 3.1x, gzip-6 1.1 s but an 8 s write. zstd
-was taken over blosc for being a core zarr v3 codec every reader has.
+was first taken over blosc "for being a core zarr v3 codec every reader has" - but blosc is one
+too, and the sweep across datasets below made blosc-zstd with bitshuffle the choice.
 
-**Measured on Modal** (L40S containers, 17 CPUs each, torn down afterwards):
+**Measured on Modal** with plain zstd, before the switch to blosc (L40S containers, 17 CPUs
+each, torn down afterwards; locally the two read alike, so the read times carry over and the
+compressed size is now 270 MB):
 
 | | uncompressed (mapped) | zstd |
 |---|---|---|
@@ -351,7 +354,7 @@ was taken over blosc for being a core zarr v3 codec every reader has.
   disappeared. Compression does not make a cold volume read faster.
 - **What it buys is room**: the worker's `/dev/shm` series cache (`HAVERSACK_SHM_CACHE_GB`, 8 GiB by
   default) holds about 10 copies of this CT uncompressed and about 26 compressed, and the inputs
-  volume holds 2.6x as many uploads.
+  volume holds 2.6x as many uploads (3.1x with blosc: about 32 copies in 8 GiB).
 - **What it costs**: about 0.3-0.5 s a read on this CT, against the 12.5 s DICOM decode either form
   replaces.
 - **Exactness**: every read, in every container, hashed to the DICOM read's voxels
@@ -362,11 +365,15 @@ was taken over blosc for being a core zarr v3 codec every reader has.
 - **Tests**: 7 new in `test_input_copy.py`, the knob forwarding in `test_modal_app.py`, the status
   field in `test_serve.py`. 11 of 11 mutants killed (the last, a deflated zip accepted, by a test
   added for it); a comment mutant survived as it must. Fast suite 2609 passed / 4 skipped.
+  After the switch to blosc: 12 of 12 (bitshuffle held by the layout test). A first reader rule
+  that required blosc's cname to be zstd let two mutants survive - it was redundant, since a blosc
+  chunk either decodes exactly through zarr or fails into NotACopy - so it was removed, and the
+  case of a blosc codec over raw bytes now holds the decode-failure path.
 
 **Across datasets (local, 2026-09-25).** The CT above was not aberrant; it was the least
 compressible case. M2, 8 cores, warm page cache, reads the median of 5, every read voxel-exact:
 
-| dataset | array | mapped read | zstd3/32 (shipped) | blosc-zstd3 bitshuffle/32 |
+| dataset | array | mapped read | zstd3/32 (first choice) | blosc-zstd3 bitshuffle/32 (shipped) |
 |---|---|---|---|---|
 | idc-torso1 CT (DICOM) | 709x768x768 int16, 836 MB | 0.15 s | 2.60x, 0.36 s | 3.10x, 0.36 s |
 | NLST low-dose chest CT (DICOM) | 249x512x512 int32, 261 MB | 0.05 s | 3.73x, 0.10 s | 4.87x, 0.11 s |
@@ -381,7 +388,8 @@ compressible case. M2, 8 cores, warm page cache, reads the median of 5, every re
   the write; neither changes the read.
 - blosc-zstd with bitshuffle was 1.2-1.4x smaller than plain zstd on EVERY set, at the same read
   and write time. blosc is one of zarr v3's core codecs as zstd is, so the reason given above
-  for preferring zstd does not hold; switching is a codec line and a layout rule.
+  for preferring zstd does not hold: the compressed form was switched to it the same day, before
+  it had been deployed anywhere (the format version stays 2; no stored copy was plain zstd).
 - Three of the four DICOM CTs read as int32 (a rescale SimpleITK widens), so their copies carry
   twice the bytes an int16 would; compression absorbs most of that (3.5-3.7x). Narrowing the type
   would change the image the reader produces, which a copy must not do.

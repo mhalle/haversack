@@ -19,9 +19,11 @@
   that stores inputs carries the extra, and one that cannot (SynthStrip) still reads copies.
   `docs/input-copy.md` is the specification.
 - An operator may store input copies compressed: `HAVERSACK_INPUT_COPY_COMPRESSION=zstd` (zstd
-  level 3 in 32-slice chunks). On Modal the 709-slice CT's copy is 322 MB instead of 837 MB, and
-  a read takes about 0.5-0.9 s from a worker's RAM cache instead of 0.25-0.45 s; a cold read from
-  a volume was no faster either way, since the volume's own latency swamps the bytes. It is the
+  level 3 through blosc with bit shuffling, in 32-slice chunks). Across seven local datasets the
+  copies were 3.1-5.8x smaller (the 709-slice CT 270 MB instead of 837 MB; int32 CTs 4.5-4.9x),
+  and a read took 2-3x the mapped one; on Modal the difference was 0.3-0.5 s a read on that CT
+  (measured with plain zstd, which reads alike). A cold read from a volume was no faster either
+  way, since the volume's own latency swamps the bytes. It is the
   choice where cache room is the constraint - a Modal worker's series cache is RAM - and applies
   only to copies written after it is set. `GET /v1/inputs/{digest}` reports
   `stored_compression`. Both input-copy variables are now forwarded into Modal containers;
