@@ -454,7 +454,7 @@ def _with_tags(image, attrs: dict):
 
 def _to_sitk(attrs: dict, raw):
     """The image, through duckn's own ``to_sitk`` where duckn is installed. Where it is not - an
-    engine environment that cannot take the duckn extra (SynthStrip's numpy<2) reading a copy
+    engine environment that cannot take the duckn extra (VoxTell's, MONAI's) reading a copy
     another container wrote - the one layout this module writes is converted directly: LPS
     space (SimpleITK's own: no flip), axes z, y, x, each ``space_direction`` the direction cosine
     times the spacing. A test holds the two equal on the same file; anything else is refused."""

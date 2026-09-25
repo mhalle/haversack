@@ -28,6 +28,13 @@
   only to copies written after it is set. `GET /v1/inputs/{digest}` reports
   `stored_compression`. Both input-copy variables are now forwarded into Modal containers;
   `HAVERSACK_INPUT_COPY=0` had never reached them.
+- SynthStrip runs on NumPy 2 and installs beside the other engines. synthstrip-torch 0.1.1 drops
+  its `numpy<2` cap, which existed because surfa 0.6.3 (its last release) breaks in `reorient`
+  on NumPy 2; it takes surfa at upstream's unreleased fix instead (`8aa4a5f6`). On CPU, NumPy
+  2.5.3 with that surfa gives the same distance field and mask bit for bit as NumPy 1.26 with
+  surfa 0.6.3. The `synthstrip` extra leaves every uv conflict group, so it no longer needs its
+  own environment, and SynthStrip's Modal image takes the `duckn` extra and reads compressed
+  input copies. synthstrip-torch is marked unsupported: kept runnable, not developed.
 
 - **A Modal deployment can take the local server's bearer token, and `haversack remote`
   reaches it.** `haversack modal deploy --token T`, or `HAVERSACK_SERVER_TOKEN` in its

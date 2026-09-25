@@ -28,14 +28,16 @@ ENGINE = "synthstrip"
 # SynthStrip engine image (built only when enabled). uv-NATIVE, same shape as fs_image:
 # `synthstrip` brings synthstrip-torch (from its git source in pyproject) + scipy (haversack
 # mask cleanup); `idc` brings obstore (fetch); `preview` brings matplotlib (serve-core
-# preview - synthstrip-torch doesn't carry it, it's a serve-tier concern). numpy<2 comes
-# from synthstrip-torch (surfa's reorient breaks on numpy 2.x). Weights fetch from MGH at
-# first use (cached warm), like FastSurfer's checkpoints.
+# preview - synthstrip-torch doesn't carry it, it's a serve-tier concern); `duckn` lets it
+# read (and write) input copies in every form, the compressed one included, which needs zarr
+# (2026-09-25 - possible since synthstrip-torch 0.1.1 dropped numpy<2). Weights fetch from MGH
+# at first use (cached warm), like FastSurfer's checkpoints.
 def _synthstrip_image():
     synthstrip_image = (
         modal.Image.debian_slim(python_version="3.12")
-        .apt_install("git")                       # uv needs git for the git source in pyproject
-        .uv_sync(extras=["synthstrip", "preview"], frozen=False)
+        # git: uv's git sources; build-essential: surfa ships only an sdist (Cython + C)
+        .apt_install("git", "build-essential")
+        .uv_sync(extras=["synthstrip", "preview", "duckn"], frozen=False)
         # Bake the 29 MB weights into the image at BUILD (to synthstrip-torch's default cache)
         # so cold containers don't re-download from MGH. Same rationale as FastSurfer above.
         .run_commands("python -c 'import synthstrip_torch; synthstrip_torch.fetch_weights()'")

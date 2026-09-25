@@ -340,7 +340,7 @@ def test_a_file_that_only_looks_like_a_copy_is_read_by_duckn(tmp_path):
 
 
 def test_without_duckn_the_copy_reads_exactly_as_duckn_reads_it(tmp_path, monkeypatch):
-    """An engine environment that cannot install duckn (SynthStrip's numpy<2) still reads a copy
+    """An engine environment that cannot install duckn (VoxTell's, MONAI's) still reads a copy
     another container wrote - with the geometry duckn's to_sitk gives, and no other."""
     import builtins
     copy = ic.transcode(write_series(tmp_path / "s", tilt_mm=0.03), tmp_path / "entry")

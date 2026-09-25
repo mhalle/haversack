@@ -175,10 +175,11 @@ Model weights must not bloat the package or be committed to a repo:
 
 ## Conflicting extras
 
-`torch` (pins `numpy>=2`) and `synthstrip` (pins `numpy<2`, for surfa) are declared
-conflicting in `[tool.uv] conflicts`, so uv forks them into one universal lock. Therefore
-`uv sync --all-extras` does **not** resolve; materialize an engine on its own with
-`UV_PROJECT_ENVIRONMENT=.venvs/<engine> uv sync --extra <engine>`.
+`voxtell` and `monai` are declared conflicting in `[tool.uv] conflicts`, so uv forks them into
+one universal lock; materialize either on its own with
+`UV_PROJECT_ENVIRONMENT=.venvs/<engine> uv sync --extra <engine>`. `synthstrip` was in that
+group, and conflicted with `duckn` and `embed`, while it pinned `numpy<2` for surfa; since
+synthstrip-torch 0.1.1 (2026-09-25) it installs beside everything else.
 
 ## Verification
 

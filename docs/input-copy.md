@@ -280,7 +280,7 @@ In duckn (a release, then a pin bump here and in CI, with feldglas kept equal):
   entries through `SeriesCache.discard`, which `test_only_jobpolicy_decides_to_discard_a_cached_input`
   refused: that policy is jobpolicy's.)
 - **Reading a copy needs neither duckn nor pydicom.** An engine image that cannot take the duckn
-  extra (SynthStrip's numpy<2) reads copies another container wrote: without duckn the one layout
+  extra (VoxTell's, MONAI's; SynthStrip's until its numpy<2 went, 2026-09-25) reads copies another container wrote: without duckn the one layout
   this module writes (LPS, z/y/x, direction x spacing) is converted directly - held bit for bit
   to duckn's `to_sitk` by a test, tilted series included - and without pydicom the tags are not
   restored (provenance, never needed to compute). WRITING needs both, so an environment without

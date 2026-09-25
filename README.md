@@ -479,11 +479,12 @@ task was `fastsurfer:brain` before 0.12.0, which is now refused with the new nam
 runs FastSurfer 2.5.4: `fastsurfer:asegdkt@2.5.4` pins it, and a build running any other
 release refuses the pin rather than running what it has.
 
-SynthStrip's dependencies pin numpy below 2, so it owns a separate environment:
+SynthStrip installs the same way (its package builds surfa from source, so it needs a C
+compiler):
 
 ```bash
-UV_PROJECT_ENVIRONMENT=.venvs/synthstrip uv sync --extra synthstrip --extra serve
-.venvs/synthstrip/bin/haversack segment t1.nii.gz --task synthstrip:mask -o mask.seg.nrrd
+uv pip install "haversack[synthstrip] @ git+https://github.com/mhalle/haversack"   # or --extra synthstrip with uv sync
+haversack segment t1.nii.gz --task synthstrip:mask -o mask.seg.nrrd
 ```
 
 FastSurfer and SynthStrip have in-process runners; VoxTell and the MONAI bundles run on
