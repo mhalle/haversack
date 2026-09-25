@@ -287,3 +287,29 @@ In duckn (a release, then a pin bump here and in CI, with feldglas kept equal):
 - **Measured locally** on the 709-slice CT: transcode 9.5 s (a 6.4 s decode, the write, the
   read-back check), then `io.read_image` of the copy 0.145 s; 61 series tags on the image, 9
   per-slice tags on each of 709 samples.
+
+## 12. Verified on Modal (2026-09-25)
+
+Smoke `haversack-inputcopy-smoke` from `41e4636` (L40S, bearer token, optional engines off;
+stopped, its three volumes, Dict and Secret deleted). 17 of 18 scripted checks passed; the one
+failure is explained below and is not the copy's.
+
+- **The read is gone from every job.** IDC `a05fb365-...` (709 slices, 418 M voxels):
+  `read+canonical` 0.85 s on the first job, which fetched and transcoded the series, and 0.68 s
+  on the next task over the same series - the earlier ranked smoke spent 11-14 s reading this
+  series in EVERY job. A warm `ts.v2:total_fastest` job was 16 s wall end to end. A fresh
+  DICOM read in the same worker took 12.5 s.
+- **The worker's entry holds one form**: `e2.r1!idc%3A.../decoded/input.duckn.zip`, 836.8 MB,
+  and no `series/`. An uploaded `CT_Abdo.nii.gz` answers `GET /v1/inputs/<digest>` with
+  `stored_form: input_copy`, `bytes` 7,753,434 (the upload's own size), `stored_bytes`
+  23,241,778; its labels lie on the input's grid, and a second task over it read in 0.15 s.
+- **The copy is the image.** Inside the worker, the copy and a fresh fetch read by
+  `io.read_image` from DICOM have the same voxel sha256 (`e29f1dcb...`), and equal origin,
+  spacing, direction (compared as floats, not printed) and pixel type. `ts.v2:total_fast` run in
+  that one container on each, and again on the copy, gave byte-identical labels.
+- **The failed check:** this deployment's `total_fast` labels differ from an EARLIER
+  deployment's (the ranked-jobs smoke) in 7,121 of 418 M voxels (0.0017 %), the same 7,121 on
+  the first job and on two `no-cache` recomputes, while all three agree with each other exactly.
+  With the input proven identical, that is the other deployment - another container and another
+  branch's build - not the copy. Comparing labels across deployments is the wrong check for an
+  input change; compare in one container.
