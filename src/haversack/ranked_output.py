@@ -31,6 +31,22 @@ from haversack.io import STORE_OUTPUT_SUFFIXES, is_store_output  # noqa: F401 - 
 
 DISTANCE_VOXELS = 2.0            # truncation of the emitted distance field, in voxels
 
+#: haversack's own rules for what a store holds, counted: bump when a change to them moves a
+#: store's bytes from the same run. 1 (2026-09-24): the TASK's field - a cascade's crop stages
+#: left out, a union's parts composed into one field (ranked_compose, painting margins at 1/2,
+#: clip 16), the derived layers computed on it.
+STORE_RULES = 1
+
+
+def ranked_tag() -> str:
+    """What a cached store's key carries beyond the task's weights: the formats its bytes are
+    written in, READ from the libraries that write them - rankfield's encoding and duckn's seg
+    metadata - and :data:`STORE_RULES`. A new rankfield or duckn format re-keys every store on
+    its own; no number here has to be remembered for it."""
+    import duckn
+    import rankfield
+    return f"ranked=rf{rankfield.FORMAT_VERSION}/seg{duckn.SEG_VERSION}/h{STORE_RULES}"
+
 
 CENTERING = {"corner": "node", "center": "cell"}
 
@@ -141,11 +157,19 @@ def _emit_junction(part, code, out, dist_meta):
             "junction_span": 127}
 
 
-def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=None, *, quiet=False,
+def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=None, *, quiet=False, run=None,
          **segment_kw):
     """Emit ``task``'s ranked output for ``image`` into ``outdir`` (arrays as ``.npy``, the
     parts' metadata in ``meta.json``) and return the :class:`~haversack.result.Segmentation`.
-    ``segment_kw`` goes to :func:`haversack.pipeline.segment` (device, dtype, grid, ...)."""
+    ``segment_kw`` goes to :func:`haversack.pipeline.segment` (device, dtype, grid, ...).
+
+    ``run``, when given, is the segmentation to use - ``run(image, task, probabilities=spec,
+    progress=..., **kw)``, a server's warm :meth:`Segmenter.segment` - instead of one built here.
+
+    What lands is the TASK's field (2026-09-24): a cascade's crop stages are left out (they only
+    decided the final stage's box), and a union's parts are composed into one field
+    (:mod:`haversack.ranked_compose`). The distance and junction layers are computed on what
+    lands, so a union gets one field of its own surfaces, seams included, not one per model."""
     depth, clip = int(depth), float(clip)
     envelope_mm = (None if str(envelope_mm).lower() in ("none", "null", "")
                    else float(envelope_mm))
@@ -158,14 +182,18 @@ def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=None, *, quiet=Fals
         for name, arr in (("ranks", code.ranks), ("support", code.support), ("tail", code.tail)):
             if arr is not None:
                 np.save(out / f"{part}_{name}.npy", arr)
-        dist_meta = _emit_distance(part, code, out)
-        metas[part] = {**code.meta, **dist_meta, **_emit_junction(part, code, out, dist_meta)}
+        metas[part] = dict(code.meta)
         say(f"  {part:<12} {code!r}  ->  {out.name}/{part}_*.npy")
 
     segment_kw.setdefault("progress", None if quiet else (lambda p: say(f"    {p}")))
     from haversack.ranked import RankedSpec
     spec = RankedSpec(sink=sink, depth=depth, clip=clip)
-    if _runs_on_an_engine(task):
+    if run is not None:
+        kw = dict(segment_kw)
+        if envelope_mm is not None:
+            kw["envelope_mm"] = envelope_mm
+        seg = run(image, task, probabilities=spec, **kw)
+    elif _runs_on_an_engine(task):
         # An engine with a ranked sink of its own (FastSurfer hands over its pre-argmax field,
         # engines/fastsurfer.emit_probabilities) runs through the Segmenter, which is the door
         # every engine task uses; nnU-Net policy that means nothing to it is left behind.
@@ -180,6 +208,12 @@ def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=None, *, quiet=Fals
     if not metas:
         raise RuntimeError(f"{task} produced no ranked output: its engine took no "
                            "probabilities sink, so there is nothing to build a store from")
+    metas = _task_field(out, metas, depth, device=segment_kw.get("device"), say=say)
+    for part, m in metas.items():
+        code = _Code(out, part, m)
+        dist_meta = _emit_distance(part, code, out)
+        m.update(dist_meta)
+        m.update(_emit_junction(part, code, out, dist_meta))
 
     (out / "meta.json").write_text(json.dumps(
         {"image": str(image), "task": task, "depth": depth, "clip": clip,
@@ -188,6 +222,52 @@ def main(image, task, outdir, depth=6, clip=8.0, envelope_mm=None, *, quiet=Fals
         indent=1, default=str), encoding="utf-8")
     say(f"done in {time.perf_counter() - t0:.0f}s -> {out}")
     return seg
+
+
+class _Code:
+    """A staged part's arrays (memory-mapped) and meta, in the shape the derived layers read."""
+
+    def __init__(self, out, part, meta):
+        self.ranks = np.load(out / f"{part}_ranks.npy", mmap_mode="r")
+        self.support = np.load(out / f"{part}_support.npy", mmap_mode="r")
+        self.meta = meta
+
+
+def _drop(out, part):
+    for name in ("ranks", "support", "tail"):
+        (out / f"{part}_{name}.npy").unlink(missing_ok=True)
+
+
+def _task_field(out, metas, depth, *, device=None, say=print):
+    """The staged parts reduced to the task's own field: crop stages dropped, a union composed.
+    Returns the metas of what remains (one part). A part the pipeline marked ``role: crop`` is a
+    cascade's crop stage; FastSurfer and single models pass through untouched."""
+    for part in [p for p, m in metas.items() if m.get("role") == "crop"]:
+        _drop(out, part)
+        del metas[part]
+        say(f"  {part:<12} crop stage: not stored (its box is in the provenance)")
+    if len(metas) < 2:
+        return metas
+    from .ranked_compose import compose
+    t = time.perf_counter()
+    parts = [(p, (np.load(out / f"{p}_ranks.npy", mmap_mode="r"),
+                  np.load(out / f"{p}_support.npy", mmap_mode="r")), m) for p, m in metas.items()]
+    ranks, support, cmeta, labels = compose(parts, depth=depth, device=device)
+    first = parts[0][2]
+    task = first.get("task")
+    name = str(task)
+    # the placement is the parts' (one grid, checked); the codec is the composed field's own
+    base = {k: v for k, v in first.items()
+            if k not in ("softmax", "tail_temperatures", "max_tail_at_temperature", "part")}
+    base.update(cmeta)
+    base.update(labels=[int(v) for v in labels], part=name, task=task, labels_named_by=task)
+    for p, *_ in parts:
+        _drop(out, p)
+    np.save(out / f"{name}_ranks.npy", ranks)
+    np.save(out / f"{name}_support.npy", support)
+    say(f"  {name:<12} composed {len(parts)} parts into one field "
+        f"({len(labels)} labels, clip {cmeta['clip']:g}) in {time.perf_counter() - t:.1f}s")
+    return {name: base}
 
 
 
@@ -231,7 +311,7 @@ def input_source(spec) -> dict:
 
 def segment_to_store(image, task, out, *, case=None, depth=6, clip=8.0, parts="all",
                      distance_voxels=DISTANCE_VOXELS, allow_unnamed=False, names=None,
-                     quiet=False, source=None, **segment_kw):
+                     quiet=False, source=None, run=None, **segment_kw):
     """Segment ``image`` with ``task`` and write the ranked store at ``out`` (``.duckn`` or
     ``.duckn.zip``); returns ``(segmentation, out)``.
 
@@ -255,7 +335,7 @@ def segment_to_store(image, task, out, *, case=None, depth=6, clip=8.0, parts="a
     staging = Path(tempfile.mkdtemp(prefix=out.name + ".emit-", dir=out.parent))
     try:
         envelope_mm = segment_kw.pop("envelope_mm", None)          # segment()'s default: none
-        seg = main(image, task, staging, depth, clip, envelope_mm, quiet=quiet, **segment_kw)
+        seg = main(image, task, staging, depth, clip, envelope_mm, quiet=quiet, run=run, **segment_kw)
         # Names the run reports are the model's own, so the store may declare the labeling
         # scheme they belong to - unless the run could not name its classes and fell back to
         # `label <v>` (a MONAI region head), or the caller brought names of its own.

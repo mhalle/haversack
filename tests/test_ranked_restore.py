@@ -51,7 +51,7 @@ def test_restoring_from_the_store_reproduces_the_runs_labels(run, interp):
     seg, path = run[interp]
     res = rr.restore(path, grid=1.0, interp=interp)
     assert res.frame is not None
-    assert res.parts == ["first", "second"]
+    assert res.parts == ["stub_union"]            # the union's task field: one layer (2026-09-24)
     img = res.image("input")
     a = np.asarray(__import__("SimpleITK").GetArrayFromImage(img))
     b = seg.array
@@ -59,10 +59,25 @@ def test_restoring_from_the_store_reproduces_the_runs_labels(run, interp):
     assert np.allclose(img.GetOrigin(), seg.labels.GetOrigin(), atol=1e-6)
     assert np.allclose(img.GetDirection(), seg.labels.GetDirection(), atol=1e-9)
     mismatch = float((a != b).mean())
-    # nearest: no interpolation, the argmax itself. Linear: the stub's field is clean enough
-    # that no gap sits within a quantum of a tie, so this is exact too; a real case is not
-    # (0.06 % on the torso, all within one quantum) - see the module header.
-    assert mismatch == 0.0, mismatch
+    if interp == "nearest":
+        # no interpolation: the composed field's argmax IS the painted label (ranked_compose)
+        assert mismatch == 0.0, mismatch
+        return
+    # Linear, on a union: the store holds the task's composed field, and a minimum over the
+    # models' painting margins does not commute with interpolation, so a seam can move by a
+    # fraction of a voxel (0.013 % of a real torso CT, 2026-09-24). Here the later stub declines
+    # every voxel by a margin of 1 while the first claims its block by 2, which caps the block's
+    # margin at 1 and moves its surface from 2/3 to 0.6 of a voxel out - on a grid this small, a
+    # shell of the block. What must hold: every difference sits on a surface of the run's labels.
+    assert mismatch < 0.03, mismatch
+    edge = np.zeros(b.shape, bool)
+    for ax in range(3):
+        lo = [slice(None)] * 3; hi = [slice(None)] * 3
+        lo[ax], hi[ax] = slice(0, -1), slice(1, None)
+        ch = b[tuple(lo)] != b[tuple(hi)]
+        edge[tuple(lo)] |= ch
+        edge[tuple(hi)] |= ch
+    assert not ((a != b) & ~edge).any(), "a difference away from every surface"
 
 
 def test_a_roi_restore_equals_the_full_restore_on_that_box(run):
@@ -124,7 +139,7 @@ def test_the_store_is_read_as_library_parts(run):
     _, path = run["linear"]
     with rs.open_store(path) as st:
         parts = rr.parts_of(st.root)
-    assert [p.name for p in parts] == ["first", "second"]
+    assert [p.name for p in parts] == ["stub_union"]
     assert parts[0].field.frame and parts[0].field.labels and parts[0].field.geometry is not None
     # what the library calls current, never a literal: this line said "0.3" and went red
     # the day rankfield cut format 0.4, though nothing about the store was wrong

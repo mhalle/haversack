@@ -176,8 +176,23 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
             continue
 
         soft = m.get("softmax") or {}
-        rep.check(bool(soft), f"parts/{i}: no softmax block - a reader cannot tell which "
-                              "normalization these classes competed in")
+        composed = m.get("composed") or {}
+        if m.get("scores") == "composed":
+            # a union's task field (haversack.ranked_compose, 2026-09-24): no one softmax, by
+            # construction - it must name the models it was composed from, each with its own
+            rep.check(not soft, f"parts/{i}: a composed field states a softmax - its scores are "
+                                "painting margins across models, not one normalization")
+            cparts = composed.get("parts") or []
+            rep.check(len(cparts) >= 2 and all((c.get("softmax") or {}).get("weights") for c in cparts),
+                      f"parts/{i}: a composed field must name the two or more models it came from, "
+                      "each with its softmax")
+            rep.check(composed.get("rule") == "painting" and "margin_scale" in composed,
+                      f"parts/{i}: a composed field does not state its rule and margin scale")
+            rep.check("tail" not in g, f"parts/{i}: a composed field has a tail - softmax mass "
+                                       "of scores that are not a softmax")
+        else:
+            rep.check(bool(soft), f"parts/{i}: no softmax block - a reader cannot tell which "
+                                  "normalization these classes competed in")
         if soft:
             rep.check(soft.get("classes") == m["classes"],
                       f"parts/{i}: softmax.classes {soft.get('classes')} != classes "
@@ -240,7 +255,7 @@ def verify(path: Path, deep: bool = False, quiet: bool = False) -> bool:
                       f"{ranks.shape[0]} rank planes (want one fewer)")
             rep.check(tuple(g["support"].shape[1:]) == shape,
                       f"parts/{i}: support grid {tuple(g['support'].shape[1:])} != ranks {shape}")
-        rep.check(m.get("exhaustive") or "tail" in g,
+        rep.check(m.get("exhaustive") or "tail" in g or m.get("scores") == "composed",
                   f"parts/{i}: not exhaustive but no tail array", warn_only=True)
         if "tail" in g:
             want_tail = "uint16" if int(m.get("tail_max") or 0) > 255 else "uint8"

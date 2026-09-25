@@ -368,7 +368,8 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             return worth_cropping(env, saving=1.0 - model.tiles(env.extent) / model.tiles(shape))
         return env
 
-    def emit_probabilities(model, logits, frame, env, *, lut, part, weights=None, label_task=None):
+    def emit_probabilities(model, logits, frame, env, *, lut, part, weights=None, label_task=None,
+                           role=None):
         """Encode this part's output distribution while the logits are still here.
 
         Between the network and the restore is the only moment they exist, so this costs
@@ -387,6 +388,10 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         the task that runs the stage's model alone (``ts.v2:total_fast`` for stage 0 of
         ``lung_vessels``), or None where no task does. ``task`` stays the task that was run,
         which is what the store is OF.
+
+        ``role`` is ``"crop"`` for a cascade's crop stage (2026-09-24): a stated fact, so the store
+        can leave the stage out - its classes decide the final stage's box and are not the task's
+        output - without recognizing it by name. A part the task's labels come from states none.
         """
         from . import ranked
         t = time.perf_counter()
@@ -415,11 +420,12 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             labels=[int(v) for v in np.asarray(lut).reshape(-1)],   # channel -> global label
             convention=convention, reoriented_to_ras=canonical == nio.CANONICAL,
             canonical_orientation=canonical,
-            input_orientation=orientation, frame=frame.to_meta())
+            input_orientation=orientation, frame=frame.to_meta(),
+            **({"role": role} if role else {}))
         T[f"probabilities:{part}"] = time.perf_counter() - t
 
     def predict_into(model, x, frame, ogrid, env, *, lut, paint, out, part="", weights=None,
-                     restore=None, label_task=None):
+                     restore=None, label_task=None, role=None):
         # tripwire: `x` must carry THIS model's normalization. Several models share one resample,
         # and feeding one model's normalization to another is silent and severe - the organs
         # model's CT clip at +276 HU flattens all bone for the parts that follow it.
@@ -433,7 +439,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         logits = model.predict_logits(crop, report=report).to(device)
         if probabilities is not None:
             emit_probabilities(model, logits, frame, env, lut=lut, part=part, weights=weights,
-                               label_task=label_task)
+                               label_task=label_task, role=role)
         mapping = frame.mapping(ogrid)
         if not env.is_whole():
             mapping = mapping >> Mapping((1.0, 1.0, 1.0), tuple(-float(v) for v in env.start))
@@ -558,7 +564,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                 t = time.perf_counter()
                 predict_into(model, x, src, src.source, env, lut=np.arange(model.K, dtype=np.int32),
                              paint=False, out=labels_in, part=f"{tag}:s{i}", weights=step.weights_id,
-                             restore="nearest", label_task=stage_task(spc, i))
+                             restore="nearest", label_task=stage_task(spc, i), role="crop")
                 T[f"network:{tag}:s{i}"] = time.perf_counter() - t
                 models.release(model)
             box = upstream_crop_box(labels_in.cpu().numpy(), step.crop_to_classes, step.dilation_mm,

@@ -834,7 +834,10 @@ def generator_steps(meta, items, engine, *, parts_kept="all", layers=("occupancy
     """
     first = dict(items)[next(iter(dict(items)))]
     haversack_v = first.get("haversack")
-    models = [p.get("softmax", {}) for _n, p in items if p.get("softmax")]
+    # a composed union's models are named in its `composed` block (haversack.ranked_compose)
+    models = [p.get("softmax", {}) for _n, p in items if p.get("softmax")] + [
+        c["softmax"] for _n, p in items for c in (p.get("composed") or {}).get("parts", [])
+        if c.get("softmax")]
     seg = {"name": "Segmentation",
            "description": f"{meta.get('task')} via the {engine} engine; the pre-argmax logit "
                           "field was captured between the network and the restore",
@@ -977,6 +980,11 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
             block["softmax"] = part["softmax"]
         if "labels_note" in part:
             block["labels_note"] = part["labels_note"]
+        for key in ("scores", "composed"):
+            # a union's task field (haversack.ranked_compose): its scores are painting margins
+            # across models, not one softmax, and it names the models and the rule it came from
+            if key in part:
+                block[key] = part[key]
         if label_task[name] is not None:
             # which task's label map names `labels`: the task's own, or for a cascade's crop
             # stage the task that runs that stage's model alone (its classes, not the task's)

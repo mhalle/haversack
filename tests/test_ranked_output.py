@@ -67,12 +67,18 @@ def test_segment_to_store_builds_a_verified_store_and_cleans_up(tmp_path, monkey
         by = {s.id: s for s in segs.segments}
         assert by["c1"].name == "a" and by["c2"].name == "b"     # the task's own label map
         assert by["c1"].extent is not None                        # class 1 has voxels
-        assert by["background_0"].role == "background" and by["background_1"].layer == 1
+        assert by["background_0"].role == "background" and "background_1" not in by
         assert not [i for i in by if i.startswith("classes_")]        # seg 0.8: no groups
-        assert sorted(st.root["parts"].group_keys()) == ["0", "1"]
-        assert "distance" in st.root["parts/0"]
-        rk = np.asarray(st.root["parts/0/ranks"][0])
-        assert set(np.unique(rk)) == {1, 2}                       # background and class 1
+        # a union stores the TASK's field (2026-09-24): its two models composed into one layer
+        assert sorted(st.root["parts"].group_keys()) == ["0"]
+        part = st.root["parts/0"]
+        ranked = part.attrs["duckn"]["extensions"]["ranked"]
+        assert ranked["scores"] == "composed" and "softmax" not in ranked
+        assert [c["part"] for c in ranked["composed"]["parts"]] == ["first", "second"]
+        assert "distance" in part and "tail" not in part
+        rk = np.asarray(part["ranks"][0])
+        lut = np.asarray(ranked["labels"])
+        assert set(lut[np.unique(rk) - 1]) == {0, 1}              # background and class 1
 
 
 def test_the_store_output_may_not_be_the_input(tmp_path):

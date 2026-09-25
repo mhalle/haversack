@@ -124,10 +124,17 @@ def _verify(path):
     return mod.verify(Path(path), deep=True, quiet=True)
 
 
-def _store(tmp_path, monkeypatch, task, models, name="c.duckn", **kw):
+def _store(tmp_path, monkeypatch, task, models, name="c.duckn", keep_stages=True, **kw):
     """``segment_to_store`` of ``task`` with the stub ``models`` handed out in stage order,
-    stubbed as test_cascade_union stubs them: the store, its segmentation, its part blocks."""
+    stubbed as test_cascade_union stubs them: the store, its segmentation, its part blocks.
+
+    ``keep_stages``: since 2026-09-24 the product path stores only the task's own field and
+    leaves a cascade's crop stages out (ranked_output._task_field). The builder still builds
+    every layer an emit directory holds - an older emit, or tools/ranked_emit.py's - and these
+    tests are about how it NAMES them, so by default the reduction is bypassed."""
     from haversack import pipeline, ranked_output
+    if keep_stages:
+        monkeypatch.setattr(ranked_output, "_task_field", lambda out, metas, depth, **k: metas)
     out = tmp_path / name
     folder = tmp_path / "Dataset000_stub" / "trainer__plans__3d_fullres"
     (folder / "fold_0").mkdir(parents=True, exist_ok=True)
@@ -199,6 +206,18 @@ def test_the_last_part_alone_is_the_task_and_declares_one_scheme(tmp_path, monke
     out, seg, blocks = _store(tmp_path, monkeypatch, "ts.v2:lung_vessels",
                               [_Found(118, 10), _Found(5, 1)], parts="last")
     assert [b["part"] for b in blocks] == ["ts.v2:lung_vessels"]
+    assert seg.labeling_scheme == "ts.v2:lung_vessels"
+    assert _verify(out)
+
+
+def test_the_product_store_of_a_cascade_is_its_final_stage(tmp_path, monkeypatch):
+    """The store is the TASK's field (2026-09-24): the crop stage decided the final stage's box
+    and is not the task's output, so the product path leaves it out - by the role the pipeline
+    stated on its emit, never by its name - and the store is one layer, one scheme."""
+    out, seg, blocks = _store(tmp_path, monkeypatch, "ts.v2:lung_vessels",
+                              [_Found(118, 10), _Found(5, 1)], keep_stages=False)
+    assert [b["part"] for b in blocks] == ["ts.v2:lung_vessels"]
+    assert "role" not in blocks[0] and blocks[0]["labels_named_by"] == "ts.v2:lung_vessels"
     assert seg.labeling_scheme == "ts.v2:lung_vessels"
     assert {s.name for s in seg.segments} == {"background", "lung_airways", "lung_airways_wall",
                                               "lung_arteries", "lung_veins"}
