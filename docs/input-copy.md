@@ -362,3 +362,28 @@ was taken over blosc for being a core zarr v3 codec every reader has.
 - **Tests**: 7 new in `test_input_copy.py`, the knob forwarding in `test_modal_app.py`, the status
   field in `test_serve.py`. 11 of 11 mutants killed (the last, a deflated zip accepted, by a test
   added for it); a comment mutant survived as it must. Fast suite 2609 passed / 4 skipped.
+
+**Across datasets (local, 2026-09-25).** The CT above was not aberrant; it was the least
+compressible case. M2, 8 cores, warm page cache, reads the median of 5, every read voxel-exact:
+
+| dataset | array | mapped read | zstd3/32 (shipped) | blosc-zstd3 bitshuffle/32 |
+|---|---|---|---|---|
+| idc-torso1 CT (DICOM) | 709x768x768 int16, 836 MB | 0.15 s | 2.60x, 0.36 s | 3.10x, 0.36 s |
+| NLST low-dose chest CT (DICOM) | 249x512x512 int32, 261 MB | 0.05 s | 3.73x, 0.10 s | 4.87x, 0.11 s |
+| C3N-00704 CTPA 0.625 mm (DICOM) | 418x512x512 int32, 438 MB | 0.08 s | 3.45x, 0.18 s | 4.48x, 0.18 s |
+| MSB-02664 CT (DICOM) | 409x512x512 int32, 429 MB | 0.07 s | 3.58x, 0.19 s | 4.67x, 0.17 s |
+| ds000114 T1 MR (.nii.gz) | 256x156x256 float32, 41 MB | 0.005 s | 4.96x, 0.015 s | 5.84x, 0.017 s |
+| ct_RAS CT (.nii.gz) | 165x512x512 float32, 173 MB | 0.03 s | 2.78x, 0.08 s | 3.40x, 0.09 s |
+| Visible Human male CT (raw .nii, not copied) | 834x512x512 float32, 875 MB | - | 4.10x, 0.36 s | 5.12x, 0.36 s |
+
+- Chunk size (16, 32, 64 slices) moves neither size nor read time materially; 64 was slightly
+  slower to read on some sets. zstd level 1 is 5-7 % larger, level 6 4-8 % smaller at twice
+  the write; neither changes the read.
+- blosc-zstd with bitshuffle was 1.2-1.4x smaller than plain zstd on EVERY set, at the same read
+  and write time. blosc is one of zarr v3's core codecs as zstd is, so the reason given above
+  for preferring zstd does not hold; switching is a codec line and a layout rule.
+- Three of the four DICOM CTs read as int32 (a rescale SimpleITK widens), so their copies carry
+  twice the bytes an int16 would; compression absorbs most of that (3.5-3.7x). Narrowing the type
+  would change the image the reader produces, which a copy must not do.
+- The compressed read costs 2-3x the mapped one here, which in seconds is 0.01-0.2 s on these
+  sets and 0.2 s on the large CT; on Modal the same CT's difference was 0.3-0.5 s.
