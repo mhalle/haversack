@@ -596,8 +596,15 @@ class SeriesCache:
         # Content-addressed entries are EXEMPT and must stay so: an upload is named by
         # the digest of its own bytes, nothing here fetched it, and there is nothing to
         # re-fetch it from - epoching those would strand them permanently.
-        name = safe_path_component(
-            series if is_digest(series) else f"e{FETCH_EPOCH}!{series}")
+        #
+        # The input copy's reader version joins it for the same reason (2026-09-25): an entry
+        # keeps the COPY instead of the fetched bytes (docs/input-copy.md), so a reader that
+        # would produce another copy from the same bytes must not find the old one - it fetches
+        # again. Content-addressed entries have no source to refetch from: a stale copy there
+        # reads as absent (``_stale_copy``), and the client sends the bytes again.
+        from .input_copy import READER_VERSION
+        epoch = f"e{FETCH_EPOCH}.r{READER_VERSION}"
+        name = safe_path_component(series if is_digest(series) else f"{epoch}!{series}")
         # ".graveyard" would BE the graveyard: the reclaim then renames that
         # directory into itself, fails with EINVAL, and the single dispatcher
         # thread loops forever. No production key can spell it (every one carries
@@ -607,16 +614,65 @@ class SeriesCache:
                 and 0 < len(name) <= 200):
             return self.root / name
         import hashlib
-        stamp = series if is_digest(series) else f"e{FETCH_EPOCH}!{series}"
+        stamp = series if is_digest(series) else f"{epoch}!{series}"
         d = self.root / ("h_" + hashlib.sha256(stamp.encode()).hexdigest()[:32])
         return d
 
     def has(self, series: str) -> bool:
-        return (self._entry(series) / self.MARKER).exists()
+        entry = self._entry(series)
+        return (entry / self.MARKER).exists() and not self._stale_copy(entry)
 
     def path(self, series: str) -> Path:
-        """Content directory of a committed entry (valid only when has())."""
-        return self._entry(series) / "series"
+        """What a committed entry holds for the reader (valid only when has()): its input copy
+        when it has one (docs/input-copy.md), else the content directory as fetched."""
+        return self._content(self._entry(series))
+
+    @staticmethod
+    def _content(entry: Path) -> Path:
+        from .input_copy import copy_path
+        copy = copy_path(entry)
+        return copy if copy.is_file() else entry / "series"
+
+    def _reclaim(self, entry: Path) -> None:
+        """Move an entry nobody can read into the graveyard and delete it (cache-internal: the
+        policy of discarding an input a job still wants is jobpolicy's alone)."""
+        try:
+            self.graveyard.mkdir(parents=True, exist_ok=True)
+            grave = self.graveyard / f"{entry.name}-{os.getpid()}-{time.time_ns()}"
+            entry.rename(grave)
+        except OSError:
+            return
+        shutil.rmtree(grave, ignore_errors=True)
+
+    @staticmethod
+    def _stale_copy(entry: Path) -> bool:
+        """An entry whose input copy another reader version wrote: its original is gone, so it
+        cannot be redone - the entry counts as absent (a fetch is fetched again; an upload,
+        with nothing to fetch it from, answers input_gone)."""
+        from .input_copy import copy_path, stale
+        copy = copy_path(entry)
+        return copy.is_file() and stale(copy)
+
+    def _transcode(self, series: str, entry: Path, dest) -> Path:
+        """The input copy of what was just stored, and the original removed - one form per
+        entry. Before the commit, inside the writer's claim: the original exists only here, as
+        the transcoder's input. A ``result:`` reference is a label map (its names and codes live
+        in its file) and is never transcoded; an input the reader refuses, or whose copy fails
+        its read-back, keeps its original and is read (and refused) as it always was."""
+        from .input_copy import transcode
+        from .sources import ResultSource, read_input_record
+        if str(series).startswith(ResultSource.prefix + ":"):
+            return Path(dest)
+        rec = read_input_record(entry) or {}
+        digest = series if is_digest(series) else (rec.get("content") or {}).get("digest")
+        copy = transcode(dest, entry, source=None if is_digest(series) else series,
+                         source_digest=digest)
+        if copy is None:
+            return Path(dest)
+        original = entry / "series"
+        if original.exists():
+            shutil.rmtree(original)
+        return copy
 
     def entry(self, series: str) -> Path:
         """The entry directory itself - where a fetch's sidecars live."""
@@ -840,7 +896,14 @@ class SeriesCache:
                                                # marker: the LRU loses a touch, that is all.
                                                # `continue` here spins the one dispatcher
                                                # thread forever at 100% CPU.
-                return entry / "series"
+                if self._stale_copy(entry):
+                    # A content-addressed entry holding another reader version's copy (a fetched
+                    # one never meets it: the version is in its name). Nobody can read it - has()
+                    # says absent - so the caller is storing those bytes again: the dead entry is
+                    # reclaimed as a dead writer's is, and the store proceeds.
+                    self._reclaim(entry)
+                    continue
+                return self._content(entry)
             token = self._claim(entry, marker=marker)
             if token is None:
                 # Another writer holds it. Wait on the MARKER, and let the owner
@@ -934,6 +997,7 @@ class SeriesCache:
                 fn = fetch or self.fetch
                 dest = Path(fn(series, entry, credentials=credentials)
                             if credentials is not None else fn(series, entry))
+                dest = self._transcode(series, entry, dest)
                 self._commit(entry, key=series, token=token)
                 return dest
             except BaseException:
@@ -953,7 +1017,8 @@ class SeriesCache:
             return False                       # claimed elsewhere, or just committed
         hb = self._hb_start(entry, token)
         try:
-            self.fetch(series, entry)
+            dest = self.fetch(series, entry)
+            self._transcode(series, entry, dest if dest is not None else entry / "series")
             self._commit(entry, key=series, token=token)
             return True
         except Exception:
@@ -2280,31 +2345,6 @@ def _discard(jdir) -> None:
     shutil.rmtree(jdir, ignore_errors=True)
 
 
-def decode_for_fast_read(src, dst_dir):
-    """Write a raw (uncompressed) NRRD beside a stored input, for fast re-reads.
-
-    NRRD raw, not NIfTI: measured fastest of the four formats (4 888 MB/s vs
-    3 435), it carries direction cosines without NIfTI's 80-character
-    limitations, and it is what the rest of this service already writes.
-
-    Written to a temp name and renamed, so a reader either sees a complete file
-    or none - a half-written decode must never be picked up as the fast path.
-    Compression is deliberately OFF here and deliberately ON for results: labels
-    compress ~52x and get FASTER to write, intensity images ~1.8x and pay 10-16x
-    to read. The rule is about entropy, not about direction.
-    """
-    import SimpleITK as sitk
-
-    from . import io as nio
-    dst_dir = Path(dst_dir)
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    tmp = dst_dir / ".partial.nrrd"
-    final = dst_dir / content.DECODED_NAME      # the name the reader looks up
-    sitk.WriteImage(nio.read_image(str(src)), str(tmp), False)
-    os.replace(tmp, final)
-    return final
-
-
 def reference_input(staged):
     """The one image a multi-input job's artifacts render against.
 
@@ -2707,8 +2747,7 @@ class LocalExecutor:
         # Uploads addressed by their own bytes, sharing the series cache's root,
         # budget and pin discipline - an entry is an entry whether a client sent
         # it or the server fetched it.
-        self.content = ContentStore(self.series_cache,
-                                    decode=decode_for_fast_read)
+        self.content = ContentStore(self.series_cache)
         #: The deliverables this deployment renders: the default for a request that names
         #: none, and the ceiling for one that does (the submit door refuses a name
         #: outside it).
@@ -4311,11 +4350,19 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(404, {"code": "input_gone", "digest": digest,
                                       "message": "not held by this server"})
         where = store.resolve(digest)
+        kind = "tree" if digest.startswith(content.TREE) else "blob"
+        from .input_copy import info, is_copy
+        if is_copy(where):
+            # the entry keeps its input copy INSTEAD of the uploaded bytes (docs/input-copy.md):
+            # members and bytes still describe the content the digest names, recorded when it
+            # was stored, and the stored form is said beside them
+            h = info(where)
+            return {"digest": digest, "kind": kind, "members": h.get("source_files"),
+                    "bytes": h.get("source_bytes"), "stored_form": "input_copy",
+                    "stored_bytes": where.stat().st_size}
         files = sorted(p for p in where.rglob("*") if p.is_file()) \
             if where.is_dir() else [where]
-        return {"digest": digest,
-                "kind": "tree" if digest.startswith(content.TREE) else "blob",
-                "members": len(files),
+        return {"digest": digest, "kind": kind, "members": len(files),
                 "bytes": sum(p.stat().st_size for p in files)}
 
     @app.put("/v1/inputs/{digest}", tags=["inputs"])

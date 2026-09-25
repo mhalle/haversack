@@ -213,7 +213,9 @@ _SECRET_VARS = ("HAVERSACK_TOKEN",)
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
-    .uv_sync(extras=["torch", "serve", "cuda"], frozen=False)
+    # duckn (duckn, zarr, pydicom): the worker writes the input copy of what it fetches
+    # (docs/input-copy.md); an image without it keeps originals and still reads copies
+    .uv_sync(extras=["torch", "serve", "cuda", "duckn"], frozen=False)
     .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
     .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
 )
@@ -247,7 +249,8 @@ image = (
 api_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")                       # uv sync resolves the whole lock (engine git sources)
-    .uv_sync(extras=["serve"], frozen=False)
+    # duckn: the api stores uploads, and so writes their input copies (docs/input-copy.md)
+    .uv_sync(extras=["serve", "duckn"], frozen=False)
     .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
     .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
 )

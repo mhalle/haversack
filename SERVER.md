@@ -336,6 +336,17 @@ series zipped twice is the same identity. `POST /v1/inputs` with a `from_job=<id
 field promotes a job's result into the store, so one job's output becomes another's input
 without the bytes passing through the client. No route ever hands input bytes back. All of it is authorized only.
 
+**Inputs are kept decoded.** A cached image input - a fetched series or an upload - is stored
+as its *input copy*: the volume decoded once, as one uncompressed array (a duckn zarr zip) with
+its geometry and the DICOM tags SimpleITK reports, in place of the files it came from. A job then
+reads it in a fraction of a second where a DICOM series is a full decode every time (13 s for a
+709-slice CT on Modal). It never changes a result: the image a job receives is the same, and so
+is every key. Label maps (a `.seg.nrrd`, a `result:` reference) keep their files, and so does
+anything the reader refuses. `GET /v1/inputs/{digest}` still describes what the digest names -
+`members` and `bytes` of the upload - and adds `stored_form: "input_copy"` and `stored_bytes`.
+An operator can keep originals instead with `HAVERSACK_INPUT_COPY=0`. The format and its rules
+are in `docs/input-copy.md`.
+
 ## Results as inputs
 
 A job's input can be a result this server computed: `{"kind": "result", "id": "<key>"}`,

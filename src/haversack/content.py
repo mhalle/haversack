@@ -36,13 +36,6 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-#: The decoded copy's filename. Looked up BY NAME, never by scanning the
-#: directory: the decoder writes to a temp name and renames, so a scan would
-#: happily return a `.partial` left by a crash mid-write - handing a truncated
-#: volume to a reader as though it were complete, and defeating the atomic
-#: rename that exists to prevent exactly that.
-DECODED_NAME = "content.nrrd"
-
 BLOB = "sha256:"
 TREE = "sha256-tree:"
 _CHUNK = 1 << 20
@@ -144,13 +137,9 @@ class ContentStore:
     a client uploaded it or the server fetched it.
     """
 
-    def __init__(self, cache, *, commit=None, refresh=None, lock=None, decode=None):
+    def __init__(self, cache, *, commit=None, refresh=None, lock=None):
         import contextlib
         self.cache = cache
-        # decode(src, dst_dir) -> Path | None: materialize a fast-reading copy.
-        # Injected rather than imported, the way SeriesCache takes its fetch and
-        # ReadAhead its read - this module stays hashlib + pathlib.
-        self._decode = decode
         # A refresh of a shared backing store can DISCARD writes that are on disk
         # but not yet published - so a store that needs commit/reload also needs
         # the write and its commit to be one indivisible step against any reload.
@@ -191,6 +180,10 @@ class ContentStore:
         if not self.cache.has(digest):
             self.has(digest)               # refresh a shared store before failing
         content = self.cache.path(digest)
+        if content.is_file():
+            # the input copy the cache keeps INSTEAD of the uploaded bytes (docs/input-copy.md):
+            # a tree or a blob alike, it is one file the reader knows
+            return content
         if digest.startswith(TREE):
             return content
         files = [p for p in content.iterdir() if p.is_file()]
@@ -200,51 +193,13 @@ class ContentStore:
         return files[0]
 
     def fast_path(self, digest: str) -> Path:
-        """What to READ - the decoded form when there is one, else the original.
+        """What to READ. Since the input copy (docs/input-copy.md) the entry holds one form -
+        the copy, decoded once when it was stored, or the original when the reader refused it -
+        so this is :meth:`resolve`. Kept as the name callers use for "the form to read".
 
-        Inputs arrive compressed and get read more than once: the same volume
-        served to a second task is a second full decode, and gzip is 10-16x
-        slower than a raw read (measured: 87 ms vs 9 ms for a 31 MB CT; seconds
-        on a whole-body volume, where a warm case measured 82 % decompression).
-
-        The decoded copy lives OUTSIDE ``series/`` so the digest-true bytes stay
-        exactly what the client sent - the digest is over those, and re-encoding
-        them would break addressing. It is derived, so it is pure cache: losing
-        it costs a re-decode and never an answer.
-
-        Materialized lazily, on the first read rather than at ingest, so a
-        preloaded input nobody runs never pays for a decode it does not need.
-        """
-        original = self.resolve(digest)
-        if self._decode is None:
-            return original
-        entry = self.cache.path(digest).parent
-        decoded = entry / "decoded" / DECODED_NAME
-        try:
-            if decoded.is_file():
-                return decoded
-            with self._lock:
-                made = self._decode(original, decoded.parent)
-            if made is not None:
-                self._restamp(entry)
-                return Path(made)
-        except Exception:
-            pass                        # any failure: read the original
-        return original
-
-    def _restamp(self, entry) -> None:
-        """Keep the LRU's byte count honest after adding a derived file.
-
-        The marker records the entry's size at commit; a decoded copy added
-        later would otherwise be invisible to the budget - an eviction policy
-        that cannot see half of what it stores.
-        """
-        marker = entry / self.cache.MARKER
-        try:
-            total = sum(p.stat().st_size for p in entry.rglob("*") if p.is_file())
-            marker.write_text(str(total), encoding="utf-8")
-        except OSError:
-            pass
+        Until 2026-09-25 this wrote a raw NRRD BESIDE the original on the first read, which
+        kept two forms of every upload."""
+        return self.resolve(digest)
 
     def pin(self, digest: str) -> None:
         self.cache.pin(digest)

@@ -45,7 +45,8 @@ def _fs_image():
     fs_image = (
         modal.Image.debian_slim(python_version="3.12")
         .apt_install("git")                       # uv needs git for the git source in pyproject
-        .uv_sync(extras=["fastsurfer"], frozen=False)
+        # duckn: this worker writes the input copy of what it fetches (docs/input-copy.md)
+        .uv_sync(extras=["fastsurfer", "duckn"], frozen=False)
         .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack", copy=True)
     )
     if _FS_CKPT:

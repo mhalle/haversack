@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+- **Cached inputs are kept decoded.** A DICOM series was decoded on every job that read it -
+  13 s for a 709-slice CT on a Modal worker, 45 s cold from a volume another container wrote -
+  whether or not it had been read a minute earlier. The series cache and the input store now keep
+  each image input as its *input copy* instead of its files: the volume `io.read_image` produced,
+  written once when the input is stored as a single uncompressed zarr chunk in a zip, with duckn's
+  geometry and the DICOM tags SimpleITK reports (series-level in `extensions.dicom`, per-slice in
+  the slice axis' samples, in duckn's `dicom-spec` encoding), and read back by mapping that chunk -
+  0.25 s for the same CT, voxels identical, geometry identical (within 1e-12 for a tilted series).
+  One form per entry: the original exists only while it is transcoded, and nothing downstream is
+  handed it. Label maps and anything the reader refuses keep their files; `HAVERSACK_INPUT_COPY=0`
+  keeps originals. Results and keys do not move. A fetched input cached before this is fetched
+  again once (its entry name now carries the reader version); `GET /v1/inputs/{digest}` gains
+  `stored_form` and `stored_bytes`. The content store's raw-NRRD fast copy is gone. pydicom joins
+  the `duckn` extra (as a data dictionary: SimpleITK's tag keys to keywords); every Modal image
+  that stores inputs carries the extra, and one that cannot (SynthStrip) still reads copies.
+  `docs/input-copy.md` is the specification.
+
 - **A Modal deployment can take the local server's bearer token, and `haversack remote`
   reaches it.** `haversack modal deploy --token T`, or `HAVERSACK_SERVER_TOKEN` in its
   environment, stores the token in the Modal Secret `<app name>-token` (through Modal's API,

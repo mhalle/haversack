@@ -1,7 +1,9 @@
 # The input copy: a decoded, single-file form of a cached input
 
-*Specification, 2026-09-25. Nothing here is built yet. The decisions in §2 are the user's; the
-numbers in §3 were measured the same day (Modal and an M2, one CT).*
+*Specification, 2026-09-25; built the same day on branch `claude/input-copy`
+(`haversack.input_copy`, `haversack.dicom_tags`, the caches in `serve.py`). The decisions in §2
+are the user's; the numbers in §3 were measured the same day (Modal and an M2, one CT). §11
+records what building it changed.*
 
 ## 1. What it is for
 
@@ -105,7 +107,7 @@ Built through duckn's own models and serializer (`from_sitk`, `duckn_attrs`), ne
     `ImageOrientationPatient`, `PixelSpacing`, `RescaleSlope`, `RescaleIntercept`,
     `RescaleType`, and the other geometry and value-mapping tags the spec lists.
   - `anonymized`: absent (not determined; haversack does not judge it).
-- Per-slice tags, on the slice axis: `axes[0].samples[i].extensions.dicom`, one sample per
+- Per-slice tags, on the slice axis: `axes[0].samples[i].metadata.dicom`, one sample per
   slice in the volume's z order (the order the series reader stacks, which `read_image` uses),
   holding the tags that differ between slices. On the measured CT that is ten: instance number
   and SOP instance UID, instance and content time, slice location, tube current, exposure and
@@ -121,7 +123,8 @@ Built through duckn's own models and serializer (`from_sitk`, `duckn_attrs`), ne
   ```
 
   `source` and `source_digest` are the ORIGINAL's record (`.input.json`, or the content store's
-  digest) - kept because the original is not; `version` is this document's format version, bumped
+  digest), and `source_files` / `source_bytes` its size - kept because the original is not
+  (`GET /v1/inputs/{digest}` reports them); `version` is this document's format version, bumped
   when the file's meaning changes; `reader_version` is §7a's.
 
 ## 6. What the copy does not hold
@@ -240,11 +243,47 @@ In duckn (a release, then a pin bump here and in CI, with feldglas kept equal):
   `dicom` extra there and haversack's `duckn` extra here.
 - `from duckn import io` recurses forever in a fresh process: `__getattr__("io")` answers with
   `from . import io`, which asks `__getattr__` again. Use `importlib.import_module`.
-- Confirm (or fix) that an axis whose `samples` carry only `extensions` - no `position` or
-  `origin` - is still read as uniformly spaced by `to_sitk` and the readers.
+- Reconcile `dicom-spec.md` §6.3 with the core convention and the model: §6.3 puts per-slice tags
+  in `samples[i].extensions.dicom`, but `SampleMetadata` forbids unknown fields and has
+  `metadata`, the core spec says per-sample data goes in `metadata` keyed by standard, and
+  duckn's own converter writes `metadata.dicom` - which this copy follows. (Checked: samples
+  carrying only `metadata` and `thickness` are read as uniformly spaced by `to_sitk`.)
 
 ## 10. Open
 
 - Whether an input copy should ever be served - e.g. as a `get` output, where the copy is
   exactly what a client wants. Not for this change; if it is, patient-tag stripping comes with
   it (§2).
+
+## 11. What building it changed (2026-09-25)
+
+- **Per-slice tags are `samples[i].metadata.dicom`**, not `extensions.dicom` (§9, duckn's own
+  converter and model).
+- **Geometry within 1e-12, not bit for bit, for a tilted series.** duckn stores each axis as
+  direction x spacing and a reader takes it apart again; for a sheared direction that is off by
+  one unit in the last place (1.1e-16 measured - a sample moved ~1e-13 mm). An axis-aligned grid
+  is exact. Voxels and pixel type are always identical. `input_copy.GEOMETRY_TOLERANCE`.
+- **Slice Thickness, Pixel Spacing, Spacing Between Slices and Rescale/Modality LUT Type** are
+  left out of `tags` (dicom-spec §2); thickness goes to the slice axis' `thickness` (per sample if
+  it varies), Rescale Type to `sample_units`. An empty numeric tag is absent, never `null` (which
+  would claim redaction).
+- **The reader version is in a fetched entry's NAME** (`e<FETCH_EPOCH>.r<READER_VERSION>!<key>`),
+  like the fetch epoch: a stale copy is never found and the input is fetched again; old entries
+  age out by LRU. A content-addressed entry has no source: a stale copy reads as absent (410
+  input_gone), and the same bytes uploaded again replace it. (The first version dropped stale
+  entries through `SeriesCache.discard`, which `test_only_jobpolicy_decides_to_discard_a_cached_input`
+  refused: that policy is jobpolicy's.)
+- **Reading a copy needs neither duckn nor pydicom.** An engine image that cannot take the duckn
+  extra (SynthStrip's numpy<2) reads copies another container wrote: without duckn the one layout
+  this module writes (LPS, z/y/x, direction x spacing) is converted directly - held bit for bit
+  to duckn's `to_sitk` by a test, tilted series included - and without pydicom the tags are not
+  restored (provenance, never needed to compute). WRITING needs both, so an environment without
+  them keeps originals (`input_copy.enabled`).
+- **`GET /v1/inputs/{digest}`** reports the original's members and bytes (recorded in the copy)
+  and adds `stored_form: "input_copy"` and `stored_bytes`.
+- **The content store's raw-NRRD copy (`decode_for_fast_read`, `content.nrrd`) is gone**, and
+  `ContentStore.fast_path` is `resolve`. On Modal the api image, the nnU-Net worker's and
+  FastSurfer's carry the duckn extra (pydicom joins it).
+- **Measured locally** on the 709-slice CT: transcode 9.5 s (a 6.4 s decode, the write, the
+  read-back check), then `io.read_image` of the copy 0.145 s; 61 series tags on the image, 9
+  per-slice tags on each of 709 samples.

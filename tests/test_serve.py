@@ -3041,8 +3041,9 @@ def test_four_channels_can_be_sent_once_and_reused_by_role(tmp_path, monkeypatch
     # the store may hand over its decoded copy rather than the original bytes,
     # so the invariant is that the right VOLUME reached the right role
     sitk = pytest.importorskip("SimpleITK")
-    want = sitk.GetArrayFromImage(sitk.ReadImage(str(_as_file(tmp_path, blobs["T1c"]))))
-    assert np.array_equal(sitk.GetArrayFromImage(sitk.ReadImage(str(got["T1c"]))), want)
+    from haversack.io import read_image          # a stored input may be its input copy
+    want = sitk.GetArrayFromImage(read_image(_as_file(tmp_path, blobs["T1c"])))
+    assert np.array_equal(sitk.GetArrayFromImage(read_image(got["T1c"])), want)
 
 
 def test_content_that_names_no_format_is_refused_at_preload(tmp_path):
@@ -3069,7 +3070,8 @@ def test_a_preloaded_blob_keeps_a_readable_name(tmp_path):
     d = "sha256:" + hashlib.sha256(raw).hexdigest()
     assert client.put(f"/v1/inputs/{d}", content=raw).json()["stored_as"] \
         == "input.nii.gz"
-    assert sitk.ReadImage(str(ex.content.resolve(d))).GetSize() == (6, 5, 4)
+    from haversack.io import read_image          # the stored form: the upload's input copy
+    assert read_image(ex.content.resolve(d)).GetSize() == (6, 5, 4)
 
 
 # -- DICOM series: many files, one input -----------------------------------
@@ -3111,7 +3113,14 @@ def test_a_dicom_series_is_stored_as_one_tree(tmp_path):
     assert body["kind"] == "tree" and body["members"] == 3
     assert body["digest"].startswith("sha256-tree:")
     assert body["series_instance_uid"] == "1.2.3.4"
-    assert ex.content.resolve(body["digest"]).is_dir()
+    # stored as its input copy, not as the slices (docs/input-copy.md): one file, the
+    # 3-slice volume; the status still describes the content the digest names
+    from haversack.input_copy import is_copy
+    from haversack.io import read_image
+    stored = ex.content.resolve(body["digest"])
+    assert is_copy(stored) and read_image(stored).GetSize()[2] == 3
+    status = client.get(f"/v1/inputs/{body['digest']}").json()
+    assert status["members"] == 3 and status["stored_form"] == "input_copy"
 
 
 def test_a_release_does_not_throw_the_result_cache_away(monkeypatch):
