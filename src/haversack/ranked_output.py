@@ -41,7 +41,7 @@ STORE_RULES = 1
 def store_extra_missing() -> list:
     """The packages of the ranked-store extra (the duckn extra: rankfield, zarr, duckn) that
     are not installed - by name, importing nothing. The one answer to "can this environment
-    write a store", for the CLI's refusal and a server's ``kind=ranked`` door alike."""
+    write a store", for the CLI's refusal and a server's ``kind=rankfield`` door alike."""
     import importlib.util
 
     def absent(name):
@@ -61,7 +61,7 @@ def ranked_tag() -> str:
     import rankfield
 
     from .ranked_compose import rule_tag
-    return (f"ranked=rf{rankfield.FORMAT_VERSION}/seg{duckn.SEG_VERSION}/h{STORE_RULES}"
+    return (f"rankfield=rf{rankfield.FORMAT_VERSION}/seg{duckn.SEG_VERSION}/h{STORE_RULES}"
             f"/{rule_tag()}")
 
 

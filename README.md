@@ -512,7 +512,7 @@ needs the `duckn` extra, and exists for nnU-Net tasks and FastSurfer.
 haversack segment ct.nii.gz --task ts.v2:total_fast -o ct_total_fast.duckn.zip
 haversack restore ct_total_fast.duckn.zip -o labels_1mm.seg.nrrd --spacing 1.0
 haversack remote submit idc:<crdc_series_uuid> --task ts.v2:total -o total.duckn.zip   # a server's, cached
-haversack remote ranked --identity idc:<crdc_series_uuid>    # the stores a server holds, with each one's path
+haversack remote rankfields --identity idc:<crdc_series_uuid>    # the stores a server holds, with each one's path
 ```
 
 A store holds the TASK's field, one layer. A cascade's is its final stage (its crop stage

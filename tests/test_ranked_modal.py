@@ -31,8 +31,8 @@ SRC = Path(haversack.__file__).resolve().parent
 
 def test_a_ranked_job_is_its_tasks_workers():
     from haversack import modal_app as m
-    assert m._worker_of({"task": "ts.v2:total_fast", "kind": "ranked"}) == "nnunetv2"
-    assert m._worker_of({"task": "fastsurfer:asegdkt", "kind": "ranked"}) == "fastsurfer"
+    assert m._worker_of({"task": "ts.v2:total_fast", "kind": "rankfield"}) == "nnunetv2"
+    assert m._worker_of({"task": "fastsurfer:asegdkt", "kind": "rankfield"}) == "fastsurfer"
 
 
 def _executor(monkeypatch):
@@ -54,16 +54,16 @@ def test_a_ranked_submit_records_keys_and_routes_as_ranked(monkeypatch, tmp_path
     m, fake, ex, spawned = _executor(monkeypatch)
     assert ex.ranked_stores is True
     ex.submit("r", tmp_path / "r", None, "ts.v2:total_fast", {}, identity=("idc:1",),
-              kind="ranked", deliverables=["preview"])
+              kind="rankfield", deliverables=["preview"])
     ex.submit("s", tmp_path / "s", None, "ts.v2:total_fast", {}, identity=("idc:1",))
-    assert fake["r"]["kind"] == "ranked" and fake["r"]["deliverables"] == []
+    assert fake["r"]["kind"] == "rankfield" and fake["r"]["deliverables"] == []
     assert "kind" not in fake["s"]
     assert fake["r"]["cache_key"] == result_key(("idc:1",), "ts.v2:total_fast", {},
-                                                ["ranked-versions"], kind="ranked")
+                                                ["rankfield-versions"], kind="rankfield")
     assert fake["s"]["cache_key"] == result_key(("idc:1",), "ts.v2:total_fast", {},
                                                 ["segment-versions"])
-    assert spawned == [("ts.v2:total_fast", "r", "ranked"), ("ts.v2:total_fast", "s", "segment")]
-    assert ex.status_of("r")["kind"] == "ranked" and "kind" not in ex.status_of("s")
+    assert spawned == [("ts.v2:total_fast", "r", "rankfield"), ("ts.v2:total_fast", "s", "segment")]
+    assert ex.status_of("r")["kind"] == "rankfield" and "kind" not in ex.status_of("s")
 
 
 def test_the_scratch_fallback_reads_the_store_by_its_name(monkeypatch, tmp_path):
@@ -74,7 +74,7 @@ def test_the_scratch_fallback_reads_the_store_by_its_name(monkeypatch, tmp_path)
     monkeypatch.setattr(m, "_reload_logged", lambda vol, name: True)
     (tmp_path / "scratch" / "r").mkdir(parents=True)
     (tmp_path / "scratch" / "r" / RANKED_NAME).write_bytes(b"PK")
-    fake["r"] = {"id": "r", "task": "ts.v2:total_fast", "kind": "ranked", "state": "done"}
+    fake["r"] = {"id": "r", "task": "ts.v2:total_fast", "kind": "rankfield", "state": "done"}
     state, path = ex.result_file("r")
     assert state == "done" and path.name == RANKED_NAME and path.read_bytes() == b"PK"
 
@@ -99,7 +99,7 @@ def test_the_nnunet_worker_writes_the_store_through_its_own_segmenter(monkeypatc
     w.seg = Seg()
     token = object()
     got = w._ranked("in.nii.gz", {"id": "r", "task": "ts.v2:total_fast", "version": None,
-                                  "input_identity": ["idc:1"]}, tmp_path / "ranked.duckn.zip",
+                                  "input_identity": ["idc:1"]}, tmp_path / "rankfield.duckn.zip",
                     "reporter", token)
     assert got == "the-seg"
     assert seen["store"]["source"] == {"type": "image", "identifier": "idc:1"}
@@ -190,22 +190,22 @@ def test_a_ranked_job_on_the_worker_publishes_its_store_under_the_stores_key(wor
     from haversack.serve import RANKED_NAME, ResultCache, result_key, versions_for
     m, jobs, scratch, cache = worker
     _submit(m, jobs, "rk")
-    jobs["rk"]["kind"] = "ranked"
+    jobs["rk"]["kind"] = "rankfield"
     ctx = _RankedCtx()
     m._execute_job(ctx, "rk")
     rec = jobs["rk"]
     assert rec["state"] == "done", rec.get("error")
     assert ctx.ranked_calls == ["rk"]
-    assert rec["result"]["outputs"][0]["kind"] == "ranked"
+    assert rec["result"]["outputs"][0]["kind"] == "rankfield"
     assert "inputs" in rec["result"]["provenance"]            # record_inputs ran, as locally
     want = result_key(("sha256:rk",), "ts.v2:total_fast", {},
-                      versions_for(ctx.seg, "ts.v2:total_fast", "ranked"), kind="ranked")
+                      versions_for(ctx.seg, "ts.v2:total_fast", "rankfield"), kind="rankfield")
     assert rec["cache_key"] == want                           # re-keyed as a STORE, not labels
     hit = ResultCache(m.CACHE_ROOT).get(want)
     assert hit is not None and Path(hit[0]).name == RANKED_NAME
     import json as _json
     meta = _json.loads((Path(hit[0]).parent / "meta.json").read_text())
-    assert meta["kind"] == "ranked"
+    assert meta["kind"] == "rankfield"
 
 
 def test_a_ranked_cache_hit_on_modal_says_its_kind(monkeypatch, tmp_path):
@@ -215,14 +215,14 @@ def test_a_ranked_cache_hit_on_modal_says_its_kind(monkeypatch, tmp_path):
     monkeypatch.setattr(m, "_emit", lambda jid, d: None)
     ex = m.ModalExecutor()
     monkeypatch.setattr(ex, "_fresh_weights_versions", lambda task, kind="segment": [kind])
-    stored = tmp_path / "k" / "g-1" / "ranked.duckn.zip"
+    stored = tmp_path / "k" / "g-1" / "rankfield.duckn.zip"
     stored.parent.mkdir(parents=True)
     stored.write_bytes(b"PK")
-    monkeypatch.setattr(ex, "cache_get", lambda key: (stored, {"outputs": [{"kind": "ranked"}]}))
+    monkeypatch.setattr(ex, "cache_get", lambda key: (stored, {"outputs": [{"kind": "rankfield"}]}))
     meta = ex.submit("h", tmp_path / "h", None, "ts.v2:total_fast", {}, identity=("idc:1",),
-                     kind="ranked")
-    assert meta["cached"] and meta["kind"] == "ranked" and meta["deliverables"] == []
-    assert ex.status_of("h")["kind"] == "ranked"
+                     kind="rankfield")
+    assert meta["cached"] and meta["kind"] == "rankfield" and meta["deliverables"] == []
+    assert ex.status_of("h")["kind"] == "rankfield"
 
 
 def test_versions_are_remembered_per_kind(monkeypatch):
@@ -234,7 +234,7 @@ def test_versions_are_remembered_per_kind(monkeypatch):
     monkeypatch.setattr(serve, "versions_for", lambda seg, task, kind="segment": [kind])
     ex = m.ModalExecutor()
     assert ex._fresh_weights_versions("ts.v2:total_fast") == ["segment"]
-    assert ex._fresh_weights_versions("ts.v2:total_fast", "ranked") == ["ranked"]
+    assert ex._fresh_weights_versions("ts.v2:total_fast", "rankfield") == ["rankfield"]
     assert ex._fresh_weights_versions("ts.v2:total_fast", "embed") == ["embed"]
     assert ex._fresh_weights_versions("ts.v2:total_fast") == ["segment"]
 
@@ -290,10 +290,10 @@ def test_the_twin_keys_each_kind_through_the_one_door(monkeypatch):
     from haversack import modal_app as m
     from haversack import serve
     monkeypatch.setattr(serve, "weights_versions_of", lambda seg, task: ["297=v2"])
-    got = {k: m._twin_weights_versions("seg", "ts.v2:total_fast", k) for k in ("segment", "ranked")}
+    got = {k: m._twin_weights_versions("seg", "ts.v2:total_fast", k) for k in ("segment", "rankfield")}
     assert got["segment"] == ["297=v2"]
-    assert got["ranked"] == serve.versions_for("seg", "ts.v2:total_fast", "ranked")
-    assert got["ranked"][:-1] == ["297=v2"] and got["ranked"][-1].startswith("ranked=")
+    assert got["rankfield"] == serve.versions_for("seg", "ts.v2:total_fast", "rankfield")
+    assert got["rankfield"][:-1] == ["297=v2"] and got["rankfield"][-1].startswith("rankfield=")
     # and the twin's endpoint uses it: parsed calls, not text
     tree = ast.parse((SRC / "modal_app.py").read_text(encoding="utf-8"))
     public = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "public")

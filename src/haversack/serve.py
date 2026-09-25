@@ -138,13 +138,13 @@ EMBEDDING_NAME = "embedding.zarr.zip"
 #: A ranked job's output (2026-09-24): the task's ranked store - its output distribution on the
 #: model grid, the field every restore and surface of its labels can be derived from (a duckn
 #: zarr zip; haversack.ranked_output). A third primary output under the same lifetime rules.
-RANKED_NAME = "ranked.duckn.zip"
+RANKED_NAME = "rankfield.duckn.zip"
 PRIMARY_NAMES = (RESULT_NAME, EMBEDDING_NAME, RANKED_NAME)
 #: What each kind of job publishes, and the suffix a download of it is named with.
-OUTPUT_OF_KIND = {"segment": RESULT_NAME, "embed": EMBEDDING_NAME, "ranked": RANKED_NAME}
+OUTPUT_OF_KIND = {"segment": RESULT_NAME, "embed": EMBEDDING_NAME, "rankfield": RANKED_NAME}
 #: The kinds whose output is not a label map: no deliverables (a preview and statistics are of
 #: labels), no label paths, no NIfTI conversion, and a status that says what the output is.
-NOT_LABELS = ("embed", "ranked")
+NOT_LABELS = ("embed", "rankfield")
 
 
 def primary_output(where) -> "Path | None":
@@ -404,7 +404,7 @@ def ranked_links(task, identity, options) -> dict:
     if len(ident) != 1 or ":" not in str(ident[0]) or is_digest(ident[0]) or options:
         return {}
     prefix, one = str(ident[0]).split(":", 1)
-    return {"ranked": f"/v1/{prefix}/{one}/{task}/{RANKED_NAME}"}
+    return {"rankfield": f"/v1/{prefix}/{one}/{task}/{RANKED_NAME}"}
 
 
 def weights_versions_of(segmenter, task) -> list:
@@ -447,7 +447,7 @@ def versions_for(segmenter, task, kind: str = "segment") -> list:
     if kind == "embed":
         from .encoders.serving import field_versions
         return field_versions(segmenter, task)
-    if kind == "ranked":
+    if kind == "rankfield":
         # the task's own model identity, as its labels key on, plus what a store's bytes are
         # written in (ranked_output.ranked_tag: rankfield's format, duckn's seg, our rules)
         from .ranked_output import ranked_tag
@@ -2437,7 +2437,7 @@ def ranked_payload(seg, path) -> dict:
     from .content import digest_file
     out = result_payload(seg, None)               # names, volumes, provenance, timings; no labels file
     p = Path(path)
-    out["outputs"] = [{"name": "ranked", "kind": "ranked", "sha256": digest_file(p),
+    out["outputs"] = [{"name": "rankfield", "kind": "rankfield", "sha256": digest_file(p),
                        "bytes": p.stat().st_size}]
     return out
 
@@ -2763,7 +2763,7 @@ class LocalExecutor:
 
     @property
     def ranked_stores(self) -> bool:
-        """Whether ``kind=ranked`` jobs run here (2026-09-24): in-process, when the packages a
+        """Whether ``kind=rankfield`` jobs run here (2026-09-24): in-process, when the packages a
         store is written with are installed (the duckn extra). Asked at the submit door, so a
         server without them refuses at once rather than failing a queued job."""
         from .ranked_output import store_extra_missing
@@ -3497,7 +3497,7 @@ class LocalExecutor:
 
         def run(image, task, **kw):
             return self._segment(image, task, cancel=rec.cancel_token, **kw)
-        reporter.stage("ranked", rec.task)
+        reporter.stage("rankfield", rec.task)
         seg, out = segment_to_store(inp, run_name(rec.task, rec.version), rec.dir / RANKED_NAME,
                                     case=rec.id, source=source, quiet=True, run=run,
                                     image_name=str(ident) if ident else None,
@@ -3582,7 +3582,7 @@ class LocalExecutor:
                             inp = rec.input_path
                 if rec.kind == "embed":
                     rec.labels_path, rec.result = self._run_encode(rec, reporter)
-                elif rec.kind == "ranked":
+                elif rec.kind == "rankfield":
                     rec.labels_path, rec.result = self._run_ranked(rec, inp, entries, reporter)
                 else:
                     seg = self._segment(inp, run_name(rec.task, rec.version), progress=reporter,
@@ -4216,7 +4216,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
     def ranked_key(identities, task: str) -> str:
         """A ranked store's key (2026-09-24): ``result_key`` with the kind, no options, over the
         versions the job was keyed on (:func:`ranked_versions`)."""
-        return result_key(tuple(identities), task, {}, ranked_versions(task), kind="ranked")
+        return result_key(tuple(identities), task, {}, ranked_versions(task), kind="rankfield")
 
     def ranked_versions(task: str) -> list:
         """The versions a ranked store of ``task`` is keyed on - from the executor that states
@@ -4232,17 +4232,17 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 takes_kind = False
             # A one-argument versions function - an operator's twin, the object-store twin -
             # states a TASK's weights; a store keys on those plus its format tag, which is what
-            # versions_for(kind="ranked") is. The first version swallowed the TypeError and
+            # versions_for(kind="rankfield") is. The first version swallowed the TypeError and
             # fell back to a describe() the twin does not have: ["unknown"], a key no store
             # has, so the twin 404'd every store it held (review, 2026-09-25).
             if takes_kind:
-                versions = wv(task, kind="ranked")
+                versions = wv(task, kind="rankfield")
             else:
                 from .ranked_output import ranked_tag
                 versions = list(wv(task)) + [ranked_tag()]
         else:
             try:
-                versions = versions_for(seg, task, "ranked")
+                versions = versions_for(seg, task, "rankfield")
             except Exception:              # no describe() and no versions function: no key
                 versions = ["unknown"]
         return versions
@@ -5142,14 +5142,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         return {"embeddings": out,
                 "next_cursor": encode_cursor(position) if position is not None else None}
 
-    @app.get("/v1/ranked", tags=["results"], responses={
+    @app.get("/v1/rankfields", tags=["results"], responses={
         422: {"description": "a filter or page the listing refuses: an identity that is "
                              "neither <source>:<identifier> for a mounted source nor a "
                              "content digest, more than 100 identities, an unknown task, a "
                              "limit outside 1-1000, a cursor this server did not issue"},
         503: {"description": "this server's view of the result cache could not be "
                              "refreshed (Modal: a volume reload was refused); retry"}})
-    def list_ranked(
+    def list_rankfields(
             request: Request,
             identity: list[str] | None = Query(None, description=(
                 "only stores of this input: <source>:<identifier> or a content digest. "
@@ -5161,7 +5161,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             cursor: str | None = Query(None, description=(
                 "the previous page's next_cursor, as given"))):
         """Cached ranked stores this server can still resolve, newest published first, a page
-        at a time: ``{"ranked": [...], "next_cursor": ...}`` (2026-09-25). Each row: ``key``,
+        at a time: ``{"rankfields": [...], "next_cursor": ...}`` (2026-09-25). Each row: ``key``,
         ``task``, ``identity``, ``computed``, ``published``, ``bytes``, and ``links.ranked`` -
         its path - when it has one: a single source identity, never an upload's digest.
 
@@ -5180,14 +5180,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 raise HTTPException(422, unknown_task(task))
         lister = getattr(executor, "cache_list", None)
         if lister is None:
-            return {"ranked": [], "next_cursor": None}
+            return {"rankfields": [], "next_cursor": None}
         wv_memo: dict = {}                 # store versions per task, once per request
         canon_memo: dict = {}
 
         def key_of(identities, canonical: str) -> str:
             if canonical not in wv_memo:
                 wv_memo[canonical] = ranked_versions(canonical)
-            return result_key(tuple(identities), canonical, {}, wv_memo[canonical], kind="ranked")
+            return result_key(tuple(identities), canonical, {}, wv_memo[canonical], kind="rankfield")
 
         def canonical_of(t) -> str | None:
             if t not in canon_memo:
@@ -5202,7 +5202,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             return want is None or (t is not None and canonical_of(t) == want)
 
         def accept(e: dict) -> bool:
-            if e.get("kind") != "ranked":
+            if e.get("kind") != "rankfield":
                 return False               # labels, a field, or a kind this server does not know
             idents = e.get("identity") if isinstance(e.get("identity"), list) else []
             if _hosted_elsewhere(idents):
@@ -5244,7 +5244,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             if links:
                 row["links"] = links
             out.append(row)
-        return {"ranked": out,
+        return {"rankfields": out,
                 "next_cursor": encode_cursor(position) if position is not None else None}
 
     @app.get("/v1/tasks/{task}", tags=["tasks"])
@@ -5265,7 +5265,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                      source: str = Form(None), deliverables: str = Form(None),
                      job_kind: str = Form("segment", alias="kind")):
         require_auth(request)
-        if job_kind not in ("segment", "embed", "ranked"):
+        if job_kind not in ("segment", "embed", "rankfield"):
             raise HTTPException(422, f"unknown job kind {job_kind!r}; a job is segment (the default), "
                                      "embed or ranked")
         try:
@@ -5346,7 +5346,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                        "tasks, e.g. " + ", ".join(names[:4]))
             raise HTTPException(404, why)
         task = canonical
-        if job_kind == "ranked":
+        if job_kind == "rankfield":
             # The task's ranked store (2026-09-24): its output distribution, not its labels. It
             # takes no options - depth and clip are the store's own rule (ranked_output), and an
             # option is a key; asks for no deliverables - a preview and statistics are of labels;
@@ -5390,7 +5390,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # and accepting it leaves the caller believing a knob was turned).
         declared: dict = {}                # role -> what the task says it takes
         binding = _validate_request(seg, task, src, opts, declared=declared)
-        if job_kind == "ranked" and len(binding) > 1:
+        if job_kind == "rankfield" and len(binding) > 1:
             # A store names its input (provenance.sources, source_file), and several inputs - a
             # CT and a result: mask - would be recorded as the first alone, in its role-tagged
             # form (review, 2026-09-25). Refused until a store can name each role.
@@ -5745,7 +5745,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             # encoder such as ts.v2:total_fast - so an embedding job is reached through itself.
             by_path = ({} if out.get("kind") == "embed" else
                        ranked_links(out.get("task"), out.get("input_identity"), out.get("options"))
-                       if out.get("kind") == "ranked" else resource_links(
+                       if out.get("kind") == "rankfield" else resource_links(
                            out.get("task"), out.get("input_identity"), out.get("options"),
                            preview="preview" in kinds, statistics="statistics" in kinds))
             if not by_path and "result" in links:
@@ -6526,7 +6526,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             """A task's ranked store by path (2026-09-24): the READ door beside its labels, as the
             embedding's is. 200 with the store (304 on a matching If-None-Match), 202 while a
             ranked job for it runs, 404 when there is none. It computes nothing, whatever Prefer
-            says: a store is computed by ``POST /v1/jobs`` with ``kind=ranked``. Anonymous, as a
+            says: a store is computed by ``POST /v1/jobs`` with ``kind=rankfield``. Anonymous, as a
             cached label map is."""
             ident = norm(ident)
             if not re.fullmatch(pat, ident):
@@ -6544,7 +6544,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                     return JSONResponse({"state": "materializing"}, status_code=202,
                                         headers=_progress_headers(None))
                 raise HTTPException(404, "not materialized; compute it with POST /v1/jobs "
-                                         f"kind=ranked (haversack remote submit {prefix}:{ident} "
+                                         f"kind=rankfield (haversack remote submit {prefix}:{ident} "
                                          f"--task {canonical} -o <name>.duckn.zip)")
             headers = _resource_headers(key, hit[1])
             fresh = not_modified(request, headers["ETag"], headers)

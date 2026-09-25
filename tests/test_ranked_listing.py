@@ -27,24 +27,24 @@ PATH = f"/v1/idc/{IDC}/total_fast/{RANKED_NAME}"
 
 
 def _rows(client, **params):
-    r = client.get("/v1/ranked", params=params)
+    r = client.get("/v1/rankfields", params=params)
     assert r.status_code == 200, r.text
-    return r.json()["ranked"]
+    return r.json()["rankfields"]
 
 
 def test_a_hosted_store_is_listed_with_its_path_and_nothing_else_is(tmp_path, monkeypatch):
     _, ex, client = _idc(tmp_path, monkeypatch)
     s = _submit_idc(client)
     wait_state(client, submit(client, task="total_fast"), ("done",))   # labels beside it
-    body = client.get("/v1/ranked").json()
+    body = client.get("/v1/rankfields").json()
     assert body["next_cursor"] is None
-    rows = body["ranked"]
+    rows = body["rankfields"]
     assert len(rows) == 1, rows
     row = rows[0]
     assert row["key"] == s["key"] and row["task"] == s["task"]
     assert row["identity"] == [f"idc:{IDC}"] and row["bytes"] > 0 and row["published"]
-    assert row["links"] == {"ranked": f"/v1/idc/{IDC}/{s['task']}/{RANKED_NAME}"}
-    assert client.get(row["links"]["ranked"]).status_code == 200
+    assert row["links"] == {"rankfield": f"/v1/idc/{IDC}/{s['task']}/{RANKED_NAME}"}
+    assert client.get(row["links"]["rankfield"]).status_code == 200
     # and neither of the other listings takes it
     assert all(r["key"] != s["key"] for r in client.get("/v1/segmentations").json()["segmentations"])
     ex.close()
@@ -71,7 +71,7 @@ def test_the_filters_find_by_identity_and_task(tmp_path, monkeypatch):
     assert keys(task="total_fast") == [s["key"]]
     assert keys(task="total") == []
     assert keys(identity=f"idc:{IDC}", task="total_fast") == [s["key"]]
-    assert client.get("/v1/ranked", params={"task": "nope"}).status_code == 422
+    assert client.get("/v1/rankfields", params={"task": "nope"}).status_code == 422
     ex.close()
 
 
@@ -79,11 +79,11 @@ def test_a_page_at_a_time_by_cursor(tmp_path, monkeypatch):
     _, _, ex, client = make(tmp_path, monkeypatch)
     a = wait_state(client, post(client, fill=0).json()["id"], ("done",))["key"]
     b = wait_state(client, post(client, fill=1).json()["id"], ("done",))["key"]
-    first = client.get("/v1/ranked", params={"limit": 1}).json()
-    second = client.get("/v1/ranked", params={"limit": 1, "cursor": first["next_cursor"]}).json()
-    assert {first["ranked"][0]["key"], second["ranked"][0]["key"]} == {a, b}
-    assert client.get("/v1/ranked", params={"cursor": "garbage"}).status_code == 422
-    assert client.get("/v1/ranked", params={"limit": 0}).status_code == 422
+    first = client.get("/v1/rankfields", params={"limit": 1}).json()
+    second = client.get("/v1/rankfields", params={"limit": 1, "cursor": first["next_cursor"]}).json()
+    assert {first["rankfields"][0]["key"], second["rankfields"][0]["key"]} == {a, b}
+    assert client.get("/v1/rankfields", params={"cursor": "garbage"}).status_code == 422
+    assert client.get("/v1/rankfields", params={"limit": 0}).status_code == 422
     ex.close()
 
 
@@ -121,8 +121,8 @@ def test_the_listing_needs_the_token(tmp_path, monkeypatch):
     monkeypatch.setattr(ranked_output, "segment_to_store", FakeStore())
     _, _, ex, _ = make(tmp_path, monkeypatch)
     client = TestClient(create_app(ex, token="secret"))
-    assert client.get("/v1/ranked").status_code == 401
-    assert client.get("/v1/ranked", headers={"Authorization": "Bearer secret"}).status_code == 200
+    assert client.get("/v1/rankfields").status_code == 401
+    assert client.get("/v1/rankfields", headers={"Authorization": "Bearer secret"}).status_code == 200
     ex.close()
 
 
@@ -139,9 +139,9 @@ def test_the_anonymous_twin_lists_the_same_stores(tmp_path, monkeypatch):
         return result_key(ids, task, opts or {}, weights_fn(task))
     twin = TestClient(create_public_app(key_fn, ex.cache.get, seg.tasks, weights_fn=weights_fn,
                                         list_fn=ex.cache.list))
-    rows = twin.get("/v1/ranked").json()["ranked"]
+    rows = twin.get("/v1/rankfields").json()["rankfields"]
     assert [r["key"] for r in rows] == [s["key"]]
-    assert twin.get(rows[0]["links"]["ranked"]).content == client.get(rows[0]["links"]["ranked"]).content
+    assert twin.get(rows[0]["links"]["rankfield"]).content == client.get(rows[0]["links"]["rankfield"]).content
     ex.close()
 
 
@@ -151,9 +151,9 @@ def test_the_client_and_the_command_line_list_stores(tmp_path, monkeypatch, caps
     _, ex, client = _idc(tmp_path, monkeypatch)
     s = _submit_idc(client)
     rc, _ = _client(client)
-    assert [r["key"] for r in rc.iter_ranked_stores(page_size=1)] == [s["key"]]
+    assert [r["key"] for r in rc.iter_rankfields(page_size=1)] == [s["key"]]
     monkeypatch.setattr(client_mod, "RemoteClient", lambda *a, **k: rc)
-    assert cli.main(["remote", "--server", "http://testserver", "--token", "t", "ranked"]) == 0
+    assert cli.main(["remote", "--server", "http://testserver", "--token", "t", "rankfields"]) == 0
     line = capsys.readouterr().out.strip()
     assert line.split("\t")[1:] == [s["task"], f"idc:{IDC}", f"/v1/idc/{IDC}/{s['task']}/{RANKED_NAME}"]
     ex.close()
@@ -161,5 +161,5 @@ def test_the_client_and_the_command_line_list_stores(tmp_path, monkeypatch, caps
 
 def test_the_listing_is_documented(tmp_path, monkeypatch):
     _, _, ex, client = make(tmp_path, monkeypatch)
-    assert "/v1/ranked" in client.get("/openapi.json").json()["paths"]
+    assert "/v1/rankfields" in client.get("/openapi.json").json()["paths"]
     ex.close()

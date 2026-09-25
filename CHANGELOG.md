@@ -3,12 +3,12 @@
 ## [Unreleased]
 
 - **A task's ranked store is a cached result, and holds the task's own field.** `POST /v1/jobs`
-  with `kind=ranked` (`haversack remote submit ... -o <name>.duckn.zip`) computes a task's
+  with `kind=rankfield` (`haversack remote submit ... -o <name>.duckn.zip`) computes a task's
   output distribution - the store `segment -o x.duckn.zip` writes - and caches it as labels
   and embeddings are cached: a third result kind, keyed on the task's weights versions and the
-  formats the store is written in (`ranked=rf<rankfield>/seg<duckn seg>/h<rules>`), served as
+  formats the store is written in (`rankfield=rf<rankfield>/seg<duckn seg>/h<rules>`), served as
   a zip by its job and, for a hosted input, by a read-only path
-  (`/v1/<source>/<id>/<task>/ranked.duckn.zip`). No options, no deliverables; a server without
+  (`/v1/<source>/<id>/<task>/rankfield.duckn.zip`). No options, no deliverables; a server without
   the `duckn` extra answers 501, and Modal runs the job on the task's own worker - the api,
   nnU-Net and FastSurfer images now carry the `duckn` extra (and SynthStrip's, below). No
   existing key moves.
@@ -40,9 +40,14 @@
   the `duckn` extra (as a data dictionary: SimpleITK's tag keys to keywords); every Modal image
   that stores inputs carries the extra, and one without it still reads uncompressed copies.
   `docs/input-copy.md` is the specification.
-- **Ranked stores are listed**: `GET /v1/ranked` (`haversack remote ranked`,
-  `RemoteClient.ranked_stores`) is the segmentations and embeddings listing for the third kind -
-  filters by `identity` and `task`, cursors, newest published first, `links.ranked` for a store
+- **The kind is `rankfield`** (named for rankfield's own object, a `RankField`, as the other
+  kinds are named for what they return): `kind=rankfield`, `rankfield.duckn.zip`,
+  `GET /v1/rankfields`, `links.rankfield`, `haversack remote rankfields`, and the key tag
+  `rankfield=rf...`. It was `ranked` on main for a day; no deployment ran it, so there are no
+  aliases. The prose and the modules keep "ranked store" for the duckn zip that holds the field.
+- **Rank fields are listed**: `GET /v1/rankfields` (`haversack remote rankfields`,
+  `RemoteClient.rankfields`) is the segmentations and embeddings listing for the third kind -
+  filters by `identity` and `task`, cursors, newest published first, `links.rankfield` for a store
   with a path, and a key round trip so a store keyed under weights or formats this server no
   longer writes is not offered. The anonymous twin lists them when its operator opts in, as
   the other two.

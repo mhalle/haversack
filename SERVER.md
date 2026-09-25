@@ -484,7 +484,7 @@ the `embed` extra and whose checkpoints live on the global `haversack-encoder-we
 
 ## Ranked stores
 
-`POST /v1/jobs` with `kind=ranked` (`haversack remote submit IN --task TASK -o <name>.duckn.zip`)
+`POST /v1/jobs` with `kind=rankfield` (`haversack remote submit IN --task TASK -o <name>.duckn.zip`)
 computes a task's RANKED STORE instead of its labels: its output distribution on the model
 grid - each voxel's classes in rank order with their logit gaps, a distance field to the
 nearest surface, and duckn segmentation metadata naming every class - in one zarr zip
@@ -514,25 +514,25 @@ before any job exists.
 Everything else is a segmentation's: the queue, single flight, the result cache and its
 lifetimes. `GET /v1/jobs/{id}/result` sends the store as `application/zip` named
 `<task>_<id>.duckn.zip`, its content digest as `ETag`; `?format=` is a 422. Its status says
-`"kind": "ranked"` and `result.outputs[0]` is `{"name": "ranked", "kind": "ranked", ...}`, so
+`"kind": "rankfield"` and `result.outputs[0]` is `{"name": "rankfield", "kind": "rankfield", ...}`, so
 a `result:` reference cannot bind it where an image belongs. Its key is the task's weights
 versions, the kind, and the formats the store is written in
-(`ranked=rf<rankfield format>/seg<duckn seg version>/h<haversack's store rules>`): a new format
+(`rankfield=rf<rankfield format>/seg<duckn seg version>/h<haversack's store rules>`): a new format
 recomputes stores and nothing else, and no label key changed when stores were added. A store
-is never listed as a segmentation; stores are listed by `GET /v1/ranked` (`haversack remote
-ranked`), the third listing over the same machinery - `identity`, `task`, `limit`, `cursor`,
-newest published first, each row with `links.ranked` when it has a path, a store keyed under
+is never listed as a segmentation; stores are listed by `GET /v1/rankfields` (`haversack remote
+rankfields`), the third listing over the same machinery - `identity`, `task`, `limit`, `cursor`,
+newest published first, each row with `links.rankfield` when it has a path, a store keyed under
 weights or formats this server no longer writes left out:
 
 ```
-GET /v1/ranked?identity=idc:<crdc_series_uuid>&task=ts.v2:total
+GET /v1/rankfields?identity=idc:<crdc_series_uuid>&task=ts.v2:total
 ```
 
 A store of one hosted input has a path, a READ like an embedding's (anonymous, 200/304/HEAD,
 202 while its job runs, 404 `no-store` naming the job to submit, never a computation):
 
 ```
-GET /v1/idc/<crdc_series_uuid>/ts.v2:total/ranked.duckn.zip
+GET /v1/idc/<crdc_series_uuid>/ts.v2:total/rankfield.duckn.zip
 ```
 
 On Modal a ranked job runs on its task's own worker (nnU-Net or FastSurfer); the api's image
@@ -771,7 +771,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/sources` | read | the hosted sources (and `result`), their identifier grammar, and which have a path surface |
 | GET | `/v1/segmentations` | token | cached results, newest first: `identity`, `task`, `limit`, `cursor` |
 | GET | `/v1/embeddings` | token | cached embedding fields, newest first: `identity`, `encoder`, `limit`, `cursor` |
-| GET | `/v1/ranked` | token | cached ranked stores, newest first: `identity`, `task`, `limit`, `cursor` |
+| GET | `/v1/rankfields` | token | cached ranked stores, newest first: `identity`, `task`, `limit`, `cursor` |
 | POST | `/v1/jobs` | token | submit |
 | GET | `/v1/jobs` | token | brief status of every known job |
 | GET | `/v1/jobs/<id>` | token | full status, result metadata, links |
@@ -804,8 +804,8 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | HEAD | `/v1/<source>/<identifier>/<task>/statistics.tsv` | read | probe: rendered, rendering, absent |
 | GET | `/v1/<source>/<identifier>/<encoder>/embedding.zarr.zip` | read | an embedding field; computes nothing |
 | HEAD | `/v1/<source>/<identifier>/<encoder>/embedding.zarr.zip` | read | probe: cached, in flight, absent |
-| GET | `/v1/<source>/<identifier>/<task>/ranked.duckn.zip` | read | a task's ranked store; computes nothing |
-| HEAD | `/v1/<source>/<identifier>/<task>/ranked.duckn.zip` | read | probe: cached, in flight, absent |
+| GET | `/v1/<source>/<identifier>/<task>/rankfield.duckn.zip` | read | a task's ranked store; computes nothing |
+| HEAD | `/v1/<source>/<identifier>/<task>/rankfield.duckn.zip` | read | probe: cached, in flight, absent |
 
 Every path-addressed route that names a file also exists with the `_res-1mm` token
 before the extension - an embedding's with `_int8` instead, and a ranked store's with none (a

@@ -1,4 +1,4 @@
-"""Ranked jobs on the server (2026-09-24): ``POST /v1/jobs`` with ``kind=ranked``.
+"""Ranked jobs on the server (2026-09-24): ``POST /v1/jobs`` with ``kind=rankfield``.
 
 A task's ranked store is a third OUTPUT KIND through the queue, the result cache and the job
 routes, beside labels and embedding fields. What these hold, each against a way it could fail:
@@ -70,7 +70,7 @@ def make(tmp_path, monkeypatch, **kw):
     return seg, store, ex, TestClient(create_app(ex))
 
 
-def post(client, *, task="total_fast", kind="ranked", options=None, fill=0, **extra):
+def post(client, *, task="total_fast", kind="rankfield", options=None, fill=0, **extra):
     return client.post("/v1/jobs", files={"file": ("scan.nii.gz", volume_bytes(fill))},
                        data={"task": task, "kind": kind, "options": json.dumps(options or {}), **extra})
 
@@ -79,7 +79,7 @@ def post(client, *, task="total_fast", kind="ranked", options=None, fill=0, **ex
 
 def test_a_store_labels_and_a_field_of_one_name_never_share_a_key():
     args = (("idc:1",), "ts.v2:total_fast", {}, ["297=v2.0.0"])
-    keys = {result_key(*args), result_key(*args, kind="embed"), result_key(*args, kind="ranked")}
+    keys = {result_key(*args), result_key(*args, kind="embed"), result_key(*args, kind="rankfield")}
     assert len(keys) == 3
 
 
@@ -87,10 +87,10 @@ def test_a_stores_versions_are_its_tasks_and_the_formats_it_is_written_in():
     import duckn
     import rankfield
     seg = FakeSegmenter()
-    v = serve_mod.versions_for(seg, "total_fast", "ranked")
+    v = serve_mod.versions_for(seg, "total_fast", "rankfield")
     assert v[:-1] == serve_mod.weights_versions_of(seg, "total_fast")
     from haversack.ranked_compose import rule_tag
-    assert v[-1] == (f"ranked=rf{rankfield.FORMAT_VERSION}/seg{duckn.SEG_VERSION}"
+    assert v[-1] == (f"rankfield=rf{rankfield.FORMAT_VERSION}/seg{duckn.SEG_VERSION}"
                      f"/h{ranked_output.STORE_RULES}/{rule_tag()}")
 
 
@@ -114,9 +114,9 @@ def test_a_ranked_job_publishes_and_serves_a_store(tmp_path, monkeypatch):
     assert r.status_code == 202, r.text
     s = wait_state(client, r.json()["id"], ("done", "failed"))
     assert s["state"] == "done", s
-    assert s["kind"] == "ranked" and s["deliverables"] == []
+    assert s["kind"] == "rankfield" and s["deliverables"] == []
     out = s["result"]["outputs"][0]
-    assert out["name"] == "ranked" and out["kind"] == "ranked"
+    assert out["name"] == "rankfield" and out["kind"] == "rankfield"
     assert s["result"]["names"]                      # the run's names, as a segmentation reports
     # the server's own segmenter ran it, with the ranked sink - not a second model load
     assert len(seg.calls) == 1 and seg.calls[0][2].get("probabilities") == "the-spec"
@@ -138,7 +138,7 @@ def test_a_ranked_job_publishes_and_serves_a_store(tmp_path, monkeypatch):
     entry = ex.cache.get(s["key"])
     assert entry is not None and entry[0].name == RANKED_NAME
     stored = json.loads((entry[0].parent / "meta.json").read_text())
-    assert stored["kind"] == "ranked" and stored["task"] == s["task"]
+    assert stored["kind"] == "rankfield" and stored["task"] == s["task"]
     ex.close()
 
 
@@ -222,7 +222,7 @@ def _idc(tmp_path, monkeypatch, workdir="w"):
 
 
 def _submit_idc(client):
-    r = client.post("/v1/jobs", data={"task": "total_fast", "kind": "ranked",
+    r = client.post("/v1/jobs", data={"task": "total_fast", "kind": "rankfield",
                                       "source": json.dumps([{"kind": "idc", "crdc_series_uuid": IDC}])})
     assert r.status_code == 202, r.text
     return wait_state(client, r.json()["id"], ("done", "failed"))
@@ -233,7 +233,7 @@ def test_a_hosted_inputs_store_has_its_own_path_and_no_label_paths(tmp_path, mon
     s = _submit_idc(client)
     assert s["state"] == "done", s
     path = f"/v1/idc/{IDC}/{s['task']}/{RANKED_NAME}"
-    assert s["links"]["ranked"] == path
+    assert s["links"]["rankfield"] == path
     assert not any(k in s["links"] for k in ("labels", "preview", "statistics")), s["links"]
     job = client.get(s["links"]["result"])
     got = client.get(path)
@@ -250,7 +250,7 @@ def test_the_path_door_reads_and_never_computes(tmp_path, monkeypatch):
     store, ex, client = _idc(tmp_path, monkeypatch)
     path = f"/v1/idc/{IDC}/total_fast/{RANKED_NAME}"
     r = client.get(path, headers={"Prefer": "wait=5"})
-    assert r.status_code == 404 and "kind=ranked" in r.text
+    assert r.status_code == 404 and "kind=rankfield" in r.text
     assert r.headers.get("cache-control") == "no-store"
     assert store.calls == [] and client.get("/v1/jobs").json()["jobs"] == []
     assert client.get(f"/v1/idc/{IDC}/nope/{RANKED_NAME}").status_code == 404
@@ -265,7 +265,7 @@ def test_an_evicted_or_restarted_ranked_job_is_still_a_store(tmp_path, monkeypat
     ex.close()
     _store2, ex2, client2 = _idc(tmp_path, monkeypatch)
     s = client2.get(f"/v1/jobs/{jid}").json()
-    assert s.get("evicted") is True and s["kind"] == "ranked", s
+    assert s.get("evicted") is True and s["kind"] == "rankfield", s
     assert not any(k in s["links"] for k in ("labels", "preview", "statistics")), s["links"]
     assert client2.get(s["links"]["result"]).headers["content-type"] == "application/zip"
     ex2.close()
@@ -306,8 +306,8 @@ def test_the_client_fetches_a_store_and_refuses_a_name_that_misstates_it(tmp_pat
     src.write_bytes(volume_bytes(9))
     out = tmp_path / "s.duckn.zip"
     final = rc.ranked(src, "total_fast", out)
-    assert final["state"] == "done" and final["kind"] == "ranked"
-    assert sent[-1]["kind"] == "ranked" and json.loads(sent[-1]["options"]) == {}
+    assert final["state"] == "done" and final["kind"] == "rankfield"
+    assert sent[-1]["kind"] == "rankfield" and json.loads(sent[-1]["options"]) == {}
     assert zipfile.is_zipfile(out)
     for wrong in ("s.zarr.zip", "s.seg.nrrd"):
         with pytest.raises(RemoteError, match="ranked store"):
@@ -333,14 +333,14 @@ def test_remote_submit_asks_for_a_store_by_the_outputs_name(tmp_path, monkeypatc
     assert cli.main(base + ["-o", str(tmp_path / "a.duckn.zip")]) == 0
     assert cli.main(base + ["-o", str(tmp_path / "a.seg.nrrd")]) == 0
     assert cli.main(base + ["-o", str(tmp_path / "a.duckn.zip"), "--no-wait"]) == 0
-    assert seen == ["ranked", None, "ranked"]
+    assert seen == ["rankfield", None, "rankfield"]
     capsys.readouterr()
     for bad, why in ((["-o", str(tmp_path / "a.duckn")], "name it .duckn.zip"),
                      (["-o", str(tmp_path / "a.duckn.zip"), "--deliverables", "preview"],
                       "renders no deliverables")):
         assert cli.main(base + bad) != 0
         assert why in capsys.readouterr().err
-    assert seen == ["ranked", None, "ranked"]
+    assert seen == ["rankfield", None, "rankfield"]
 
 
 
@@ -367,7 +367,7 @@ def test_the_store_is_handed_the_jobs_name_case_pin_and_inputs(tmp_path, monkeyp
     src = jdir / "input_scan.nii.gz"
     src.write_bytes(volume_bytes(5))
     ex.submit(jid, jdir, src, "total_fast", {}, identity=("sha256:pinned",), version="v9",
-              kind="ranked", no_cache=True)
+              kind="rankfield", no_cache=True)
     assert wait_state(client, jid, ("done", "failed"))["state"] == "done"
     assert store.calls[-1]["task"] == "total_fast@v9"
     ex.close()
@@ -378,7 +378,7 @@ def test_the_path_door_says_202_while_its_store_computes(tmp_path, monkeypatch):
     gate = threading.Event()
     store, ex, client = _idc(tmp_path, monkeypatch)
     store.gate = gate
-    r = client.post("/v1/jobs", data={"task": "total_fast", "kind": "ranked",
+    r = client.post("/v1/jobs", data={"task": "total_fast", "kind": "rankfield",
                                       "source": json.dumps([{"kind": "idc", "crdc_series_uuid": IDC}])})
     jid = r.json()["id"]
     wait_state(client, jid, ("running",))
@@ -484,7 +484,7 @@ def test_the_client_and_cli_refuse_names_that_misstate_a_kind(tmp_path, monkeypa
 
 def test_a_store_has_a_path_only_for_one_hosted_identity():
     from haversack.serve import ranked_links
-    assert ranked_links("t", ["idc:1"], {}) == {"ranked": f"/v1/idc/1/t/{RANKED_NAME}"}
+    assert ranked_links("t", ["idc:1"], {}) == {"rankfield": f"/v1/idc/1/t/{RANKED_NAME}"}
     assert ranked_links("t", ["idc:1", "idc:2"], {}) == {}
     assert ranked_links("t", ["image=idc:1", "mask=idc:2"], {}) == {}
     assert ranked_links("t", ["sha256:" + "0" * 64], {}) == {}

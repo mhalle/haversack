@@ -254,7 +254,7 @@ image = (
 # cold-start measurement first, not a guess (2026-09-08).
 # `duckn` (2026-09-24): the api keys a ranked store on the formats it is written in -
 # ranked_output.ranked_tag reads rankfield's and duckn's - and the first deploy without it
-# answered every kind=ranked submit with a 500 (ModuleNotFoundError: duckn).
+# answered every kind=rankfield submit with a 500 (ModuleNotFoundError: duckn).
 api_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")                       # uv sync resolves the whole lock (engine git sources)
@@ -1489,7 +1489,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             return
         from haversack.serve import run_name
         embedding = meta.get("kind") == "embed"
-        ranked = meta.get("kind") == "ranked"
+        ranked = meta.get("kind") == "rankfield"
         not_labels = embedding or ranked      # no label file, no deliverables, a kind on record
         # per-container weights provisioning (engine's own), under the caller's pin if any
         ctx._ensure(run_name(meta["task"], meta.get("version")))
@@ -2167,7 +2167,7 @@ class ModalExecutor:
     #: ``HAVERSACK_EMBED=1`` (an ``EmbedWorker``). The submit door asks this and refuses
     #: with 501 before any job exists otherwise.
     embeds = EMBED
-    #: ``kind=ranked`` jobs run here (2026-09-24): on the task's own worker, whose image carries
+    #: ``kind=rankfield`` jobs run here (2026-09-24): on the task's own worker, whose image carries
     #: the duckn extra (the nnU-Net worker's base image and FastSurfer's).
     ranked_stores = True
     #: The api container holds no encoder weights: ``/v1/encoders`` says None, not False.
@@ -2364,7 +2364,7 @@ class ModalExecutor:
                inputs: tuple = (), refresh_input: bool = False,
                version: str | None = None, deliverables=None, kind: str = "segment"):
         if kind != "segment" and not ((kind == "embed" and self.embeds)
-                                      or (kind == "ranked" and self.ranked_stores)):
+                                      or (kind == "rankfield" and self.ranked_stores)):
             # the route asks `embeds` first; this is the second line, for a caller that did not
             raise ValueError(f"this deployment runs no {kind!r} jobs")
         embedding = kind == "embed"
@@ -2533,7 +2533,7 @@ class ModalExecutor:
                 # that declined it
                 "deliverables", "deliverables_unavailable")
         d = {k: meta.get(k) for k in keys if meta.get(k) is not None}
-        if meta.get("kind") in ("embed", "ranked"):
+        if meta.get("kind") in ("embed", "rankfield"):
             d["kind"] = meta["kind"]          # as the local executor says it, and only then
         if meta.get("state") == "done" and meta.get("result") is not None:
             d["result"] = meta["result"]

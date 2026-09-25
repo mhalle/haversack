@@ -152,27 +152,27 @@ class RemoteClient:
                 params.append((k, v))
         return self._json("GET", "/v1/embeddings", params=params)
 
-    def ranked_stores(self, *, identity=None, task: str | None = None,
+    def rankfields(self, *, identity=None, task: str | None = None,
                       limit: int | None = None, cursor: str | None = None) -> dict:
-        """One page of the ranked stores the server holds (``GET /v1/ranked``, authorized):
-        ``{"ranked": [...], "next_cursor": ...}``, newest published first. ``identity`` and
+        """One page of the ranked stores the server holds (``GET /v1/rankfields``, authorized):
+        ``{"rankfields": [...], "next_cursor": ...}``, newest published first. ``identity`` and
         paging as in :meth:`segmentations`; ``task`` keeps one task's. A row with a path has
-        ``links.ranked``, which a plain GET downloads."""
+        ``links.rankfield``, which a plain GET downloads."""
         ids = [identity] if isinstance(identity, str) else list(identity or [])
         params = [("identity", i) for i in ids]
         for k, v in (("task", task), ("limit", limit), ("cursor", cursor)):
             if v is not None:
                 params.append((k, v))
-        return self._json("GET", "/v1/ranked", params=params)
+        return self._json("GET", "/v1/rankfields", params=params)
 
-    def iter_ranked_stores(self, *, identity=None, task: str | None = None,
+    def iter_rankfields(self, *, identity=None, task: str | None = None,
                            page_size: int | None = None):
-        """Every row of :meth:`ranked_stores`, following the server's cursors to the end."""
+        """Every row of :meth:`rankfields`, following the server's cursors to the end."""
         cursor = None
         while True:
-            page = self.ranked_stores(identity=identity, task=task, limit=page_size,
+            page = self.rankfields(identity=identity, task=task, limit=page_size,
                                       cursor=cursor)
-            yield from page.get("ranked") or []
+            yield from page.get("rankfields") or []
             cursor = page.get("next_cursor")
             if not cursor:
                 return
@@ -203,7 +203,7 @@ class RemoteClient:
         result.
 
         ``kind="embed"`` makes the job an embedding field of ``image`` with the ENCODER named
-        ``task`` (``GET /v1/encoders``), whose only option is ``int8``; ``kind="ranked"`` makes
+        ``task`` (``GET /v1/encoders``), whose only option is ``int8``; ``kind="rankfield"`` makes
         it the task's ranked store (2026-09-24; no options, no deliverables); None sends
         nothing, which is a segmentation - the form every server before 2026-09-23 understands."""
         data = {"task": task, "options": json.dumps(options)}
@@ -353,7 +353,7 @@ class RemoteClient:
     def ranked(self, image, task: str, output, *, on_status=None) -> dict:
         """The task's ranked store of ``image`` into ``output`` (``<name>.duckn.zip``): submit a
         ranked job, wait, fetch. Returns the final status; raises on a failed job."""
-        return self.run(image, task, output, on_status=on_status, kind="ranked")
+        return self.run(image, task, output, on_status=on_status, kind="rankfield")
 
     def run(self, image, task: str, output, *, on_status=None, deliverables=None,
             kind: str | None = None, **options) -> dict:

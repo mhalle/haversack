@@ -934,10 +934,10 @@ def _command_line() -> click.Group:
                          help='the rows as one JSON document instead of a table'),
         ])
     remote.add_command(remote_embeddings)
-    remote_ranked = _Command(
-        'ranked', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+    remote_rankfields = _Command(
+        'rankfields', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
         short_help='the ranked stores the server holds, newest first',
-        help=('Lists cached ranked stores (GET /v1/ranked; needs the token): when each was '
+        help=('Lists cached ranked stores (GET /v1/rankfields; needs the token): when each was '
               'published, its task, its input and its path - a plain GET of it downloads the '
               'store - or its key, for one with no path (an upload). --identity is computed by '
               'the server, as for `remote results`.'),
@@ -952,7 +952,7 @@ def _command_line() -> click.Group:
             click.Option(['--json'], is_flag=True,
                          help='the rows as one JSON document instead of a table'),
         ])
-    remote.add_command(remote_ranked)
+    remote.add_command(remote_rankfields)
 
     docs = _Command(
         'docs', callback=_dispatch(_cmd_docs, 'docs'),
@@ -1308,23 +1308,23 @@ def _cmd_remote(args) -> int:
             where = (e.get("links") or {}).get("embedding") or f"key:{e.get('key')}"
             print("\t".join([stamp, str(e.get("encoder")),
                              ",".join(map(str, e.get("identity") or [])) or "-", where]))
-    elif args.rcmd == "ranked":
+    elif args.rcmd == "rankfields":
         import datetime
         import itertools
         if args.limit < 0:
             from .errors import InputError
             raise InputError("--limit must be 0 (every store) or more")
-        rows = c.iter_ranked_stores(identity=list(args.identity) or None, task=args.task,
+        rows = c.iter_rankfields(identity=list(args.identity) or None, task=args.task,
                                     page_size=min(args.limit, 1000) if args.limit else 1000)
         rows = list(itertools.islice(rows, args.limit) if args.limit else rows)
         if args.json:
-            print(json.dumps({"ranked": rows}, indent=2))
+            print(json.dumps({"rankfields": rows}, indent=2))
             return 0
         for e in rows:
             when = e.get("published") or e.get("computed")
             stamp = (datetime.datetime.fromtimestamp(when, datetime.timezone.utc)
                      .strftime("%Y-%m-%dT%H:%M:%SZ") if when else "-")
-            where = (e.get("links") or {}).get("ranked") or f"key:{e.get('key')}"
+            where = (e.get("links") or {}).get("rankfield") or f"key:{e.get('key')}"
             print("\t".join([stamp, str(e.get("task")),
                              ",".join(map(str, e.get("identity") or [])) or "-", where]))
     elif args.rcmd == "status":
@@ -1342,7 +1342,7 @@ def _cmd_remote(args) -> int:
             raise InputError(f"{args.output}: a remote ranked store downloads as one file; "
                              "name it .duckn.zip")
         # passed only when set: a segmentation's call is exactly what it was
-        by_kind = {"kind": "ranked"} if low.endswith(".duckn.zip") else {}
+        by_kind = {"kind": "rankfield"} if low.endswith(".duckn.zip") else {}
         if by_kind and wanted:
             from .errors import InputError
             raise InputError("a ranked store renders no deliverables (a preview and statistics "
