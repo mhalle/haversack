@@ -5751,6 +5751,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             # the executor may have joined this ask to an identical flight already
             # running: the status it answers with is that job's, under its id
             rid = (rec.get("id") if isinstance(rec, dict) else getattr(rec, "id", None)) or jid
+            # the record in hand when the executor can read a status off it (Modal: the
+            # read back was a Dict round trip per submit, 2026-09-25)
+            of_record = getattr(executor, "status_of_record", None)
+            if of_record is not None and isinstance(rec, dict) and rec.get("id") == rid:
+                return of_record(rec)
             return executor.status_of(rid)
 
         # In a worker thread, never on the event loop: ModalExecutor's submit is a

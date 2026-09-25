@@ -46,6 +46,7 @@ def _executor(monkeypatch):
     monkeypatch.setattr(ex, "_fresh_weights_versions",
                         lambda task, kind="segment": [f"{kind}-versions"])
     monkeypatch.setattr(ex, "cache_get", lambda key: None)
+    monkeypatch.setattr(ex, "_cache_record", lambda key, wanted=(): None)
     return m, fake, ex, spawned
 
 
@@ -220,7 +221,8 @@ def test_a_ranked_cache_hit_on_modal_says_its_kind(monkeypatch, tmp_path):
     stored = tmp_path / "k" / "g-1" / "rankfield.duckn.zip"
     stored.parent.mkdir(parents=True)
     stored.write_bytes(b"PK")
-    monkeypatch.setattr(ex, "cache_get", lambda key: (stored, {"outputs": [{"kind": "rankfield"}]}))
+    monkeypatch.setattr(ex, "_cache_record",
+                        lambda key, wanted=(): (stored, {"outputs": [{"kind": "rankfield"}]}, ()))
     meta = ex.submit("h", tmp_path / "h", None, "ts.v2:total_fast", {}, identity=("idc:1",),
                      kind="rankfield")
     assert meta["cached"] and meta["kind"] == "rankfield" and meta["deliverables"] == []

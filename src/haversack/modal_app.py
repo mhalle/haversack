@@ -1634,10 +1634,21 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         labels = local / name
         if not not_labels:
             s.save(labels)
-        with ctx._vol_lock:
-            jdir.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(labels, jdir / name)   # the api's fallback reads it
-            scratch_vol.commit()
+
+        def _scratch_copy() -> None:
+            with ctx._vol_lock:
+                jdir.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(labels, jdir / name)   # the api's fallback reads it
+                scratch_vol.commit()
+        # The job's own copy on the scratch volume is the api's FALLBACK: `_job_result`
+        # serves the job's cache entry, and reads this copy only once that entry is evicted
+        # or republished with other bytes. A keyed job publishes its entry before `done`, so
+        # its copy - a commit, 0.7-1.5 s of every job measured on Modal (2026-09-25) - is
+        # placed just after `done`. A job with no key publishes no entry: its copy is the
+        # only one there will be, and is placed first, as before.
+        copy_after_done = bool(meta.get("cache_key"))
+        if not copy_after_done:
+            _scratch_copy()
         if embedding:
             from haversack.encoders.serving import field_payload
             result = field_payload(s, labels)
@@ -1718,6 +1729,12 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             clear_pending=_clear_pending, put=_put,
             mark_done=_mark_done, start_worker=_start,
             **({"kind": meta["kind"]} if not_labels else {}))
+        if copy_after_done:
+            try:
+                _scratch_copy()
+            except Exception as e:           # noqa: BLE001 - done is already observable
+                print(f"[scratch] {jid}: its own copy was not placed ({type(e).__name__}: "
+                      f"{e}); its result is served from the cache entry", flush=True)
     except Cancelled:
         _emit(jid, {"state": "cancelled", "finished": time.time()})
         _clear_own_artifacts_marker(jid, meta)
@@ -2305,7 +2322,7 @@ class ModalExecutor:
         deploy's, which rendered its whole set)."""
         return _artifact_state(key, name, sweep=True)
 
-    def _unrendered_on_hit(self, key: str, wanted, hit) -> dict:
+    def _unrendered_on_hit(self, key: str, wanted, hit, missing=None) -> dict:
         """``{name: why}`` for what a cache hit's list names and its stored generation
         will not have (2026-09-20). Empty when the generation holds everything asked
         for, or a render still running will bring the rest.
@@ -2324,7 +2341,8 @@ class ModalExecutor:
         """
         from haversack.jobpolicy import RENDER_BUSY, missing_deliverables, pending_covers
         from haversack.serve import ResultsNotVisible
-        missing = missing_deliverables(wanted, Path(hit[0]).parent)
+        if missing is None:        # `missing`: read by the caller under the view's lock
+            missing = missing_deliverables(wanted, Path(hit[0]).parent)
         if not missing:
             return {}
         m = self._pending_marker(key)
@@ -2477,7 +2495,7 @@ class ModalExecutor:
                               kind=kind) if not_labels
                    else result_key(identity, task, options, self._fresh_weights_versions(task)))
             if not no_cache:
-                hit = self.cache_get(key)
+                hit = self._cache_record(key, wanted)
                 if hit is not None:
                     meta = {"id": jid, "task": task, "options": options,
                             "input_identity": list(identity), "state": "done",
@@ -2486,8 +2504,7 @@ class ModalExecutor:
                             # the VOLUME's path: hit[0] is this container's own copy,
                             # which no other container (nor this one restarted) has
                             "result": hit[1],
-                            "cache_path": str(Path(CACHE_ROOT) / key
-                                              / Path(hit[0]).parent.name / Path(hit[0]).name),
+                            "cache_path": str(hit[0]),
                             **({"kind": kind} if not_labels else {}),
                             # the handle the job result route resolves - and leases -
                             # the entry by; cache_path names one generation, which a
@@ -2497,7 +2514,7 @@ class ModalExecutor:
                             # a pinned ask answered from the cache still reports its pin,
                             # as the local executor does (seen missing on Modal, 2026-09-12)
                             **({"version": version} if version else {})}
-                    unavailable = self._unrendered_on_hit(key, wanted, hit)
+                    unavailable = self._unrendered_on_hit(key, wanted, hit, missing=hit[2])
                     if unavailable:
                         meta["deliverables_unavailable"] = unavailable
                     jobs_dict[jid] = meta
@@ -2579,6 +2596,28 @@ class ModalExecutor:
             if had:
                 scratch_vol.commit()
 
+    def _cache_record(self, key, wanted=()):
+        """What a submit answered from the cache needs, and nothing more: ``(the VOLUME's
+        path of the primary output, its result record, which of ``wanted`` the generation
+        lacks)``, or None. Read under ``_cache_view`` shared; the path is recorded, never
+        opened outside the lock.
+
+        Not ``cache_get``, which hands out a container-local copy of the generation for a
+        route that streams it. A submit reads none of those bytes, and on Modal the copy
+        was most of its time (2026-09-25, `haversack-prof-smoke`): the first read of each
+        file off the volume, under the one ``_mirror_lock`` every copy takes, made six
+        concurrent hit-submits wait 1.0-4.0 s in the lookup, each behind the others'
+        copies. A stat per wanted artifact answers what the copy was used to answer:
+        0.27-0.6 s, none waiting on another."""
+        from haversack.jobpolicy import missing_deliverables
+        from haversack.serve import ResultCache
+        _reload_cache_view(max_age=CACHE_FRESH_S)
+        with _cache_view.shared():
+            hit = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).get(key)   # leased, as before
+            if hit is None:
+                return None
+            return Path(hit[0]), hit[1], missing_deliverables(wanted, Path(hit[0]).parent)
+
     def cache_get(self, key):
         from haversack.serve import ResultCache
         _reload_cache_view(max_age=CACHE_FRESH_S)
@@ -2647,6 +2686,12 @@ class ModalExecutor:
         meta = jobs_dict.get(jid)
         if meta is None:
             return None
+        return self.status_of_record(meta)
+
+    def status_of_record(self, meta: dict) -> dict:
+        """``status_of`` for a record already in hand: what ``submit`` returns, which the
+        route answers with - the record it has just written, where reading it back cost a
+        Dict round trip per submit (0.07-0.7 s under concurrent submits, 2026-09-25)."""
         keys = ("id", "task", "state", "created", "started", "finished",
                 "progress", "error", "input_identity", "cached",
                 # the result handle and the options its URL form depends on -

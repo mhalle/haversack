@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **Faster submits and finishes on Modal.** Profiled on a deployment with three fresh IDC CTs:
+  a submit answered from the result cache copied the result into the api container to read its
+  record, and concurrent ones queued behind each other's copies (1-4 s each); it now reads the
+  record and checks which artifacts exist in place (0.9-1.0 s end to end, from 2.4-5.4 s). The
+  route answers a submit from the record it just wrote instead of reading it back. A worker places
+  the job's own scratch copy - the fallback used once a result is evicted - after reporting done
+  rather than before (0.7-1.5 s of every job's latency), and the `.seg.nrrd` header no longer
+  sorts the whole label map to list the labels present (1 s on a 418 M-voxel map). Results,
+  keys and file bytes are unchanged.
 - **An input copy is written a slab at a time.** Transcoding a DICOM series or a gzipped NIfTI
   held the volume several times over - 3.3 GB at peak for a 709-slice CT, where Modal's api
   container (which transcodes uploads) has 2 GB. The compressed copy is written a chunk of 32

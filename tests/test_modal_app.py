@@ -902,6 +902,7 @@ def test_an_unverified_pin_leaves_no_modal_inflight_marker(monkeypatch, tmp_path
     ex = m.ModalExecutor()
     monkeypatch.setattr(ex, "_fresh_weights_versions", lambda task: ["w=unknown"])
     monkeypatch.setattr(ex, "cache_get", lambda key: None)
+    monkeypatch.setattr(ex, "_cache_record", lambda key, wanted=(): None)
     ex.submit("j1", tmp_path, None, "ts.v2:total_fast", {}, identity=("idc:x",),
               no_cache=True, version="v9")
     assert not [k for k, v in fake.items() if k.startswith("inflight:") and v == "j1"]
@@ -981,7 +982,8 @@ def test_a_pinned_ask_answered_from_the_modal_cache_reports_its_pin(monkeypatch,
     monkeypatch.setattr(m, "scratch_vol", types.SimpleNamespace(commit=lambda: None))
     ex = m.ModalExecutor()
     monkeypatch.setattr(ex, "_fresh_weights_versions", lambda task: ["297=v2.0.0-weights"])
-    monkeypatch.setattr(ex, "cache_get", lambda key: ("/cache/labels.seg.nrrd", {"volumes_ml": {}}))
+    monkeypatch.setattr(ex, "_cache_record",
+                        lambda key, wanted=(): ("/cache/labels.seg.nrrd", {"volumes_ml": {}}, ()))
     ex.submit("j1", tmp_path, None, "ts.v2:total_fast", {}, identity=("idc:x",),
               version="v2.0.0-weights")
     ex.submit("j2", tmp_path, None, "ts.v2:total_fast", {}, identity=("idc:x",))
@@ -1009,6 +1011,7 @@ def test_a_submit_commits_the_scratch_volume_only_when_it_holds_an_upload(monkey
     ex = m.ModalExecutor()
     monkeypatch.setattr(ex, "_fresh_weights_versions", lambda task: ["w=1"])
     monkeypatch.setattr(ex, "cache_get", lambda key: None)
+    monkeypatch.setattr(ex, "_cache_record", lambda key, wanted=(): None)
 
     remote = tmp_path / "j1"
     remote.mkdir()

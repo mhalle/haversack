@@ -122,7 +122,11 @@ class Segmentation:
             "Segmentation_ReferenceImageExtentOffset": "0 0 0",
             PROVENANCE_KEY: json.dumps(self.provenance),
         }
-        present = sorted(int(v) for v in np.unique(arr) if v != 0)
+        # Which labels are present, from the bounding boxes already in hand (an absent label's
+        # is None) - np.unique sorted the whole volume a second time to say the same: 1.0 s
+        # of a 418 M-voxel save's 2.2 (2026-09-25). np.unique only without scipy.
+        present = ([i + 1 for i, o in enumerate(objects) if o is not None]
+                   if objects is not None else sorted(int(v) for v in np.unique(arr) if v != 0))
         for i, value in enumerate(present):
             name = self.schema.names.get(value, f"label_{value}")
             h = (value * 0.61803398875) % 1.0

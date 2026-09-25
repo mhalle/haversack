@@ -50,6 +50,7 @@ def _executor(monkeypatch, *, embeds=True):
     monkeypatch.setattr(ex, "_fresh_weights_versions",
                         lambda task, kind="segment": [f"{kind}-versions"])
     monkeypatch.setattr(ex, "cache_get", lambda key: None)
+    monkeypatch.setattr(ex, "_cache_record", lambda key, wanted=(): None)
     return m, fake, ex, spawned
 
 

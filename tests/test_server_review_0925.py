@@ -201,6 +201,7 @@ def _modal(monkeypatch):
     ex = m.ModalExecutor()
     monkeypatch.setattr(ex, "_fresh_weights_versions", lambda task, kind="segment": ["v"])
     monkeypatch.setattr(ex, "cache_get", lambda key: None)
+    monkeypatch.setattr(ex, "_cache_record", lambda key, wanted=(): None)
     monkeypatch.setattr(ex, "_flight_alive", lambda jid, meta: True)
     return m, fake, ex, spawned
 
