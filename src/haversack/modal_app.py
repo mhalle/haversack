@@ -207,13 +207,14 @@ _SECRET_VARS = ("HAVERSACK_TOKEN",)
 # Base image (the ASGI api container + the nnU-Net GPU Worker). uv-NATIVE: the nnU-Net
 # worker's deps come from pyproject extras - `torch` (torch/nnunetv2/scipy/scikit-image),
 # `serve` (fastapi/uvicorn/python-multipart/matplotlib), `cuda` (triton,
-# the CUDA restore backend). The inference stack itself is core (torch, nnunetv2, scipy,
+# the CUDA restore backend), `duckn` (rankfield/zarr/duckn: the worker writes ranked stores,
+# and the api keys them on the formats they are written in - ranked_output.ranked_tag). The inference stack itself is core (torch, nnunetv2, scipy,
 # scikit-image, all from PyPI). apt git: uv sync resolves the whole project's lock, which
 # touches the engine git sources.
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
-    .uv_sync(extras=["torch", "serve", "cuda"], frozen=False)
+    .uv_sync(extras=["torch", "serve", "cuda", "duckn"], frozen=False)
     .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
     .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
 )
@@ -1476,6 +1477,8 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             return
         from haversack.serve import run_name
         embedding = meta.get("kind") == "embed"
+        ranked = meta.get("kind") == "ranked"
+        not_labels = embedding or ranked      # no label file, no deliverables, a kind on record
         # per-container weights provisioning (engine's own), under the caller's pin if any
         ctx._ensure(run_name(meta["task"], meta.get("version")))
         entries = meta.get("source") or [{"kind": "upload"}]
@@ -1574,12 +1577,15 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             else:
                 input_path = _stage_uploads(ctx, jdir, local)[0]
         from haversack.serve import OUTPUT_OF_KIND, RESULT_NAME, ResultCache, reference_input
-        name = OUTPUT_OF_KIND["embed"] if embedding else RESULT_NAME
+        name = OUTPUT_OF_KIND.get(meta.get("kind") or "segment", RESULT_NAME)
         local.mkdir(parents=True, exist_ok=True)
         if embedding:
             # the encoder writes its field itself, from the staged FILE (never a pre-read
             # image), and records the job's identity (encoders.serving.input_record)
             s = ctx._embed(input_path, meta, local / name, on_progress, token)
+        elif ranked:
+            # the task's store, written by this worker's own runner (2026-09-24)
+            s = ctx._ranked(input_path, meta, local / name, on_progress, token)
         else:
             s = ctx._compute(input_path, meta, on_progress, token)
         # Asked once more before anything is saved or published, as the local server
@@ -1596,7 +1602,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         # the local file, which no reload in another thread can hide.
         import shutil
         labels = local / name
-        if not embedding:
+        if not not_labels:
             s.save(labels)
         with ctx._vol_lock:
             jdir.mkdir(parents=True, exist_ok=True)
@@ -1605,6 +1611,9 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         if embedding:
             from haversack.encoders.serving import field_payload
             result = field_payload(s, labels)
+        elif ranked:
+            from haversack.serve import ranked_payload
+            result = ranked_payload(s, labels)
         else:
             from haversack.serve import result_payload
             result = result_payload(s, labels)
@@ -1629,7 +1638,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
         # worker still warm from the previous deploy may have another. A record with no
         # list is a previous deploy's, or a path-surface ask: the deployment's set.
         from haversack.jobpolicy import unkeyed_deliverables, wanted_deliverables
-        wanted = () if embedding else wanted_deliverables(meta.get("deliverables"), ARTIFACTS)
+        wanted = () if not_labels else wanted_deliverables(meta.get("deliverables"), ARTIFACTS)
         # no key, no entry, nothing to render into: said on the record before `done`,
         # as the local executor does, so `links` never names what no door serves
         unkeyed = unkeyed_deliverables(wanted, meta.get("cache_key"))
@@ -1652,7 +1661,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
                     key, labels, result,
                     {"identity": meta.get("input_identity"), "task": meta["task"],
                      "options": meta.get("options"), "job": jid,
-                     "computed": started, **({"kind": "embed"} if embedding else {})},
+                     "computed": started, **({"kind": meta["kind"]} if not_labels else {})},
                     output_name=name)
                 cache_vol.commit()
             return gen
@@ -1678,7 +1687,7 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             migrate_key=_migrate, set_pending=_set_pending,
             clear_pending=_clear_pending, put=_put,
             mark_done=_mark_done, start_worker=_start,
-            **({"kind": "embed"} if embedding else {}))
+            **({"kind": meta["kind"]} if not_labels else {}))
     except Cancelled:
         _emit(jid, {"state": "cancelled", "finished": time.time()})
         _clear_own_artifacts_marker(jid, meta)
@@ -1814,6 +1823,25 @@ class _WorkerBase:
         """An embedding job's work; only ``EmbedWorker`` has one (the spawn routes by kind)."""
         raise NotImplementedError(f"the {self.engine} worker runs no embedding jobs")
 
+    def _ranked_run(self, token):
+        """The segmentation a ranked job runs through - ``run(image, task, probabilities=...,
+        progress=..., **kw)`` - or NotImplementedError for an engine whose runner hands over no
+        distribution (the submit door refuses its tasks first: ranked_output.supports_store_output)."""
+        raise NotImplementedError(f"the {self.engine} worker writes no ranked stores")
+
+    def _ranked(self, input_path, meta, out, on_progress, token):
+        """A ranked job's work (2026-09-24): the task's store at ``out``, through this worker's
+        own runner (``_ranked_run``), naming its input by the job's identity. Returns the
+        Segmentation the run produced, whose names and provenance the record carries."""
+        from haversack.ranked_output import segment_to_store
+        from haversack.serve import run_name
+        ident = (meta.get("input_identity") or [None])[0]
+        source = {"type": "image", "identifier": str(ident)} if ident else None
+        seg, _ = segment_to_store(input_path, run_name(meta["task"], meta.get("version")), out,
+                                  case=meta["id"], source=source, quiet=True,
+                                  run=self._ranked_run(token), progress=on_progress)
+        return seg
+
     @modal.method()
     def run_job(self, jid: str, source_tokens: dict | None = None) -> None:
         try:
@@ -1896,6 +1924,10 @@ class Worker(_WorkerBase):
         return self.seg.segment(input_path, run_name(meta["task"], meta.get("version")),
                                 progress=on_progress,
                                 cancel=token, **(meta.get("options") or {}))
+
+    def _ranked_run(self, token):
+        # the warm Segmenter a segmentation uses, with the ranked sink handed through
+        return lambda image, task, **kw: self.seg.segment(image, task, cancel=token, **kw)
 
 
 if EMBED:
@@ -2111,6 +2143,9 @@ class ModalExecutor:
     #: ``HAVERSACK_EMBED=1`` (an ``EmbedWorker``). The submit door asks this and refuses
     #: with 501 before any job exists otherwise.
     embeds = EMBED
+    #: ``kind=ranked`` jobs run here (2026-09-24): on the task's own worker, whose image carries
+    #: the duckn extra (the nnU-Net worker's base image and FastSurfer's).
+    ranked_stores = True
     #: The api container holds no encoder weights: ``/v1/encoders`` says None, not False.
     encoder_weights_visible = False
 
@@ -2304,10 +2339,12 @@ class ModalExecutor:
                identity=(), no_cache: bool = False, source_tokens=None,
                inputs: tuple = (), refresh_input: bool = False,
                version: str | None = None, deliverables=None, kind: str = "segment"):
-        if kind != "segment" and not (kind == "embed" and self.embeds):
+        if kind != "segment" and not ((kind == "embed" and self.embeds)
+                                      or (kind == "ranked" and self.ranked_stores)):
             # the route asks `embeds` first; this is the second line, for a caller that did not
             raise ValueError(f"this deployment runs no {kind!r} jobs")
         embedding = kind == "embed"
+        not_labels = kind != "segment"         # an embedding field or a ranked store
         # `deliverables` is the request's list (None: it named none). It is written on
         # the job's record - which the worker reads ONCE, when the job starts, so the
         # list reaches it with no Dict read of its own - and it never reaches
@@ -2322,7 +2359,7 @@ class ModalExecutor:
         # through a Dict to another container would be sending it a lie.
         from haversack.jobpolicy import wanted_deliverables
         from haversack.serve import result_key
-        wanted = () if embedding else wanted_deliverables(deliverables, ARTIFACTS)
+        wanted = () if not_labels else wanted_deliverables(deliverables, ARTIFACTS)
         with self.volume_guard:
             # Make any upload visible to the worker - and only then: a commit was
             # 0.67 s of every submit's 1.48 (2026-09-19), paid by idc:/input: jobs
@@ -2336,9 +2373,10 @@ class ModalExecutor:
                 scratch_vol.commit()
         key = None
         if identity:
-            # the kind only for an embedding job: a segmentation's calls are exactly as they were
+            # the kind only when it is not a segmentation: a segmentation's calls are exactly
+            # as they were
             key = (result_key(identity, task, options, self._fresh_weights_versions(task, kind),
-                              kind=kind) if embedding
+                              kind=kind) if not_labels
                    else result_key(identity, task, options, self._fresh_weights_versions(task)))
             if not no_cache:
                 hit = self.cache_get(key)
@@ -2352,7 +2390,7 @@ class ModalExecutor:
                             "result": hit[1],
                             "cache_path": str(Path(CACHE_ROOT) / key
                                               / Path(hit[0]).parent.name / Path(hit[0]).name),
-                            **({"kind": "embed"} if embedding else {}),
+                            **({"kind": kind} if not_labels else {}),
                             # the handle the job result route resolves - and leases -
                             # the entry by; cache_path names one generation, which a
                             # later publication of the key lets pruning reclaim
@@ -2371,7 +2409,7 @@ class ModalExecutor:
                 "input_identity": list(identity), "cache_key": key,
                 "deliverables": list(wanted),
                 "refresh_input": bool(refresh_input),
-                **({"kind": "embed"} if embedding else {}),
+                **({"kind": kind} if not_labels else {}),
                 # the caller's pin: the worker runs run_name(task, version), so its
                 # catalog installs that version or refuses it (see serve.run_name)
                 **({"version": version} if version else {}),
@@ -2381,7 +2419,7 @@ class ModalExecutor:
         # installed version (see LocalExecutor.submit); the worker's re-key installs one
         if key and not (version and no_cache):
             jobs_dict[f"inflight:{key}"] = jid
-        call = (_spawn_worker(task, jid, source_tokens, kind=kind) if embedding
+        call = (_spawn_worker(task, jid, source_tokens, kind=kind) if not_labels
                 else _spawn_worker(task, jid, source_tokens))
         _emit(jid, {"call_id": call.object_id})   # merge, never clobber worker emits
         return meta
@@ -2471,8 +2509,8 @@ class ModalExecutor:
                 # that declined it
                 "deliverables", "deliverables_unavailable")
         d = {k: meta.get(k) for k in keys if meta.get(k) is not None}
-        if meta.get("kind") == "embed":
-            d["kind"] = "embed"               # as the local executor says it, and only then
+        if meta.get("kind") in ("embed", "ranked"):
+            d["kind"] = meta["kind"]          # as the local executor says it, and only then
         if meta.get("state") == "done" and meta.get("result") is not None:
             d["result"] = meta["result"]
         return d
@@ -2528,7 +2566,7 @@ class ModalExecutor:
         meta = jobs_dict.get(jid)
         if meta is None:
             return None, None
-        name = OUTPUT_OF_KIND["embed"] if meta.get("kind") == "embed" else RESULT_NAME
+        name = OUTPUT_OF_KIND.get(meta.get("kind") or "segment", RESULT_NAME)
         if meta.get("cache_path"):
             p = Path(meta["cache_path"])
             _reload_cache_view()

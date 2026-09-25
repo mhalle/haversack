@@ -45,7 +45,8 @@ def _fs_image():
     fs_image = (
         modal.Image.debian_slim(python_version="3.12")
         .apt_install("git")                       # uv needs git for the git source in pyproject
-        .uv_sync(extras=["fastsurfer"], frozen=False)
+        # duckn (rankfield, zarr, duckn): this worker writes FastSurfer's ranked stores
+        .uv_sync(extras=["fastsurfer", "duckn"], frozen=False)
         .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack", copy=True)
     )
     if _FS_CKPT:
@@ -98,6 +99,13 @@ class FastSurferWorker(_WorkerBase):
         # (memory-in, decode-once) or a path otherwise; segment() takes both
         # and writes no temp files (model is cached across jobs on this worker).
         return fastsurfer.segment(input_path, device="cuda")
+
+    def _ranked_run(self, token):
+        # FastSurfer hands its pre-argmax field to the ranked sink (engines/fastsurfer); its
+        # runner takes no progress or cancel, as _compute's does not
+        from haversack.engines import fastsurfer
+        return lambda image, task, *, probabilities=None, **kw: fastsurfer.segment(
+            image, device="cuda", probabilities=probabilities)
 
 
 #: What the composer in modal_app imports.
