@@ -395,3 +395,14 @@ compressible case. M2, 8 cores, warm page cache, reads the median of 5, every re
   would change the image the reader produces, which a copy must not do.
 - The compressed read costs 2-3x the mapped one here, which in seconds is 0.01-0.2 s on these
   sets and 0.2 s on the large CT; on Modal the same CT's difference was 0.3-0.5 s.
+
+**Every engine image can read a compressed copy (2026-09-25).** Reading one needs zarr, which the
+SynthStrip image could not take while synthstrip-torch pinned numpy<2. synthstrip-torch 0.1.1
+drops the cap (surfa at upstream's unreleased NumPy 2 fix, `8aa4a5f6`; on CPU, bit-identical to
+numpy 1.26 with surfa 0.6.3), and the SynthStrip image takes the `duckn` extra. Smoke
+`haversack-sst-smoke` (L40S, compression on; torn down): the worker ran numpy 2.5.3, surfa at the
+fix, synthstrip-torch 0.1.1, zarr 3.4.0; the ds000114 T1 from OpenNeuro and the same T1 uploaded
+(stored compressed, 7.0 MB) each computed, and their masks agreed voxel for voxel - 1,282 mL, the
+figure the 2026-09-12 smoke gave - and with the CPU numpy<2 mask to Dice 0.99999 (16 voxels).
+VoxTell's and MONAI's images still lack zarr: with compression on, an upload they read must be
+stored uncompressed, or they must take zarr first.
