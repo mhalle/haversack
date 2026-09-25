@@ -40,6 +40,25 @@
   the `duckn` extra (as a data dictionary: SimpleITK's tag keys to keywords); every Modal image
   that stores inputs carries the extra, and one without it still reads uncompressed copies.
   `docs/input-copy.md` is the specification.
+- **Fixes from the 2026-09-25 server review** (four adversarial reviewers, one black-box against
+  the live deployment; each fix pinned by a test that fails on 9c69466, 10 of 10 mutants killed):
+  - On Modal a submit of a key already computing JOINS that job, as the local server does and as
+    SERVER.md says; it used to start a second computation and publish the key twice (seen on the
+    live deployment). The in-flight marker is claimed atomically (`modal.Dict.put(...,
+    skip_if_exists=True)`), so two api containers cannot both win; a flight is joined only with
+    the same source credentials (recorded as a digest, never the token); what a joiner asks
+    rendered joins a queued job's list; and a joiner's DELETE releases the flight rather than
+    cancelling it for the others.
+  - An upload job's input resolves only from a committed store entry: one evicted after the
+    submit, being written again by a re-upload of the same bytes, was handed to the job half
+    written, and its labels published under the whole content's key. The job now fails naming
+    the fix (send the bytes again).
+  - `PUT` and `POST /v1/inputs` store off the event loop: the input copy made the store's adopt a
+    whole-volume decode, compression and verify, which stalled every other request to the
+    container for the length of it.
+  - A series the reader fails on with something other than a refusal (SimpleITK's error on
+    slices of different sizes) keeps its original, as before the input copy: it had been thrown
+    away - a fetched input downloaded again on every job, an upload answered 500.
 - **The kind is `rankfield`** (named for rankfield's own object, a `RankField`, as the other
   kinds are named for what they return): `kind=rankfield`, `rankfield.duckn.zip`,
   `GET /v1/rankfields`, `links.rankfield`, `haversack remote rankfields`, and the key tag

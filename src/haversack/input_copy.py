@@ -270,7 +270,7 @@ def transcode(content, entry, *, source=None, source_digest=None) -> Path | None
     """Write ``entry``'s copy of ``content`` and return its path - or None, when the input is
     not one to transcode (:func:`wanted`), the reader refuses it, or the copy does not read back
     as exactly what the reader produced; the caller then keeps the original. Verified before it
-    is placed: voxels, geometry and the series tags, read back through :func:`read_copy`."""
+    is placed: voxels, pixel type and geometry, read back through :func:`read_copy`."""
     import numpy as np
     import SimpleITK as sitk
 
@@ -282,6 +282,15 @@ def transcode(content, entry, *, source=None, source_digest=None) -> Path | None
         image, per_slice = nio.read_image_and_tags(content)
     except InputError:
         return None                          # refused: the original stays, and fails at read
+    except Exception as e:                   # noqa: BLE001 - review, 2026-09-25
+        # Not only a refusal: SimpleITK raises a bare RuntimeError on, e.g., slices of
+        # different sizes. That escaped this function, the cache tore the entry down, and a
+        # fetched input was downloaded again on every job (an upload was a 500) - where
+        # before the copy it was kept and failed at read. Keep the original, and say why.
+        import sys
+        print(f"warning: no input copy for {source or content}: the reader failed "
+              f"({type(e).__name__}: {e}); the original is kept", file=sys.stderr, flush=True)
+        return None
     final = copy_path(entry)
     final.parent.mkdir(parents=True, exist_ok=True)
     partial = final.with_name("." + COPY_NAME + ".partial")

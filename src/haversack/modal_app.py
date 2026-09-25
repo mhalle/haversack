@@ -1276,6 +1276,17 @@ def _sweep_jobs_store(current_jid: str, vol_lock=None) -> None:
                     del jobs_dict[k]
                 except Exception:
                     pass
+        elif k.startswith("joiners:"):         # a flight's rider count (2026-09-25):
+            jid = k[len("joiners:"):]          # nothing to count once it has landed
+            rec = records.get(jid)
+            if rec is None and jid not in gone:
+                rec = jobs_dict.get(jid)       # items() is not atomic: re-read before dropping
+                rec = rec if isinstance(rec, dict) else None
+            if jid in gone or rec is None or rec.get("state") in _TERMINAL:
+                try:
+                    del jobs_dict[k]
+                except Exception:
+                    pass
         elif k.startswith("cancel:"):
             if now - float(v or 0) <= 900:
                 continue
@@ -2160,6 +2171,26 @@ def _spawn_worker(task: str, jid: str, source_tokens=None, kind: str = "segment"
     return workers[engine]().run_job.spawn(jid, source_tokens=source_tokens)
 
 
+def _tokens_id(tokens) -> str | None:
+    """A digest naming a request's source credentials, or None for none - what the jobs Dict
+    records so a submit can tell whether it may ride a flight, without storing a credential."""
+    if not tokens:
+        return None
+    import hashlib
+    import json as _json
+    return hashlib.sha256(_json.dumps(tokens, sort_keys=True, default=str)
+                          .encode()).hexdigest()[:32]
+
+
+def _claim(key: str, value) -> bool:
+    """Put ``key`` only if absent - atomically, on a real modal.Dict (``skip_if_exists``,
+    Modal >= 1.x); a plain dict double answers with setdefault."""
+    put = getattr(jobs_dict, "put", None)
+    if put is not None:
+        return bool(put(key, value, skip_if_exists=True))
+    return jobs_dict.setdefault(key, value) == value
+
+
 class ModalExecutor:
     """The :func:`haversack.serve.create_app` executor protocol over Modal primitives."""
 
@@ -2428,9 +2459,23 @@ class ModalExecutor:
                         meta["deliverables_unavailable"] = unavailable
                     jobs_dict[jid] = meta
                     return meta
+        tokens_id = _tokens_id(source_tokens)
+        joinable = bool(key) and not no_cache and not (version and no_cache)
+        if joinable:
+            # Single flight (review, 2026-09-25): an identical key already computing is
+            # JOINED, as the local executor does and SERVER.md says. This executor never
+            # looked, so a second submit 23 s after the first computed and published the
+            # same key again on the live deployment.
+            other = self._join_flight(key, tokens_id, wanted)
+            if other is not None:
+                self._discard_job_dir(jdir)
+                return other
         meta = {"id": jid, "task": task, "options": options,
                 "source": list(source or [{"kind": "upload"}]),
                 "input_identity": list(identity), "cache_key": key,
+                # which source credentials fetched this flight - a digest, never the
+                # tokens: a caller without them must not ride a flight that used them
+                "tokens_id": tokens_id,
                 "deliverables": list(wanted),
                 "refresh_input": bool(refresh_input),
                 **({"kind": kind} if not_labels else {}),
@@ -2442,11 +2487,54 @@ class ModalExecutor:
         # no marker for a pin the API could not verify: it is keyed on an UNKNOWN
         # installed version (see LocalExecutor.submit); the worker's re-key installs one
         if key and not (version and no_cache):
-            jobs_dict[f"inflight:{key}"] = jid
+            marker = f"inflight:{key}"
+            if not _claim(marker, jid):
+                # another submit claimed the key between our look and our claim (two api
+                # containers, or two threads): ride its flight if it is live, else the
+                # marker is a dead or finished flight's, and this job takes it over
+                other = self._join_flight(key, tokens_id, wanted) if joinable else None
+                if other is not None:
+                    try:
+                        del jobs_dict[jid]
+                    except Exception:          # noqa: BLE001 - a leftover record is harmless
+                        pass
+                    self._discard_job_dir(jdir)
+                    return other
+                jobs_dict[marker] = jid
         call = (_spawn_worker(task, jid, source_tokens, kind=kind) if not_labels
                 else _spawn_worker(task, jid, source_tokens))
         _emit(jid, {"call_id": call.object_id})   # merge, never clobber worker emits
         return meta
+
+    def _join_flight(self, key, tokens_id, wanted):
+        """The live job computing ``key`` with the same source credentials, joined - its
+        record, as a submit answers - or None. A joiner is counted (``joiners:<jid>``) so
+        one caller's DELETE leaves the flight instead of cancelling it for the others, and
+        what it asked rendered joins the job's list while the job is still queued (the
+        worker reads the list once, when it starts)."""
+        other = self.find_inflight(key)
+        if other is None:
+            return None
+        meta = jobs_dict.get(other) or {}
+        if meta.get("tokens_id") != tokens_id:
+            return None
+        jobs_dict[f"joiners:{other}"] = int(jobs_dict.get(f"joiners:{other}") or 0) + 1
+        if meta.get("state") == "queued" and wanted:
+            from haversack.jobpolicy import wanted_deliverables
+            both = set(meta.get("deliverables") or ()) | set(wanted)
+            if both != set(meta.get("deliverables") or ()):
+                _emit(other, {"deliverables": list(wanted_deliverables(both, ARTIFACTS))})
+        return jobs_dict.get(other) or meta
+
+    def _discard_job_dir(self, jdir):
+        """A joined submit's own job directory: nothing will read it. An upload in it is
+        the same bytes the flight already has."""
+        import shutil
+        with self.volume_guard:
+            had = Path(jdir).exists() and any(Path(jdir).iterdir())
+            shutil.rmtree(jdir, ignore_errors=True)
+            if had:
+                scratch_vol.commit()
 
     def cache_get(self, key):
         from haversack.serve import ResultCache
@@ -2563,6 +2651,12 @@ class ModalExecutor:
             return None, False
         state = meta.get("state")
         if state in ("queued", "running"):
+            joiners = int(jobs_dict.get(f"joiners:{jid}") or 0)
+            if joiners > 0:
+                # several callers ride this flight: one leaving must not end it for the
+                # others - the last DELETE is the one that cancels (as LocalExecutor)
+                jobs_dict[f"joiners:{jid}"] = joiners - 1
+                return "released", False
             call_id = meta.get("call_id")
             if call_id:
                 try:

@@ -177,9 +177,14 @@ def _post(client, deliverables="absent", expect=202):
 def test_the_list_is_on_the_record_the_worker_reads_and_never_in_the_key(monkeypatch,
                                                                          tmp_path):
     m, jobs, vol, ex, client, spawned = _api(monkeypatch, tmp_path)
-    a = _post(client, ["statistics"])
-    b = _post(client, [])
-    c = _post(client)
+    # one key three times: each job lands before the next ask, or the next JOINS it (a
+    # submit joins a flight since 2026-09-25 - this test used to expect three computations)
+    def landed(j):
+        jobs[j["id"]] = {**jobs[j["id"]], "state": "done", "result": {}}
+        return j
+    a = landed(_post(client, ["statistics"]))
+    b = landed(_post(client, []))
+    c = landed(_post(client))
     assert jobs[a["id"]]["deliverables"] == ["statistics"]
     assert jobs[b["id"]]["deliverables"] == []
     assert jobs[c["id"]]["deliverables"] == ["preview", "statistics"]
@@ -188,7 +193,6 @@ def test_the_list_is_on_the_record_the_worker_reads_and_never_in_the_key(monkeyp
     assert len(keys) == 1 and None not in keys, keys
     assert all("deliverables" not in json.dumps(jobs[j["id"]]["options"]) for j in (a, b, c))
     # the status route reports it, and builds `links` from it
-    jobs[a["id"]] = {**jobs[a["id"]], "state": "done", "result": {}}
     s = client.get(f"/v1/jobs/{a['id']}").json()
     assert s["deliverables"] == ["statistics"]
     assert "statistics" in s["links"] and "preview" not in s["links"]

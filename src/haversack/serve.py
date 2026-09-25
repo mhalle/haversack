@@ -3419,6 +3419,13 @@ class LocalExecutor:
         digest = str(entry.get("id") or entry.get("sha256") or "")
         self.content.pin(digest)
         pinned.append(digest)
+        # Held NOW, after the pin (review, 2026-09-25): the submit checked, but the entry
+        # can be evicted before dispatch, and a re-upload of the same bytes may be writing
+        # it at this moment - resolving then handed the job a half-written series, whose
+        # labels were published under the whole content's key.
+        if not self.content.has(digest):
+            raise InputError(f"{digest} is no longer held by this server (evicted after "
+                             "the job was accepted); send the bytes again")
         return self.content.fast_path(digest)     # decoded copy when there is one
 
     def _stage_many(self, rec, entries, reporter, pinned: list) -> dict:
@@ -4480,7 +4487,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(422, {
                 "code": "bad_digest",
                 "message": f"expected {content.BLOB}<hex> or {content.TREE}<hex>"})
-        if store.has(digest):
+        # off the event loop: on a shared store a miss refreshes the backing volume
+        if await asyncio.to_thread(store.has, digest):
             return {"digest": digest, "stored": False, "reason": "already held"}
         if digest.startswith(content.TREE):
             raise HTTPException(422, {
@@ -4510,7 +4518,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             # caller asserts is not evidence, and a blob nothing can open is not
             # worth storing.
             try:
-                store.put_file(tmp, computed=actual)
+                # off the event loop (review, 2026-09-25): the adopt now decodes,
+                # compresses and verifies the volume (the input copy)
+                await asyncio.to_thread(store.put_file, tmp, computed=actual)
             except content.UnidentifiedContent as e:
                 raise HTTPException(422, {"code": "unknown_format",
                                           "message": str(e)}) from e
@@ -4569,7 +4579,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 raise HTTPException(409, {
                     "code": "not_done",
                     "message": f"job {from_job!r} is {state}; nothing to promote"})
-            digest = store.put_file(path, expect=expect)
+            digest = await asyncio.to_thread(store.put_file, path, expect=expect)
             return {"digest": digest, "kind": "blob", "members": 1, "stored": True,
                     "bytes": Path(path).stat().st_size, "from_job": str(from_job)}
         # multi_items(), not values(): a form is a MULTIdict, and several
@@ -4593,56 +4603,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 with open(staged / f"{i}_{name}", "wb") as f:
                     while chunk := await up.read(1 << 20):
                         f.write(chunk)
-            files = sorted(staged.iterdir())
-            # One zip is an ARCHIVE of members, not a member itself - unpack it
-            # unless the caller explicitly asked for a blob.
-            def _is_zip(path):
-                # four bytes, not the whole upload: this runs on every
-                # single-part POST, on an async route, against a file that may
-                # sit on a network volume
-                with open(path, "rb") as f:
-                    return f.read(4) == b"PK\x03\x04"
-
-            if len(files) == 1 and kind != "blob" and _is_zip(files[0]):
-                unpacked = work / "unpacked"
-                try:
-                    files = sorted(content.extract_zip(files[0], unpacked))
-                except content.ArchiveError as e:
-                    raise HTTPException(422, {"code": "bad_archive",
-                                              "message": str(e)}) from e
-                staged = unpacked
-            as_tree = kind == "tree" or (kind is None and len(files) > 1) or \
-                staged.name == "unpacked"
-            if not as_tree:
-                digest = content.digest_file(files[0])
-                already = store.has(digest)     # honest about a no-op adopt
-                store.put_file(files[0], expect=expect, computed=digest)
-                return {"digest": digest, "kind": "blob", "members": 1,
-                        "stored": not already, "bytes": files[0].stat().st_size}
-            # Refuse a mixed folder rather than pick a series out of it: reading
-            # "the" series when there are two means choosing one, and choosing
-            # silently is how a plausible, wrong segmentation gets produced.
-            from haversack.io import dicom_series_ids
-            series = dicom_series_ids(staged)
-            if len(series) > 1:
-                raise HTTPException(422, {
-                    "code": "multiple_series",
-                    "message": f"these {len(files)} files hold {len(series)} DICOM "
-                               "series; submit one series per input",
-                    "series_instance_uids": sorted(series)})
-            # What it IS, not what the request called it: `put_dir` stores a
-            # one-file directory as a blob, so that a one-member zip and the same
-            # bytes sent loose are one identity. Ask for the digest first so the
-            # `stored` flag is honest about a no-op adopt.
-            digest = (content.digest_file(files[0]) if len(files) == 1
-                      else content.digest_dir(staged))
-            already = store.has(digest)
-            store.put_dir(staged, expect=expect)
-            return {"digest": digest,
-                    "kind": "blob" if len(files) == 1 else "tree", "members": len(files),
-                    "stored": not already,
-                    "bytes": sum(p.stat().st_size for p in files),
-                    "series_instance_uid": series[0] if series else None}
+            # Everything after the bytes land runs OFF the event loop (review, 2026-09-25):
+            # hashing, unzipping, series detection and the store's adopt - which since the
+            # input copy decodes, compresses and verifies the whole volume, tens of seconds
+            # for a large series, while every other request to this container waited.
+            return await asyncio.to_thread(_store_uploaded, work, staged, kind, expect)
         except content.DigestMismatch as e:
             raise HTTPException(422, {"code": "digest_mismatch",
                                       "declared": e.expected, "actual": e.actual,
@@ -4652,6 +4617,61 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                       "message": str(e)}) from e
         finally:
             _discard(work)
+
+    def _store_uploaded(work: Path, staged: Path, kind, expect) -> dict:
+        """``POST /v1/inputs``' work once its parts are on disk: one zip unpacked, the
+        content identified and digested, stored. Blocking by nature; its route runs it in a
+        thread."""
+        store = _store_or_404()
+        files = sorted(staged.iterdir())
+        # One zip is an ARCHIVE of members, not a member itself - unpack it
+        # unless the caller explicitly asked for a blob.
+        def _is_zip(path):
+            # four bytes, not the whole upload: this runs on every
+            # single-part POST, against a file that may sit on a network volume
+            with open(path, "rb") as f:
+                return f.read(4) == b"PK\x03\x04"
+
+        if len(files) == 1 and kind != "blob" and _is_zip(files[0]):
+            unpacked = work / "unpacked"
+            try:
+                files = sorted(content.extract_zip(files[0], unpacked))
+            except content.ArchiveError as e:
+                raise HTTPException(422, {"code": "bad_archive",
+                                          "message": str(e)}) from e
+            staged = unpacked
+        as_tree = kind == "tree" or (kind is None and len(files) > 1) or \
+            staged.name == "unpacked"
+        if not as_tree:
+            digest = content.digest_file(files[0])
+            already = store.has(digest)     # honest about a no-op adopt
+            store.put_file(files[0], expect=expect, computed=digest)
+            return {"digest": digest, "kind": "blob", "members": 1,
+                    "stored": not already, "bytes": files[0].stat().st_size}
+        # Refuse a mixed folder rather than pick a series out of it: reading
+        # "the" series when there are two means choosing one, and choosing
+        # silently is how a plausible, wrong segmentation gets produced.
+        from haversack.io import dicom_series_ids
+        series = dicom_series_ids(staged)
+        if len(series) > 1:
+            raise HTTPException(422, {
+                "code": "multiple_series",
+                "message": f"these {len(files)} files hold {len(series)} DICOM "
+                           "series; submit one series per input",
+                "series_instance_uids": sorted(series)})
+        # What it IS, not what the request called it: `put_dir` stores a
+        # one-file directory as a blob, so that a one-member zip and the same
+        # bytes sent loose are one identity. Ask for the digest first so the
+        # `stored` flag is honest about a no-op adopt.
+        digest = (content.digest_file(files[0]) if len(files) == 1
+                  else content.digest_dir(staged))
+        already = store.has(digest)
+        store.put_dir(staged, expect=expect)
+        return {"digest": digest,
+                "kind": "blob" if len(files) == 1 else "tree", "members": len(files),
+                "stored": not already,
+                "bytes": sum(p.stat().st_size for p in files),
+                "series_instance_uid": series[0] if series else None}
 
     @app.get("/v1/health", tags=["service"])
     def health():
@@ -5690,7 +5710,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 raise
             # the executor may have joined this ask to an identical flight already
             # running: the status it answers with is that job's, under its id
-            return executor.status_of(getattr(rec, "id", None) or jid)
+            rid = (rec.get("id") if isinstance(rec, dict) else getattr(rec, "id", None)) or jid
+            return executor.status_of(rid)
 
         # In a worker thread, never on the event loop: ModalExecutor's submit is a
         # dozen blocking RPCs (Dict writes, a spawn, a volume reload), and run inline

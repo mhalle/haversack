@@ -177,8 +177,11 @@ class ContentStore:
         SimpleITK - so guessing from the entry's shape would turn a one-slice
         series into a single-file read.
         """
-        if not self.cache.has(digest):
-            self.has(digest)               # refresh a shared store before failing
+        # Only a COMMITTED entry (review, 2026-09-25): this used to refresh and carry on
+        # to the path either way, so an evicted entry that a re-upload was writing handed
+        # its reader a half-written series.
+        if not self.has(digest):           # refreshes a shared store before failing
+            raise FileNotFoundError(f"{digest} is not held by this store")
         content = self.cache.path(digest)
         if content.is_file():
             # the input copy the cache keeps INSTEAD of the uploaded bytes (docs/input-copy.md):
