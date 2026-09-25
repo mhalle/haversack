@@ -9,15 +9,18 @@ A job reads its input every time it runs. For a DICOM series that is a full deco
 slice, whether the same series was read a minute earlier or not: on the 709-slice CPTAC-CCRCC CT
 `idc:a05fb365-dfd2-4116-ab8e-a7262d2c169c` the decode is 13 s on a Modal worker - most of a warm
 `ts.v2:total_fast` job - and a fresh container reading a series another container cached paid
-45 s. The input copy is the input decoded once, kept beside the original in the cache that
-already holds it, and read instead of it from then on.
+45 s. The input copy is the input decoded once, when the cache stores it, and kept INSTEAD of
+the original: an entry holds one form or the other, never both.
 
-It is **pure cache**. It is derived from the original, never replaces it, never changes what a
-job computes, and losing it costs one decode and never an answer. The original stays because
-the recorded digest (`.input.json`) and every DICOM fact are about the original's bytes.
+It never changes what a job computes (§8). The original's facts - its digest, its DICOM
+identifiers - are recorded when it is fetched or uploaded (`.input.json`, the content store's
+digest-named entry) and survive it; its bytes do not (§7a lists what that costs).
 
 ## 2. Decisions
 
+- **One form per entry.** When the reader accepts the input, the entry keeps the copy and the
+  original is deleted; when it does not (uneven spacing, an unreadable file), the entry keeps
+  the original as fetched, so the job's error is the reader's own and nothing is lost.
 - **Always on, never a request option.** The copy gives the network the same voxels and the
   same geometry as the original (§8), so it is not part of any result's identity, and a request
   option would split the cache over identical results. An operator may turn it off (§7).
@@ -113,11 +116,13 @@ Built through duckn's own models and serializer (`from_sitk`, `duckn_attrs`), ne
   {"kind": "input_copy", "version": 1,
    "source": "idc:a05fb365-dfd2-4116-ab8e-a7262d2c169c",
    "source_digest": "sha256-tree:…",
+   "reader_version": 1,
    "reader": {"haversack": "0.14.0", "SimpleITK": "2.x"}}
   ```
 
-  `source` and `source_digest` are the entry's own record (`.input.json`, or the content store's
-  digest); `version` is this document's format version, bumped when the file's meaning changes.
+  `source` and `source_digest` are the ORIGINAL's record (`.input.json`, or the content store's
+  digest) - kept because the original is not; `version` is this document's format version, bumped
+  when the file's meaning changes; `reader_version` is §7a's.
 
 ## 6. What the copy does not hold
 
@@ -130,31 +135,41 @@ Built through duckn's own models and serializer (`from_sitk`, `duckn_attrs`), ne
 
 ## 7. Writing and reading
 
-**Where.** Beside the original, in the entry that holds it, in both caches: the series cache
-(hosted sources: `idc:`, `tcia:`, `s3:`, …) and the content store (uploads and digests) - on the
-local server and on Modal. The content store's existing raw-NRRD copy (`content.nrrd`,
-`decode_for_fast_read`) is replaced by this one, so there is one form. The copy counts toward
-its cache's byte budget (as `ContentStore._restamp` does now) and is evicted with its entry.
+**Where.** In place of the original, in the entry that holds it, in both caches: the series
+cache (hosted sources: `idc:`, `tcia:`, `s3:`, …) and the content store (uploads and digests) -
+on the local server and on Modal. The content store's current raw-NRRD copy (`content.nrrd`,
+`decode_for_fast_read`), which sits BESIDE its original, goes: one form per entry. The entry's
+committed byte count is the copy's.
 
-**When.** Lazily, on the first read of an entry, as the content store does now: a preloaded
-input nobody runs never pays for a decode.
+**When.** When the entry is stored - a fetch completing, an upload being put - before the
+entry is committed: it is the only moment the original exists. (The content store decodes
+lazily today, so a preloaded input nobody runs pays nothing; now every stored input pays its
+decode once, at ingest - 13 s for the measured CT.)
 
-**Which inputs.** DICOM series, and single files whose read decompresses (`.nii.gz`,
-gzip-encoded NRRD). An input that is already raw and single (NRRD raw, MHA/MHD raw, an
-uncompressed duckn) is read as it is.
+**Which inputs.** Image inputs that are a DICOM series, or a single file whose read
+decompresses (`.nii.gz`, gzip-encoded NRRD). An input already raw and single (NRRD raw, MHA/MHD
+raw, an uncompressed duckn) is kept as it is - it is its own efficient form. **Label-map inputs
+are never converted** (a `result:` reference, an uploaded `.seg.nrrd`): their segment names and
+codes live in the file.
 
-**How it is written.**
+**How it is written** (inside the writer's claim on the entry, before `.done`):
 
-1. Read the original with `io.read_image` - the reference - and, for a series, the series
-   reader's per-slice dictionaries (`MetaDataDictionaryArrayUpdateOn()`; measured free).
-2. Write `decoded/.input.duckn.zip.partial` (§4, §5).
-3. Read it back with the mapped reader; compare the voxel digest, the geometry and the tags
-   with step 1. Any difference: delete it, warn once, keep reading the original.
-4. Rename into place; on Modal, commit under the volume lock the caches already use.
+1. Record the original's facts first, as today: the digest of the fetched or uploaded bytes and
+   the DICOM identifiers (`.input.json`); for an upload, the `expect` digest check.
+2. Read the original with `io.read_image` - the reference - and, for a series, the series
+   reader's per-slice dictionaries (`MetaDataDictionaryArrayUpdateOn()`; measured free). If the
+   reader refuses the input, stop: the entry keeps the original.
+3. Write `decoded/.input.duckn.zip.partial` (§4, §5).
+4. Read it back with the mapped reader; compare the voxel digest, the geometry and the tags
+   with step 2. Any difference: delete the copy, warn, and keep the original.
+5. Rename the copy into place, THEN delete the original (`series/`), then commit the entry (on
+   Modal, the volume commit under the lock the caches already use). A crash between the steps
+   leaves an uncommitted entry, which the cache already treats as nobody's and refetches.
 
-**How it is read.** Inside `io.read_image`, which every engine and door already goes through:
-the copy is used when it exists AND its `extensions.haversack.source_digest` equals the entry's
-current digest; otherwise the original is read (and the copy rewritten). The mapped reader:
+**How it is read.** The cache resolves an entry to whichever form it holds; `io.read_image`,
+which every engine and door already goes through, reads a copy with the mapped reader when its
+`extensions.haversack` says `input_copy` and its `reader_version` is current (§7a). The mapped
+reader:
 
 1. reads `zarr.json` and requires exactly §4: one regular chunk equal to the shape, the `bytes`
    codec alone, a stored member, a member size equal to the array's, no `value_transforms`, the
@@ -166,9 +181,25 @@ current digest; otherwise the original is read (and the copy rewritten). The map
    read would show them. Per-slice tags stay in the file; `input_copy.slice_tags(path, keyword)`
    returns one tag as a z-ordered list.
 
-**Invalidation.** A refetch (`no-cache`, `refresh_input`) rewrites the entry and so the copy; a
-digest mismatch is caught at read (above). Eviction and `cache clean` remove the entry with its
-copy. **Operator switch:** `HAVERSACK_INPUT_COPY=0` reads originals only (a disk-bound host).
+**Invalidation.** A refetch (`no-cache`, `refresh_input`) rewrites the entry. Eviction and
+`cache clean` remove it. **Operator switch:** `HAVERSACK_INPUT_COPY=0` stores originals only -
+the behavior before this change, for a host that wants the DICOM kept.
+
+### 7a. What keeping one form costs
+
+- **A reader fix cannot be re-applied from the cache.** The copy records `reader_version` (a
+  haversack counter, bumped whenever `io.read_image` would produce different voxels, geometry
+  or tags from the same bytes - the input-side analog of `CACHE_EPOCH`). A copy with another
+  version is stale: a hosted input is refetched from its source; an UPLOAD is treated as
+  evicted - the existing 410 `input_gone`, "send the bytes again" - because its bytes exist
+  nowhere else.
+- **What SimpleITK does not pass is gone from the cache:** sequences, private tags, binary
+  values. A consumer that needs the full DICOM header refetches the series from its archive.
+- **`get` cannot hand back the raw files from the cache**; asked for them, it refetches (hosted
+  sources only).
+- **The digest and DICOM facts are recorded, not re-derivable.** They were computed from the
+  original when it was stored and are kept; nothing can re-check them against bytes later.
+- **Disk:** one form, not two - 836 MB for the measured CT instead of 839 + 836.
 
 **Never served.** The copy is internal. It is not an output and has no route.
 
@@ -184,7 +215,10 @@ copy. **Operator switch:** `HAVERSACK_INPUT_COPY=0` reads originals only (a disk
 - **The reader's refusals.** Each §7 requirement violated in turn falls back to the generic
   path; an all-zero volume whose chunk zarr did not write falls back; a truncated file is never
   read (the rename protocol) and a size mismatch falls back.
-- **Binding.** A copy whose `source_digest` is not the entry's is not used.
+- **One form.** After a store the entry holds the copy and no `series/`; a refused or failed
+  conversion leaves the original and no copy; a crash mid-way leaves an uncommitted entry.
+- **Staleness.** A copy with another `reader_version` is not read: a hosted input is refetched,
+  an upload answers 410 `input_gone`.
 - **Tags.** Series-level tags round-trip to the image; per-slice tags come back in z order and
   in the spec's encoding; convention-captured tags are absent.
 - **Modal.** The write, lock and commit on the worker; a copy written by one container read by
@@ -205,8 +239,9 @@ In duckn (a release, then a pin bump here and in CI, with feldglas kept equal):
 
 ## 10. Open
 
-- Whether the Modal content store's copy is written by the api container (which stores uploads)
-  or by the worker on first read. Lazy-on-read puts it on the worker, under the worker's lock.
+- On Modal, uploads are stored by the api container, which would now convert them at upload
+  time (~13 s of CPU for the measured series, where it only hashes today) - or the api stores the
+  original and the worker converts it on first use, which keeps two forms until then.
 - Whether an input copy should ever be served - e.g. as a `get` output, where the copy is
   exactly what a client wants. Not for this change; if it is, patient-tag stripping comes with
   it (§2).
