@@ -123,8 +123,14 @@ def test_every_image_that_writes_or_keys_a_store_carries_the_duckn_extra():
     """The api keys a store on the formats it is written in (ranked_output.ranked_tag imports
     rankfield and duckn) and the nnU-Net worker writes it - one base image; FastSurfer's worker
     writes its own. A missing extra is a job that fails on the worker, or an api that cannot key."""
-    base = _extras_of_uv_syncs(SRC / "modal_app.py")
-    assert ["torch", "serve", "cuda", "duckn"] in base, base
+    images = _extras_of_uv_syncs(SRC / "modal_app.py")
+    # every image that answers a request (the api, its twin) or runs a worker carries `serve`,
+    # and every one of them keys a store or writes one: duckn directly, or through `embed`.
+    # The first version checked the worker's base image only, and the API's own image - a
+    # second uv_sync - shipped without it: a 500 on every ranked submit, found by deploying.
+    serving = [e for e in images if "serve" in e]
+    assert len(serving) >= 2, images
+    assert all(("duckn" in e or "embed" in e) for e in serving), serving
     fs = _extras_of_uv_syncs(SRC / "engines" / "modal_fastsurfer.py")
     assert fs and all("duckn" in e for e in fs), fs
 

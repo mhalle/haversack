@@ -245,10 +245,13 @@ image = (
 # engine extras. Whether it should get its leanness back - a `--no-deps` install of the
 # five names the README's "Lean install" lists - is an open question that wants a
 # cold-start measurement first, not a guess (2026-09-08).
+# `duckn` (2026-09-24): the api keys a ranked store on the formats it is written in -
+# ranked_output.ranked_tag reads rankfield's and duckn's - and the first deploy without it
+# answered every kind=ranked submit with a 500 (ModuleNotFoundError: duckn).
 api_image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")                       # uv sync resolves the whole lock (engine git sources)
-    .uv_sync(extras=["serve"], frozen=False)
+    .uv_sync(extras=["serve", "duckn"], frozen=False)
     .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
     .add_local_dir(_pkg_dir(), remote_path="/root/pkg/haversack")
 )
