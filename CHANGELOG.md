@@ -35,6 +35,12 @@
   surfa 0.6.3. The `synthstrip` extra leaves every uv conflict group, so it no longer needs its
   own environment, and SynthStrip's Modal image takes the `duckn` extra and reads compressed
   input copies. synthstrip-torch is marked unsupported: kept runnable, not developed.
+- VoxTell and the MONAI bundles are documented as experimental: off unless a deployment sets
+  `HAVERSACK_VOXTELL=1` / `HAVERSACK_MONAI=1` (as they already were - neither has an in-process
+  runner), Modal-only, heavy, and not maintained for general use. They showed the engine model
+  can carry a free-text prompter and a foreign model zoo; they are not what most users need.
+  A VISTA3D evaluation against TotalSegmentator (four CTs, median Dice 0.82-0.92, pelvic
+  structures reported on chest-only scans, non-commercial weights) found no case for adding it.
 
 - **A Modal deployment can take the local server's bearer token, and `haversack remote`
   reaches it.** `haversack modal deploy --token T`, or `HAVERSACK_SERVER_TOKEN` in its

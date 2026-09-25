@@ -487,8 +487,12 @@ uv pip install "haversack[synthstrip] @ git+https://github.com/mhalle/haversack"
 haversack segment t1.nii.gz --task synthstrip:mask -o mask.seg.nrrd
 ```
 
-FastSurfer and SynthStrip have in-process runners; VoxTell and the MONAI bundles run on
-Modal. FastSurfer's
+FastSurfer and SynthStrip have in-process runners. **VoxTell and the MONAI bundles are
+experimental and off unless a deployment asks for them** (`HAVERSACK_VOXTELL=1`,
+`HAVERSACK_MONAI=1` at `modal deploy`): both run only on Modal, both are heavy (VoxTell pulls
+an ~8 GB text model; MONAI's image carries every bundle's dependencies), and neither is
+maintained for general use - they showed the engine model can carry a free-text prompter and a
+foreign model zoo, not that most users should reach for them. FastSurfer's
 view-aggregation field is large (2.6 GB in half precision at 1 mm), so on Apple Silicon it
 stays in CPU memory unless the machine has 32 GB or more; 16 GB is tight for it. On Apple
 Silicon haversack caps PyTorch's MPS allocator at the device's recommended working set,
@@ -539,8 +543,8 @@ haversack remote embeddings --identity idc:<uuid>    # what it has cached, with 
 
 - Multi-channel nnU-Net inputs, region (sigmoid) heads, and the `3d_lowres`, cascade and `2d`
   configurations are not on the nnU-Net path.
-- VoxTell and the MONAI bundles have no in-process runner yet; they run on Modal.
-  FastSurfer and SynthStrip run locally from their own environments (above).
+- VoxTell and the MONAI bundles are experimental, opt-in, and Modal-only (above).
+  FastSurfer and SynthStrip run locally (above).
 - Versioning: `haversack.__version__` is haversack's own number and is what the server reports; the
   distribution's version belongs to the repository as a whole. It is deliberately NOT part of a
   cached result's key: a release that changes no model, no resampling and no encoding leaves
