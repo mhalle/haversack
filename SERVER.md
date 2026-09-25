@@ -346,7 +346,7 @@ anything the reader refuses. `GET /v1/inputs/{digest}` still describes what the 
 `members` and `bytes` of the upload - and adds `stored_form: "input_copy"`, `stored_compression`
 and `stored_bytes`. Copies are compressed (zstd through blosc with bit shuffling): 3-5x smaller
 than the raw volume for the CTs and MR measured, read in up to about a second.
-`HAVERSACK_INPUT_COPY_COMPRESSION=none` stores them uncompressed instead - the fastest read (a
+`HAVERSACK_INPUT_COPY_COMPRESSION=uncompressed` stores them uncompressed instead - the fastest read (a
 fraction of a second), at 3-5x the room, and readable without duckn or zarr, which the
 experimental VoxTell and MONAI images lack. `HAVERSACK_INPUT_COPY=0` keeps originals. The setting
 applies to copies written after it is set; a cache may hold both forms. On Modal, both variables are forwarded from the

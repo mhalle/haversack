@@ -100,7 +100,7 @@ def _same(a, b, exact=True):
 def mapped(monkeypatch):
     """The uncompressed, mapped form - not the default since 2026-09-25, so a test of its layout
     or of its duckn-free read asks for it."""
-    monkeypatch.setenv(ic.COMPRESSION_ENV, "none")
+    monkeypatch.setenv(ic.COMPRESSION_ENV, "uncompressed")
 
 
 def _nifti(path: Path, gz=True) -> Path:
@@ -482,12 +482,12 @@ def test_a_compressed_copy_has_its_own_layout_and_version(tmp_path, zstd):
 def test_either_form_reads_whatever_the_setting_says_now(tmp_path, monkeypatch):
     series = write_series(tmp_path / "s")
     ref = nio.read_image(series)
-    monkeypatch.setenv(ic.COMPRESSION_ENV, "none")
+    monkeypatch.setenv(ic.COMPRESSION_ENV, "uncompressed")
     plain = ic.transcode(series, tmp_path / "a")
     monkeypatch.setenv(ic.COMPRESSION_ENV, "zstd")
     packed = ic.transcode(series, tmp_path / "b")
-    assert (ic.stored_compression(plain), ic.stored_compression(packed)) == ("none", "zstd")
-    for setting in ("zstd", "none"):
+    assert (ic.stored_compression(plain), ic.stored_compression(packed)) == ("uncompressed", "zstd")
+    for setting in ("zstd", "uncompressed"):
         monkeypatch.setenv(ic.COMPRESSION_ENV, setting)
         for copy in (plain, packed):
             assert not ic.stale(copy) and _same(nio.read_image(copy), ref)
@@ -502,12 +502,12 @@ def test_an_unknown_setting_keeps_the_original(tmp_path, monkeypatch, capsys):
 
 def test_a_version_that_disagrees_with_the_layout_is_stale(tmp_path, zstd, monkeypatch):
     packed = ic.transcode(write_series(tmp_path / "s"), tmp_path / "a")
-    monkeypatch.setattr(ic, "FORMATS", {"none": 1, "zstd": 1})     # as a version-1 reader sees it
+    monkeypatch.setattr(ic, "FORMATS", {"uncompressed": 1, "zstd": 1})     # as a version-1 reader sees it
     assert ic.stale(packed)
-    monkeypatch.setattr(ic, "FORMATS", {"none": 2, "zstd": 2})
-    monkeypatch.setenv(ic.COMPRESSION_ENV, "none")
+    monkeypatch.setattr(ic, "FORMATS", {"uncompressed": 2, "zstd": 2})
+    monkeypatch.setenv(ic.COMPRESSION_ENV, "uncompressed")
     plain = ic.transcode(write_series(tmp_path / "t"), tmp_path / "b")
-    monkeypatch.setattr(ic, "FORMATS", {"none": 1, "zstd": 2})
+    monkeypatch.setattr(ic, "FORMATS", {"uncompressed": 1, "zstd": 2})
     assert ic.stale(plain)                                          # says 2, is a mapped chunk
 
 
@@ -525,10 +525,10 @@ def test_a_compressed_copy_missing_a_chunk_is_refused(tmp_path, zstd):
 
 def test_the_default_is_the_compressed_form(tmp_path, monkeypatch):
     """Compressed by default (2026-09-25): with the setting unset, a copy is the blosc-zstd
-    layout, and `none` still gives the mapped one."""
+    layout, and `uncompressed` still gives the mapped one."""
     monkeypatch.delenv(ic.COMPRESSION_ENV, raising=False)
     series = write_series(tmp_path / "s")
     assert ic.compression() == ic.DEFAULT_COMPRESSION == "zstd"
     assert ic.stored_compression(ic.transcode(series, tmp_path / "a")) == "zstd"
-    monkeypatch.setenv(ic.COMPRESSION_ENV, "none")
-    assert ic.stored_compression(ic.transcode(series, tmp_path / "b")) == "none"
+    monkeypatch.setenv(ic.COMPRESSION_ENV, "uncompressed")
+    assert ic.stored_compression(ic.transcode(series, tmp_path / "b")) == "uncompressed"

@@ -28,7 +28,7 @@
   whether or not it had been read a minute earlier. The series cache and the input store now keep
   each image input as its *input copy* instead of its files: the volume `io.read_image` produced,
   written once when the input is stored as a zarr zip (compressed by default - above; with
-  `HAVERSACK_INPUT_COPY_COMPRESSION=none`, one uncompressed chunk read by mapping it, 0.25 s for
+  `HAVERSACK_INPUT_COPY_COMPRESSION=uncompressed`, one uncompressed chunk read by mapping it, 0.25 s for
   the same CT), with duckn's geometry and the DICOM tags SimpleITK reports (series-level in
   `extensions.dicom`, per-slice in the slice axis' samples, in duckn's `dicom-spec` encoding) -
   voxels identical, geometry identical (within 1e-12 for a tilted series).
@@ -41,9 +41,9 @@
   that stores inputs carries the extra, and one without it still reads uncompressed copies.
   `docs/input-copy.md` is the specification.
 - **Input copies are compressed by default** (`HAVERSACK_INPUT_COPY_COMPRESSION`, default `zstd`;
-  `none` for the uncompressed form): the smallest form measured, at a read of up to about a second
+  `uncompressed` for the other form): the smallest form measured, at a read of up to about a second
   against the DICOM decode it replaces. The experimental VoxTell and MONAI images cannot read a
-  compressed copy (no zarr); a deployment that runs them sets `none`.
+  compressed copy (no zarr); a deployment that runs them sets `uncompressed`.
 - Input copies may be stored compressed: `HAVERSACK_INPUT_COPY_COMPRESSION=zstd` (zstd
   level 3 through blosc with bit shuffling, in 32-slice chunks). Across seven local datasets the
   copies were 3.1-5.8x smaller (the 709-slice CT 270 MB instead of 837 MB; int32 CTs 4.5-4.9x),

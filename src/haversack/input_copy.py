@@ -10,7 +10,7 @@ the chunks in parallel, with voxels and geometry identical. Compressed by defaul
 form's (0.3-0.9 s for that CT; docs/input-copy.md §13) - against the 13 s DICOM decode it
 replaces either way, and cache room is what a Modal worker's RAM series cache runs out of.
 
-``HAVERSACK_INPUT_COPY_COMPRESSION=none`` stores one uncompressed chunk instead, read by mapping
+``HAVERSACK_INPUT_COPY_COMPRESSION=uncompressed`` stores one uncompressed chunk instead, read by mapping
 it (0.15-0.25 s for that CT) - the fastest read, and one that needs neither duckn nor zarr.
 
 An entry holds one form: the copy, or - when the reader refuses the input, or anything about
@@ -47,7 +47,7 @@ KIND = "input_copy"
 FORMAT_VERSION = 1
 #: The file's format version by its compression: a compressed copy is a different layout, and a
 #: reader that knows only version 1 must see it as stale (refetch), never try to map it.
-FORMATS = {"none": 1, "zstd": 2}
+FORMATS = {"uncompressed": 1, "zstd": 2}
 #: The reader's version, the input side's ``CACHE_EPOCH``: bump whenever ``io.read_image`` would
 #: produce different voxels, geometry or tags from the same original bytes. A copy written under
 #: another version is STALE - its original is gone, so it cannot be redone: a fetched input is
@@ -58,7 +58,7 @@ READER_VERSION = 2
 #: The operator's switch: ``HAVERSACK_INPUT_COPY=0`` keeps originals, as before this existed.
 ENV = "HAVERSACK_INPUT_COPY"
 #: How new copies are stored: ``zstd`` (the default since 2026-09-25: blosc-zstd, the smallest
-#: at the same read time of everything measured) or ``none`` (one mapped chunk: the fastest read,
+#: at the same read time of everything measured) or ``uncompressed`` (one mapped chunk: the fastest read,
 #: and one that needs neither duckn nor zarr). A cache may hold both; the reader reads each by its
 #: own layout, so changing this rewrites nothing and invalidates nothing.
 COMPRESSION_ENV = "HAVERSACK_INPUT_COPY_COMPRESSION"
@@ -209,7 +209,7 @@ def _source_size(content) -> tuple[int, int]:
     return len(files), sum(q.stat().st_size for q in files)
 
 
-def _metadata(image, per_slice, *, source, source_digest, source_size=(None, None), how="none"):
+def _metadata(image, per_slice, *, source, source_digest, source_size=(None, None), how="uncompressed"):
     """The duckn metadata of the copy, through duckn's own models: the geometry is
     ``from_sitk``'s (LPS - no flip either way), the rest is filled into its fields."""
     import haversack
@@ -245,7 +245,7 @@ def _metadata(image, per_slice, *, source, source_digest, source_size=(None, Non
     return vol
 
 
-def _write(vol, out: Path, how: str = "none") -> None:
+def _write(vol, out: Path, how: str = "uncompressed") -> None:
     import zarr
     from duckn.models import duckn_attrs
     from zarr.storage import ZipStore
@@ -312,7 +312,7 @@ def transcode(content, entry, *, source=None, source_digest=None) -> Path | None
 
 def _layout(path: Path):
     """``(zarr.json dict, how, chunk data offset, dtype, shape)`` for one of the two layouts this
-    module writes - ``how`` "none" (one stored chunk, mapped at the offset) or "zstd" (blosc slabs of
+    module writes - ``how`` "uncompressed" (one stored chunk, mapped at the offset) or "zstd" (blosc slabs of
     whole slices, decoded by zarr; offset None) - or NotACopy for any other."""
     import math
     import struct
@@ -353,11 +353,11 @@ def _layout(path: Path):
     if local[:4] != b"PK\x03\x04":
         raise NotACopy(f"{path}: no local header where the index points")
     name_len, extra_len = struct.unpack("<HH", local[26:30])
-    return meta, "none", info.header_offset + 30 + name_len + extra_len, dt, shape
+    return meta, "uncompressed", info.header_offset + 30 + name_len + extra_len, dt, shape
 
 
 def stored_compression(path) -> str:
-    """How a copy is stored - "none" or "zstd" - read from its layout, not from what it says."""
+    """How a copy is stored - "uncompressed" or "zstd" - read from its layout, not from what it says."""
     return _layout(Path(path))[1]
 
 

@@ -194,8 +194,8 @@ reader:
 **Invalidation.** A refetch (`no-cache`, `refresh_input`) rewrites the entry. Eviction and
 `cache clean` remove it. **Operator switch:** `HAVERSACK_INPUT_COPY=0` stores originals only -
 the behavior before this change, for a host that wants the DICOM kept.
-**Compression** - the default since 2026-09-25 (`HAVERSACK_INPUT_COPY_COMPRESSION`, `zstd`; `none`
-for the uncompressed form; §13):
+**Compression** - the default since 2026-09-25 (`HAVERSACK_INPUT_COPY_COMPRESSION`, `zstd`;
+`uncompressed` for the other form; §13):
 zstd level 3 through blosc with bit shuffling, in chunks of 32 whole slices, one zip member each, still a stored zip, format
 version 2. It is read through zarr, whose codec pipeline decodes the chunks in parallel - no
 mapping. Existing copies are not rewritten; a cache holds whichever form each entry was written
@@ -413,5 +413,5 @@ stored uncompressed, or they must take zarr first.
 **Compressed by default (2026-09-25, the user's decision).** The default became `zstd` - the
 blosc-zstd bitshuffle form this section chose - because the measurements above favor it wherever
 room matters and cost ~0.3-0.9 s a read against the 12-13 s decode it replaces either way.
-`none` stays for a host that wants the mapped read, or runs VoxTell or MONAI: their images lack
+`uncompressed` stays for a host that wants the mapped read, or runs VoxTell or MONAI: their images lack
 zarr, so they cannot read a compressed copy (both are experimental and opt-in).
