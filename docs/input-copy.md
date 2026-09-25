@@ -142,7 +142,13 @@ on the local server and on Modal. The content store's current raw-NRRD copy (`co
 committed byte count is the copy's.
 
 **When.** When the entry is stored - a fetch completing, an upload being put - before the
-entry is committed: it is the only moment the original exists. (The content store decodes
+entry is committed. The original exists only inside that step, as the transcoder's input: an
+implementation detail. Nothing downstream - segmenters, engines, `io.read_image`'s callers, the
+read-ahead - is ever handed the original; a committed entry is the copy (or, for an input the
+reader refuses, the original, which fails at read as it does today). **Whoever stores the entry
+transcodes it:** a worker what it fetches, the api container what it is uploaded (on Modal ~13 s
+of CPU for the measured series at upload, where it only hashed before - the submit waits for it,
+as it waits for the upload's hash today). (The content store decodes
 lazily today, so a preloaded input nobody runs pays nothing; now every stored input pays its
 decode once, at ingest - 13 s for the measured CT.)
 
@@ -239,9 +245,6 @@ In duckn (a release, then a pin bump here and in CI, with feldglas kept equal):
 
 ## 10. Open
 
-- On Modal, uploads are stored by the api container, which would now convert them at upload
-  time (~13 s of CPU for the measured series, where it only hashes today) - or the api stores the
-  original and the worker converts it on first use, which keeps two forms until then.
 - Whether an input copy should ever be served - e.g. as a `get` output, where the copy is
   exactly what a client wants. Not for this change; if it is, patient-tag stripping comes with
   it (§2).
