@@ -106,7 +106,7 @@ def _dicom_series(directory: Path) -> Stream | None:
     first.ReadImageInformation()
     size = first.GetSize()
     if first.GetNumberOfComponents() != 1 or len(size) < 2 or (len(size) == 3 and size[2] != 1):
-        return None                # colour, or a multi-frame file: not a slice per file
+        return None                # color, or a multi-frame file: not a slice per file
     origin, direction, spacing = _series_geometry(files)     # refuses what the reader refuses
     pixel_id = first.GetPixelID()
     dtype = sitk.GetArrayViewFromImage(sitk.Image([1, 1, 1], pixel_id)).dtype
@@ -155,7 +155,7 @@ def _nifti_gz(path: Path) -> Stream | None:
     vox_offset = struct.unpack(endian + "f", h[108:112])[0]
     slope, inter = struct.unpack(endian + "ff", h[112:120])
     if datatype not in _NIFTI_DTYPES:
-        return None                # colour, complex (a 4-D file fails the size check below)
+        return None                # color, complex (a 4-D file fails the size check below)
     if not (slope in (0.0, 1.0) and inter == 0.0):
         return None                # scaled: SimpleITK's own arithmetic, whole read only
     nx, ny, nz = (int(d) for d in dim[1:4])

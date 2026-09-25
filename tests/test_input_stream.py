@@ -211,7 +211,12 @@ from haversack import input_copy as ic, input_stream
 if sys.argv[1] == "whole":
     input_stream.stream_of = lambda content: None
 assert ic.transcode(sys.argv[2], sys.argv[3]) is not None
-print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+try:        # Linux: ru_maxrss survives exec, so it would report the parent pytest's peak;
+            # VmHWM belongs to this process's own address space (kB)
+    hwm = [l for l in open("/proc/self/status") if l.startswith("VmHWM:")][0]
+    print(int(hwm.split()[1]) * 1024)
+except OSError:                                        # macOS: ru_maxrss, in bytes
+    print(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
 '''
 
 
@@ -239,6 +244,5 @@ def test_a_streamed_transcode_peaks_at_a_fraction_of_the_whole(tmp_path):
                            capture_output=True, text=True, env=env)
         assert r.returncode == 0, r.stderr[-800:]
         peaks[mode] = int(r.stdout.strip().splitlines()[-1])
-    scale = 1 if sys.platform == "darwin" else 1024           # bytes on macOS, KiB on Linux
-    whole, stream = peaks["whole"] * scale, peaks["stream"] * scale
+    whole, stream = peaks["whole"], peaks["stream"]                        # bytes, both
     assert stream < 0.6 * whole, (stream / 1e6, whole / 1e6)
