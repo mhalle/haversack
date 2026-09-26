@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **FastSurfer is part of haversack.** `fastsurfer-lean` is a core dependency (under 1 MB now;
+  its weights still download on first use), so `fastsurfer:*` tasks work after a plain install
+  and a FastSurfer rank field's restore always lateralizes the cortex. The engine is on wherever
+  it is installed; `HAVERSACK_FASTSURFER=0` switches it off, and a Modal deploy builds its worker
+  unless told not to. torch's floor becomes 2.14 (the fork's). `haversack[fastsurfer]` still
+  installs (an empty alias). CI now installs it and runs the FastSurfer tests.
 - **Python 3.13 and 3.14.** haversack required 3.12 because FastSurfer's command-line
   definitions handed argparse a `str | None` as a type, which 3.14's argparse refuses. Fixed in
   the fork (fastsurfer-lean v2.5.4-lean4, with its deprecated SciPy imports), since upstream has

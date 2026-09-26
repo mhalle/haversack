@@ -60,6 +60,13 @@ dependencies = [
     "zarr>=3.3",
     "rankfield>=0.3.7",
     "pydicom>=2.4",
+    # FastSurfer is core (2026-09-25, the user's call): the fork's inference needs nothing core
+    # does not already bring (nnU-Net pulls pandas, nibabel, yacs, ...), so it adds 0.9 MB, and a
+    # FastSurfer rank field's restore lateralizes the cortex with FastSurfer's own rule. Its
+    # weights (64 MB) still download on first use. The engine is on wherever it is installed
+    # unless HAVERSACK_FASTSURFER=0, so its tasks are listed and a Modal deploy builds its
+    # worker by default. It raises torch's floor to 2.14 (the fork's).
+    "fastsurfer-lean",
 ]
 # NOTE: mlx is NOT a core dependency (moved to the `mlx` extra below, 2026-08-26).
 # The product is torch/MPS-first (haversack); MLX is the oracle-only path. Keeping mlx
@@ -105,14 +112,12 @@ torch = []
 # lived in its own environment; 0.1.1 takes surfa at upstream's unreleased NumPy 2 fix
 # (8aa4a5f6), measured bit-identical, and the engine installs beside the others.
 synthstrip = ["synthstrip-torch", "scipy"]
-# The FastSurfer engine, installed pip-style from our slimmed fork `fastsurfer-lean`
-# (mhalle/fastsurfer-lean - FastSurfer's parcellation CNN only, packaging fixed so
-# FastSurferCNN's subpackages ship; git rev in [tool.uv.sources]). This replaces the
-# image's git-clone + requirements + sys.path hack with a proper install. Upstream
-# FastSurfer itself can't be an extra: its `[tool.setuptools] packages` list omits
-# subpackages, so a plain `pip install git+.../FastSurfer` is import-broken - hence
-# the fork. Heavy tree dropped in the fork; conflicts with the other engines below.
-fastsurfer = ["fastsurfer-lean"]
+# `[fastsurfer]` is an empty alias since fastsurfer-lean became core (2026-09-25), kept so
+# `haversack[fastsurfer]` / `--extra fastsurfer` in existing commands, docs and the FastSurfer
+# worker's image still install. The fork (mhalle/fastsurfer-lean) exists because upstream's
+# package list omits FastSurferCNN's subpackages, and now also for 3.14 and a lean dependency
+# set; its tag is in [tool.uv.sources].
+fastsurfer = []
 # The VoxTell engine (haversack.engines.voxtell): free-text promptable segmentation from
 # MIC-DKFZ. It pins `torch>=2.0,<2.9`, which override-dependencies below lifts (2026-09-12,
 # verified on torch 2.14); it keeps its own environment, in the conflicts group below, until

@@ -277,7 +277,7 @@ def _engine_rules(parts, labels, roi):
         from FastSurferCNN.data_loader.data_utils import split_cortex_labels
     except ImportError:
         return labels, ("cortical parcels are not lateralized: FastSurfer's rule needs the "
-                        "fastsurfer extra (pip install 'haversack[fastsurfer]')",)
+                        "fastsurfer-lean package, which haversack installs (this is a lean or --no-deps install)",)
     wide = labels.astype(np.int32)              # the rule compares against 1003..2035
     try:
         split = split_cortex_labels(wide)

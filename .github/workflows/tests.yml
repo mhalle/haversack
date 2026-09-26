@@ -39,6 +39,8 @@ jobs:
         # obstore is a CORE dependency, not an extra: `idc:` always needed it, and since 0.7.0
         # `s3:` and `gs:` read through it too - without it those sources report themselves
         # disabled and the allowlist tests get "missing dependency" where they expect a refusal.
+        # fastsurfer-lean is CORE since 2026-09-25 (FastSurfer's engine and the cortical split a
+        # FastSurfer rank field's restore applies); before, CI installed no engine at all.
         # click is CORE too, since the command line moved onto it (2026-09-11); modal would
         # bring it anyway, but a dependency CI only has by accident is one it can lose.
         # --no-sources: this list pins every sibling itself. Without it uv also reads each git
@@ -55,7 +57,8 @@ jobs:
             'duckn @ git+https://github.com/mhalle/duckn.git@v0.5.2' \
             'rankfield @ git+https://github.com/mhalle/rankfield.git@v0.3.7' \
             'feldglas @ git+https://github.com/mhalle/feldglas.git@v0.1.5' \
-            'provender @ git+https://github.com/mhalle/provender.git@v0.1.6' nibabel
+            'provender @ git+https://github.com/mhalle/provender.git@v0.1.6' nibabel \
+            'fastsurfer-lean @ git+https://github.com/mhalle/fastsurfer-lean.git@v2.5.4-lean4'
       - name: Run tests
         env:
           PYTHONPATH: src

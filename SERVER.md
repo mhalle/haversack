@@ -665,10 +665,11 @@ each model. It is deployment policy, not a request parameter, so a client cannot
 without it those tasks are listed and described but refuse to run. On Modal the same switch is
 `HAVERSACK_ALLOW_TRANSPOSE=1` at deploy.
 
-The nnU-Net engine is always on. The others are switched on per deployment by environment
-variable, `HAVERSACK_FASTSURFER=1`, `HAVERSACK_SYNTHSTRIP=1`, `HAVERSACK_VOXTELL=1`,
-`HAVERSACK_MONAI=1`, and each needs its runtime installed in the environment the server runs
-in (`--extra fastsurfer`, `--extra synthstrip`, ...). VoxTell and MONAI are experimental:
+The nnU-Net and FastSurfer engines come with haversack and are on unless switched off
+(`HAVERSACK_FASTSURFER=0`). The others are switched on per deployment by environment variable,
+`HAVERSACK_SYNTHSTRIP=1`, `HAVERSACK_VOXTELL=1`, `HAVERSACK_MONAI=1`, and each needs its
+runtime installed in the environment the server runs in (`--extra synthstrip`, ...); an
+installed engine with its variable unset is on. VoxTell and MONAI are experimental:
 off unless their variable is set, Modal-only, heavy, and not maintained for general use; they
 conflict with each other, so they cannot share one environment. `GET /v1/version`
 reports which engines are enabled, and `GET /v1/tasks/{task}` names each task's engine.

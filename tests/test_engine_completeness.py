@@ -51,6 +51,10 @@ PYPROJECT = ROOT / "pyproject.toml"
 #: Engines whose runtime is core rather than an extra. The default engine is the only one:
 #: its packages ship with haversack, so the rules about extras cannot apply to it.
 DEFAULT_ONLY = {R.NNUNETV2}
+#: Optional engines whose runtime became core (FastSurfer, 2026-09-25): every other rule here
+#: still holds them (an adapter, a worker, a flag), but their extra is an empty alias and
+#: their distribution is a core dependency - which the two extras rules check instead.
+CORE_RUNTIME = {"fastsurfer"}
 
 
 def _optional_engines() -> dict:
@@ -120,6 +124,11 @@ class EveryEngineDeclaresWhatInstallsIt(unittest.TestCase):
                   for k, v in data["project"]["optional-dependencies"].items()}
         problems = []
         for name, e in _optional_engines().items():
+            if name in CORE_RUNTIME:
+                if not set(e.dist) & (core - {"torch", "numpy", "scipy", "scikit-image"}):
+                    problems.append(f"{name}: a core engine's dist={e.dist} names no core "
+                                    "dependency of its own")
+                continue
             own = extras.get(e.extra or "", set()) - core
             if not (set(e.dist) & own):
                 problems.append(
@@ -139,6 +148,8 @@ class EveryEngineDeclaresWhatInstallsIt(unittest.TestCase):
                 problems.append(f"{name}: no extra - nothing installs this engine's runtime")
             elif e.extra not in extras:
                 problems.append(f"{name}: extra {e.extra!r} is not defined in pyproject")
+            elif name in CORE_RUNTIME:
+                continue                             # an alias: the runtime is core
             elif not extras[e.extra]:
                 problems.append(f"{name}: extra {e.extra!r} declares no packages")
         self.assertEqual([], problems, "\n  ".join(problems))
