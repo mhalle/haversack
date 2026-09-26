@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- **An embedding of a fetched input records the source's digest.** The server hands an encoder
+  the input copy it keeps instead of the fetched bytes, and the field recorded the copy's hash -
+  a digest of bytes nobody sent. It records the digest the copy was made from now.
 - **`haversack modal deploy` says when `HAVERSACK_RESULT_STORE` is set**: nothing on Modal reads
   it, and a deployment keeps its results on its cache volume, which it now names in a note
   instead of ignoring the variable.

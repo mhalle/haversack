@@ -26,6 +26,19 @@ def _identity(input_spec, path: Path) -> dict:
     ident = {"input": str(input_spec)}
     if parsed:
         ident["source"], ident["identifier"] = parsed[0], parsed[1]
+    # An input copy (docs/input-copy.md) is what the cache keeps INSTEAD of the source bytes,
+    # so hashing it recorded the digest of bytes nobody sent - a fetched series' field named its
+    # copy's digest (found mapping the input caches, 2026-09-26). The copy records the source's
+    # own digest when it was written; that is the one a field states.
+    from ..input_copy import NotACopy, info, is_copy
+    if is_copy(path):
+        try:
+            source = info(path).get("source_digest")
+        except (NotACopy, OSError, ValueError):
+            source = None
+        if source:
+            ident["digest"] = str(source)
+            return ident
     ident["digest"] = digest_dir(path) if path.is_dir() else digest_file(path)
     return ident
 
