@@ -157,9 +157,12 @@ class InputStore:
         with contextlib.suppress(OSError):
             os.utime(self._ref_file(key_for(identity)))
 
-    def discard(self, identity: str) -> bool:
-        """Forget ``identity`` (a refresh: the next use fetches it again). Its blobs are left
-        to the sweep - they may be shared, and a job's view may be linked to them."""
+    def forget(self, identity: str) -> bool:
+        """Forget ``identity``: the next use fetches it again. Its blobs are left to the sweep -
+        they may be shared, and a job's view may be linked to them. Not called ``discard``:
+        DECIDING to discard a cached input is jobpolicy's alone (a test holds every
+        ``.discard(`` call to it), and this is the mechanism, which the store also uses for a
+        ref whose blobs were swept."""
         from provender import ops
         existed = self.ref(identity) is not None
         ops.delete(self.store, ref_name(key_for(identity)))
@@ -200,7 +203,7 @@ class InputStore:
             if self.has(identity):
                 self.touch(identity)
                 return self.ref(identity)
-            self.discard(identity)                 # a ref whose blobs were swept
+            self.forget(identity)                  # a ref whose blobs were swept
             stage = self.staging_root / uuid.uuid4().hex
             stage.mkdir(parents=True)
             try:
@@ -344,7 +347,7 @@ class InputStore:
             except InputGone:
                 if attempt:
                     raise
-                self.discard(identity)
+                self.forget(identity)
         raise AssertionError("unreachable")
 
     # -- eviction --------------------------------------------------------------------------
@@ -389,3 +392,158 @@ class InputStore:
             swept = self.blobs.sweep(keep=keep_blobs, grace_s=self.grace_s, candidates=listed,
                                      allow_empty=True)
         return {"refs_dropped": dropped, "blobs": swept}
+
+
+class ServerInputs:
+    """``SeriesCache`` + ``ContentStore``'s interface over an :class:`InputStore`, so the
+    local server's call sites run unchanged behind ``HAVERSACK_INPUT_STORE=blobs``.
+
+    Those call sites already follow the lifecycle a view needs - pin, look, use, unpin - so a
+    PIN holds a view of the input in this process (``<root>/views/<pid>/``), ``path`` and
+    ``get_or_fetch`` answer inside it, and the last unpin deletes it. The store's eviction
+    never touches a view: it is hard links or copies. A view built without a pin (a status
+    route's ``resolve``) is reaped once it is older than :attr:`LOOSE_VIEW_S`."""
+
+    LOOSE_VIEW_S = 120.0
+
+    def __init__(self, root, fetch_fn, *, budget_bytes: int = 8 << 30, grace_s: float = GRACE_S):
+        self.store = InputStore(root, fetch_fn, budget_bytes=budget_bytes, grace_s=grace_s)
+        self.root = self.store.root
+        self._views_root = self.root / "views" / str(os.getpid())
+        shutil.rmtree(self._views_root, ignore_errors=True)   # a previous process's, same pid
+        self._guard = __import__("threading").RLock()
+        self._pins: dict[str, int] = {}
+        self._views: dict[str, tuple[Path, float]] = {}
+        self._fetching: set[str] = set()
+        self._reap_dead_processes()
+
+    def _reap_dead_processes(self) -> None:
+        """Views of a process that is gone - a crash leaves them - are nobody's."""
+        base = self.root / "views"
+        for d in base.iterdir() if base.is_dir() else ():
+            try:
+                pid = int(d.name)
+                if pid != os.getpid():
+                    os.kill(pid, 0)
+            except ProcessLookupError:
+                shutil.rmtree(d, ignore_errors=True)
+            except (ValueError, PermissionError):
+                continue
+
+    # -- views -------------------------------------------------------------------------------
+
+    def _view(self, key: str, *, fetch=None, credentials=None, check=None) -> Path:
+        with self._guard:
+            held = self._views.get(key)
+            if held is not None and held[0].exists():
+                return held[0]
+        dest = self._views_root / uuid.uuid4().hex
+        dest.mkdir(parents=True)
+        try:
+            if fetch is False:
+                path = self.store.materialize(key, dest)
+            else:
+                path = self.store.get_or_fetch(key, dest, fetch=fetch,
+                                               credentials=credentials, check=check)
+        except BaseException:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise
+        with self._guard:
+            self._views[key] = (path, time.time())
+            self._reap_loose()
+        return path
+
+    def _drop_view(self, key: str) -> None:
+        held = self._views.pop(key, None)
+        if held is not None:
+            view = held[0]
+            while view.parent != self._views_root and view.parent != view:
+                view = view.parent
+            shutil.rmtree(view, ignore_errors=True)
+
+    def _reap_loose(self) -> None:
+        now = time.time()
+        for key, (path, made) in list(self._views.items()):
+            if not self._pins.get(key) and now - made > self.LOOSE_VIEW_S:
+                self._drop_view(key)
+
+    # -- SeriesCache's interface -----------------------------------------------------------------
+
+    def pin(self, key: str) -> None:
+        with self._guard:
+            self._pins[key] = self._pins.get(key, 0) + 1
+
+    def unpin(self, key: str) -> None:
+        with self._guard:
+            n = self._pins.get(key, 0) - 1
+            if n > 0:
+                self._pins[key] = n
+                return
+            self._pins.pop(key, None)
+            self._drop_view(key)
+
+    def has(self, key: str) -> bool:
+        return self.store.has(key)
+
+    def path(self, key: str) -> Path:
+        return self._view(key, fetch=False)
+
+    def entry(self, key: str) -> Path:
+        """Where ``.input.json`` is: the view's root (``input_records`` reads it there)."""
+        view = self._view(key, fetch=False)
+        while view.parent != self._views_root and view.parent != view:
+            view = view.parent
+        return view
+
+    def staging(self, key: str) -> bool:
+        with self._guard:
+            return key in self._fetching
+
+    def get_or_fetch(self, key: str, *, check=None, credentials=None, fetch=None) -> Path:
+        with self._guard:
+            self._fetching.add(key)
+        try:
+            return self._view(key, fetch=fetch, credentials=credentials, check=check)
+        finally:
+            with self._guard:
+                self._fetching -= {key}
+
+    def prefetch(self, key: str) -> bool:
+        """Store without blocking and without a view: False when it is here already, is
+        being fetched here, or the fetch failed."""
+        if self.store.has(key) or self.staging(key):
+            return False
+        with self._guard:
+            self._fetching.add(key)
+        try:
+            self.store.ensure(key)
+            return True
+        except Exception:                      # noqa: BLE001 - a prefetch never fails a job
+            return False
+        finally:
+            with self._guard:
+                self._fetching -= {key}
+
+    def discard(self, key: str) -> bool:
+        """Forget ``key`` so the next use fetches it again - refused while this process holds
+        it pinned, as SeriesCache refuses (jobpolicy says "input in use")."""
+        with self._guard:
+            if self._pins.get(key):
+                return False
+        return self.store.forget(key)
+
+    # -- ContentStore's interface --------------------------------------------------------------
+
+    def resolve(self, digest: str) -> Path:
+        if not self.store.has(digest):
+            raise FileNotFoundError(f"{digest} is not held by this store")
+        return self._view(digest, fetch=False)
+
+    def fast_path(self, digest: str) -> Path:
+        return self.resolve(digest)
+
+    def put_file(self, staged, *, expect=None, computed=None) -> str:
+        return self.store.put_file(staged, expect=expect, computed=computed)
+
+    def put_dir(self, staged, *, expect=None) -> str:
+        return self.store.put_dir(staged, expect=expect)

@@ -504,6 +504,21 @@ evicted (the epoch rule already works that way). An UPLOAD cannot be re-fetched,
 upload entries are read by a shim and converted on first use, under the time-limited rule of
 decision 1.
 
+**As built so far (2026-09-26).** (a) is done: `inputstore.InputStore` (the store) and
+`ServerInputs` (SeriesCache + ContentStore's interface over it, so the server's call sites run
+unchanged), selected by `HAVERSACK_INPUT_STORE=blobs`. The server's pin/look/use/unpin already
+IS a view's lifecycle: a pin holds a view in `<store>/views/<pid>/`, the last unpin deletes it,
+a crashed process's views are reaped. The whole fast suite with the flag on: 2,842 passed,
+6 failed, each a test's assumption rather than the store's behavior, and each to be rewritten
+store-neutral before step 8 deletes the legacy classes: a legacy internal (`content.cache`),
+the legacy path layout (`test_prefetch_prereads_next_input`, `test_the_sweep_only_removes_
+things_it_can_name`), a job's input path read AFTER the job ended - a view is gone by then
+(`test_four_channels_can_be_sent_once_and_reused_by_role`, `test_a_job_on_a_stored_copy_keys_
+and_computes_as_on_the_original`), and a stand-in reader that DELETES the file it is asked to
+read, which the legacy store committed as an empty entry and this one refuses
+(`test_the_conversion_answers_410_when_its_input_leaves_and_cleans_up`). The artifact pair is
+loaded while the input is staged, so a preview never reads a view after its unpin.
+
 **Order.** (a) the store half (refs, views, eviction) with its tests, behind a flag, on the
 local server; (b) the command line's cache onto it; (c) the shim for legacy uploads; (d) a
 soak like step 5's, with a server killed mid-fetch; (e) the old classes deleted with step 8.

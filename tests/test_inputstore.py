@@ -106,9 +106,9 @@ class FetchAndRead(_Base):
             self.assertFalse(self.store.has("idc:abc"))
         self.assertTrue(self.store.has("idc:abc"))
 
-    def test_discard_forgets_it(self):
+    def test_forget_forgets_it(self):
         self.store.ensure("idc:abc")
-        self.assertTrue(self.store.discard("idc:abc"))
+        self.assertTrue(self.store.forget("idc:abc"))
         self.assertFalse(self.store.has("idc:abc"))
         self.store.ensure("idc:abc")
         self.assertEqual(self.fetch.calls, 2)
@@ -191,7 +191,7 @@ class Eviction(_Base):
     def test_a_jobs_view_survives_the_eviction_of_its_input(self):
         for linked in (True, False):
             with self.subTest(linked=linked):
-                self.store.discard("idc:abc")
+                self.store.forget("idc:abc")
                 ctx = (mock.patch("os.link", side_effect=OSError(45, "not supported"))
                        if not linked else mock.patch.object(os, "getpid", os.getpid))
                 with ctx:
@@ -208,14 +208,14 @@ class Eviction(_Base):
         self._fill(2)
         (self.store.store.root / "inputs" / "junk.json").write_text("{not json")
         before = self.store.blobs.entries()
-        self.store.discard("idc:0")             # its blobs are now unreferenced
+        self.store.forget("idc:0")             # its blobs are now unreferenced
         self.store.evict()
         self.assertEqual(self.store.blobs.entries(), before)
 
     def test_young_unreferenced_blobs_wait_out_the_grace(self):
         store = InputStore(self.tmp / "g", self.fetch, grace_s=3600)
         store.ensure("idc:abc")
-        store.discard("idc:abc")
+        store.forget("idc:abc")
         store.evict()
         self.assertEqual(len(store.blobs.entries()), 1)
 

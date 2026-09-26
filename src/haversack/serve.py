@@ -2816,13 +2816,21 @@ class LocalExecutor:
         self._encode = embed_fn
         self._fetch_idc = fetch_idc_fn or _fetch_idc_series
         self.sources = _source_registry(sources)
-        self.series_cache = SeriesCache(self.workdir / "series_cache", self._fetch_source,
-                                        budget_bytes=input_cache_bytes)
+        if os.environ.get("HAVERSACK_INPUT_STORE", "").strip().lower() == "blobs":
+            # step 6 of docs/cache-consolidation.md, behind its flag until it has soaked:
+            # inputs as blobs + one ref each, read through views a pin holds (inputstore)
+            from .inputstore import ServerInputs
+            self.series_cache = ServerInputs(self.workdir / "input_store", self._fetch_source,
+                                             budget_bytes=input_cache_bytes)
+            self.content = self.series_cache
+        else:
+            self.series_cache = SeriesCache(self.workdir / "series_cache", self._fetch_source,
+                                            budget_bytes=input_cache_bytes)
+            # Uploads addressed by their own bytes, sharing the series cache's root,
+            # budget and pin discipline - an entry is an entry whether a client sent
+            # it or the server fetched it.
+            self.content = ContentStore(self.series_cache)
         self.read_ahead = ReadAhead(read_fn)
-        # Uploads addressed by their own bytes, sharing the series cache's root,
-        # budget and pin discipline - an entry is an entry whether a client sent
-        # it or the server fetched it.
-        self.content = ContentStore(self.series_cache)
         #: The deliverables this deployment renders: the default for a request that names
         #: none, and the ceiling for one that does (the submit door refuses a name
         #: outside it).
