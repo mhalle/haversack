@@ -327,7 +327,8 @@ The proposed order - each step behind a flag, with deployments untouched until t
      destination holds is learned from the SOURCE's copy of the same history, a new object
      is one create-if-absent, and keys sync 8 at a time: an incremental sync of 16 keys went
      from 73.7 s to 4.9 s (15 requests a key), and a first copy of them from 200 s to 19 s.
-6. **Inputs** onto the same store (the older step 4 below, unchanged in intent).
+6. **Inputs** onto the same store (the older step 4 below, unchanged in intent). Designed
+   2026-09-26 - see "Step 6: inputs, as designed" below.
 7. **Modal last**, onto R2 directly.
 8. **Delete the old protocols** - `ResultCache`'s and the hybrid's - in one commit, as the
    older step 6 said.
@@ -441,6 +442,63 @@ copying rather than adopting:
 
 **Recommendation: home-rolled, small, on obstore + the local filesystem** — but with the
 local tier's eviction measured against diskcache before writing a third LRU by hand.
+
+## Step 6: inputs, as designed (2026-09-26)
+
+**What exists.** Three input caches, each with its own protocol, mapped 2026-09-26:
+
+- the server's `serve.SeriesCache` (fetched inputs) with `content.ContentStore` over the SAME
+  root and budget (uploads by digest): entry directories named `e<fetch epoch>.r<reader
+  version>!<identity>` (digests carry no epoch), `.owner` claims published by `os.link` with
+  heartbeats and handovers, `.done` markers, an in-process pin count, an LRU by `.done` mtime,
+  a graveyard; the original bytes deleted once the input copy is written;
+- on Modal, two more instances of the same class: one on `/dev/shm` per worker (fetched), one
+  on the inputs volume (uploads), made safe across containers only because content-addressed
+  writes are idempotent;
+- the command line's `sources.materialize` cache (`inputs/<kind>/<hash>`, `.staging-*`,
+  `.lock-*`), the only one `haversack cache` sees, with no input copy.
+
+What callers need is small: for a job, a PATH to read (the copy, a file with its original
+name, or a DICOM folder); for provenance, the source record (`.input.json`); for an upload
+reference, whether the bytes are still here (410 `input_gone` when not); for the prefetcher,
+"is it here or being fetched". Nothing about the stored form reaches the result key (pinned
+by `test_a_job_on_a_stored_copy_keys_and_computes_as_on_the_original`).
+
+**The design.** Inputs join the result store's shape - immutable blobs, one small ref per key:
+
+- **Ref** `inputs/<percent-encoded key>.json`, the key being what `SeriesCache._entry` names
+  today (`e<F>.r<R>!<identity>` for a fetched input, `r<R>!<digest>` for an upload - the
+  reader version now names uploads too, so a stale copy is simply never looked up). It holds
+  the stored form (`copy`, `file`, `tree`), each file's name, digest and size, and the source
+  record that `.input.json` holds today. Written create-if-absent: an input is fetched once
+  per key and never republished, so no compare-and-swap is needed.
+- **Blobs** are the result store's `blobs/sha256/` - one namespace, so an input copy and a
+  result that happen to share bytes are stored once, and one sweep serves both.
+- **A job reads its own view**, built in its job directory from the blobs: a hard link, else a
+  copy-on-write clone (APFS, btrfs, XFS), else a copy (exFAT, FAT). The view carries the
+  names a reader needs (`input.duckn.zip`, `ct.nii.gz`, a DICOM folder). Because the job owns
+  its view, **eviction never needs to know who is reading**: pins, `.owner` claims,
+  heartbeats, handovers and the graveyard all go. A blob deleted under a hard link keeps its
+  inode; a clone or a copy is independent of it.
+- **One fetch per key on a host** is kept as an ECONOMY, not a guarantee: a per-key lock on
+  the local disk (provender's striped `flock`, which already runs on exFAT). Two hosts may
+  fetch the same series once each; both write the same blobs and the second ref write is a
+  no-op. Correctness never depends on the lock.
+- **Eviction** is the result store's: refs by least recent use, then unreferenced blobs past
+  a grace period. An upload whose ref is gone answers 410 `input_gone`, as today; a fetched
+  input is fetched again.
+- **The command line's cache** uses the same store, which puts inputs under `haversack cache`
+  for the first time and ends a third protocol.
+
+**Migration.** A fetched input is public and re-fetchable: legacy entries are not read, only
+evicted (the epoch rule already works that way). An UPLOAD cannot be re-fetched, so legacy
+upload entries are read by a shim and converted on first use, under the time-limited rule of
+decision 1.
+
+**Order.** (a) the store half (refs, views, eviction) with its tests, behind a flag, on the
+local server; (b) the command line's cache onto it; (c) the shim for legacy uploads; (d) a
+soak like step 5's, with a server killed mid-fetch; (e) the old classes deleted with step 8.
+Modal's two instances move with step 7.
 
 ## The rule while this happens: do not disturb what runs today
 
