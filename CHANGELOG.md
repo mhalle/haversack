@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **FastSurfer installs lighter: fastsurfer-lean v2.5.4-lean3.** The fork's inference no
+  longer depends on h5py, matplotlib or torchvision (each was imported only for training code,
+  or for a one-transform `Compose`); they moved to its `train` extra. Inside haversack that
+  removes h5py (10.5 MB) - nnU-Net already brings the others - so the engine now adds under
+  1 MB to an install; on its own the fork is ~70 MB lighter. Labels are byte-identical to lean2
+  (ds000114 sub-09, run where none of the three was installed), and the FastSurfer identity
+  stays `2.5.4`, so no result key moves. Weights still download on first use (64 MB).
 - **A FastSurfer store restores onto its input.** `haversack restore` refused the input grid
   for these stores (FastSurfer's field lives on its own conformed grid, rotated from an oblique
   input, which a frame cannot describe) and could only restore onto the conformed grid. The

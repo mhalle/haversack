@@ -190,7 +190,7 @@ provender = { git = "https://github.com/mhalle/provender.git", tag = "v0.1.6" }
 # code the maintainers had not released or validated. The release in the tag is the
 # engine's weights identity (engines/registry.py), and a test holds the two together.
 # Import namespace stays FastSurferCNN.
-fastsurfer-lean = { git = "https://github.com/mhalle/fastsurfer-lean.git", tag = "v2.5.4-lean2" }
+fastsurfer-lean = { git = "https://github.com/mhalle/fastsurfer-lean.git", tag = "v2.5.4-lean3" }
 # voxtell = MIC-DKFZ's free-text promptable segmentation. Pinned to a git rev, not the
 # PyPI release: 0.1.0 on PyPI predates helpers this engine uses (download_voxtell_model),
 # and pinning the rev means the source we integrated against is the source that runs.
