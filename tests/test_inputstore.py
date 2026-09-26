@@ -343,3 +343,19 @@ class WhatACrashLeaves(_Base):
             self.store.ensure("idc:x", fetch=boom)
         left = [p for p in self.store.staging_root.rglob("*") if p.is_file()]
         self.assertEqual(left, [])
+
+
+class ConvertingTheCopy(_Base):
+    def test_a_copy_converts_to_the_originals_voxels_and_geometry(self):
+        from haversack import io
+        src = _nifti(self.tmp / "o" / "ct.nii.gz", value=5)
+        path = self.store.get_or_fetch("idc:abc", self.job(), fetch=_Fetch(
+            lambda d: __import__("shutil").copyfile(src, d / "ct.nii.gz")))
+        self.assertEqual(path.name, "input.duckn.zip")
+        out = io.convert(path, self.tmp / "x.nrrd")
+        a, b = sitk.ReadImage(str(out)), sitk.ReadImage(str(src))
+        self.assertTrue((sitk.GetArrayFromImage(a) == sitk.GetArrayFromImage(b)).all())
+        from haversack.input_copy import GEOMETRY_TOLERANCE    # a copy's stated bound (1 ulp seen)
+        for f in ("GetSpacing", "GetOrigin", "GetDirection"):
+            np.testing.assert_allclose(getattr(a, f)(), getattr(b, f)(), atol=GEOMETRY_TOLERANCE,
+                                       rtol=0)

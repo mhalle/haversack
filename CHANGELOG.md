@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- **`haversack get -o scan.nii.gz` reads an input copy or a duckn store.** `io.convert` read every
+  file with SimpleITK, which cannot open either, so converting one failed "Unable to determine
+  ImageIO reader".
 - **`grid: "model"` works.** The job options and SERVER.md have offered the network's own grid
   as an output grid since the package was named, and nothing resolved it: every such job failed
   "could not convert string to float". It is the forward resample's rule inverted, so the labels

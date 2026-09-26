@@ -1655,6 +1655,27 @@ def _not_into_itself(spec, src, out, convert: bool) -> None:
                              "outside it")
 
 
+def _as_fetched_name(src_spec, src) -> str:
+    """What `get -o <dir>/` names an unconverted input: an input copy as ``<stem>.duckn.zip``
+    (its own name in the cache is the same for every input), a folder by the source's stem,
+    a file by its own name."""
+    from pathlib import Path
+    from . import sources
+    from .input_copy import is_copy
+    stem = sources.source_stem(src_spec)
+    if is_copy(src):
+        return stem + ".duckn.zip"
+    return stem if Path(src).is_dir() else Path(src).name
+
+
+def _raw_export_refused() -> bool:
+    """Whether `get` refuses to copy a remote input as fetched: with the blob input store
+    (HAVERSACK_INPUT_STORE=blobs, step 6) it hands out the input copy only. The legacy cache
+    keeps its raw export until the store becomes the default and the legacy code goes."""
+    from .inputstore import input_store_enabled
+    return input_store_enabled()
+
+
 def _cmd_get(args) -> int:
     """`haversack get`."""
     import shutil
@@ -1684,6 +1705,20 @@ def _cmd_get(args) -> int:
             if out_target is None:
                 return src
             out, want_convert = out_target(src)
+            if not local and not want_convert and _raw_export_refused():
+                # haversack hands out ITS form of a remote input - the input copy - never the
+                # bytes as they came off the wire (the user's decision, 2026-09-26); an input the
+                # reader could not read has no copy, so there is nothing of haversack's to give
+                # What is stored IS haversack's form when it is the copy, or an input already
+                # in its own efficient form that is never copied (a raw NRRD, an uncompressed
+                # NIfTI, a duckn store, a label map: `wanted` says no). A copy that was wanted
+                # and not made means the reader refused the input: nothing of ours to give.
+                from .input_copy import is_copy, wanted
+                if not is_copy(src) and wanted(src):
+                    raise InputError(
+                        f"{src_spec} could not be read as an image, so haversack keeps no copy of "
+                        "it to export (it does not hand out the files as fetched; the source's "
+                        "own tools do)")
             _not_into_itself(src_spec, src, out, want_convert)
             if want_convert:
                 try:
@@ -1699,6 +1734,8 @@ def _cmd_get(args) -> int:
                     # and once it is a NIfTI the gap is gone - `segment` on that file cannot
                     # see what it refuses on the source, and a `note:` here would not travel
                     # with the file. The fetched series keeps everything, so name the way to it.
+                    if _raw_export_refused():
+                        raise
                     raise InputError(f"{e}; `-o <directory>/` without --format copies the "
                                      "series as fetched") from None
             elif Path(src).is_dir():
@@ -1726,9 +1763,8 @@ def _cmd_get(args) -> int:
             if to_dir or not io.image_suffix(out.name):
                 out = out / (sources.source_stem(src_spec) + ext)
             print(get_one(src_spec, lambda src: (out, True))); return 0
-        if to_dir:                                    # the raw content, named by the source
-            name = sources.source_stem(src_spec)
-            print(get_one(src_spec, lambda src: (out / (name if src.is_dir() else src.name), False)))
+        if to_dir:                                    # the content, named by the source
+            print(get_one(src_spec, lambda src: (out / _as_fetched_name(src_spec, src), False)))
             return 0
 
         def as_named(src):
@@ -1757,7 +1793,7 @@ def _cmd_get(args) -> int:
     def into_outdir(src_spec):
         def place(src):
             stem = sources.source_stem(src_spec)
-            name = stem + ext if ext else (stem if src.is_dir() else src.name)
+            name = stem + ext if ext else _as_fetched_name(src_spec, src)
             if fold(name) in written:
                 raise InputError(f"{outdir / name} was already written for {written[fold(name)]} "
                                  f"in this run; get {src_spec} on its own, with -o naming another file")

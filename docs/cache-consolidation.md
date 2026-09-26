@@ -556,6 +556,16 @@ offered and nothing handled - fixed, not an input-store defect. Two fixes came f
 it: staging goes under `staging/<pid>/` and a dead process's is reaped when the store opens
 (a fetch killed mid-way left it forever), and `serve --input-cache-gb`.
 
+**No export of the bytes as they came off the wire, anywhere (the user's decision,
+2026-09-26).** haversack caches images for algorithms that read the accelerated form; it is not
+a tool for handing a remote source's files to a user (idc-index, s5cmd and the sources' own
+clients do that better). So the command line stores the input copy as the server does - one
+form, one store behavior - and `haversack get` gives the copy: `get SPEC` prints its path,
+`-o x.nii.gz` / `--format` converts from it, `-o dir/` with no format writes the copy itself
+(`<stem>.duckn.zip`). An input the reader refuses is kept as fetched (there is nothing to
+convert), so the rule is "no raw export", not "every input has a copy". Originals remain
+recoverable where the header design below proves a byte-exact rebuild.
+
 **DICOM headers (designed with the user, 2026-09-26; not built).** They serve two purposes,
 kept apart. For USE, JSON - the duckn dicom extension's keyword-keyed tags, sourced from
 pydicom (duckn's `dicom_convert`: private tags, sequences, binary values in base64) rather

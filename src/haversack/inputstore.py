@@ -643,7 +643,8 @@ _COMMAND: dict = {}
 
 
 class CommandInputs:
-    """The command line's inputs: an :class:`InputStore` whose views are persistent EXPORTS,
+    """The command line's inputs: the server's store form (the input copy, where the reader can
+    read the input), in an :class:`InputStore` whose views are persistent EXPORTS,
     one per input (``<root>/exports/<ref name>/``), because the command line hands out paths
     for later - `haversack get` prints one for the user to open, a batch materializes before
     it segments - which a per-process view would take away at exit. An export is built from
@@ -653,7 +654,9 @@ class CommandInputs:
     never had one."""
 
     def __init__(self, root):
-        self.store = InputStore(root, None, budget_bytes=1 << 62, transcode=False)
+        # the input copy, as the server keeps it: no export of the bytes as they came off the
+        # wire, anywhere (the user's decision, 2026-09-26) - `get` hands out the copy
+        self.store = InputStore(root, None, budget_bytes=1 << 62)
         self.root = self.store.root
         self.exports = self.root / "exports"
 

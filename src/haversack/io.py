@@ -457,10 +457,16 @@ def convert(src, dst, *, compress: bool = True) -> Path:
     could no longer see anything wrong.
 
     A file is read as it stands. :func:`read_image` would also refuse one that is not 3D (a 4D
-    NIfTI converts to NRRD fine) and snap a near-orthonormal affine, which is a geometry change."""
+    NIfTI converts to NRRD fine) and snap a near-orthonormal affine, which is a geometry change.
+    The exception is haversack's own form - an input copy, or any duckn store - which SimpleITK
+    cannot open at all: it is read by :func:`read_image`, whose read of a copy is verified exact
+    when the copy is written. Until 2026-09-26 `get -o scan.nii.gz` of a copied input failed
+    "Unable to determine ImageIO reader" (found as `get` became the copy's door)."""
     sitk = _sitk()
     src = Path(src)
-    if src.is_dir():
+    from .duckn_io import is_duckn_store
+    from .input_copy import is_copy
+    if src.is_dir() or is_copy(src) or is_duckn_store(src):
         img = read_image(src)
     else:
         _readable(src)

@@ -2,8 +2,10 @@
 
 Store-neutral versions of what the legacy cache's tests pin, plus what the store must add:
 one fetch across processes; `get` printing a path that is still there after the command
-exits, of the ORIGINAL files (the command line keeps no input copy - a viewer opens what
-`get` hands out); provenance from the stored record; `cache usage` and `clean` counting refs.
+exits; provenance from the stored record; `cache usage` and `clean` counting refs. And the
+user's decision of 2026-09-26: no export of the bytes as they came off the wire - `get` hands
+out haversack's form (the input copy, or an input already in its own efficient form), and an
+input the reader refused has nothing to export.
 """
 import json
 import os
@@ -46,7 +48,7 @@ def test_get_prints_the_original_and_it_outlives_the_command(fake, tmp_path):
     r = _child(["get", "fake:case1"], tmp_path)
     assert r.returncode == 0, r.stderr
     printed = Path(r.stdout.strip())
-    assert printed.name == "case1.nrrd"                   # the original, not an input copy
+    assert printed.name == "case1.nrrd"                   # a raw NRRD is stored as it is
     assert printed.is_file()                               # the process is gone; the path is not
     assert (tmp_path / "cache" / "input-store") in printed.parents
 
@@ -94,9 +96,7 @@ def test_a_batch_materializes_every_input_and_each_path_stays(fake, tmp_path):
     assert all(p.is_file() and p.name == f"case{i}.nrrd" for i, p in enumerate(paths))
 
 
-def test_an_input_the_server_would_copy_is_kept_as_fetched(fake, tmp_path):
-    """A compressed NIfTI is what the server keeps as an input copy; the command line keeps
-    the file (`get` hands it to the user, and a viewer opens a NIfTI, not a duckn copy)."""
+def _gz_source(FakeSource):
     import SimpleITK as sitk
 
     class Gz(FakeSource):
@@ -106,7 +106,48 @@ def test_an_input_the_server_would_copy_is_kept_as_fetched(fake, tmp_path):
             sitk.WriteImage(sitk.GetImageFromArray(np.zeros((6, 6, 6), np.int16)),
                             str(d / f"{identifier}.nii.gz"))
             return d
-    from haversack import input_copy
-    assert input_copy.wanted(Path(tmp_path / "x.nii.gz"))    # what the server would copy
-    got = sources.materialize("fake:gz", sources=[Gz()])
-    assert got.name == "gz.nii.gz" and got.is_file()
+    return Gz()
+
+
+def test_the_command_line_keeps_the_copy_as_the_server_does(fake, tmp_path):
+    got = sources.materialize("fake:gz", sources=[_gz_source(FakeSource)])
+    assert got.name == "input.duckn.zip" and got.is_file()
+
+
+def test_get_into_a_directory_writes_the_copy_named_by_the_source(fake, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sources, "default_sources", lambda: [_gz_source(FakeSource)])
+    out = tmp_path / "out"
+    assert cli.main(["get", "fake:scan", "fake:other", "-o", str(out) + "/"]) == 0
+    assert sorted(p.name for p in out.iterdir()) == ["other.duckn.zip", "scan.duckn.zip"]
+    from haversack import io
+    assert io.read_image(out / "scan.duckn.zip").GetSize() == (6, 6, 6)
+
+
+def test_get_converts_from_the_copy(fake, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sources, "default_sources", lambda: [_gz_source(FakeSource)])
+    dst = tmp_path / "scan.nrrd"
+    assert cli.main(["get", "fake:scan", "-o", str(dst)]) == 0
+    import SimpleITK as sitk
+    assert sitk.ReadImage(str(dst)).GetSize() == (6, 6, 6)
+
+
+def test_an_input_in_its_own_efficient_form_is_handed_out_as_stored(fake, tmp_path, capsys):
+    """A raw NRRD is never copied (it is already a mapped read): stored as it is, and that IS
+    haversack's form of it."""
+    out = tmp_path / "out"
+    assert cli.main(["get", "fake:case1", "-o", str(out) + "/"]) == 0
+    assert [p.name for p in out.iterdir()] == ["case1.nrrd"]
+
+
+def test_an_input_the_reader_refused_is_not_exported_as_fetched(fake, tmp_path, monkeypatch, capsys):
+    class Broken(FakeSource):
+        def fetch(self, identifier, dest_dir, *, credentials=None):
+            d = Path(dest_dir) / "series"
+            d.mkdir()
+            (d / "a.dcm").write_bytes(b"DICM but not really")
+            (d / "b.dcm").write_bytes(b"DICM but not really either")
+            return d
+    monkeypatch.setattr(sources, "default_sources", lambda: [Broken()])
+    assert cli.main(["get", "fake:bad", "-o", str(tmp_path / "out") + "/"]) != 0
+    assert "does not hand out the files as fetched" in capsys.readouterr().err
+    assert not (tmp_path / "out" / "bad").exists()
