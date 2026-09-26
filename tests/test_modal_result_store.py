@@ -178,3 +178,22 @@ def test_the_attach_preflight_does_not_probe_a_cache_volume_there_is_not(store, 
     monkeypatch.setattr(m, "INPUTS_ROOT", str(tmp_path / "inputs"))
     monkeypatch.setattr(m, "WEIGHTS_ROOT", str(tmp_path / "weights"))
     m._check_volumes_attached()                         # CACHE_ROOT does not exist: not asked
+
+
+def test_the_module_imports_as_a_store_deployment_defines_it():
+    """Every test above patches a module imported WITHOUT a store; a deploy imports it WITH
+    one, where the scheduled sweep and the conditional mounts exist. The first deploy failed at
+    that import (modal.Period takes whole hours; a float was passed), which none of them saw."""
+    import os
+    import subprocess
+    import sys
+    root = Path(__file__).resolve().parent.parent
+    env = {**os.environ, "HAVERSACK_RESULT_STORE": "s3://bucket/prefix",
+           "HAVERSACK_RESULT_SWEEP_HOURS": "0.5",
+           "PYTHONPATH": os.pathsep.join(p for p in (str(root / "src"), os.environ.get("PYTHONPATH", "")) if p)}
+    code = ("import haversack.modal_app as m; "
+            "assert m.cache_vol is None and m._results_mount() == {}; "
+            "assert m._STORE_SECRETS and hasattr(m, 'sweep_results'); print('ok')")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
+                       timeout=120)
+    assert r.returncode == 0 and "ok" in r.stdout, r.stderr[-2000:]

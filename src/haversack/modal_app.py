@@ -2977,7 +2977,7 @@ def api():
 
 if RESULT_STORE:
     @app.function(cpu=1.0, memory=1024, image=api_image, secrets=_STORE_SECRETS, timeout=3600,
-                  schedule=modal.Period(hours=RESULT_SWEEP_HOURS))
+                  schedule=modal.Period(seconds=max(60, int(RESULT_SWEEP_HOURS * 3600))))
     def sweep_results():
         """The result store's reclamation, once per RESULT_SWEEP_HOURS for the whole
         deployment: blobs no pointer (current or kept history) names, past their grace, and
