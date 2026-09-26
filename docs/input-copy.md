@@ -479,3 +479,27 @@ pre-existing reader bug: a duplicated end slice named to sort first made GDCM or
 first and last positions tied, and `_series_geometry` divided by the zero span - every check then
 compared against NaN and passed. It raises now. Each case is a test in `tests/test_input_stream.py`,
 and each fails on `5e17e7d`.
+
+## 15. Conformance to duckn (2026-09-26)
+
+A copy is a duckn file, and haversack claims it conforms to duckn 0.5.4's specification - the
+core convention's §4.7 ("Writers and Converters") and the `dicom` extension. Each obligation,
+what the copy does about it, and what holds it:
+
+| Obligation | What a copy does | Held by |
+|---|---|---|
+| State only what is true of the array (duckn §4.7) | Voxels are the values the files mean: GDCM's slice-axis sign is never trusted (geometry from IPP), its MONOCHROME1 complement is undone, an unapplied Modality LUT is applied, a multi-frame file whose frames are not one uniform grid is refused | `test_io_series.py`, `test_dicom_tag_review_0926.py` |
+| `version` always present (duckn §3.1) | `1.0` (no 1.1 field is used) | `test_a_copy_states_the_convention_version` |
+| No `value_transforms` means stored = real (duckn §3.1); materialize drops transforms (§4.3) | Values are materialized; no transform is written | the reader tests above |
+| Keep a source extension only while a faithful re-encoding (duckn §4.5) | Same grid, same quantity (§4.3 materialization): the `dicom` extension stays; nothing a copy is derived into carries it | `test_input_copy.py` |
+| Say what kind of values (dicom §3.1) | `stored_values`, judged from what the decode did | `test_dicom_tag_review_0926.py` |
+| Nothing in stored-value units beside other values (dicom §5.10) | Bits Stored, pixel ranges, padding, Real World Value Mapping only when `stored_values` is true | same |
+| Private elements only if vouched for (dicom §9) | None: the source keeps them | `test_the_tags_are_the_files_own_headers` |
+| Tags split, encoded and excluded as the spec says (dicom §2, §4, §6, §9) | duckn's one conversion (`tags_from_files`) | duckn's own suite |
+| A header written from the copy contradicts nothing (duckn §4.7, for `get -o`) | `honest_metadata` on every export | `test_input_copy.py`, `test_dicom_tag_review_0926.py` |
+
+**The choice haversack makes (duckn §4.7: a writer's own, documented).** Efficiency and
+usability, not round-trip fidelity: the copy is the standard form of input that engines read
+fast, faithful to the data rather than to the source's bytes (§1's decision); private elements
+and the source's wire bytes are not kept, and anyone who needs them fetches the original from
+its source, which each input's record names.
