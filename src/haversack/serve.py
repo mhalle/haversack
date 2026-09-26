@@ -7048,6 +7048,14 @@ def main_serve(args) -> int:
             raise InputError(f"cannot write the token file {token_file}: {e}") from None
     print(f"haversack {_version()} serving on http://{args.host}:{args.port} "
           f"(device={args.device}, workdir={workdir})", flush=True)
+    if getattr(args, "result_store", None):
+        # which store a writer publishes into is the first thing to know about a shared cache,
+        # and the startup lines did not say it (2026-09-26); any credentials in the URL are cut
+        from urllib.parse import urlsplit, urlunsplit
+        u = urlsplit(str(args.result_store))
+        shown = (urlunsplit(u._replace(netloc=u.netloc.rsplit("@", 1)[1])) if "@" in u.netloc
+                 else str(args.result_store))
+        print(f"result store: {shown} (local copy {cache_dir})", flush=True)
     if generated:
         print(f"token: {token}\n  written to {token_file} (this user only); `haversack remote` "
               "on this machine uses it by itself, other machines pass --token", flush=True)

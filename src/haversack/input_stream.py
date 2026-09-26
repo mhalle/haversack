@@ -105,16 +105,10 @@ def _series_files(directory: Path) -> list | None:
 
 
 def _dicom_by_force(f: Path) -> bool:
-    """Whether a file pydicom refused to read plainly is DICOM after all - a dataset written
-    without the preamble and file meta, which GDCM reads. Judged by elements a DICOM object
-    carries (its SOP class, its image size, its modality), not by pydicom merely not raising:
-    ``force`` makes something of almost any bytes."""
-    import pydicom
-    try:
-        ds = pydicom.dcmread(f, stop_before_pixels=True, force=True)
-        return any(k in ds for k in ("SOPClassUID", "Rows", "Modality"))
-    except Exception:                          # noqa: BLE001 - not DICOM even by force
-        return False
+    """:func:`haversack.io._dicom_by_force`: one rule for "DICOM without its preamble", which
+    the reader's own folder check asks too (2026-09-26)."""
+    from .io import _dicom_by_force as rule
+    return rule(f)
 
 
 def _dicom_series(directory: Path) -> Stream | None:

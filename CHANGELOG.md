@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **A server with `--result-store` names the store at startup**, beside its local copy (any
+  credentials in the URL cut). Nothing said which store a writer publishes into.
+- **A NIfTI upload no longer prints GDCM's "No Series were found" into the server log.** Every
+  upload arrives as a folder holding one file, and both the multi-series check and the reader
+  asked GDCM about it first; GDCM gets the right answer (no series) and prints two ITK warnings
+  on the way. It is now asked only when a file in the folder could be DICOM, preamble or not.
 ## [0.14.0] - 2026-09-26
 
 MOOSE models fed the orientation they were trained in, and moosez's body-composition workflow; a

@@ -206,8 +206,12 @@ def _read_image(path, *, tags: bool):
         image = read_duckn_image(p)
     elif p.is_dir():
         reader = sitk.ImageSeriesReader()
-        _refuse_several_series(p, reader.GetGDCMSeriesIDs(str(p)))
-        files = reader.GetGDCMSeriesFileNames(str(p))
+        # a folder with nothing DICOM in it (a staged single-file upload, every job of one)
+        # is not handed to GDCM, which says so on stderr (_may_hold_dicom, 2026-09-26)
+        files = []
+        if _may_hold_dicom(p):
+            _refuse_several_series(p, reader.GetGDCMSeriesIDs(str(p)))
+            files = reader.GetGDCMSeriesFileNames(str(p))
         if not files:
             # not a DICOM series - but a directory holding exactly one image
             # file reads as that file (how staged single-file sources arrive)
@@ -484,11 +488,50 @@ def dicom_series_ids(directory) -> list:
     the case where reading "the" series means picking one, and picking silently
     is how a plausible, wrong segmentation gets produced.
     """
+    if not _may_hold_dicom(Path(directory)):
+        return []
     sitk = _sitk()
     try:
         return list(sitk.ImageSeriesReader.GetGDCMSeriesIDs(str(directory)))
     except Exception:
         return []
+
+
+def _may_hold_dicom(directory: Path) -> bool:
+    """Whether any file in ``directory`` could be DICOM, asked BEFORE GDCM is: GDCM answers
+    a folder with no DICOM in it correctly (no series) but prints two ITK warnings to stderr
+    on the way, and the server asks this of every folder an upload is staged in - so a NIfTI
+    upload put "No Series were found" into the log of every job (seen 2026-09-26 running the
+    object store). The first file that could be DICOM ends the check, so a real series costs
+    one header read; only a folder with none reads each file's header once. Without pydicom
+    (a lean install) GDCM is asked as before."""
+    try:
+        import pydicom
+    except ImportError:
+        return True
+    for f in sorted(directory.iterdir()):
+        if not f.is_file() or f.name.startswith("."):
+            continue
+        try:
+            pydicom.dcmread(f, stop_before_pixels=True)
+            return True
+        except Exception:                          # noqa: BLE001 - not plainly DICOM
+            if _dicom_by_force(f):
+                return True
+    return False
+
+
+def _dicom_by_force(f: Path) -> bool:
+    """Whether a file pydicom refused to read plainly is DICOM after all - a dataset written
+    without the preamble and file meta, which GDCM reads. Judged by elements a DICOM object
+    carries (its SOP class, its image size, its modality), not by pydicom merely not raising:
+    ``force`` makes something of almost any bytes."""
+    import pydicom
+    try:
+        ds = pydicom.dcmread(f, stop_before_pixels=True, force=True)
+        return any(k in ds for k in ("SOPClassUID", "Rows", "Modality"))
+    except Exception:                          # noqa: BLE001 - not DICOM even by force
+        return False
 
 
 # A ranked store output is named `.duckn` (a directory) or `.duckn.zip` (a standard zarr zip).
