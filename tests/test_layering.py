@@ -236,7 +236,7 @@ class TestLayering(unittest.TestCase):
         core = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["dependencies"]
         missing = []
         for spec in core:
-            name = re.split(r"[<>=!~\[; ]", spec.strip(), 1)[0]
+            name = re.split(r"[<>=!~\[; ]", spec.strip(), maxsplit=1)[0]
             try:
                 distribution(name)
             except PackageNotFoundError:

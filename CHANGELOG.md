@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **Python 3.13 and 3.14.** haversack required 3.12 because FastSurfer's command-line
+  definitions handed argparse a `str | None` as a type, which 3.14's argparse refuses. Fixed in
+  the fork (fastsurfer-lean v2.5.4-lean4, with its deprecated SciPy imports), since upstream has
+  the same code. The fast suite passes on 3.12, 3.13 and 3.14, and FastSurfer and
+  `ts.v2:total_fast` write byte-identical labels on 3.14 and 3.12. CI now runs 3.12 and 3.14.
+  The one `asyncio.iscoroutinefunction` (removed in 3.16) is `inspect`'s.
 - **duckn, zarr, rankfield and pydicom are core.** Every cached input is kept as a duckn copy
   (pydicom is its DICOM dictionary) and a task's rank field is a duckn store, so the `duckn`
   extra had become a requirement in practice; every deployed image installed it already. It

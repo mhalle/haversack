@@ -82,7 +82,7 @@ def test_the_shipped_lut_still_matches_the_one_fastsurfer_ships():
 
 def test_the_weights_identity_is_the_release_the_fork_is_pinned_to():
     """The result key says which FastSurfer ran (`fastsurfer=2.5.4`), and pyproject decides
-    which one is installed (`fastsurfer-lean` at `v2.5.4-lean3`). Two independent facts: a
+    which one is installed (`fastsurfer-lean` at `v2.5.4-lean4`). Two independent facts: a
     tag bump that forgot the registry would publish new code's bytes under the old release's
     key - served to anyone who asked for the old one - and nothing else would notice.
 

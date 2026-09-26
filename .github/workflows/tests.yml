@@ -12,6 +12,12 @@ jobs:
   haversack:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      # the ends of requires-python (2026-09-25: the cap moved from 3.12 to 3.14 once the
+      # FastSurfer fork ran on 3.14); 3.13 was measured locally, not run on every push
+      matrix:
+        python: ["3.12", "3.14"]
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7
@@ -20,6 +26,7 @@ jobs:
           # uv.lock is not the dependency source here (see below), so key the cache on the
           # workflow itself - it invalidates exactly when the installed set changes.
           cache-dependency-glob: .github/workflows/tests.yml
+          cache-suffix: py${{ matrix.python }}
       - name: Install dependencies
         # Hand-listed rather than `uv sync` so torch can come from the CPU index: it avoids
         # pulling ~2.5 GB of CUDA wheels onto a CPU-only runner. src goes on the path.
@@ -40,7 +47,7 @@ jobs:
         # name one commit - a tag source and a URL ref are different kinds of reference
         # (found 2026-09-23, the first time this list carried feldglas).
         run: |
-          uv venv
+          uv venv --python ${{ matrix.python }}
           uv pip install --no-sources --index-strategy unsafe-best-match \
             --extra-index-url https://download.pytorch.org/whl/cpu \
             torch nnunetv2 scipy scikit-image 'SimpleITK>=2.3' obstore 'click>=8.5' pytest \

@@ -6166,6 +6166,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         that landed a second later. Nothing here remembers an absence either - every
         request looks again (2026-09-21, with the object-store session)."""
         import functools
+        import inspect                  # asyncio's is deprecated, gone in 3.16
 
         def unstored(e):
             # 410 with it (adversarial pass, 2026-09-21): "the bytes are gone" turns back
@@ -6176,7 +6177,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 e.headers = {**(e.headers or {}), "Cache-Control": "no-store"}
             return e
 
-        if asyncio.iscoroutinefunction(route):
+        if inspect.iscoroutinefunction(route):
             @functools.wraps(route)
             async def guarded(*args, **kwargs):
                 try:
