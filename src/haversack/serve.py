@@ -6999,6 +6999,7 @@ def main_serve(args) -> int:
         except OSError as e:
             raise InputError(f"{flag} {d}: {e.strerror or e}") from None
     ex = LocalExecutor(seg, workdir=workdir, max_pending=args.max_pending,
+                       input_cache_bytes=int(float(getattr(args, "input_cache_gb", 8.0)) * (1 << 30)),
                        keep_finished=args.keep_finished, cache_dir=cache_dir,
                        jobs_ttl_h=getattr(args, "jobs_ttl_hours", 24.0),
                        result_store=getattr(args, "result_store", None) or None,

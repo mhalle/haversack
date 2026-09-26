@@ -322,3 +322,24 @@ class TheEconomyLockGivesWay(_Base):
             self.assertTrue(self.store.has("idc:abc"))
         finally:
             os.close(fd)
+
+
+class WhatACrashLeaves(_Base):
+    def test_a_dead_processs_staging_is_reaped_when_the_store_opens(self):
+        dead = self.store.staging_root / "999999" / "abc"
+        dead.mkdir(parents=True)
+        (dead / "half.dcm").write_bytes(b"x")
+        mine = self.store.staging_root / str(os.getpid()) / "live"
+        mine.mkdir(parents=True)
+        InputStore(self.tmp / "inputs", self.fetch)
+        self.assertFalse(dead.parent.exists())
+        self.assertTrue(mine.exists())
+
+    def test_a_fetch_that_fails_leaves_no_staging(self):
+        def boom(identity, entry, credentials=None):
+            (Path(entry) / "series").mkdir()
+            raise RuntimeError("network")
+        with self.assertRaises(RuntimeError):
+            self.store.ensure("idc:x", fetch=boom)
+        left = [p for p in self.store.staging_root.rglob("*") if p.is_file()]
+        self.assertEqual(left, [])

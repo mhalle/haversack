@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **`grid: "model"` works.** The job options and SERVER.md have offered the network's own grid
+  as an output grid since the package was named, and nothing resolved it: every such job failed
+  "could not convert string to float". It is the forward resample's rule inverted, so the labels
+  come back on exactly the model's voxels. Found by a soak that picks options at random.
+- **`haversack serve --input-cache-gb`** sets how much fetched and uploaded input a server
+  keeps (8 GB by default, as before).
 - **An embedding of a fetched input records the source's digest.** The server hands an encoder
   the input copy it keeps instead of the fetched bytes, and the field recorded the copy's hash -
   a digest of bytes nobody sent. It records the digest the copy was made from now.

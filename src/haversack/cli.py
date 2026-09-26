@@ -703,6 +703,9 @@ def _command_line() -> click.Group:
                          help='where model weights live (see `segment --model-root`)'),
             click.Option(['--max-pending'], type=int, default=16,
                          help='queue bound; past it POST returns 429'),
+            click.Option(['--input-cache-gb'], type=float, default=8.0,
+                         help='how much fetched and uploaded input the server keeps, least '
+                              'recently used going first'),
             click.Option(['--keep-finished'], type=int, default=50,
                          help='finished jobs (and files) retained'),
             click.Option(['--jobs-ttl-hours'], type=float, default=24.0,

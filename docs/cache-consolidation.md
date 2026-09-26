@@ -472,8 +472,14 @@ by `test_a_job_on_a_stored_copy_keys_and_computes_as_on_the_original`).
   the stored form (`copy`, `file`, `tree`), each file's name, digest and size, and the source
   record that `.input.json` holds today. Written create-if-absent: an input is fetched once
   per key and never republished, so no compare-and-swap is needed.
-- **Blobs** are the result store's `blobs/sha256/` - one namespace, so an input copy and a
-  result that happen to share bytes are stored once, and one sweep serves both.
+- **Blobs** under their OWN prefix, `inputs/blobs/sha256/`, not the result store's
+  `blobs/sha256/`. Corrected while building (2026-09-26): each owner's sweep keeps only the
+  blobs its own refs name - `SharedResultCache.sweep` the result pointers' chains,
+  `InputStore.evict` the input refs' files - so in ONE namespace each would collect the
+  other's live blobs. Separate prefixes make each sweep correct by construction (provender's
+  `Blobs(store, prefix)` owns exactly its prefix, which is what that parameter is for). The
+  dedupe given up is nil in practice: an input and a result almost never share bytes. A
+  standalone local store keeps `blobs/` at its own root, as built.
 - **A job reads its own view**, built in its job directory from the blobs: a hard link, else a
   copy-on-write clone (APFS, btrfs, XFS), else a copy (exFAT, FAT). The view carries the
   names a reader needs (`input.duckn.zip`, `ct.nii.gz`, a DICOM folder). Because the job owns
@@ -538,6 +544,29 @@ legacy SeriesCache holds (committed and current, by the legacy cache's own `has`
 store on first use - its input copy byte for byte, or its original files, with its record -
 and leaves fetched inputs to be fetched again. Its expiry is decision 1's (two minor releases
 after the release that makes this store the default, or 90 days, whichever is later).
+
+(d), the soak (`tools/soak_input_store.py`), ran 15 minutes (2026-09-26): one real server
+with the flag, a 0.3 GB input budget, three clients uploading, storing and re-referencing
+variants of a CT and submitting one IDC series under random options, 10 % `no-cache`, the
+server SIGKILLed at minute 5 and restarted. 336 jobs: 322 done, 51 references answered 410
+input_gone after eviction, 92 IDC jobs re-fetched as eviction required, no 5xx, no digest
+mismatch; afterwards no staging or view file, every ref's blobs present, no orphan after a
+sweep, the store at 302 MB. The 14 failures were all `grid: "model"`, an option the schema
+offered and nothing handled - fixed, not an input-store defect. Two fixes came from building
+it: staging goes under `staging/<pid>/` and a dead process's is reaped when the store opens
+(a fetch killed mid-way left it forever), and `serve --input-cache-gb`.
+
+**DICOM headers (designed with the user, 2026-09-26; not built).** They serve two purposes,
+kept apart. For USE, JSON - the duckn dicom extension's keyword-keyed tags, sourced from
+pydicom (duckn's `dicom_convert`: private tags, sequences, binary values in base64) rather
+than from SimpleITK's dictionary, which drops binary values - and served through an API
+(`haversack.inputs.open(spec).dicom()`, a route) rather than by anyone parsing DICOM. For
+ROUND TRIP, an OPAQUE member of the copy: each file's raw header bytes (everything before
+Pixel Data), never interpreted or exposed as data, used only to rebuild the original files.
+Measured on a 249-slice NLST CT: 628 KB raw, 11 KB with zstd. For an uncompressed transfer
+syntax with an integer rescale the rebuild is byte-exact and can be PROVEN at transcode time
+(rebuild, hash, compare with the recorded source digest); a compressed transfer syntax or a
+non-integer rescale gets pixel-exact at best, recorded as such.
 
 **Order.** (a) the store half (refs, views, eviction) with its tests, behind a flag, on the
 local server; (b) the command line's cache onto it; (c) the shim for legacy uploads; (d) a

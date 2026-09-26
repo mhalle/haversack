@@ -93,6 +93,20 @@ def _relpath(name) -> str:
     return name
 
 
+def reap_dead(base: Path) -> None:
+    """Remove ``base/<pid>/`` for every pid that is no longer running: what a process killed
+    mid-fetch (its staging) or mid-job (its views) left, which nothing else would ever take."""
+    for d in base.iterdir() if base.is_dir() else ():
+        try:
+            pid = int(d.name)
+            if pid != os.getpid():
+                os.kill(pid, 0)
+        except ProcessLookupError:
+            shutil.rmtree(d, ignore_errors=True)
+        except (ValueError, PermissionError, OSError):
+            continue
+
+
 class InputStore:
     """Inputs as blobs + one ref each, under ``root`` (``root/store`` is the object store,
     ``root/staging`` where a fetch is assembled, ``root/locks`` the per-key economy locks)."""
@@ -114,6 +128,7 @@ class InputStore:
         self.transcode = bool(transcode)
         import threading
         self._held = threading.local()          # stripes this thread holds (re-entrancy)
+        reap_dead(self.staging_root)            # a fetch killed mid-way leaves its staging
 
     # -- refs ------------------------------------------------------------------------------
 
@@ -237,7 +252,7 @@ class InputStore:
                 self.touch(identity)
                 return self.ref(identity)
             self.forget(identity)                  # a ref whose blobs were swept
-            stage = self.staging_root / uuid.uuid4().hex
+            stage = self.staging_root / str(os.getpid()) / uuid.uuid4().hex
             stage.mkdir(parents=True)
             try:
                 fn = fetch or self.fetch
@@ -455,17 +470,7 @@ class ServerInputs:
         self._reap_dead_processes()
 
     def _reap_dead_processes(self) -> None:
-        """Views of a process that is gone - a crash leaves them - are nobody's."""
-        base = self.root / "views"
-        for d in base.iterdir() if base.is_dir() else ():
-            try:
-                pid = int(d.name)
-                if pid != os.getpid():
-                    os.kill(pid, 0)
-            except ProcessLookupError:
-                shutil.rmtree(d, ignore_errors=True)
-            except (ValueError, PermissionError):
-                continue
+        reap_dead(self.root / "views")
 
     # -- views -------------------------------------------------------------------------------
 

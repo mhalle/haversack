@@ -73,11 +73,34 @@ class Frame:
         """Output-grid index -> model-grid coordinate, for any grid sharing the source axes."""
         return Mapping.between(grid, self.resampled_from) >> self.forward_rule
 
+    def model_grid(self) -> Grid:
+        """The network's own grid, placed in the source's millimeters: the forward resampler's
+        rule inverted (model index -> source index) and carried through the grid it resampled.
+        Restoring onto it maps every output voxel exactly onto a model voxel center, so it
+        returns the network's own voxels. An axis the resampler collapsed to one sample
+        (the corner rule's zero factor) keeps the source spacing there.
+
+        Advertised as ``grid="model"`` by the job schema and SERVER.md since the package was
+        named, and never handled - every such job failed "could not convert string to float:
+        'model'" (found by the input-store soak, 2026-09-26, which picks options at random)."""
+        rf = self.resampled_from
+        rule = self.forward_rule
+        a = np.asarray(rule.a, dtype=np.float64)
+        b = np.asarray(rule.b, dtype=np.float64)
+        sp = np.asarray(rf.spacing, dtype=np.float64)
+        inv_a = np.where(a > 0, 1.0 / np.where(a > 0, a, 1.0), 1.0)
+        inv_b = np.where(a > 0, -b * inv_a, 0.0)
+        return Grid(shape=self.model_shape, spacing=tuple(sp * inv_a),
+                    origin=tuple(np.asarray(rf.origin, dtype=np.float64) + inv_b * sp))
+
     def resolve_grid(self, grid) -> Grid:
-        """``"input"`` -> the source grid; a number -> isotropic at that spacing (same field of
-        view); a Grid -> itself."""
+        """``"input"`` -> the source grid; ``"model"`` -> the network's own grid
+        (:meth:`model_grid`); a number -> isotropic at that spacing (same field of view); a
+        Grid -> itself."""
         if grid is None or grid == "input":
             return self.source
+        if grid == "model":
+            return self.model_grid()
         if isinstance(grid, Grid):
             return grid
         return Grid.isotropic(float(grid), like=self.source)
