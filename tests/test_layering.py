@@ -437,7 +437,8 @@ class TestLayering(unittest.TestCase):
             r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr[-1500:])
         self.assertNotIn("Traceback", r.stderr)
-        self.assertIn("duckn extra", r.stderr)
+        self.assertIn("duckn, zarr and rankfield", r.stderr)
+        self.assertIn("uv pip install", r.stderr)
 
     def test_no_module_depends_on_the_mlx_toolkit(self):
         for path in sorted(SRC.rglob("*.py")):

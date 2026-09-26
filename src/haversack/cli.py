@@ -30,8 +30,9 @@ INSTALL_HINT = ('this is a lean install (--no-deps); a normal install has them: 
 
 
 
-STORE_EXTRA_HINT = ("the ranked store needs the duckn extra: uv sync --extra duckn "
-                    "(or uv pip install 'haversack[duckn]')")
+STORE_EXTRA_HINT = ("the ranked store needs duckn, zarr and rankfield, which haversack installs "
+                    "(core since 2026-09-25); this environment was installed without them (a lean "
+                    "or --no-deps install): uv pip install 'haversack @ git+https://github.com/mhalle/haversack'")
 
 
 def _need_store_extra():

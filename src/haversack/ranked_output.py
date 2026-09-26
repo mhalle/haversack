@@ -39,7 +39,7 @@ STORE_RULES = 1
 
 
 def store_extra_missing() -> list:
-    """The packages of the ranked-store extra (the duckn extra: rankfield, zarr, duckn) that
+    """The packages of the ranked-store extra (rankfield, zarr, duckn - core since 2026-09-25, absent only in a lean install) that
     are not installed - by name, importing nothing. The one answer to "can this environment
     write a store", for the CLI's refusal and a server's ``kind=rankfield`` door alike."""
     import importlib.util

@@ -48,6 +48,16 @@ dependencies = [
     # typer was weighed: it is click underneath plus rich, shellingham and a pre-1.0 API, for
     # help this project prints plain, and it had been dropped on 2026-09-07, imported nowhere.
     "click>=8.5",
+    # duckn, zarr, rankfield and pydicom are core (2026-09-25, the user's call: "duckn is now
+    # essentially necessary"). Every cached input is kept as a duckn zarr copy (pydicom is its
+    # DICOM data dictionary), a task's rank field is a duckn store encoded by rankfield, and
+    # every deployed image already carried them. 14.3 MB beside core. duckn and rankfield come
+    # from git tags, as provender does - which is why an install needs `uv pip`, not pip. The
+    # default `segment IN -o labels.nii.gz` still imports none of them (rule 6, test_layering).
+    "duckn>=0.5.2",
+    "zarr>=3.3",
+    "rankfield>=0.3.7",
+    "pydicom>=2.4",
 ]
 # NOTE: mlx is NOT a core dependency (moved to the `mlx` extra below, 2026-08-26).
 # The product is torch/MPS-first (haversack); MLX is the oracle-only path. Keeping mlx
@@ -114,19 +124,15 @@ voxtell = ["voxtell"]
 # chain and therefore its own deps. Conflicting with the other engines below, as ever.
 monai = ["monai>=1.4", "torch>=2.7", "nibabel", "itk", "pytorch-ignite", "einops",
          "timm", "scikit-learn", "tensorboard", "fire", "PyYAML"]
-# INTERNAL, undocumented: duckn volumes as input and ranked stores (zarr, duckn metadata) as
-# output - haversack.duckn_io, haversack.ranked_store, haversack.ranked_output. duckn is not
-# on PyPI; it installs from its GitHub tag (git source below). Not a conflict group: it sits
-# beside the torch extra. The dev env adds it: `uv sync --extra torch ... --extra duckn`.
-# zarr 3.3 and duckn need Python 3.12, which is the project's floor (0.6.1: one floor, no
-# per-package markers - the extra was empty on 3.10 and rankfield-only on 3.11).
-duckn = ["duckn>=0.5.2", "zarr>=3.3", "rankfield>=0.3.7", "pydicom>=2.4"]      # the ranked encoding + restore (github, a tag)
+# `[duckn]` is an empty alias since its packages became core (2026-09-25), kept so that
+# `haversack[duckn]` in existing commands, docs and every Modal image's extras still installs.
+duckn = []
 # `haversack embed` (2026-09-23): an encoder's token lattices written as an embedding field. The
 # field format is feldglas's, and feldglas is its one author - haversack hands it the tokens and
 # writes through `feldglas.store` (zarr + duckn's own models, like the ranked stores). The networks
 # need the torch extra (RADAR's encoder is built from nnU-Net's dynamic_network_architectures);
 # RADAR's input convention reorients through nibabel, as upstream's DataFolder does.
-embed = ["feldglas", "duckn", "zarr>=3.3", "rankfield>=0.3.7", "nibabel"]
+embed = ["feldglas", "nibabel"]                    # duckn, zarr and rankfield are core
 
 [build-system]
 requires = ["hatchling"]

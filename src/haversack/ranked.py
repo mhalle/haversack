@@ -24,9 +24,9 @@ try:
 except ModuleNotFoundError as _e:
     if _e.name != "rankfield":
         raise
-    raise ImportError("haversack.ranked is a shim over rankfield, which the duckn extra installs: "
-                      "uv sync --extra duckn (or uv pip install 'haversack[duckn]'; on pip alone, "
-                      "rankfield @ git+https://github.com/mhalle/rankfield.git)") from None
+    raise ImportError("haversack.ranked is a shim over rankfield, which haversack installs; this "
+                      "environment was installed without it (a lean or --no-deps install): "
+                      "uv pip install 'haversack @ git+https://github.com/mhalle/haversack'") from None
 
 RankedCode = RankField                  # the name the pipeline and the tools grew up with
 RANKED_VERSION = FORMAT_VERSION

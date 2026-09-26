@@ -27,10 +27,10 @@ uv venv --python 3.12 && source .venv/bin/activate
 uv pip install "haversack @ git+https://github.com/mhalle/haversack"
 ```
 
-`pip install` of the same URL works too for the bare install and the extras that resolve
-from PyPI (`serve`, `remote`, `modal`); the extras whose packages come from git (`duckn`,
-`fastsurfer`, `synthstrip`, `voxtell`) need `uv pip install`, which reads the sources this
-project declares. Add `serve` to the extras for the local server, `remote` for the client:
+Use `uv pip install`, not `pip install`: several of haversack's own packages (duckn,
+rankfield, provender, and the engines' forks) install from their git tags, which uv reads from
+the sources this project declares and pip cannot. Add `serve` to the extras for the local
+server, `remote` for the client:
 
 ```bash
 uv pip install "haversack[serve,remote] @ git+https://github.com/mhalle/haversack"
@@ -506,7 +506,8 @@ store** instead of its labels: its output distribution on the model grid - every
 classes in rank order with their logit gaps, a distance field to the nearest surface, and
 duckn segmentation metadata naming each class. Labels onto any grid can be restored from it
 later without the network (`haversack restore STORE -o labels.seg.nrrd [--spacing 1.0]`). It
-needs the `duckn` extra, and exists for nnU-Net tasks and FastSurfer.
+exists for nnU-Net tasks and FastSurfer; a FastSurfer store's restore lateralizes the cortex
+as FastSurfer does, which needs the `fastsurfer` extra (without it the restore says so).
 
 ```bash
 haversack segment ct.nii.gz --task ts.v2:total_fast -o ct_total_fast.duckn.zip

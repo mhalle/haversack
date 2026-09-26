@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **duckn, zarr, rankfield and pydicom are core.** Every cached input is kept as a duckn copy
+  (pydicom is its DICOM dictionary) and a task's rank field is a duckn store, so the `duckn`
+  extra had become a requirement in practice; every deployed image installed it already. It
+  adds 14.3 MB. `haversack[duckn]` still installs (an empty alias), and the `embed` extra is now
+  only feldglas and nibabel. The default `segment IN -o labels.nii.gz` still imports none of
+  them. The README's install section said a plain `pip install` works for the bare install; it
+  has not since provender became core - haversack's own packages install from git tags, which
+  `uv pip install` reads and pip cannot - and now says so.
 - **FastSurfer installs lighter: fastsurfer-lean v2.5.4-lean3.** The fork's inference no
   longer depends on h5py, matplotlib or torchvision (each was imported only for training code,
   or for a one-transform `Compose`); they moved to its `train` extra. Inside haversack that

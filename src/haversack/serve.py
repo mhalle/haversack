@@ -2787,7 +2787,7 @@ class LocalExecutor:
     @property
     def ranked_stores(self) -> bool:
         """Whether ``kind=rankfield`` jobs run here (2026-09-24): in-process, when the packages a
-        store is written with are installed (the duckn extra). Asked at the submit door, so a
+        store is written with are installed (core; absent only in a lean install). Asked at the submit door, so a
         server without them refuses at once rather than failing a queued job."""
         from .ranked_output import store_extra_missing
         return not store_extra_missing()
@@ -5416,7 +5416,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             # and exists only for a task whose engine hands over a distribution.
             from .ranked_output import supports_store_output
             if not getattr(executor, "ranked_stores", False):
-                raise HTTPException(501, "this server writes no rank fields (the duckn extra is not "
+                raise HTTPException(501, "this server writes no rank fields (duckn, zarr or rankfield is not "
                                          "installed where its jobs run); write one locally with "
                                          "`haversack segment ... -o <name>.duckn.zip`")
             if asked:

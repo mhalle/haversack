@@ -273,8 +273,9 @@ def open_store(path, mode: str = "r") -> RankedStore:
         import zarr
         from zarr.storage import LocalStore, ZipStore
     except ImportError as e:
-        raise InputError("ranked stores need zarr (the duckn extra): "
-                         "uv sync --extra duckn, or uv pip install zarr") from e
+        raise InputError("ranked stores need zarr, which haversack installs; this environment "
+                         "was installed without it (a lean or --no-deps install): "
+                         "uv pip install 'haversack @ git+https://github.com/mhalle/haversack'") from e
 
     p = Path(path)
     if mode != "r" and p.is_symlink():

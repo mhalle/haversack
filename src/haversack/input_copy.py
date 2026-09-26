@@ -85,7 +85,7 @@ class NotACopy(Exception):
 
 def enabled() -> bool:
     """Whether inputs are transcoded here: the operator has not said no, and the packages a copy
-    is WRITTEN with are installed (the duckn extra). An environment without them keeps
+    is WRITTEN with are installed (core since 2026-09-25; absent only in a lean install). An environment without them keeps
     originals, as before this existed; reading a copy needs neither (:func:`read_copy`)."""
     if os.environ.get(ENV, "1").strip().lower() in ("0", "false", "no", "off"):
         return False
@@ -590,8 +590,8 @@ def _with_tags(image, attrs: dict):
             from duckn.dicom_tags import to_sitk_strings
             restored = to_sitk_strings(tags)
         except ImportError:
-            # an environment without duckn or pydicom's data dictionary (an engine image without
-            # the duckn extra): the tags are provenance, never needed to compute - the image is
+            # an environment without duckn or pydicom's data dictionary (a lean install, or an
+            # image built before they were core): the tags are provenance, never needed - the image is
             # read without them rather than not at all
             restored = {}
         for key, value in restored.items():
@@ -600,8 +600,8 @@ def _with_tags(image, attrs: dict):
 
 
 def _to_sitk(attrs: dict, raw):
-    """The image, through duckn's own ``to_sitk`` where duckn is installed. Where it is not - an
-    engine environment that cannot take the duckn extra (VoxTell's, MONAI's) reading a copy
+    """The image, through duckn's own ``to_sitk`` where duckn is installed. Where it is not - a
+    lean environment without duckn reading a copy
     another container wrote - the one layout this module writes is converted directly: LPS
     space (SimpleITK's own: no flip), axes z, y, x, each ``space_direction`` the direction cosine
     times the spacing. A test holds the two equal on the same file; anything else is refused."""

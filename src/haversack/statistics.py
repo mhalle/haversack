@@ -218,7 +218,7 @@ def _field_measurements(code) -> dict:
         return {}, None
     try:
         from . import measure, ranked
-    except ImportError as e:                # the duckn extra is not installed
+    except ImportError as e:                # duckn is not installed (a lean install)
         return {}, str(e)
     try:
         labels = code.meta.get("labels")
