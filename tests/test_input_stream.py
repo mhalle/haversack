@@ -246,3 +246,97 @@ def test_a_streamed_transcode_peaks_at_a_fraction_of_the_whole(tmp_path):
         peaks[mode] = int(r.stdout.strip().splitlines()[-1])
     whole, stream = peaks["whole"], peaks["stream"]                        # bytes, both
     assert stream < 0.6 * whole, (stream / 1e6, whole / 1e6)
+
+
+# -- the review of 2026-09-25: a DICOM file the listing cannot place hands over to the whole read
+
+def _last(d: Path) -> Path:
+    return sorted(d.glob("*.dcm"))[-1]
+
+
+def _no_preamble(d: Path) -> Path:
+    """The last slice rewritten as a bare implicit-VR dataset, no preamble or file meta: pydicom
+    reads it only by force, GDCM reads it as a slice."""
+    f = _last(d)
+    ds = pydicom.dcmread(f)
+    del ds.file_meta
+    ds.preamble = None
+    pydicom.dcmwrite(f, ds, implicit_vr=True, little_endian=True, enforce_file_format=False)
+    with pytest.raises(Exception):
+        pydicom.dcmread(f)
+    return d
+
+
+def _drop(tag):
+    def make(d: Path) -> Path:
+        f = _last(d)
+        ds = pydicom.dcmread(f)
+        delattr(ds, tag)
+        ds.save_as(f, enforce_file_format=True)
+        return d
+    return make
+
+
+def _with_secondary_capture(d: Path) -> Path:
+    """A secondary capture of another series beside the CT: pixel data, no position."""
+    from pydicom.uid import generate_uid
+    ds = pydicom.dcmread(_last(d))
+    ds.SOPClassUID = ds.file_meta.MediaStorageSOPClassUID = "1.2.840.10008.5.1.4.1.1.7"
+    ds.SOPInstanceUID = ds.file_meta.MediaStorageSOPInstanceUID = generate_uid()
+    ds.SeriesInstanceUID = generate_uid()
+    for tag in ("ImagePositionPatient", "ImageOrientationPatient"):
+        delattr(ds, tag)
+    ds.save_as(d / "SC0001.dcm", enforce_file_format=True)
+    return d
+
+
+@pytest.mark.parametrize("make", [_no_preamble, _drop("ImagePositionPatient"),
+                                  _drop("ImageOrientationPatient"), _with_secondary_capture],
+                         ids=["no-preamble-end-slice", "end-slice-without-position",
+                              "end-slice-without-orientation", "secondary-capture-beside"])
+def test_a_folder_the_listing_cannot_place_takes_the_whole_read(tmp_path, make):
+    """Each of these was streamed: the first read with one slice fewer than the reader keeps,
+    the others copied although the reader refuses them - and the copy replaced the original."""
+    from haversack import io as nio
+    src = make(write_series(tmp_path / "s", n=10))
+    assert input_stream.stream_of(src) is None
+    try:
+        expected = nio.read_image(src).GetSize()
+    except Exception:                                   # noqa: BLE001 - the reader refuses it
+        expected = None
+    got = ic.transcode(src, tmp_path / "e")
+    if expected is None:
+        assert got is None, "a copy of a folder the reader refuses"
+    else:
+        assert got is not None and nio.read_image(got).GetSize() == expected
+
+
+def test_a_nifti_whose_data_offset_is_below_the_header_is_read_whole(tmp_path):
+    """niftilib reads a single file from its 348-byte header's end when vox_offset says less;
+    seeking to vox_offset read header bytes as voxels (0: a copy shifted by 174 values)."""
+    from haversack import io as nio
+    a = (np.arange(10 * 6 * 5) % 997).astype("int16").reshape(10, 6, 5) + 3
+    src = _nifti_gz(tmp_path / "v.nii.gz", a)
+    raw = bytearray(gzip.decompress(src.read_bytes()))
+    raw[108:112] = struct.pack("<f", 0.0)
+    src.write_bytes(gzip.compress(bytes(raw)))
+    ref = sitk.GetArrayFromImage(nio.read_image(src))
+    assert input_stream.stream_of(src) is None
+    got = ic.transcode(src, tmp_path / "e")
+    assert got is not None
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(nio.read_image(got)), ref)
+
+
+def test_a_duplicated_end_slice_is_refused_not_read_with_nan_geometry(tmp_path):
+    """GDCM sorts a series whose first and last positions tie by file name; the zero span made
+    every geometry check compare against NaN and pass, and the volume read with NaN spacing."""
+    from haversack import io as nio
+    from haversack.errors import InputError
+    from pydicom.uid import generate_uid
+    d = write_series(tmp_path / "s", n=10)
+    ds = pydicom.dcmread(_last(d))
+    ds.SOPInstanceUID = ds.file_meta.MediaStorageSOPInstanceUID = generate_uid()
+    # named to sort FIRST, so the by-name order puts the two tied positions first and last
+    ds.save_as(d / "AA0000.dcm", enforce_file_format=True)
+    with pytest.raises(InputError, match="duplicate"):
+        nio.read_image(d)

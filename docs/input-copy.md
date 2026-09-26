@@ -465,3 +465,17 @@ Tests: `tests/test_input_stream.py` (15: streamed = whole on five series shapes 
 GDCM's order, the fallbacks, the check, a short source, peak memory in a subprocess). 13 of 13
 mutants killed; two survive as they must - a sanity mutant, and routing a refused series to the
 whole path, which refuses it too (an economy, not a behavior).
+
+**Review, 2026-09-25 (same day).** An adversarial reviewer found the slab path writing copies that
+differ from the reader - the one thing it must never do, since the copy replaces the original, and
+`_check_streamed` cannot see it (it compares the file with the slabs written, never with the
+reader). `_series_files` skipped any file pydicom could not read plainly or that lacked a placed
+slice's tags, where GDCM lists it: a no-preamble end slice was dropped (39 of 40 slices), and a
+folder the reader refuses (a slice without IPP/IOP; a CT beside another series' secondary capture)
+was copied. Now only files that are not DICOM at all are passed over; any other the listing cannot
+place hands the folder to the whole read. `_nifti_gz` seeked to `vox_offset` where niftilib clamps
+a smaller one up to the header size; below 352 it now defers too. The reviewer also found a
+pre-existing reader bug: a duplicated end slice named to sort first made GDCM order by name, the
+first and last positions tied, and `_series_geometry` divided by the zero span - every check then
+compared against NaN and passed. It raises now. Each case is a test in `tests/test_input_stream.py`,
+and each fails on `5e17e7d`.

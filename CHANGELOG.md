@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **The streamed input copy defers to the reader wherever the two could differ.** A review found
+  four inputs it copied differently from what `io.read_image` reads - and a copy replaces the
+  original: a series whose end slice has no DICOM preamble (copied one slice short), an end slice
+  missing its position or orientation, and a CT beside a secondary capture of another series (both
+  refused by the reader, copied anyway), and a gzipped NIfTI whose `vox_offset` is below the header
+  size (copied shifted by the header's bytes). Any DICOM file the header listing cannot place now
+  hands the folder to the whole read, and such a NIfTI too. Separately, a series whose first and
+  last slices share a position read with NaN spacing; it is refused now as a duplicate slice.
 - **FastSurfer is part of haversack.** `fastsurfer-lean` is a core dependency (under 1 MB now;
   its weights still download on first use), so `fastsurfer:*` tasks work after a plain install
   and a FastSurfer rank field's restore always lateralizes the cortex. The engine is on wherever

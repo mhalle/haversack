@@ -70,7 +70,15 @@ def _series_files(directory: Path) -> list | None:
     the memory the slab path exists to save. pydicom stops before the pixel data (~50 MB
     peak). The order is unique here because :func:`haversack.io._series_geometry` refuses
     duplicate and non-monotonic positions; that it is GDCM's was checked on four real series
-    and is held by a test against GDCM on descending and shuffled ones."""
+    and is held by a test against GDCM on descending and shuffled ones.
+
+    Only a file that is not DICOM at all is passed over, as GDCM passes it over. Any DICOM file
+    this listing would have to leave out - one pydicom reads only by force (no preamble), or an
+    object that is not a slice with its geometry (a SEG or a secondary capture beside the CT, a
+    slice missing its position or orientation) - hands the directory to the whole read, which
+    decides as it always did (review, 2026-09-25). Skipping them instead dropped an end slice
+    the reader keeps (a 40-slice series copied as 39), and wrote copies of folders the reader
+    refuses (a missing position; two series side by side), each placed as the input."""
     import numpy as np
     import pydicom
     slices, series = [], set()
@@ -79,11 +87,13 @@ def _series_files(directory: Path) -> list | None:
             continue
         try:
             ds = pydicom.dcmread(f, stop_before_pixels=True)
-        except Exception:                      # noqa: BLE001 - not DICOM: GDCM skips it too
-            continue
+        except Exception:                      # noqa: BLE001
+            if _dicom_by_force(f):
+                return None                    # DICOM this listing cannot read as GDCM does
+            continue                           # not DICOM: GDCM skips it too
         if not all(k in ds for k in ("Rows", "Columns", "ImagePositionPatient",
                                      "ImageOrientationPatient")):
-            continue                           # not an image slice (RTSTRUCT, SR, ...)
+            return None                        # a DICOM object that is not a placed slice
         series.add(str(ds.get("SeriesInstanceUID", "")))
         slices.append((f, [float(v) for v in ds.ImagePositionPatient],
                        [float(v) for v in ds.ImageOrientationPatient]))
@@ -92,6 +102,19 @@ def _series_files(directory: Path) -> list | None:
     iop = np.asarray(slices[0][2])
     normal = np.cross(iop[:3], iop[3:])
     return [str(f) for f, ipp, _ in sorted(slices, key=lambda s: float(np.dot(s[1], normal)))]
+
+
+def _dicom_by_force(f: Path) -> bool:
+    """Whether a file pydicom refused to read plainly is DICOM after all - a dataset written
+    without the preamble and file meta, which GDCM reads. Judged by elements a DICOM object
+    carries (its SOP class, its image size, its modality), not by pydicom merely not raising:
+    ``force`` makes something of almost any bytes."""
+    import pydicom
+    try:
+        ds = pydicom.dcmread(f, stop_before_pixels=True, force=True)
+        return any(k in ds for k in ("SOPClassUID", "Rows", "Modality"))
+    except Exception:                          # noqa: BLE001 - not DICOM even by force
+        return False
 
 
 def _dicom_series(directory: Path) -> Stream | None:
@@ -156,6 +179,12 @@ def _nifti_gz(path: Path) -> Stream | None:
     slope, inter = struct.unpack(endian + "ff", h[112:120])
     if datatype not in _NIFTI_DTYPES:
         return None                # color, complex (a 4-D file fails the size check below)
+    if not vox_offset >= 352:
+        # below a single file's minimum (348 bytes of header, 4 of extension flag) niftilib
+        # does not read from vox_offset - it clamps up to the header's size - so seeking to it
+        # would read header bytes as voxels: a vox_offset of 0 shifted the whole copy by 174
+        # int16 values (review, 2026-09-25). The whole read decides such a file.
+        return None
     if not (slope in (0.0, 1.0) and inter == 0.0):
         return None                # scaled: SimpleITK's own arithmetic, whole read only
     nx, ny, nz = (int(d) for d in dim[1:4])

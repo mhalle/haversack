@@ -89,7 +89,14 @@ def _series_geometry(files) -> tuple[tuple, tuple, tuple]:
                          "not a single uniform volume")
     row, col = iops[0][:3], iops[0][3:]
     span = ipps[-1] - ipps[0]
-    n_hat = span / np.linalg.norm(span)
+    extent = float(np.linalg.norm(span))
+    if not extent > 0:
+        # the first and last slices at one position (a duplicated end slice, which GDCM then
+        # sorts by name): dividing by the zero span made every check below compare against
+        # NaN and pass, and the volume read with NaN spacing (review, 2026-09-25)
+        raise InputError("duplicate slice positions in the series: its first and last slices "
+                         "sit at one position")
+    n_hat = span / extent
     if abs(float(np.dot(n_hat, np.cross(row, col)))) < 0.999:
         raise InputError("non-orthogonal acquisition (gantry tilt or shear): slice "
                          "positions do not advance along the image normal")
