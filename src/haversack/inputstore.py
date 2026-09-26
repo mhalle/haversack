@@ -439,8 +439,12 @@ class ServerInputs:
 
     LOOSE_VIEW_S = 120.0
 
-    def __init__(self, root, fetch_fn, *, budget_bytes: int = 8 << 30, grace_s: float = GRACE_S):
+    def __init__(self, root, fetch_fn, *, budget_bytes: int = 8 << 30, grace_s: float = GRACE_S,
+                 legacy_root=None):
         self.store = InputStore(root, fetch_fn, budget_bytes=budget_bytes, grace_s=grace_s)
+        #: the legacy SeriesCache root whose UPLOADS are adopted on first use (the migration
+        #: shim; see :meth:`_adopt_legacy_upload`)
+        self.legacy_root = Path(legacy_root) if legacy_root else None
         self.root = self.store.root
         self._views_root = self.root / "views" / str(os.getpid())
         shutil.rmtree(self._views_root, ignore_errors=True)   # a previous process's, same pid
@@ -516,6 +520,49 @@ class ServerInputs:
             self._drop_view(key)
 
     def has(self, key: str) -> bool:
+        return self.store.has(key) or self._adopt_legacy_upload(key)
+
+    def _adopt_legacy_upload(self, key: str) -> bool:
+        """MIGRATION SHIM (decision 1 of docs/cache-consolidation.md: time-limited - removed two
+        minor releases after the release that makes this store the default, or 90 days,
+        whichever is later; the CHANGELOG says when). An UPLOAD the legacy SeriesCache holds
+        cannot be fetched again, so on first use it is stored here from the legacy entry - its
+        input copy as it is (never re-encoded), or its original files - and the legacy entry
+        is left for the legacy cache's own eviction. A FETCHED input is not adopted: it is
+        public and simply fetched again under the new key. Only a committed, current entry
+        is adopted: the legacy cache's own `has` decides (`.done`, and a copy of this reader
+        version), so an entry mid-write or stale is not."""
+        from .content import is_digest
+        if self.legacy_root is None or not is_digest(key) or not self.legacy_root.is_dir():
+            return False
+        try:
+            if getattr(self, "_legacy", None) is None:
+                from .serve import SeriesCache
+                self._legacy = SeriesCache(self.legacy_root, None)
+            legacy = self._legacy
+            if not legacy.has(key):
+                return False
+            entry = legacy.entry(key)
+            content = legacy.path(key)
+        except Exception:                          # noqa: BLE001 - an unreadable legacy entry
+            return False                           # is simply not adopted: input_gone, as before
+
+        def carry(_identity, stage):
+            stage = Path(stage)
+            rel = content.relative_to(entry)
+            if content.is_dir():
+                shutil.copytree(content, stage / rel)
+            else:
+                (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(content, stage / rel)
+            side = entry / ".input.json"
+            if side.is_file():
+                shutil.copyfile(side, stage / ".input.json")
+            return stage / rel
+        try:
+            self.store.ensure(key, fetch=carry)
+        except Exception:                          # noqa: BLE001 - as unreadable, above
+            return False
         return self.store.has(key)
 
     def path(self, key: str) -> Path:
@@ -568,7 +615,7 @@ class ServerInputs:
     # -- ContentStore's interface --------------------------------------------------------------
 
     def resolve(self, digest: str) -> Path:
-        if not self.store.has(digest):
+        if not self.has(digest):
             raise FileNotFoundError(f"{digest} is not held by this store")
         return self._view(digest, fetch=False)
 

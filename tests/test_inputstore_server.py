@@ -164,3 +164,74 @@ def test_a_crashed_processs_views_are_reaped(tmp_path, monkeypatch):
     (dead / "x").mkdir(parents=True)
     ServerInputs(tmp_path / "input_store", None)
     assert not dead.exists()
+
+
+def test_an_upload_the_legacy_cache_holds_is_adopted_on_first_use(tmp_path, monkeypatch):
+    """The migration shim: an upload stored before the flag cannot be fetched again, so it is
+    carried into the new store the first time it is asked for - its input copy as it is - and
+    a job on it runs. A fetched input is NOT adopted (it is fetched again under the new key)."""
+    import hashlib
+    raw = volume_bytes(9)
+    d = "sha256:" + hashlib.sha256(raw).hexdigest()
+    monkeypatch.delenv("HAVERSACK_INPUT_STORE")
+    legacy = LocalExecutor(FakeSegmenter(), workdir=tmp_path)             # the legacy store
+    TestClient(create_app(legacy)).put(f"/v1/inputs/{d}", content=raw)
+    assert legacy.content.has(d)
+    legacy_copy = legacy.content.resolve(d)
+    legacy.close()
+    monkeypatch.setenv("HAVERSACK_INPUT_STORE", "blobs")
+    _, ex, client, _ = _server(tmp_path, monkeypatch)
+    assert not ex.series_cache.store.has(d)
+    info = client.get(f"/v1/inputs/{d}")
+    assert info.status_code == 200 and info.json()["stored_form"] == "input_copy"
+    assert ex.series_cache.store.has(d)
+    # the copy was carried byte for byte, not re-encoded
+    blob = next(iter(ex.series_cache.store.ref(d)["files"].values()))
+    assert blob["digest"] == "sha256:" + hashlib.sha256(legacy_copy.read_bytes()).hexdigest()
+    r = client.post("/v1/jobs", data={"task": "total_fast",
+                                      "source": json.dumps([{"kind": "input", "sha256": d}])})
+    assert r.status_code == 202, r.text
+    assert wait_state(client, r.json()["id"], ("done",))["input_identity"] == [d]
+
+
+def test_a_legacy_entry_mid_write_is_not_adopted(tmp_path, monkeypatch):
+    import hashlib
+    raw = volume_bytes(10)
+    d = "sha256:" + hashlib.sha256(raw).hexdigest()
+    monkeypatch.delenv("HAVERSACK_INPUT_STORE")
+    legacy = LocalExecutor(FakeSegmenter(), workdir=tmp_path)
+    TestClient(create_app(legacy)).put(f"/v1/inputs/{d}", content=raw)
+    entry = legacy.series_cache.entry(d)
+    legacy.close()
+    (entry / legacy.series_cache.MARKER).unlink()                          # uncommitted
+    monkeypatch.setenv("HAVERSACK_INPUT_STORE", "blobs")
+    _, ex, client, _ = _server(tmp_path, monkeypatch)
+    assert client.get(f"/v1/inputs/{d}").status_code == 404
+    assert not ex.series_cache.store.has(d)
+
+
+def test_a_fetched_input_the_legacy_cache_holds_is_fetched_again(tmp_path, monkeypatch):
+    monkeypatch.delenv("HAVERSACK_INPUT_STORE")
+    _, legacy, lclient, lcalls = _server(tmp_path, monkeypatch)
+    wait_state(lclient, _idc_job(lclient), ("done",))
+    assert legacy.series_cache.has(f"idc:{UUID}") and len(lcalls) == 1
+    legacy.close()
+    monkeypatch.setenv("HAVERSACK_INPUT_STORE", "blobs")
+    _, ex, client, calls = _server(tmp_path, monkeypatch)
+    assert not ex.series_cache.has(f"idc:{UUID}")
+    wait_state(client, _idc_job(client, options={"interp": "nearest"}), ("done",))
+    assert len(calls) == 1
+
+
+def test_resolve_alone_adopts_a_legacy_upload(tmp_path, monkeypatch):
+    """Every route asks has() first today; resolve() must not depend on that order."""
+    import hashlib
+    raw = volume_bytes(11)
+    d = "sha256:" + hashlib.sha256(raw).hexdigest()
+    monkeypatch.delenv("HAVERSACK_INPUT_STORE")
+    legacy = LocalExecutor(FakeSegmenter(), workdir=tmp_path)
+    TestClient(create_app(legacy)).put(f"/v1/inputs/{d}", content=raw)
+    legacy.close()
+    monkeypatch.setenv("HAVERSACK_INPUT_STORE", "blobs")
+    _, ex, _, _ = _server(tmp_path, monkeypatch)
+    assert ex.series_cache.resolve(d).name == "input.duckn.zip"

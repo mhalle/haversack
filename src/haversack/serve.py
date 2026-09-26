@@ -2821,7 +2821,8 @@ class LocalExecutor:
             # inputs as blobs + one ref each, read through views a pin holds (inputstore)
             from .inputstore import ServerInputs
             self.series_cache = ServerInputs(self.workdir / "input_store", self._fetch_source,
-                                             budget_bytes=input_cache_bytes)
+                                             budget_bytes=input_cache_bytes,
+                                             legacy_root=self.workdir / "series_cache")
             self.content = self.series_cache
         else:
             self.series_cache = SeriesCache(self.workdir / "series_cache", self._fetch_source,

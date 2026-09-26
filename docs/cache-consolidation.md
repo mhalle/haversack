@@ -533,6 +533,12 @@ flag on, ten more legacy command-line tests fail on layout alone (`cache/inputs/
 a planted `.input.json`, a staging-litter check); `tests/test_inputstore_cli.py` holds the
 behaviors they pin, store-neutral. Default-off suite: 2,859 passed.
 
+(c) is done: `ServerInputs._adopt_legacy_upload`, the migration shim, carries an UPLOAD the
+legacy SeriesCache holds (committed and current, by the legacy cache's own `has`) into the new
+store on first use - its input copy byte for byte, or its original files, with its record -
+and leaves fetched inputs to be fetched again. Its expiry is decision 1's (two minor releases
+after the release that makes this store the default, or 90 days, whichever is later).
+
 **Order.** (a) the store half (refs, views, eviction) with its tests, behind a flag, on the
 local server; (b) the command line's cache onto it; (c) the shim for legacy uploads; (d) a
 soak like step 5's, with a server killed mid-fetch; (e) the old classes deleted with step 8.
