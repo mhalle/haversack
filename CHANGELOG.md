@@ -9,7 +9,7 @@
   vouch for a vendor's private data against the copy's voxels; the source keeps them), empty text as `""`, the source's transfer
   syntax recorded, and Bits Stored / High Bit only where the copy holds the source's stored
   values (a rescaled CT does not). About 1 s more per 709-slice series, once. Copies record
-  `tags_version: 2`. Needs duckn 0.5.3.
+  `tags_version: 2`. duckn 0.5.3, feldglas 0.1.6.
 - **A copy's header never contradicts its voxels.** A copy holds rescaled values (HU for CT);
   the tags said what the files said in STORED units. Real GE and Siemens CT state Pixel
   Padding Value -2000: in the copy the padding is -3024, and masking -2000 masks nothing.
