@@ -31,7 +31,7 @@ KERNEL = {"grid", "mapping", "tables", "restore", "resample", "reference", "shuf
 PIPELINE = {"io", "preprocess", "frame", "network", "pipeline", "cli", "tasks", "values", "envelope",
             "weights_fetch", "trainers", "result", "cache", "segmenter", "weights", "progress", "job",
             "serve", "client", "modal_app", "sources", "ecosystems", "preview", "statistics",
-            "schemas", "content", "objectcache", "inputstore", "jobstore", "jobpolicy", "filelock", "fetchlib", "attribution", "cache_admin", "ranked_store", "ranked_build",
+            "schemas", "content", "objectcache", "inputstore", "inputs", "jobstore", "jobpolicy", "filelock", "fetchlib", "attribution", "cache_admin", "ranked_store", "ranked_build",
             "ranked_output", "ranked_compose", "view", "ranked_restore", "duckn_io", "input_copy", "input_stream",
             "segments", "labelmap",
             # the encoders subpackage (2026-09-23): each family module is pipeline - it reads images

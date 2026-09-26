@@ -582,6 +582,11 @@ names the user's file, not the cache. Flag-on suite: 20 legacy tests fail - the 
 3 that pin the raw export the user dropped, and one reading `.input.json` beside the returned
 path (the record is right through `input_record`: both series of a study folder, one of one).
 
+`haversack.inputs` is the public door to that form: `open(spec)` - a hosted source, a local
+file or folder, a held upload digest - returns an `Input` with `identity`, `record`, `image()`,
+`array(slices)` (from a copy only the chunks holding those slices, or the mapped slices
+themselves) and `tags()` (JSON). A path under the cache is not the interface.
+
 **DICOM headers (designed with the user, 2026-09-26; not built).** They serve two purposes,
 kept apart. For USE, JSON - the duckn dicom extension's keyword-keyed tags, sourced from
 pydicom (duckn's `dicom_convert`: private tags, sequences, binary values in base64) rather

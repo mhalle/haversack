@@ -696,6 +696,9 @@ class CommandInputs:
         return read
 
     def ingest(self, path, *, progress=None) -> Path:
+        return self.ingest_with_identity(path, progress=progress)[1]
+
+    def ingest_with_identity(self, path, *, progress=None) -> tuple[str | None, Path]:
         """A LOCAL file or folder as an input: stored under the digest of its bytes (a folder
         as a tree digest, one file as that file - ContentStore's rules, as an upload) and
         handed back as its export. What the store cannot take as an image is handed back as
@@ -709,7 +712,7 @@ class CommandInputs:
         from .input_copy import is_copy
         path = Path(path)
         if is_copy(path) or is_duckn_store(path):
-            return path
+            return None, path
         try:
             from .content import digest_file
             digest = None
@@ -722,8 +725,8 @@ class CommandInputs:
             else:
                 digest = self.store.put_dir(path)      # hashes every member; stores once
         except UnidentifiedContent:
-            return path
-        return self.get_or_fetch(digest, fetch=None)
+            return None, path
+        return digest, self.get_or_fetch(digest, fetch=None)
 
     def forget(self, identity: str) -> None:
         self.store.forget(identity)

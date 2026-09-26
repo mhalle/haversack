@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **`haversack.inputs`: inputs by reference, in haversack's own form.** `inputs.open(spec)` takes
+  a hosted source, a local file or folder, or a held upload's digest, and returns the input with
+  its identity, provenance record, image, voxels (`array(slices)` reads only those slices from an
+  input copy) and DICOM tags as JSON - so a program reads what haversack's engines read, without
+  parsing DICOM again. With `HAVERSACK_INPUT_STORE=blobs` every input, local ones included, is
+  stored once as its copy (behind the flag until it is the default).
 - **`haversack get -o scan.nii.gz` reads an input copy or a duckn store.** `io.convert` read every
   file with SimpleITK, which cannot open either, so converting one failed "Unable to determine
   ImageIO reader".
