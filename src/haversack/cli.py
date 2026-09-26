@@ -784,6 +784,12 @@ def _command_line() -> click.Group:
                          help=('worker GPU (default L40S; A10 is the economical fast-mode '
                                'choice)')),
             click.Option(['--app-name'], help='Modal app name (default: haversack-serve)'),
+            click.Option(['--result-store'], envvar='HAVERSACK_RESULT_STORE',
+                         help=('keep results in this object store instead of a cache volume '
+                               '(s3://bucket/prefix - R2, S3, any S3-compatible store). Its '
+                               'credentials are read from AWS_ACCESS_KEY_ID, '
+                               'AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT (and AWS_REGION) here and '
+                               'stored in the Modal Secret <app name>-result-store')),
             click.Option(['--cache-volume'],
                          help=('the Modal volume holding the result cache (default: <app '
                                'name>-cache). Result keys hold no app name, so a deployment '
@@ -1141,13 +1147,30 @@ def _cmd_modal(args) -> int:
     for k in ("HAVERSACK_TOKEN_SECRET", "HAVERSACK_SERVER_TOKEN", "HAVERSACK_TOKEN"):
         env.pop(k, None)
     app_name = env.get("HAVERSACK_APP_NAME") or "haversack-serve"
-    if env.get("HAVERSACK_RESULT_STORE"):
-        # set for a local `serve`, and read by nothing on Modal: the deployment keeps its
-        # results on its cache volume. Said, not silently ignored (2026-09-26).
-        volume = env.get("HAVERSACK_CACHE_VOLUME") or f"{app_name}-cache"
-        print(f"note: HAVERSACK_RESULT_STORE is set, but a Modal deployment keeps its results "
-              f"on its cache volume ({volume}); a result store on Modal is not built yet",
-              file=sys.stderr)
+    # The result store (step 7 of docs/cache-consolidation.md, 2026-09-26): results live in
+    # an object store, one authority for every container, and the cache volume is not used.
+    # Its credentials go from THIS environment into a Modal Secret through the SDK - never
+    # into an image, never onto a command line - and every function that reads or writes
+    # results mounts it (modal_app._STORE_SECRETS).
+    store = getattr(args, "result_store", None) or env.get("HAVERSACK_RESULT_STORE")
+    for k in ("HAVERSACK_RESULT_STORE", "HAVERSACK_RESULT_STORE_SECRET"):
+        env.pop(k, None)
+    if store:
+        from .errors import InputError
+        missing = [k for k in _STORE_CREDENTIALS[:3] if not os.environ.get(k)]
+        if missing:
+            raise InputError(f"--result-store {store}: {', '.join(missing)} not set here; the "
+                             "store's credentials are read from this environment into a Modal "
+                             "Secret at deploy")
+        secret = f"{app_name}-result-store"
+        _put_secret(secret, {k: os.environ[k] for k in _STORE_CREDENTIALS if os.environ.get(k)})
+        env["HAVERSACK_RESULT_STORE"] = store
+        env["HAVERSACK_RESULT_STORE_SECRET"] = secret
+        if args.cache_volume:
+            print(f"note: --cache-volume is unused: results live in {store}", file=sys.stderr)
+        print(f"results: {store} (credentials in Modal Secret {secret})", file=sys.stderr)
+    for k in _STORE_CREDENTIALS:
+        env.pop(k, None)                   # the deploy process itself needs none of them
     if token:
         if token_source == "--token":
             print(TOKEN_FLAG_NOTE, file=sys.stderr)
@@ -1160,6 +1183,22 @@ def _cmd_modal(args) -> int:
     else:
         print("auth: Modal proxy auth (Modal-Key / Modal-Secret)", file=sys.stderr)
     return subprocess.call([sys.executable, "-m", "modal", "deploy", apppath], env=env)
+
+
+#: What an object store's credentials are called in the environment (obstore's names); the
+#: first three are required, the region optional (R2 says "auto").
+_STORE_CREDENTIALS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ENDPOINT", "AWS_REGION")
+
+
+def _put_secret(name: str, values: dict) -> None:
+    """Create or overwrite the Modal Secret ``name`` with ``values``, through the SDK so no
+    value becomes a command's argument."""
+    import modal
+    from modal.exception import NotFoundError
+    try:
+        modal.Secret.from_name(name).update(values)
+    except NotFoundError:
+        modal.Secret.objects.create(name, values)
 
 
 def _put_token_secret(name: str, token: str) -> None:

@@ -705,10 +705,19 @@ def test_the_per_app_stores_are_spelled_from_the_app_name_alone():
     tree = ast.parse(Path(modal_app.__file__).read_text(encoding="utf-8"))
     names = {}
     for node in tree.body:
-        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
-                and ast.unparse(node.value.func) in ("modal.Volume.from_name",
-                                                     "modal.Dict.from_name")):
-            names[node.targets[0].id] = ast.unparse(node.value.args[0])
+        value = getattr(node, "value", None)
+        # the cache volume is made only without a result store (2026-09-26): `X if not
+        # RESULT_STORE else None`, whose other branch must be nothing at all
+        if (isinstance(node, ast.Assign) and isinstance(value, ast.IfExp)
+                and isinstance(value.body, ast.Call)
+                and ast.unparse(value.body.func).endswith(".from_name")
+                and ast.unparse(value.body.func).startswith(("modal.Volume", "modal.Dict"))):
+            assert ast.unparse(value.orelse) == "None", ast.unparse(node)
+            value = value.body
+        if (isinstance(node, ast.Assign) and isinstance(value, ast.Call)
+                and ast.unparse(value.func) in ("modal.Volume.from_name",
+                                                "modal.Dict.from_name")):
+            names[node.targets[0].id] = ast.unparse(value.args[0])
     assert names == {"weights_vol": "'haversack-weights'",
                      "scratch_vol": "f'{APP_NAME}-scratch'",
                      "inputs_vol": "f'{APP_NAME}-inputs'",

@@ -145,14 +145,52 @@ class ModalDeployAuth(unittest.TestCase):
         self.assertNotIn("HAVERSACK_TOKEN", s["env"])
         self.assertIn("Modal proxy auth", s["stderr"])
 
-    def test_a_result_store_set_for_serve_is_said_not_to_reach_modal(self):
-        """HAVERSACK_RESULT_STORE is read by `serve`; a deploy inheriting it keeps its results
-        on the cache volume, and says so rather than ignore it (2026-09-26)."""
-        s = self._deploy(["--cache-volume", "shared-cache"],
-                         {"HAVERSACK_RESULT_STORE": "s3://bucket/prefix"})
-        self.assertIn("HAVERSACK_RESULT_STORE is set", s["stderr"])
-        self.assertIn("(shared-cache)", s["stderr"])
-        self.assertNotIn("RESULT_STORE", self._deploy([], {})["stderr"])
+    _CREDS = {"AWS_ACCESS_KEY_ID": "AKID-123", "AWS_SECRET_ACCESS_KEY": "SECRET-456",
+              "AWS_ENDPOINT": "https://example.r2.cloudflarestorage.com", "AWS_REGION": "auto"}
+
+    def _deploy_store(self, argv, env):
+        put = []
+        with mock.patch.object(cli, "_put_secret", lambda name, values: put.append((name, values))):
+            s = self._deploy(argv, env)
+        s["put"] = put
+        return s
+
+    def test_a_result_store_puts_its_credentials_in_a_secret_and_forwards_only_names(self):
+        """Step 7 (2026-09-26): the store's credentials go from the deploying environment into
+        the Modal Secret <app>-result-store; the deploy forwards the URL and the Secret's NAME,
+        and no credential rides the deploy's environment or command line."""
+        s = self._deploy_store(["--app-name", "unit-app", "--result-store", "s3://bucket/results"],
+                               self._CREDS)
+        self.assertEqual(s["put"], [("unit-app-result-store", self._CREDS)])
+        self.assertEqual(s["env"]["HAVERSACK_RESULT_STORE"], "s3://bucket/results")
+        self.assertEqual(s["env"]["HAVERSACK_RESULT_STORE_SECRET"], "unit-app-result-store")
+        for v in ("AKID-123", "SECRET-456"):
+            self.assertFalse(any(v in x for x in s["cmd"]))
+            self.assertFalse(any(v in x for x in s["env"].values()), v)
+        self.assertIn("results: s3://bucket/results", s["stderr"])
+
+    def test_the_store_may_come_from_the_variable_serve_reads(self):
+        s = self._deploy_store([], {**self._CREDS, "HAVERSACK_RESULT_STORE": "s3://b/p"})
+        self.assertEqual(s["env"]["HAVERSACK_RESULT_STORE"], "s3://b/p")
+
+    def test_missing_credentials_are_refused_by_name_before_anything_is_written(self):
+        put, called = [], []
+        with mock.patch.dict(os.environ, _clean_env(AWS_ACCESS_KEY_ID="x"), clear=True), \
+                mock.patch.object(cli, "_put_secret", lambda *a: put.append(a)), \
+                mock.patch.object(subprocess, "call", lambda *a, **k: called.append(a) or 0), \
+                mock.patch("sys.stderr") as err:
+            rc = cli.main(["modal", "deploy", "--result-store", "s3://b/p"])
+        said = "".join(c.args[0] for c in err.write.call_args_list if c.args)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("AWS_SECRET_ACCESS_KEY", said)
+        self.assertIn("AWS_ENDPOINT", said)
+        self.assertEqual((put, called), ([], []))
+
+    def test_without_a_store_nothing_about_one_is_forwarded(self):
+        s = self._deploy_store([], self._CREDS)
+        self.assertEqual(s["put"], [])
+        self.assertNotIn("HAVERSACK_RESULT_STORE", s["env"])
+        self.assertFalse(any(k.startswith("AWS_") for k in s["env"]))
 
     def test_no_proxy_auth_without_a_token_says_it_is_open(self):
         s = self._deploy(["--no-proxy-auth"], {})

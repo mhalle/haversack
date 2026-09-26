@@ -104,6 +104,20 @@ DELIVERABLE_NOT_VISIBLE = (
     "this server cannot see the result store's latest state yet (a volume reload was "
     "refused), so it cannot tell whether this was rendered; ask again shortly")
 RESULTS_KEEP = int(os.environ.get("HAVERSACK_RESULTS_KEEP", "500"))
+#: The result store (step 7 of docs/cache-consolidation.md, the user's decision 2026-09-26): an
+#: object store URL - ``s3://bucket/prefix``, R2 by choice - that is the ONE authority for
+#: results. Each container keeps only a local copy on its own disk (``LOCAL_RESULTS_ROOT``,
+#: bounded by RESULTS_KEEP), and the cache volume is neither mounted nor made. A pointer read
+#: is current by construction, so none of the volume-view machinery below (reloads, the view
+#: lock, the mirror) is in a result's path. Unset: the cache volume, exactly as before.
+RESULT_STORE = os.environ.get("HAVERSACK_RESULT_STORE") or None
+#: The Modal Secret holding the store's credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+#: AWS_ENDPOINT, AWS_REGION), made by `haversack modal deploy` from the deploying environment.
+RESULT_STORE_SECRET = os.environ.get("HAVERSACK_RESULT_STORE_SECRET") or f"{APP_NAME}-result-store"
+LOCAL_RESULTS_ROOT = "/tmp/haversack-results"
+#: How often ONE scheduled function sweeps the store (unreferenced blobs past their grace, and
+#: expired tombstones) - not every container: a sweep lists the whole store.
+RESULT_SWEEP_HOURS = float(os.environ.get("HAVERSACK_RESULT_SWEEP_HOURS", "24"))
 #: Whether this deployment runs ``kind=embed`` jobs (2026-09-23): an encoder GPU worker
 #: (``EmbedWorker``), its image with the ``embed`` extra, and the encoder weights volume.
 #: Off by default - a deployment asks for it, as for an optional engine.
@@ -199,6 +213,10 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   # the deploy mounts the named cache at /cache while the containers commit
                   # and reload the app's own volume, which is mounted nowhere.
                   "HAVERSACK_CACHE_VOLUME",
+                  # the result store and its credentials' Secret NAME (never the credentials):
+                  # a container that did not see them would mount nothing and publish nowhere
+                  "HAVERSACK_RESULT_STORE", "HAVERSACK_RESULT_STORE_SECRET",
+                  "HAVERSACK_RESULT_SWEEP_HOURS",
                   # the encoder worker (2026-09-23): a module-level `if EMBED:` defines it,
                   # which a container that re-imports this module must see the same way
                   "HAVERSACK_EMBED", "HAVERSACK_ENCODER_VOLUME",
@@ -290,7 +308,39 @@ jobs_dict = modal.Dict.from_name(f"{APP_NAME}-jobs", create_if_missing=True)
 # The one store a deployment may name (HAVERSACK_CACHE_VOLUME, see CACHE_VOLUME above): its
 # keys carry no app name. The three above stay per app, and a test reads these five lines
 # to keep it so - scratch and the Dict hold THIS deployment's job ids and flights.
-cache_vol = modal.Volume.from_name(CACHE_VOLUME, create_if_missing=True)
+cache_vol = (modal.Volume.from_name(CACHE_VOLUME, create_if_missing=True)
+             if not RESULT_STORE else None)          # a result store: no cache volume at all
+
+
+def _results_mount() -> dict:
+    """The cache volume's mount, or nothing when results live in a store."""
+    return {} if RESULT_STORE else {CACHE_ROOT: cache_vol}
+
+
+#: The store's credentials, on every function that reads or writes results (the api, the
+#: twin, every worker); ``required_keys`` fails a deploy at once if the Secret lacks one.
+_STORE_SECRETS = ([modal.Secret.from_name(
+    RESULT_STORE_SECRET, required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ENDPOINT"])]
+    if RESULT_STORE else [])
+_results_guard = threading.Lock()
+_results_held: dict = {}
+
+
+def _results(*, read_only: bool = False):
+    """This container's view of the result store (store mode only): a SharedResultCache over
+    the store with its local copy on the container's disk, built ONCE - its constructor probes
+    the store's conditional writes (two writes and a delete), which per call would double every
+    request. The twin's view is read-only: no probe, and not one write to the store."""
+    with _results_guard:
+        got = _results_held.get(read_only)
+        if got is None:
+            from haversack.objectcache import SharedResultCache, open_store
+            from haversack.serve import ResultCache
+            store, prefix = open_store(RESULT_STORE)
+            local = ResultCache(LOCAL_RESULTS_ROOT + ("-ro" if read_only else ""), keep=RESULTS_KEEP)
+            got = _results_held[read_only] = SharedResultCache(
+                store, local, prefix=prefix, check=not read_only, read_only=read_only)
+        return got
 
 # -- the api container's view of the cache volume ---------------------------------
 #
@@ -435,13 +485,21 @@ def _log_refusal(name: str, why: str) -> None:
         print(f"[volume] {name} reload refused: {why}", flush=True)
 
 
+#: Whether this process serves the anonymous twin: its store view is read-only (set where the
+#: twin's app is built).
+_TWIN = False
+
+
 def _reload_cache_view(max_age: float = 0.0) -> bool:
     """Make the view at least as new as this call, less ``max_age`` seconds: True when
     it is. Reloads once no lookup is mid-read (see ``_cache_view``), one reload at a time,
     and a caller that waited behind another's reload takes that one's outcome when it
     started after the caller asked - so N concurrent askers cost one reload, not a queue
-    of N writers. Never called with ``_cache_view`` held by this thread."""
+    of N writers. Never called with ``_cache_view`` held by this thread. A result store
+    has no view to reload: always current."""
     global _cache_view_as_of, _cache_view_failed_at
+    if RESULT_STORE:
+        return True
     asked = time.monotonic()
     with _cache_reload_mutex:
         if _cache_view_as_of >= asked - max_age:
@@ -544,7 +602,12 @@ def _trim_mirror() -> None:
 def _read_cache(key: str):
     """The entry under ``key`` from the view as it stands - ``(local labels path,
     result)`` or None - read under ``_cache_view`` shared, and handed out as a local
-    copy: the volume's own files are never open outside the lock."""
+    copy: the volume's own files are never open outside the lock.
+
+    With a result store the entry comes from the store's pointer - current by construction -
+    and is served from this container's own local copy, which is already a local copy."""
+    if RESULT_STORE:
+        return _results(read_only=_TWIN).get(key)
     from haversack.serve import ResultCache
     with _cache_view.shared():
         hit = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).get(key)   # leased, as before
@@ -561,7 +624,10 @@ def _cache_view_since(since: float) -> None:
     ``since`` has taken; raises ``ResultsNotVisible`` when none does, so the caller answers
     "not visible here yet" rather than "gone" or "never computed". The one loop behind
     every absence this container vouches for: a lookup's miss (``_confirm_cache_absent``)
-    and a listing, whose every row NOT in it is a miss (``_list_cache``)."""
+    and a listing, whose every row NOT in it is a miss (``_list_cache``). A result store's
+    pointer read is always current: there is no view to wait for."""
+    if RESULT_STORE:
+        return
     from haversack.serve import ResultsNotVisible
     for delay in CACHE_CONFIRM_DELAYS_S:
         if delay:
@@ -604,11 +670,18 @@ def _list_cache(*, keys=None, limit=None, after=None, accept=None, match=None) -
     It hands out no path and takes no lease - rows are copied out as plain data - so no
     volume file is open, or relied on, once it returns. ``ResultCache()`` mkdirs its root,
     a touch of the volume, so it too is built under the lock; the hold is never nested
-    (a second shared acquire behind a waiting reload would wait on itself)."""
+    (a second shared acquire behind a waiting reload would wait on itself).
+
+    With a result store the listing is the store's: its pointers are current when read, and
+    nothing on a volume is held open."""
     from haversack.serve import LIST_WORKERS, ListingMemo, ResultCache
-    _cache_view_since(time.monotonic())
     if not _listing_memo:
         _listing_memo.append(ListingMemo())
+    if RESULT_STORE:
+        return _results(read_only=_TWIN).list(keys=keys, limit=limit, after=after, accept=accept,
+                                             match=match, memo=_listing_memo[0],
+                                             workers=LIST_WORKERS)
+    _cache_view_since(time.monotonic())
     with _cache_view.shared():
         cache = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP)
     return cache.list(keys=keys, limit=limit, after=after, accept=accept, match=match,
@@ -637,7 +710,9 @@ def _api_result_entry(key: str, *, fresh: bool = False):
 
     @contextlib.contextmanager
     def held():
-        if fresh:
+        if RESULT_STORE:
+            yield _read_cache(key)                 # a store's pointer is current: fresh by nature
+        elif fresh:
             yield _confirm_cache_absent(key, time.monotonic())
         else:
             _reload_cache_view(max_age=CACHE_FRESH_S)
@@ -664,6 +739,11 @@ def _worker_result_entry(vol_lock):
         @contextlib.contextmanager
         def held():
             from haversack.serve import ResultCache, ResultsNotVisible
+            if RESULT_STORE:
+                # the store's pointer, served from this container's own copy: no volume, so
+                # nothing another thread's reload could hide, and current without a reload
+                yield _results().get(key)
+                return
             attempts = CACHE_CONFIRM_DELAYS_S if fresh else (0.0,)
             for i, delay in enumerate(attempts):
                 if delay:
@@ -681,6 +761,21 @@ def _worker_result_entry(vol_lock):
                 "volume reload was refused); submit again shortly")
         return held()
     return entry
+
+
+def _note_task_versions(seg, task: str, kind: str) -> None:
+    """What a read-only reader of the result store keys ``task`` on (``note_task``, step 4b),
+    recorded after a publication as LocalExecutor records it - and never at the publication's
+    expense: a result that is published is published whether or not the note is written."""
+    from haversack.serve import installed_versions, versions_for
+    try:
+        if kind in ("segment", "rankfield"):
+            _results().note_task(task, versions_for(seg, task), installed_versions(seg, task))
+        elif kind == "embed":
+            _results().note_task(f"embed:{task}", versions_for(seg, task, "embed"))
+    except Exception as e:                     # noqa: BLE001 - see the docstring
+        print(f"[results] could not record {task}'s versions in the store: "
+              f"{type(e).__name__}: {e}", flush=True)
 
 
 def _worker_sources(vol_lock) -> dict:
@@ -715,7 +810,8 @@ def _check_volumes_attached() -> None:
     a volume touch there is unsafe.
     """
     import os
-    for root in (SCRATCH_ROOT, CACHE_ROOT, INPUTS_ROOT, WEIGHTS_ROOT):
+    roots = (SCRATCH_ROOT, INPUTS_ROOT, WEIGHTS_ROOT) + (() if RESULT_STORE else (CACHE_ROOT,))
+    for root in roots:
         probe = Path(root) / f".attach-probe-{os.getpid()}"
         try:
             probe.write_text("ok", encoding="utf-8")
@@ -1704,17 +1800,23 @@ def _execute_job(ctx, jid: str, source_tokens: dict | None = None) -> str | None
             _clear_pending_marker(key, jid)
 
         def _put(key: str) -> str:
+            doc = {"identity": meta.get("input_identity"), "task": meta["task"],
+                   "options": meta.get("options"), "job": jid,
+                   "computed": started, **({"kind": meta["kind"]} if not_labels else {})}
+            if RESULT_STORE:
+                # The store's conditional pointer write IS the publication: nothing to
+                # commit, no volume for another thread to hide. Then the task's versions,
+                # as LocalExecutor records them, so a read-only reader keys this result.
+                gen = _results().put(key, labels, result, doc, output_name=name)
+                _note_task_versions(ctx.seg, meta["task"], meta.get("kind") or "segment")
+                return gen
             # Under the lock (see the block above _stage_uploads): the previous job's
             # artifact thread places into and commits this volume, and a commit that
             # ends in a reload would hide the generation add_artifact checks for - which
             # then drops the artifact without a word - or fail this put mid-way.
             with ctx._vol_lock:
                 gen = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).put(
-                    key, labels, result,
-                    {"identity": meta.get("input_identity"), "task": meta["task"],
-                     "options": meta.get("options"), "job": jid,
-                     "computed": started, **({"kind": meta["kind"]} if not_labels else {})},
-                    output_name=name)
+                    key, labels, result, doc, output_name=name)
                 cache_vol.commit()
             return gen
 
@@ -1833,6 +1935,12 @@ class _WorkerBase:
         from haversack.serve import ResultCache, artifact_overlap
 
         def _place(name: str, path) -> bool:
+            if RESULT_STORE:
+                # an amending manifest in the store; refused (False) for a generation that
+                # is no longer current, as the volume's add_artifact refuses
+                ok = _results().add_artifact(cache_key, name, path, generation=generation)
+                Path(path).unlink(missing_ok=True)
+                return ok
             with self._vol_lock:
                 # constructed under the lock too: ResultCache() mkdirs its root, which a
                 # scratch-or-cache reload in another thread hides (review, 2026-09-19)
@@ -1843,7 +1951,7 @@ class _WorkerBase:
 
         def _finish(placed) -> None:
             try:
-                if placed:
+                if placed and not RESULT_STORE:
                     with self._vol_lock:
                         cache_vol.commit()
                 print("[artifacts] overlap "
@@ -1925,7 +2033,8 @@ class _WorkerBase:
 @app.cls(gpu=GPU, timeout=3600, memory=32768, scaledown_window=SCALEDOWN,
          max_containers=MAX_CONTAINERS,
          volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
-                  CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
+                  **_results_mount(), INPUTS_ROOT: inputs_vol},
+         secrets=_STORE_SECRETS,
          enable_memory_snapshot=SNAPSHOT, **_cls_extra)
 class Worker(_WorkerBase):
     """The nnU-Net worker: runs every ecosystem whose engine is ``nnunetv2``
@@ -2011,7 +2120,8 @@ if EMBED:
     @app.cls(gpu=GPU, timeout=3600, memory=32768, scaledown_window=SCALEDOWN,
              max_containers=MAX_CONTAINERS, image=encode_image,
              volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
-                      CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol, ENCODERS_ROOT: encoder_vol})
+                      **_results_mount(), INPUTS_ROOT: inputs_vol, ENCODERS_ROOT: encoder_vol},
+             secrets=_STORE_SECRETS)
     class EmbedWorker(_WorkerBase):
         """The encoder worker (2026-09-23): runs every ``kind=embed`` job - RADAR and the
         nnU-Net encoders alike - through ``encoders.pipeline.embed_file``, and publishes the
@@ -2515,7 +2625,9 @@ class ModalExecutor:
                             # the VOLUME's path: hit[0] is this container's own copy,
                             # which no other container (nor this one restarted) has
                             "result": hit[1],
-                            "cache_path": str(hit[0]),
+                            # (a result store: no path is shared - the job result route
+                            # resolves the entry by key, which every container can)
+                            **({} if RESULT_STORE else {"cache_path": str(hit[0])}),
                             **({"kind": kind} if not_labels else {}),
                             # the handle the job result route resolves - and leases -
                             # the entry by; cache_path names one generation, which a
@@ -2622,6 +2734,13 @@ class ModalExecutor:
         0.27-0.6 s, none waiting on another."""
         from haversack.jobpolicy import missing_deliverables
         from haversack.serve import ResultCache
+        if RESULT_STORE:
+            # the pointer, current; the files this container's own copy holds (a fill of
+            # what the pointer names, the one download a first hit here costs)
+            hit = _results().get(key)
+            if hit is None:
+                return None
+            return Path(hit[0]), hit[1], missing_deliverables(wanted, Path(hit[0]).parent)
         _reload_cache_view(max_age=CACHE_FRESH_S)
         with _cache_view.shared():
             hit = ResultCache(CACHE_ROOT, keep=RESULTS_KEEP).get(key)   # leased, as before
@@ -2684,6 +2803,8 @@ class ModalExecutor:
 
     def cache_delete(self, key):
         from haversack.serve import ResultCache
+        if RESULT_STORE:
+            return _results().delete(key)      # a tombstone; the sweep reclaims the bytes
         _reload_cache_view()
         # exclusive, like a reload: Modal reloads after a commit when its server asks
         # (it never hid a file in 61 measured commits, but nothing promises that)
@@ -2784,7 +2905,7 @@ class ModalExecutor:
         if meta is None:
             return None, None
         name = OUTPUT_OF_KIND.get(meta.get("kind") or "segment", RESULT_NAME)
-        if meta.get("cache_path"):
+        if meta.get("cache_path") and not RESULT_STORE:
             p = Path(meta["cache_path"])
             _reload_cache_view()
             with _cache_view.shared():         # read, and copied out, clear of reloads
@@ -2837,8 +2958,8 @@ _API_SECRETS = ([modal.Secret.from_name(TOKEN_SECRET, required_keys=["HAVERSACK_
 
 @app.function(cpu=2.0, memory=2048, scaledown_window=300, image=api_image,
               volumes={SCRATCH_ROOT: scratch_vol, WEIGHTS_ROOT: weights_vol,
-                       CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
-              secrets=_API_SECRETS)
+                       **_results_mount(), INPUTS_ROOT: inputs_vol},
+              secrets=_API_SECRETS + _STORE_SECRETS)
 @modal.concurrent(max_inputs=100)
 @modal.asgi_app(requires_proxy_auth=PROXY_AUTH and not TOKEN_SECRET)
 def api():
@@ -2854,15 +2975,32 @@ def api():
     return create_app(ex, token=token)
 
 
+if RESULT_STORE:
+    @app.function(cpu=1.0, memory=1024, image=api_image, secrets=_STORE_SECRETS, timeout=3600,
+                  schedule=modal.Period(hours=RESULT_SWEEP_HOURS))
+    def sweep_results():
+        """The result store's reclamation, once per RESULT_SWEEP_HOURS for the whole
+        deployment: blobs no pointer (current or kept history) names, past their grace, and
+        tombstones past TOMBSTONE_KEEP_S. Deletions write tombstones; only this frees bytes."""
+        _pkg_dir()
+        got = _results().sweep()
+        print(f"[results] sweep: {got}", flush=True)
+        return got
+
+
 if PUBLIC:
     @app.function(cpu=1.0, memory=1024, scaledown_window=300, image=api_image,
-                  volumes={CACHE_ROOT: cache_vol, WEIGHTS_ROOT: weights_vol})
+                  volumes={**_results_mount(), WEIGHTS_ROOT: weights_vol},
+                  secrets=_STORE_SECRETS)
     @modal.concurrent(max_inputs=100)
     @modal.asgi_app(requires_proxy_auth=False)
     def public():
         """The anonymous read-only twin (HAVERSACK_PUBLIC=1): cache hits only, no
         compute path in the function at all - it cannot spend GPU by
-        construction. Shares the cache volume with the authed api."""
+        construction. Shares the cache volume with the authed api - or, with a result
+        store, reads that store through a read-only view (not one write to it)."""
+        global _TWIN
+        _TWIN = True
         _pkg_dir()
         os.environ["TOTALSEG_WEIGHTS_PATH"] = WEIGHTS_ROOT
         from haversack import Segmenter

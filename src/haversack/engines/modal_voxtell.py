@@ -16,10 +16,11 @@ import sys
 
 import modal
 
-from haversack.modal_app import (CACHE_ROOT, GPU, GPU_SNAPSHOT, INPUTS_ROOT,
+from haversack.modal_app import (GPU, GPU_SNAPSHOT, INPUTS_ROOT,
                                  MAX_CONTAINERS, SCALEDOWN, SCRATCH_ROOT, SNAPSHOT,
                                  WEIGHTS_ROOT, _WorkerBase, _cls_extra, _pkg_dir, _RUNTIME_KNOBS,
-                                 app, cache_vol, inputs_vol, scratch_vol, weights_vol)
+                                 _STORE_SECRETS, _results_mount,
+                                 app, inputs_vol, scratch_vol, weights_vol)
 
 #: The engine this adapter deploys. Must equal the module suffix and a registry key;
 #: `test_engine_completeness` reconciles all three.
@@ -63,7 +64,8 @@ def _voxtell_image():
 @app.cls(gpu=GPU, timeout=3600, memory=40960, scaledown_window=SCALEDOWN,
          max_containers=MAX_CONTAINERS, image=_voxtell_image(),
          volumes={WEIGHTS_ROOT: weights_vol, SCRATCH_ROOT: scratch_vol,
-              CACHE_ROOT: cache_vol, INPUTS_ROOT: inputs_vol},
+              **_results_mount(), INPUTS_ROOT: inputs_vol},
+         secrets=_STORE_SECRETS,
          enable_memory_snapshot=SNAPSHOT, **_cls_extra)
 class VoxTellWorker(_WorkerBase):
     """The VoxTell engine worker: free-text prompts instead of a fixed task.
