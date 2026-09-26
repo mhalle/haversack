@@ -620,17 +620,16 @@ which cost GPU time and are small, are worth a shared store. Not measured: paral
 GETs (which would raise its rate), and the cost of re-making the copy after a re-fetch (a decode
 - seconds for this series, ~12 s for a 709-slice one).
 
-**DICOM headers (designed with the user, 2026-09-26; not built).** They serve two purposes,
-kept apart. For USE, JSON - the duckn dicom extension's keyword-keyed tags, sourced from
-pydicom (duckn's `dicom_convert`: private tags, sequences, binary values in base64) rather
-than from SimpleITK's dictionary, which drops binary values - and served through an API
-(`haversack.inputs.open(spec).dicom()`, a route) rather than by anyone parsing DICOM. For
-ROUND TRIP, an OPAQUE member of the copy: each file's raw header bytes (everything before
-Pixel Data), never interpreted or exposed as data, used only to rebuild the original files.
-Measured on a 249-slice NLST CT: 628 KB raw, 11 KB with zstd. For an uncompressed transfer
-syntax with an integer rescale the rebuild is byte-exact and can be PROVEN at transcode time
-(rebuild, hash, compare with the recorded source digest); a compressed transfer syntax or a
-non-integer rescale gets pixel-exact at best, recorded as such.
+**DICOM headers (designed with the user, 2026-09-26; not built).** JSON for USE only: the duckn
+dicom extension's keyword-keyed tags, sourced from pydicom (duckn's `dicom_convert`: private
+tags, sequences, binary values in base64) rather than from SimpleITK's dictionary, which drops
+binary values - and served through an API (`haversack.inputs.open(spec).dicom()`, a route)
+rather than by anyone parsing DICOM. **No round trip (the user, the same day):** the copy is a
+faithful DATA product, not a byte-faithful archive; the original is downloadable from its source,
+more faithfully than a cache could hold it, and the input record says where. So no raw-header
+member. (What it would have taken, for the record: rebuilding files was byte-exact only for an
+uncompressed transfer syntax, integer rescale and nothing above BitsStored; compressed sources,
+float rescale, per-slice rescale and junk high bits would have been pixel- or value-exact at best.)
 
 **Order.** (a) the store half (refs, views, eviction) with its tests, behind a flag, on the
 local server; (b) the command line's cache onto it; (c) the shim for legacy uploads; (d) a
