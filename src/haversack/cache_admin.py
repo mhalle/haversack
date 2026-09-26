@@ -111,7 +111,7 @@ def stores() -> list[dict]:
     except Exception:
         wroot = None
     out = [
-        {"name": "inputs", "path": default_input_cache(), "sweepable": True},
+        {"name": "inputs", "path": _inputs_path(), "sweepable": True},
         {"name": "results", "path": results_dir(), "sweepable": True},
         {"name": "checkpoints", "path": checkpoint_dir(), "sweepable": True},
         # a running server's generated token lives here; never swept, never a credential
@@ -124,12 +124,31 @@ def stores() -> list[dict]:
     return out
 
 
+def _inputs_path() -> Path:
+    """The command line's input cache: the content-addressed store behind
+    ``HAVERSACK_INPUT_STORE=blobs`` (step 6), else the legacy directory cache."""
+    from .inputstore import input_store_enabled
+    from .sources import default_input_cache, default_input_store
+    return default_input_store() if input_store_enabled() else default_input_cache()
+
+
+def _input_store(root):
+    """The store at ``root`` when the flag is on and one is there - a plain InputStore: cache
+    admin reads refs and sweeps, and builds no view."""
+    from .inputstore import InputStore, input_store_enabled
+    if not input_store_enabled() or not (Path(root) / "store").is_dir():
+        return None
+    return InputStore(root, None, budget_bytes=1 << 62, grace_s=0)
+
+
 def usage() -> list[dict]:
     """:func:`stores`, each with ``items`` and ``bytes`` measured now."""
     rows = []
     for st in stores():
         _, b = _du(st["path"])
-        n = len(_entries(st["path"], nested=(st["name"] == "inputs")))
+        store = _input_store(st["path"]) if st["name"] == "inputs" else None
+        n = (len(store._refs()) if store is not None
+             else len(_entries(st["path"], nested=(st["name"] == "inputs"))))
         rows.append({**st, "items": n, "bytes": b, "human": _human(b)})
     return rows
 
@@ -195,6 +214,34 @@ def clean(category: str, *, older_than_days: float | None = None, item: str | No
     for cat in cats:
         root = Path(by_name[cat]["path"])
         if not root.exists():
+            continue
+        store = _input_store(root) if cat == "inputs" else None
+        if store is not None:
+            # refs are the items; their blobs go in one sweep once the refs are forgotten (an
+            # explicit clean: no grace - a fetch in flight loses at worst its blob, a miss)
+            from .inputstore import key_for
+            from .sources import parse_input
+            before = _du(root)[1]
+            wanted = None
+            if item is not None:
+                parsed = parse_input(item)
+                wanted = {key_for(f"{parsed[0]}:{parsed[1]}")} if parsed else set()
+            for used, key, doc in store._refs():
+                if (wanted is not None and key not in wanted) or (
+                        cutoff is not None and used >= cutoff):
+                    continue
+                removed.append(str(doc.get("identity") or key))
+                if dry_run:
+                    freed += int(doc.get("bytes") or 0)
+                else:
+                    store.forget(doc.get("identity") or key)
+                    # the command line's export of it, if there is one (CommandInputs)
+                    from .inputstore import ref_name
+                    shutil.rmtree(Path(root) / "exports" / Path(ref_name(key)).stem,
+                                  ignore_errors=True)
+            if not dry_run:
+                store.evict()
+                freed += max(0, before - _du(root)[1])
             continue
         if item is not None and cat == "inputs":
             entry = input_entry(item)

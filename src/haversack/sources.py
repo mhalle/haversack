@@ -1964,6 +1964,16 @@ def input_record(spec, *, cache_dir=None, sources=None) -> dict:
             pass
         return rec
     kind, ident = parsed
+    from .inputstore import command_inputs, input_store_enabled
+    if input_store_enabled():
+        store = command_inputs(Path(cache_dir) / "store" if cache_dir else default_input_store())
+        rec = store.record(f"{kind}:{ident}")
+        if rec is None:
+            return {"kind": kind, "identity": f"{kind}:{ident}", "content": None, "origin": None,
+                    "license": None, "cite": [], "note": "no record of this fetch"}
+        rec = dict(rec)
+        rec["identity"] = f"{kind}:{ident}"
+        return rec
     root = Path(cache_dir) if cache_dir else default_input_cache()
     # `input_entry_dir`, not a third copy of it: this one was missed when FETCH_EPOCH
     # went into the key, so `haversack` would have read provenance out of the entry a
@@ -1991,6 +2001,13 @@ def input_entry_dir(root, kind: str, ident: str) -> Path:
     import hashlib
     return Path(root) / kind / hashlib.sha1(
         f"e{FETCH_EPOCH}!{ident}".encode()).hexdigest()[:20]
+
+
+def default_input_store() -> Path:
+    """Where the command line's inputs live on the content-addressed store (behind
+    ``HAVERSACK_INPUT_STORE=blobs``; ``default_input_cache`` is the legacy one)."""
+    from .cache_admin import cache_root
+    return cache_root() / "input-store"
 
 
 def default_input_cache() -> Path:
@@ -2045,6 +2062,20 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
         raise InputError(f"the {kind} source's runtime is not installed in this environment "
                          f"(a lean install?): uv pip install {'obstore' if kind == 'idc' else kind}")
     check_identifier(src, ident, credentials)
+    from .inputstore import command_inputs, input_store_enabled
+    if input_store_enabled():
+        # step 6 of docs/cache-consolidation.md, behind its flag: the same store the server's
+        # inputs use - an input copy as blobs + one ref - read through a view this process owns
+        store = command_inputs(Path(cache_dir) / "store" if cache_dir else default_input_store())
+
+        def fetch(_identity, entry):
+            fetch_recording_origin(src, ident, entry, credentials)
+            return entry / "series" if (entry / "series").is_dir() else entry
+        what = ident if kind == "http" else f"{kind}:{ident}"
+        if progress and not store.has(f"{kind}:{ident}"):
+            progress(f"fetching {what}")
+        got = store.get_or_fetch(f"{kind}:{ident}", fetch=fetch)
+        return (sole_file(got) or got) if got.is_dir() else got
     root = Path(cache_dir) if cache_dir else default_input_cache()
     entry = input_entry_dir(root, kind, ident)
     done = entry / ".done"

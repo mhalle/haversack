@@ -50,6 +50,9 @@ GRACE_S = 3600.0
 #: hex, and upper-case letters are escaped too, so two keys differing only in case - which a
 #: case-insensitive filesystem (APFS, exFAT) would fold into one file - never share a ref.
 _KEEP = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_.")
+#: How long a fetch waits for another fetch of the same key on this host before going ahead
+#: anyway: the lock saves a download, and a lock that cannot be had must not stop the work.
+ECONOMY_WAIT_S = 600.0
 #: A ref name longer than this is hashed; the key itself is always inside the document.
 _MAX_NAME = 180
 
@@ -95,7 +98,7 @@ class InputStore:
     ``root/staging`` where a fetch is assembled, ``root/locks`` the per-key economy locks)."""
 
     def __init__(self, root, fetch_fn=None, *, budget_bytes: int = 8 << 30,
-                 grace_s: float = GRACE_S):
+                 grace_s: float = GRACE_S, transcode: bool = True):
         from provender import Blobs
         from provender.disk import DiskStore
         self.root = Path(root)
@@ -106,6 +109,11 @@ class InputStore:
         self.fetch = fetch_fn
         self.budget = int(budget_bytes)
         self.grace_s = float(grace_s)
+        #: whether an input is kept as its input copy (the server) or as fetched (the command
+        #: line, whose `get` hands the user the original files - a copy no viewer opens)
+        self.transcode = bool(transcode)
+        import threading
+        self._held = threading.local()          # stripes this thread holds (re-entrancy)
 
     # -- refs ------------------------------------------------------------------------------
 
@@ -173,11 +181,30 @@ class InputStore:
     @contextlib.contextmanager
     def _economy_lock(self, key: str, check=None):
         """One fetch of ``key`` at a time on this host - to save a download, never for
-        correctness. Released by the kernel when the holder exits, however it exits."""
+        correctness. Released by the kernel when the holder exits, however it exits.
+
+        Because nothing depends on it, it gives way rather than wait without end (2026-09-26):
+        - RE-ENTRANT in a thread: a fetch that stores another input while it runs (a source
+          whose fetch materializes something) takes the same stripe again - and two opens of
+          one lock file in one process exclude each other, so a nested call waited forever
+          (`test_an_unlocked_publish_CANNOT_REMOVE_a_completed_winner`, which nests exactly
+          that, hung). A different key on the same stripe nests the same way.
+        - BOUNDED: past :data:`ECONOMY_WAIT_S` a waiter goes ahead unlocked; the worst it can
+          cost is the download it would have saved."""
         import fcntl
-        self.locks.mkdir(parents=True, exist_ok=True)
+        import threading
         stripe = int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:4], "big") % 256
+        held = self._held.__dict__.setdefault("stripes", {})
+        if held.get(stripe):
+            held[stripe] += 1
+            try:
+                yield
+            finally:
+                held[stripe] -= 1
+            return
+        self.locks.mkdir(parents=True, exist_ok=True)
         fd = os.open(self.locks / f"{stripe:03d}", os.O_RDWR | os.O_CREAT, 0o644)
+        deadline = time.monotonic() + ECONOMY_WAIT_S
         try:
             while True:
                 try:
@@ -186,8 +213,14 @@ class InputStore:
                 except BlockingIOError:
                     if check is not None:
                         check()
+                    if time.monotonic() > deadline:
+                        break                      # go ahead unlocked: a duplicate fetch at worst
                     time.sleep(0.1)
-            yield
+            held[stripe] = 1
+            try:
+                yield
+            finally:
+                held.pop(stripe, None)
         finally:
             os.close(fd)
 
@@ -225,7 +258,7 @@ class InputStore:
         from .sources import ResultSource, read_input_record
         record = read_input_record(stage)
         read = content
-        if not str(identity).startswith(ResultSource.prefix + ":"):
+        if self.transcode and not str(identity).startswith(ResultSource.prefix + ":"):
             # a result: reference is a label map, never transcoded (as SeriesCache)
             digest = identity if is_digest(identity) else ((record or {}).get("content") or {}).get("digest")
             copy = transcode(content, stage, source=None if is_digest(identity) else identity,
@@ -547,3 +580,75 @@ class ServerInputs:
 
     def put_dir(self, staged, *, expect=None) -> str:
         return self.store.put_dir(staged, expect=expect)
+
+
+def input_store_enabled() -> bool:
+    """``HAVERSACK_INPUT_STORE=blobs``: inputs on this store (step 6), until it is the default."""
+    return os.environ.get("HAVERSACK_INPUT_STORE", "").strip().lower() == "blobs"
+
+
+_COMMAND: dict = {}
+
+
+class CommandInputs:
+    """The command line's inputs: an :class:`InputStore` whose views are persistent EXPORTS,
+    one per input (``<root>/exports/<ref name>/``), because the command line hands out paths
+    for later - `haversack get` prints one for the user to open, a batch materializes before
+    it segments - which a per-process view would take away at exit. An export is built from
+    the blobs once (hard links, else copies), in a temporary directory renamed into place, so
+    two processes never half-build one; it is reused by every later command, and `haversack
+    cache clean inputs` removes it with its ref. No byte budget: the command line's cache
+    never had one."""
+
+    def __init__(self, root):
+        self.store = InputStore(root, None, budget_bytes=1 << 62, transcode=False)
+        self.root = self.store.root
+        self.exports = self.root / "exports"
+
+    def export_dir(self, identity: str) -> Path:
+        return self.exports / Path(ref_name(key_for(identity))).stem
+
+    def has(self, identity: str) -> bool:
+        return self.store.has(identity)
+
+    def record(self, identity: str) -> dict | None:
+        return self.store.record(identity)
+
+    def get_or_fetch(self, identity: str, *, fetch) -> Path:
+        """The input's export, storing it first if absent; what to hand the reader."""
+        doc = self.store.ensure(identity, fetch=fetch)
+        dest = self.export_dir(identity)
+        if not dest.is_dir() or self.store.ref(identity) is None:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.parent / f".{dest.name}.{uuid.uuid4().hex[:8]}"
+            try:
+                self.store.materialize(identity, tmp)
+                shutil.rmtree(dest, ignore_errors=True)   # a stale export of a forgotten ref
+                try:
+                    os.rename(tmp, dest)
+                except OSError:                    # another process placed it meanwhile
+                    pass
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+        self.store.touch(identity)
+        read = dest / doc["read"]
+        if read.is_dir():
+            from .content import TREE, is_digest
+            if is_digest(identity) and not str(identity).startswith(TREE):
+                files = [p for p in read.iterdir() if p.is_file()]
+                if len(files) == 1:
+                    return files[0]
+        return read
+
+    def forget(self, identity: str) -> None:
+        self.store.forget(identity)
+        shutil.rmtree(self.export_dir(identity), ignore_errors=True)
+
+
+def command_inputs(root) -> CommandInputs:
+    """The command line's inputs under ``root``, one per root per process."""
+    key = str(Path(root).resolve())
+    got = _COMMAND.get(key)
+    if got is None:
+        got = _COMMAND[key] = CommandInputs(root)
+    return got

@@ -519,6 +519,20 @@ read, which the legacy store committed as an empty entry and this one refuses
 (`test_the_conversion_answers_410_when_its_input_leaves_and_cleans_up`). The artifact pair is
 loaded while the input is staged, so a preview never reads a view after its unpin.
 
+(b) is done too, same flag: `sources.materialize` stores into `<cache root>/input-store` through
+`CommandInputs`, whose views are persistent EXPORTS (`exports/<ref name>/`, built once by hard
+links in a temporary directory renamed into place), because the command line hands paths out
+for later - `haversack get` prints one - which a per-process view would take away at exit.
+The command line keeps inputs AS FETCHED (`transcode=False`): `get` hands the user the
+original, and a viewer opens a NIfTI, not a duckn copy. No byte budget, as before; `cache
+usage` counts refs and `cache clean inputs [spec]` forgets refs, removes their exports and
+sweeps at once. Building it found a real defect in (a): the economy lock deadlocked a fetch
+that stores another input while it runs (two opens of one lock file in one process exclude
+each other); it is re-entrant per thread now, and gives way after `ECONOMY_WAIT_S`. With the
+flag on, ten more legacy command-line tests fail on layout alone (`cache/inputs/<kind>/...`,
+a planted `.input.json`, a staging-litter check); `tests/test_inputstore_cli.py` holds the
+behaviors they pin, store-neutral. Default-off suite: 2,859 passed.
+
 **Order.** (a) the store half (refs, views, eviction) with its tests, behind a flag, on the
 local server; (b) the command line's cache onto it; (c) the shim for legacy uploads; (d) a
 soak like step 5's, with a server killed mid-fetch; (e) the old classes deleted with step 8.

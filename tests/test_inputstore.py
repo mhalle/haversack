@@ -286,3 +286,39 @@ class OneFetchPerHost(_Base):
                 self.store.ensure("idc:abc", check=check)
         finally:
             os.close(fd)
+
+
+class TheEconomyLockGivesWay(_Base):
+    """The per-key lock saves a download; nothing depends on it, so it must never hang."""
+
+    def test_a_fetch_that_stores_another_input_while_it_runs_does_not_deadlock(self):
+        inner_done = []
+
+        def outer(identity, entry, credentials=None):
+            # a source whose fetch stores something else - the same key's stripe, and another
+            self.store.ensure("idc:abc", fetch=_Fetch(lambda d: _nifti(d / "a.nii.gz")))
+            inner_done.append(True)
+            return _Fetch(lambda d: _nifti(d / "b.nii.gz"))(identity, entry)
+        t = threading.Thread(target=self.store.ensure, args=("idc:abc",),
+                             kwargs={"fetch": outer}, daemon=True)
+        t.start()
+        t.join(timeout=20)
+        self.assertFalse(t.is_alive(), "a nested ensure deadlocked on its own lock")
+        self.assertTrue(inner_done)
+        # the inner store finished first and its ref stands: the outer takes it
+        self.assertEqual(list(self.store.ref("idc:abc")["files"]), ["decoded/input.duckn.zip"])
+
+    def test_a_lock_held_forever_elsewhere_is_waited_out(self):
+        import fcntl
+        import hashlib
+        key = key_for("idc:abc")
+        stripe = int.from_bytes(hashlib.sha256(key.encode()).digest()[:4], "big") % 256
+        self.store.locks.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.store.locks / f"{stripe:03d}", os.O_RDWR | os.O_CREAT)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with mock.patch.object(inputstore, "ECONOMY_WAIT_S", 0.3):
+                self.store.ensure("idc:abc")
+            self.assertTrue(self.store.has("idc:abc"))
+        finally:
+            os.close(fd)
