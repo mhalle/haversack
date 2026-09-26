@@ -59,5 +59,9 @@ jobs:
       - name: Run tests
         env:
           PYTHONPATH: src
-        # --no-project: plain `uv run` would re-sync the project and replace the CPU torch.
-        run: uv run --no-project pytest -m "not slow" -q
+        # The environment's own interpreter, not `uv run`: `uv run --no-project` honors
+        # .python-version (3.12.14), and an environment that does not match it exactly - the
+        # 3.14 leg, or a runner's other 3.12 - is passed over for a fresh interpreter without
+        # pytest (2026-09-25, the first matrix run). Plain `uv run` would re-sync the project
+        # and replace the CPU torch.
+        run: .venv/bin/python -m pytest -m "not slow" -q
