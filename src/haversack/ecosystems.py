@@ -923,6 +923,101 @@ class MooseEcosystem(ZipManifestEcosystem):
     #: against the mined segments index). One class list is one scheme, so it declares theirs.
     REPACKAGED = {"clin_ct_dental": ("dentalsegmentator", "base")}
 
+    # -- the orientation each model was trained in, and moosez's workflows (2026-09-26) ---------
+    #
+    # Until 2026-09-26 every MOOSE model got the input's own axis order, as a stock nnU-Net
+    # folder does - and none of them was trained that way. moosez fed its models dicom2nifti's
+    # LAS until 2025-07-18 and RAS since, when six models were retrained for it: on LPS DICOM
+    # `clin_ct_ribs` swapped left and right and lost the posterior ribs (reported by a user; 170 ml
+    # of rib where the MOOSE paper's result has 344), `clin_ct_muscles` found 7 ml of muscle. The
+    # manifest states each model's orientation with its basis (tools/gen_moose_manifest.py's
+    # MODEL_ORIENTATION, measured where it could be); nothing here reads it off a file name.
+
+    def _model_orientation(self, task: str) -> str | None:
+        entry = manifest_entry(self._entries, task, what=f"{self.name} task {task!r}",
+                               generator=self.generator)
+        code = entry.get("model_orientation")
+        if not code:
+            raise ModelNotFound(
+                f"{self.name} task {task!r}: the manifest states no model orientation, and "
+                f"running a model in the wrong one mirrors its labels - regenerate the manifest "
+                f"with {self.generator}")
+        return None if code == "native" else str(code)
+
+    def _crop_task(self, task: str) -> str | None:
+        return ((self._entries.get(task) or {}).get("workflow") or {}).get("crop_task")
+
+    def materialized(self, task: str, root) -> bool:
+        crop = self._crop_task(task)
+        return super().materialized(task, root) and (crop is None
+                                                     or super().materialized(crop, root))
+
+    def ensure(self, task: str, root, progress=None, version=None) -> None:
+        crop = self._crop_task(task)
+        if crop is not None:
+            # the crop model is part of the task, at whatever release the manifest names; a pin
+            # names the task's own release, as moosez's workflow is pinned by its target model
+            super().ensure(crop, root, progress=progress)
+        super().ensure(task, root, progress=progress, version=version)
+
+    def spec(self, task: str, root) -> TaskSpec:
+        import dataclasses
+        spec = dataclasses.replace(super().spec(task, root),
+                                   orientation=self._model_orientation(task))
+        workflow = (self._entries.get(task) or {}).get("workflow")
+        return spec if workflow is None else self._workflow_spec(task, spec, workflow, root)
+
+    def _workflow_spec(self, task: str, target: TaskSpec, w: dict, root) -> TaskSpec:
+        """moosez's crop-then-segment workflow as a cascade (``workflows.run``): the crop model
+        labels the image, the image is cut to the ``crop_axes`` extent of ``crop_classes`` (no
+        margin), the target model runs on the cut, and its result keeps only the band of the
+        largest connected piece of ``band_classes``. Both models run in the TASK's orientation,
+        as moosez runs both on one reoriented image."""
+        import dataclasses
+        from .tasks import CascadeStep, _check_cascade
+        crop = w["crop_task"]
+        crop_orientation = self._model_orientation(crop)
+        if crop_orientation != target.orientation:
+            raise ModelNotFound(
+                f"{self.name}:{task}: its crop model {crop!r} was trained in "
+                f"{crop_orientation or 'native order'}, the target in "
+                f"{target.orientation or 'native order'}; one cascade runs one orientation - "
+                f"regenerate the manifest with {self.generator}")
+        crop_spec = super().spec(crop, root)
+        for key in ("crop_classes", "band_classes"):
+            # moosez states values; the crop checkpoint names them - the two must agree, or
+            # the workflow would cut to whatever those values mean in another release
+            wrong = {v: n for v, n in w[key].items() if crop_spec.label_map.get(int(v)) != n}
+            if wrong:
+                raise ModelNotFound(
+                    f"{self.name}:{task}: {key} {wrong} are not what {crop!r}'s checkpoint "
+                    f"calls those values ({ {int(v): crop_spec.label_map.get(int(v)) for v in wrong} })"
+                    f" - regenerate the manifest with {self.generator}")
+        stages = (CascadeStep(weights_id=crop_spec.single,
+                              crop_to_classes=tuple(sorted(int(v) for v in w["crop_classes"])),
+                              dilation_mm=float(w.get("margin_mm", 0)),
+                              crop_axes=tuple(w.get("crop_axes") or ()),
+                              band_classes=tuple(sorted(int(v) for v in w.get("band_classes") or {})),
+                              band_largest_component=bool(w.get("band_largest_component"))),
+                  CascadeStep(weights_id=target.single))
+        _check_cascade(stages, f"{self.name}:{task}")
+        return dataclasses.replace(target, shape="cascade", single=None, cascade=stages)
+
+    def stage_task(self, task: str, stage: int) -> str | None:
+        return self._crop_task(task) if stage == 0 else None
+
+    def info(self, task: str, root) -> dict:
+        out = super().info(task, root)
+        entry = self._entries.get(task) or {}
+        if entry.get("model_orientation"):
+            # what the model is fed, and why - reported so describe() and the result key say
+            # it: every MOOSE result computed before 2026-09-26 was fed the input's own order
+            out["model_orientation"] = entry["model_orientation"]
+            out["orientation_basis"] = entry.get("orientation_basis")
+        if entry.get("workflow"):
+            out["workflow"] = entry["workflow"]
+        return out
+
     def labeling_scheme(self, task: str) -> dict | None:
         if task not in self._entries:
             raise LookupError(f"unknown {self.name} task {task!r}")

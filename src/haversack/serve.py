@@ -420,7 +420,9 @@ def weights_versions_of(segmenter, task) -> list:
     its tile step (``step_size``, ts.v3's 0.8) adds ``step=<value>`` the same way, and a cascade
     its crop rule (``crop=upstream``, 2026-09-22), which moved every cascade's labels and no
     other task's. A task stating auxiliary classes adds ``auxiliary=0`` (2026-09-22): its
-    results used to carry them as unnamed values, and now map them to 0 as upstream does."""
+    results used to carry them as unnamed values, and now map them to 0 as upstream does. A
+    task whose catalog states its model's orientation adds ``orient=<code>`` (MOOSE,
+    2026-09-26)."""
     try:
         d = segmenter.describe(task)
         entries = d.get("weights_installed") or []
@@ -433,6 +435,12 @@ def weights_versions_of(segmenter, task) -> list:
             out.append(f"crop={d['crop']}")
         if d.get("auxiliary"):
             out.append("auxiliary=0")
+        if d.get("model_orientation") not in (None, "native"):
+            # the orientation a catalog STATES its model was trained in (MOOSE's manifest,
+            # 2026-09-26): until then every MOOSE model got the input's own axis order, and on
+            # LPS DICOM the RAS-trained ones mirrored their labels. Only a stated reorientation
+            # adds this - "native" is what every model got before - so no other key moves.
+            out.append(f"orient={d['model_orientation']}")
     except Exception:
         out = ["unknown"]
     return out + _engine_epoch(segmenter, task)

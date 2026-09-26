@@ -15,7 +15,7 @@ from .mapping import Mapping
 from . import backends
 from .restore import to_labels
 from .network import TorchModel, available_folds
-from .tasks import (ModelNotFound, TaskCatalog, TaskSpec, _resolve_spec,
+from .tasks import (ModelNotFound, TaskCatalog, TaskSpec, _resolve_spec, array_axis,
                     _uses_nnunet_preprocessing, resolve_model_folder)
 from .cache import ModelCache
 from .result import Segmentation
@@ -61,6 +61,56 @@ def upstream_crop_box(labels, classes, margin_mm: float, spacing_zyx):
     lo = tuple(max(0, int(i.min()) - int(a)) for i, a in zip(idx, add))
     hi = tuple(min(int(n), int(i.max()) + 1 + int(a)) for i, a, n in zip(idx, add, mask.shape))
     return lo, hi
+
+
+def crop_axes_only(box, shape, axes):
+    """``box`` with every array axis NOT in ``axes`` opened to the whole image: moosez's
+    ``crop_fov`` cuts only the superior-inferior extent and keeps every voxel across the
+    other two (2026-09-26). ``axes`` empty keeps the box as it is - TotalSegmentator's."""
+    if box is None or not axes:
+        return box
+    lo, hi = box
+    return (tuple(l if k in axes else 0 for k, l in enumerate(lo)),
+            tuple(h if k in axes else int(n) for k, (h, n) in enumerate(zip(hi, shape))))
+
+
+def band_of(labels, classes, axes, *, largest_component: bool):
+    """``{array axis: (lo, hi)}``, end exclusive, that ``classes`` span in ``labels`` along each
+    of ``axes`` - of their largest connected piece when ``largest_component`` - or None when
+    none is present. moosez's ``restrict_fov``: ``BinaryThreshold``, then SimpleITK's
+    ``ConnectedComponent`` (face connectivity, its default, as ``scipy.ndimage.label``'s) and
+    ``RelabelComponent`` by size, whose first label is the largest; both number components in
+    raster order, so a tie goes to the same piece."""
+    mask = np.isin(np.asarray(labels), [int(c) for c in classes])
+    if not mask.any():
+        return None
+    if largest_component:
+        from scipy import ndimage
+        comp, n = ndimage.label(mask)
+        if n > 1:
+            sizes = np.bincount(comp.ravel())[1:]
+            mask = comp == (int(np.argmax(sizes)) + 1)
+    idx = np.nonzero(mask)
+    return {int(k): (int(idx[k].min()), int(idx[k].max()) + 1) for k in axes}
+
+
+def keep_band(labels, band, source, grid):
+    """Zero every voxel of ``labels`` (on ``grid``) whose center lies outside ``band`` - index
+    ranges of the ``source`` grid, carried over in millimeters. Both grids live in one
+    canonical frame (``Grid`` carries no direction), so on the source grid itself this keeps
+    exactly the band's slices."""
+    for k, (lo, hi) in band.items():
+        edge_lo = source.origin[k] + (lo - 0.5) * source.spacing[k]
+        edge_hi = source.origin[k] + (hi - 0.5) * source.spacing[k]
+        centers = grid.origin[k] + np.arange(grid.shape[k]) * grid.spacing[k]
+        inside = np.nonzero((centers >= edge_lo) & (centers < edge_hi))[0]
+        a, b = (int(inside[0]), int(inside[-1]) + 1) if inside.size else (0, 0)
+        index = [slice(None)] * 3
+        index[k] = slice(0, a)
+        labels[tuple(index)] = 0
+        index[k] = slice(b, None)
+        labels[tuple(index)] = 0
+    return labels
 
 
 def _lut(K: int, remap: dict | None) -> np.ndarray:
@@ -544,14 +594,18 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         with upstream: on a neck CT headneck_bones_vessels scored mean Dice 0.738 against
         upstream, zygomatic arches labeled beyond upstream's box."""
         box = None
+        bands = []                           # (source grid, {axis: (lo, hi)}) - MOOSE's restrict_fov
         stages = spc.cascade
         report.n_parts = max(report.n_parts, len(stages) - 1 + max(1, len(stages[-1].union)))
         for i, step in enumerate(stages):
             if i == len(stages) - 1:
                 parts = ([(p.weights_id, dict(p.label_remap), p.name or str(p.weights_id))
                           for p in step.union] if step.union else [(step.weights_id, None, tag)])
-                return run_single_or_union(spc, tag, parts=parts, box=box, use_body=False,
-                                           first=i, out_grid=out_grid, restore=restore)
+                out, fr, og = run_single_or_union(spc, tag, parts=parts, box=box, use_body=False,
+                                                  first=i, out_grid=out_grid, restore=restore)
+                for source, band in bands:
+                    out = keep_band(out, band, source, og)
+                return out, fr, og
             if step.crop_from_task is not None:
                 report.stage("cascade", f"{tag} stage {i + 1}/{len(stages)}: crop from {step.crop_from_task!r}")
                 crop = step.crop_from_task
@@ -580,12 +634,28 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                              restore="nearest", label_task=stage_task(spc, i), role="crop")
                 T[f"network:{tag}:s{i}"] = time.perf_counter() - t
                 models.release(model)
-            box = upstream_crop_box(labels_in.cpu().numpy(), step.crop_to_classes, step.dilation_mm,
-                                    src.source.spacing)
-            prov.setdefault("crops", []).append({
-                "task": tag, "stage": i + 1, "classes": [int(c) for c in step.crop_to_classes],
-                "margin_mm": float(step.dilation_mm),
-                "box": None if box is None else [list(box[0]), list(box[1])]})
+            crop_labels = labels_in.cpu().numpy()
+            # the anatomical axes a MOOSE crop is limited to, as array axes of the canonical
+            # grid the labels are on: the task's stated orientation, else the input's own
+            axes = [array_axis(canonical or orientation, a) for a in step.crop_axes]
+            box = crop_axes_only(upstream_crop_box(crop_labels, step.crop_to_classes,
+                                                   step.dilation_mm, src.source.spacing),
+                                 crop_labels.shape, axes)
+            crop = {"task": tag, "stage": i + 1, "classes": [int(c) for c in step.crop_to_classes],
+                    "margin_mm": float(step.dilation_mm),
+                    "box": None if box is None else [list(box[0]), list(box[1])]}
+            if step.crop_axes:
+                crop["axes"] = list(step.crop_axes)
+            if step.band_classes:
+                band = band_of(crop_labels, step.band_classes, axes or range(3),
+                               largest_component=step.band_largest_component)
+                crop["band"] = {"classes": [int(c) for c in step.band_classes],
+                                "largest_component": bool(step.band_largest_component),
+                                "slices": None if band is None else
+                                {str(k): list(v) for k, v in band.items()}}
+                if band is not None:          # absent classes restrict nothing, as moosez
+                    bands.append((src.source, band))
+            prov.setdefault("crops", []).append(crop)
             if box is None:
                 report.stage("cascade", "crop classes absent -> empty result, as upstream returns")
                 og = src.resolve_grid(grid if out_grid is None else out_grid)

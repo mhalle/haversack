@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+- **MOOSE models run in the orientation they were trained in.** Every MOOSE model was fed the
+  input's own axis order, and none was trained that way: moosez fed its models LAS (through
+  dicom2nifti) until July 2025 and RAS since, when six models were retrained for it. On DICOM
+  input (LPS) the RAS-trained ones saw the patient turned 180 degrees: `clin_ct_ribs` swapped left
+  and right and lost the posterior ribs (reported on an NLST CT: 170 ml of rib where MOOSE's own
+  result has 344; flipping the image by hand gave 328), and on a chest CT `clin_ct_organs` scored
+  mean Dice 0.00 against `ts.v2:total` (0.91 fixed), `clin_ct_muscles` found 7 ml of muscle.
+  The manifest now states each model's orientation and why (measured where it could be), and
+  nothing reads it off an asset's file name. Older models stay LAS rather than follow current
+  moosez to RAS: `clin_ct_lungs` scores 0.99 in LAS and 0.00 in RAS (upstream issue #232 reports
+  it flipped in moosez itself). `clin_ct_dental` is DentalSegmentator's checkpoint and keeps its
+  authors' native order. MOOSE results recompute once (their key gains `orient=`).
+- **`moose:clin_ct_body_composition` runs moosez's workflow.** moosez runs it after
+  `clin_ct_fast_vertebrae`: the image is cut to the head-to-foot extent of L1-L5, body composition
+  runs on that cut, and the result keeps only the slices of L3's largest connected piece. haversack
+  ran the model on the whole image. The crop model installs with the task.
 - **FastSurfer's checkpoints install as a package.** The three FastSurferVINN v2.0.0 files
   (67 MB, Apache-2.0, unmodified from Zenodo) are published as `fastsurfer-vinn-weights`
   (github.com/mhalle/fastsurfer-vinn-weights) and installed by the `fastsurfer` extra. The Modal

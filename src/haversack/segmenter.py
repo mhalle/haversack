@@ -341,7 +341,8 @@ class Segmenter:
         # path rebuilt the answer from the checkpoint and dropped them - so the
         # credit vanished at the moment someone started using the model.
         for key in ("license", "release", "description", "tag", "authors", "copyright",
-                    "references", "data_source", "summary", "bundle_version", "attribution"):
+                    "references", "data_source", "summary", "bundle_version", "attribution",
+                    "model_orientation", "orientation_basis", "workflow"):
             if info and key in info and key not in d:
                 d[key] = info[key]
         if "attribution" not in d:

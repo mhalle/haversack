@@ -54,13 +54,45 @@ class CascadeStep:
     before it found, and paints its classes into one output in order, a later part over an
     earlier one - TotalSegmentator's ``headneck_muscles`` (2026-09-22), which crops like
     ``headneck_bones_vessels`` and then runs Datasets 778 and 779 on that crop, combining them
-    exactly as it combines ``total``'s five parts."""
+    exactly as it combines ``total``'s five parts.
+
+    MOOSE crops differently, and two fields say how (2026-09-26, ``clin_ct_body_composition``:
+    moosez's ``WORKFLOW_REGISTRY``). ``crop_axes`` names the anatomical axes the box is cut
+    along - ``("SI",)`` cuts the superior-inferior extent of the crop classes and keeps every
+    voxel across the other two, as moosez's ``crop_fov`` does; empty means all three, the
+    TotalSegmentator box. ``band_classes`` makes this crop stage ALSO restrict the result: after
+    the final stage, only the band along ``crop_axes`` that these classes span in this stage's
+    labels is kept (the largest connected piece of them when ``band_largest_component``), and
+    a band whose classes are absent restricts nothing - moosez's ``restrict_fov``. Axes are
+    named anatomically and resolved against the task's canonical orientation, never by array
+    index, because that index depends on the orientation the task states."""
 
     weights_id: WeightsId | None = None
     crop_to_classes: tuple[int, ...] = ()
     dilation_mm: float = 10.0
     crop_from_task: str | None = None
     union: tuple["UnionPart", ...] = ()
+    crop_axes: tuple[str, ...] = ()
+    band_classes: tuple[int, ...] = ()
+    band_largest_component: bool = False
+
+
+#: The anatomical axes a cascade crop may be limited to, as ``CascadeStep.crop_axes`` names
+#: them: each is the pair of orientation letters an axis can point toward.
+ANATOMICAL_AXES = ("RL", "AP", "SI")
+
+
+def array_axis(orientation: str, axis: str) -> int:
+    """The (Z, Y, X) array axis along which anatomical ``axis`` ("RL", "AP", "SI") runs in an
+    image of DICOM orientation ``orientation`` (``DICOMOrient``'s codes, which name the
+    direction each IMAGE axis x, y, z points toward). Array axis k is image axis 2 - k."""
+    if axis not in ANATOMICAL_AXES:
+        raise ValueError(f"{axis!r} is not an anatomical axis {ANATOMICAL_AXES}")
+    code = str(orientation or "").upper()
+    hits = [i for i, c in enumerate(code) if c in axis]
+    if len(code) != 3 or len(hits) != 1:
+        raise ValueError(f"{orientation!r} is not an orientation code with one {axis} axis")
+    return 2 - hits[0]
 
 
 def dataset_labels(ds: dict, where: str = "dataset.json") -> dict[int, str]:
@@ -232,6 +264,17 @@ def _check_cascade(stages, where: str) -> None:
         if st.union and i != len(stages) - 1:
             raise ValueError(f"{where}: cascade stage {i + 1} is a union but not the last "
                              "stage; only the final stage may combine models")
+        last = i == len(stages) - 1
+        bad = [a for a in st.crop_axes if a not in ANATOMICAL_AXES]
+        if bad or len(set(st.crop_axes)) != len(st.crop_axes):
+            raise ValueError(f"{where}: cascade stage {i + 1} crop_axes {list(st.crop_axes)} - "
+                             f"each must be one of {ANATOMICAL_AXES}, once")
+        if last and (st.crop_axes or st.band_classes or st.band_largest_component):
+            raise ValueError(f"{where}: cascade stage {i + 1} is the final stage; crop_axes and "
+                             "band_* belong to the crop stage whose labels they read")
+        if st.band_largest_component and not st.band_classes:
+            raise ValueError(f"{where}: cascade stage {i + 1} asks for the largest component of "
+                             "no band classes")
 
 
 def _step_size(raw, where: str) -> float | None:

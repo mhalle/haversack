@@ -97,7 +97,19 @@ def registry(tmp_path):
 def _generate(gen, registry, dest, **kw):
     kw.setdefault("status", lambda url: 200)
     kw.setdefault("top_level", fake_top_level)
+    # every fake entry states an orientation unless a test says otherwise: the table is
+    # checked against the registry both ways, and these tests are about something else
+    kw.setdefault("orientation", {n: ("LAS", "test") for n in _names(gen, registry)} if
+                  registry.exists() and _names(gen, registry) else {})
+    kw.setdefault("workflows", {})
     return gen.generate(registry, dest, **kw)
+
+
+def _names(gen, registry):
+    try:
+        return set(gen.parse(registry)) - {"clin_mr_FVM"}
+    except SystemExit:
+        return set()
 
 
 # --- parsing: every entry, whatever its name looks like -----------------------
@@ -340,3 +352,66 @@ def test_top_level_lists_what_the_archive_unpacks_to(gen):
                "clin_mr_FVM/Dataset501_FVM/t__p__c/dataset.json": 0, ".DS_Store": 0}
     with mock.patch.object(zippeek, "central_directory", lambda url: listing):
         assert zippeek.top_level("https://h/x.zip") == ["clin_mr_FVM"]
+
+
+# --- the orientation each model was trained in (2026-09-26) ------------------------------
+
+def test_every_offered_model_states_its_orientation_and_why(gen, registry, tmp_path):
+    """moosez fed its models LAS before 2025-07-18 and RAS since; the manifest records which
+    each was trained in, and the basis, because nothing in a checkpoint says it."""
+    dest = tmp_path / "moose_weights.json"
+    table = {n: ("LAS", "era") for n in OFFERED} | {"clin_ct_body": ("RAS", "measured"),
+                                                   "clin_ct_dental": (None, "its authors")}
+    _generate(gen, registry, dest, orientation=table)
+    raw = json.loads(dest.read_text(encoding="utf-8"))["tasks"]
+    assert {t: e["model_orientation"] for t, e in raw.items()} == {
+        "clin_ct_body": "RAS", "clin_ct_dental": "native",
+        "clin_ct_ALPACA": "LAS", "clin_ct_PUMA4": "LAS"}
+    assert raw["clin_ct_body"]["orientation_basis"] == "measured"
+
+
+def test_a_model_stating_no_orientation_stops_the_manifest(gen, registry, tmp_path):
+    """A new upstream model must be looked at, not defaulted: the wrong orientation mirrors
+    its labels silently (clin_ct_ribs, 2026-09-26)."""
+    dest = tmp_path / "moose_weights.json"
+    table = {n: ("LAS", "era") for n in OFFERED - {"clin_ct_PUMA4"}}
+    with pytest.raises(SystemExit, match=r"clin_ct_PUMA4.*state no model orientation"):
+        _generate(gen, registry, dest, orientation=table)
+    assert not dest.exists()
+
+
+def test_an_orientation_for_a_model_no_longer_offered_stops_the_manifest(gen, registry, tmp_path):
+    dest = tmp_path / "moose_weights.json"
+    table = {n: ("LAS", "era") for n in OFFERED | {"clin_ct_GONE"}}
+    with pytest.raises(SystemExit, match=r"clin_ct_GONE.*not offered"):
+        _generate(gen, registry, dest, orientation=table)
+    assert not dest.exists()
+
+
+def test_a_workflow_is_recorded_with_its_target(gen, registry, tmp_path):
+    dest = tmp_path / "moose_weights.json"
+    w = {"crop_task": "clin_ct_body", "crop_classes": {"2": "body"}, "crop_axes": ["SI"]}
+    _generate(gen, registry, dest, workflows={"clin_ct_ALPACA": w})
+    raw = json.loads(dest.read_text(encoding="utf-8"))["tasks"]
+    assert raw["clin_ct_ALPACA"]["workflow"] == w
+    assert "workflow" not in raw["clin_ct_body"]
+
+
+def test_a_workflow_whose_crop_task_is_not_offered_stops_the_manifest(gen, registry, tmp_path):
+    dest = tmp_path / "moose_weights.json"
+    w = {"crop_task": "clin_mr_FVM", "crop_classes": {"1": "x"}}
+    with pytest.raises(SystemExit, match=r"clin_ct_ALPACA.*clin_mr_FVM.*offered"):
+        _generate(gen, registry, dest, workflows={"clin_ct_ALPACA": w})
+    assert not dest.exists()
+
+
+def test_the_shipped_manifest_states_what_the_table_says(gen):
+    """The shipped file and the generator's table are two copies of one fact: they must agree,
+    every task stating one, and moosez's one workflow present."""
+    raw = json.loads((TOOLS.parent / "src/haversack/data/moose_weights.json").read_text(
+        encoding="utf-8"))["tasks"]
+    assert set(raw) == set(gen.MODEL_ORIENTATION)
+    for name, entry in raw.items():
+        code, basis = gen.MODEL_ORIENTATION[name]
+        assert (entry["model_orientation"], entry["orientation_basis"]) == (code or "native", basis), name
+    assert {n: e["workflow"] for n, e in raw.items() if "workflow" in e} == gen.WORKFLOWS
