@@ -13,6 +13,12 @@
   provenance, never what an engine reads, so this is not a reader-version change. Only public
   text tags go back onto an image read from a copy, so no private block or base64 value lands
   in a header written from it. Needs duckn 0.5.3.
+- **A copy's header is deflated; its chunks stay stored.** With the files' own tags a header can
+  be most of a copy: a 92-slice Siemens MR carries 1.8 MB (Siemens' private per-slice blocks,
+  as base64) in a 4.2 MB copy. Deflated it is 85 KB, and the copy 2.5 MB; a 709-slice CT's
+  header goes from 0.75 MB to 41 KB. Only the header changes: the chunks are still stored, as
+  the mapped reader and duckn's zip guide need. Copies written before read as before; code
+  from before this change calls a deflated header another layout (stale, fetched again).
 
 - **A Modal deployment can keep its results in an object store.** `haversack modal deploy
   --result-store s3://bucket/prefix` (R2, S3, any S3-compatible store) makes the store the one

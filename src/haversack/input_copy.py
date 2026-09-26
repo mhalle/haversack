@@ -27,8 +27,16 @@ The file (``<entry>/decoded/input.duckn.zip``):
     c/0/0/0     the voxels, C order, little-endian, stored (not deflated)
 
 or, compressed (format version 2): chunks of ``CHUNK_SLICES`` whole slices, codecs ``bytes`` then
-``blosc`` (cname zstd, bitshuffle), one zip member per chunk (``c/<k>/0/0``), the zip itself still
-stored.
+``blosc`` (cname zstd, bitshuffle), one zip member per chunk (``c/<k>/0/0``), the chunk members
+still stored.
+
+In both, ``zarr.json`` is DEFLATED and every chunk member STORED (2026-09-26). The chunks must be
+stored - the mapped reader takes a member's bytes at its offset, and duckn's zip guide asks it of
+anything referenced by byte range - but the header is only ever read whole, and with the files'
+own DICOM tags it is large: a 92-slice Siemens MR carries 1.8 MB of them (Siemens' private
+per-slice parameter blocks, as base64), 43 % of its compressed copy, and 81 KB deflated. A copy
+written before this has a stored header and reads the same; code from before it calls a
+deflated header another layout (stale), as it does any layout it does not know.
 
 Imports nothing heavy at module level: ``io`` asks :func:`is_copy` on every read.
 """
@@ -277,10 +285,43 @@ def _metadata(image, per_slice, *, files=(), source, source_digest, source_size=
     return vol
 
 
+def _pack(work: Path, out: Path, raw=None) -> None:
+    """The zip the readers take, from a zarr directory ``work``: ``zarr.json`` deflated, then
+    each chunk member stored, in chunk order. ``raw``: the one uncompressed chunk's array, written
+    from memory as ``c/0/0/0`` rather than from a file (never in ``work`` - it would be a second
+    copy of the volume on disk)."""
+    import zipfile
+
+    def member(name, how):
+        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = how
+        info.external_attr = 0o644 << 16
+        return info
+    with zipfile.ZipFile(out, "w", allowZip64=True) as zf:
+        zf.writestr(member("zarr.json", zipfile.ZIP_DEFLATED), (work / "zarr.json").read_bytes(),
+                    compresslevel=6)
+        if raw is not None:
+            import numpy as np
+            le = np.ascontiguousarray(raw, dtype=raw.dtype.newbyteorder("<"))
+            with zf.open(member("c/0/0/0", zipfile.ZIP_STORED), "w", force_zip64=True) as f:
+                f.write(memoryview(le).cast("B"))
+            return
+        chunks = sorted((work / "c").iterdir(), key=lambda d: int(d.name))
+        for d in chunks:
+            with open(d / "0" / "0", "rb") as src, \
+                    zf.open(member(f"c/{d.name}/0/0", zipfile.ZIP_STORED), "w",
+                            force_zip64=True) as dst:
+                import shutil
+                shutil.copyfileobj(src, dst, 8 << 20)
+
+
 def _write(vol, out: Path, how: str = "uncompressed") -> None:
+    import shutil
+    import tempfile
+
     import zarr
     from duckn.models import duckn_attrs
-    from zarr.storage import ZipStore
+    from zarr.storage import LocalStore
     shape = tuple(int(n) for n in vol.raw.shape)
     if how == "zstd":
         from zarr.codecs import BloscCodec
@@ -288,14 +329,21 @@ def _write(vol, out: Path, how: str = "uncompressed") -> None:
         compressors = [BloscCodec(cname="zstd", clevel=ZSTD_LEVEL, shuffle=BLOSC_SHUFFLE)]
     else:
         chunks, compressors = shape, None
-    store = ZipStore(str(out), mode="w")
+    # zarr writes the metadata (and the compressed chunks) into a directory; _pack makes the
+    # zip, header deflated. The uncompressed chunk goes from memory straight into the zip.
+    work = Path(tempfile.mkdtemp(prefix=".write-", dir=out.parent))
     try:
-        arr = zarr.create_array(store, shape=shape, dtype=vol.raw.dtype, chunks=chunks,
-                                compressors=compressors, attributes=duckn_attrs(vol.metadata),
-                                fill_value=0, config={"write_empty_chunks": True})
-        arr[:] = vol.raw
+        arr = zarr.create_array(LocalStore(str(work)), shape=shape, dtype=vol.raw.dtype,
+                                chunks=chunks, compressors=compressors,
+                                attributes=duckn_attrs(vol.metadata), fill_value=0,
+                                config={"write_empty_chunks": True})
+        if how == "zstd":
+            arr[:] = vol.raw
+            _pack(work, out)
+        else:
+            _pack(work, out, raw=vol.raw)
     finally:
-        store.close()
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def _geometry_image(stream):
@@ -313,7 +361,7 @@ def _write_streamed(stream, out: Path, attributes) -> list:
     """Write ``stream`` as the compressed copy at ``out``, a chunk per slab, and return each
     slab's sha256 for the check. The chunks go to a zarr directory beside ``out`` first, because
     the attributes (the per-slice tags) are known only once the last slab is read; the directory
-    is then packed into the stored zip the reader takes (zarr.json, c/<k>/0/0), and removed."""
+    is then packed into the zip the reader takes (:func:`_pack`), and removed."""
     import hashlib
 
     import numpy as np
@@ -343,10 +391,7 @@ def _write_streamed(stream, out: Path, attributes) -> list:
         if at != z:
             raise ValueError(f"the source gave {at} slices, not {z}")
         arr.update_attributes(attributes(per_slice or stream.tags))
-        with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED) as zf:
-            zf.write(work / "zarr.json", "zarr.json")
-            for k in range(len(digests)):
-                zf.write(work / "c" / str(k) / "0" / "0", f"c/{k}/0/0")
+        _pack(work, out)
         return digests
     finally:
         shutil.rmtree(work, ignore_errors=True)
@@ -504,7 +549,10 @@ def _layout(path: Path):
         raise NotACopy(f"{path}: not an input copy's array")
     endian = (codecs[0].get("configuration") or {}).get("endian", "little")
     dt = np.dtype(meta["data_type"]).newbyteorder("<" if endian == "little" else ">")
-    stored = all(i.compress_type == zipfile.ZIP_STORED for i in members.values())
+    # the chunks must be stored (mapped at their offset, or referenced by range); the header
+    # may be deflated - it is, since 2026-09-26 - as it is only ever read whole
+    stored = all(i.compress_type == zipfile.ZIP_STORED
+                 for n, i in members.items() if n.startswith("c/"))
     names = {n for n in members if n.startswith("c/")}
     # any blosc configuration: zarr decodes it exactly or fails, and a failure is NotACopy
     if len(codecs) == 2 and codecs[1].get("name") == "blosc":

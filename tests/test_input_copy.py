@@ -139,7 +139,8 @@ def test_the_file_is_one_stored_chunk_with_the_stated_metadata(tmp_path, mapped)
     copy = ic.transcode(series, tmp_path / "entry", source="fixture:1", source_digest="sha256:x")
     with zipfile.ZipFile(copy) as z:
         assert [i.filename for i in z.infolist()] == ["zarr.json", "c/0/0/0"]
-        assert all(i.compress_type == zipfile.ZIP_STORED for i in z.infolist())
+        assert z.getinfo("c/0/0/0").compress_type == zipfile.ZIP_STORED     # mapped at its offset
+        assert z.getinfo("zarr.json").compress_type == zipfile.ZIP_DEFLATED  # read whole
         meta = json.loads(z.read("zarr.json"))
     assert meta["chunk_grid"]["configuration"]["chunk_shape"] == meta["shape"]
     assert meta["codecs"] == [{"name": "bytes", "configuration": {"endian": "little"}}]
@@ -256,6 +257,35 @@ def test_a_copy_of_stored_values_keeps_bits_stored(tmp_path):
     tags = _attrs(copy)["extensions"]["dicom"]["tags"]
     assert (tags["BitsStored"], tags["HighBit"]) == (16, 15)
     assert "BitsAllocated" not in tags
+
+
+@pytest.mark.parametrize("form", ["uncompressed", "zstd"])
+def test_a_copy_written_with_a_stored_header_still_reads_and_is_not_stale(tmp_path, monkeypatch,
+                                                                          form):
+    """Copies from before 2026-09-26 have a STORED zarr.json: the same file to every reader."""
+    monkeypatch.setenv(ic.COMPRESSION_ENV, form)
+    series = write_series(tmp_path / "s")
+    copy = ic.transcode(series, tmp_path / "entry")
+    old = tmp_path / "old" / ic.COPY_DIR / ic.COPY_NAME
+    old.parent.mkdir(parents=True)
+    with zipfile.ZipFile(copy) as src, zipfile.ZipFile(old, "w", zipfile.ZIP_STORED) as dst:
+        for i in src.infolist():
+            dst.writestr(i.filename, src.read(i.filename))
+    assert not ic.stale(old) and ic.stored_compression(old) == form
+    assert _same(nio.read_image(old), nio.read_image(copy))
+
+
+def test_the_header_is_deflated_where_the_tags_are_large(tmp_path):
+    """The reason for the deflated header: per-slice private blocks repeat almost exactly."""
+    series = _enrich(write_series(tmp_path / "s", n=20))
+    for i, f in enumerate(sorted(series.iterdir())):
+        ds = pydicom.dcmread(f)
+        ds.add_new(0x00291010, "OB", bytes(range(256)) * 60 + bytes([i]))   # a CSA-like block
+        ds.save_as(f, enforce_file_format=True)
+    copy = ic.transcode(series, tmp_path / "entry")
+    with zipfile.ZipFile(copy) as z:
+        h = z.getinfo("zarr.json")
+    assert h.file_size > 20 * 15_000 and h.compress_size < h.file_size / 10
 
 
 def test_only_public_text_tags_go_back_onto_the_image(tmp_path):
@@ -551,7 +581,9 @@ def test_a_compressed_copy_has_its_own_layout_and_version(tmp_path, zstd):
     copy = ic.transcode(write_series(tmp_path / "s"), tmp_path / "entry")
     with zipfile.ZipFile(copy) as z:
         names = sorted(i.filename for i in z.infolist())
-        assert all(i.compress_type == zipfile.ZIP_STORED for i in z.infolist())
+        assert all(i.compress_type == zipfile.ZIP_STORED
+                   for i in z.infolist() if i.filename.startswith("c/"))
+        assert z.getinfo("zarr.json").compress_type == zipfile.ZIP_DEFLATED
         meta = json.loads(z.read("zarr.json"))
     assert names == ["c/0/0/0", "c/1/0/0", "zarr.json"]
     assert meta["chunk_grid"]["configuration"]["chunk_shape"] == [4, 6, 5]
