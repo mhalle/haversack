@@ -184,10 +184,13 @@ def read_image(path):
 
 def read_image_and_tags(path):
     """:func:`read_image`, plus the DICOM tags SimpleITK reports for it: ``(image,
-    per_slice)``, ``per_slice`` a list of ``{"gggg|eeee": value}`` dicts - one per slice, in
-    the volume's z order, for a DICOM series (the series reader's own per-slice dictionaries,
+    per_slice, files)``, ``per_slice`` a list of ``{"gggg|eeee": value}`` dicts - one per slice,
+    in the volume's z order, for a DICOM series (the series reader's own per-slice dictionaries,
     from the SAME decode); the file's one dictionary for a single file; ``[]`` for a volume
-    that carries none (a duckn store). What the input copy records (:mod:`duckn.dicom_tags`)."""
+    that carries none (a duckn store). ``files``: the DICOM files the image was read from, in
+    that same z order (one for a single DICOM file, none for anything else) - the input copy
+    reads their headers for its tags (:func:`duckn.dicom_tags.tags_from_files`: sequences,
+    binary values and private tags, which SimpleITK's dictionaries do not hold)."""
     return _read_image(path, tags=True)
 
 
@@ -197,6 +200,7 @@ def _read_image(path, *, tags: bool):
     from .duckn_io import is_duckn_store, read_duckn_image
     from .input_copy import NotACopy, is_copy, read_copy
     per_slice: list = []
+    files: list = []
     if is_copy(p):
         try:
             image = read_copy(p)
@@ -245,9 +249,25 @@ def _read_image(path, *, tags: bool):
             image = _read_with_snapped_affine(p, e)
         if tags:
             per_slice = [{k: image.GetMetaData(k) for k in image.GetMetaDataKeys()}]
+            if _is_dicom_file(p):
+                files = [str(p)]
     if image.GetDimension() != 3:
         raise InputError(f"expected a 3D image; {p} has {image.GetDimension()} dimensions")
-    return image, per_slice
+    return image, per_slice, files
+
+
+def _is_dicom_file(p: Path) -> bool:
+    """A single file read as an image that is DICOM: the Part 10 preamble, or DICOM without it
+    (:func:`_dicom_by_force`). Asked only when tags are wanted."""
+    try:
+        with open(p, "rb") as f:
+            head = f.read(132)
+    except OSError:
+        return False
+    if len(head) == 132 and head[128:132] == b"DICM":
+        return True
+    return not p.name.lower().endswith((".nii", ".nii.gz", ".nrrd", ".nhdr", ".mha", ".mhd")) \
+        and _dicom_by_force(p)
 
 
 def _read_with_snapped_affine(p, itk_error, tol: float = 1e-3):

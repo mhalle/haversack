@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+- **An input copy's DICOM tags are the files' own headers.** They were SimpleITK's per-slice
+  dictionaries, which hold no sequences, no binary values and (as haversack read them) no
+  private tags. They are now read through pydicom by duckn's one tag conversion, under
+  dicom-spec's rules as settled on 2026-09-26: sequences, binary values as base64, private tags
+  with their creators, per-slice identifiers kept, empty text as `""`, the source's transfer
+  syntax recorded, and Bits Stored / High Bit only where the copy holds the source's stored
+  values (a rescaled CT does not). About 1 s more per 709-slice series, once. Copies record
+  `tags_version: 2`; existing copies stay valid and keep their thinner tags - tags are
+  provenance, never what an engine reads, so this is not a reader-version change. Only public
+  text tags go back onto an image read from a copy, so no private block or base64 value lands
+  in a header written from it. Needs duckn 0.5.3.
+
 - **A Modal deployment can keep its results in an object store.** `haversack modal deploy
   --result-store s3://bucket/prefix` (R2, S3, any S3-compatible store) makes the store the one
   authority for results: every container reads and writes it, keeps only a local copy on its

@@ -55,6 +55,13 @@ FORMATS = {"uncompressed": 1, "zstd": 2}
 #: ``duckn.dicom_tags``, which leaves binary-VR values out where haversack's own converter kept
 #: SimpleITK's strings of them - bumped before any deployment held a copy, so it cost nothing.
 READER_VERSION = 2
+#: What the copy's DICOM tags were made by - NOT part of :data:`READER_VERSION`, though the
+#: tags once were (2026-09-26): they are provenance, never what an engine reads, so a copy with
+#: an older kind of tags is still exact and is kept; ``Input.dicom()`` reports which kind it
+#: holds. 1 (absent): SimpleITK's dictionaries. 2: the files' own headers through pydicom
+#: (``duckn.dicom_tags.tags_from_files``) - sequences, binary values, private tags, and the
+#: dicom-spec rules settled that day (Bits Stored only where the copy holds stored values).
+TAGS_VERSION = 2
 #: The operator's switch: ``HAVERSACK_INPUT_COPY=0`` keeps originals, as before this existed.
 ENV = "HAVERSACK_INPUT_COPY"
 #: How new copies are stored: ``zstd`` (the default since 2026-09-25: blosc-zstd, the smallest
@@ -194,6 +201,21 @@ def _thickness(per_slice):
     return None, nums
 
 
+def _holds_stored_values(per_slice) -> bool:
+    """Whether the copy's voxels are the source's STORED values - no slice asks for a rescale
+    other than the identity - so Bits Stored / High Bit are still true of them (dicom-spec
+    §5.10). SimpleITK applies a rescale where the files state one, and widens the type."""
+    if not per_slice:
+        return False
+    for d in per_slice:
+        try:
+            if float(d.get("0028|1053", "1") or 1) != 1 or float(d.get("0028|1052", "0") or 0) != 0:
+                return False
+        except ValueError:
+            return False
+    return True
+
+
 def _sample_units(per_slice):
     from duckn.dicom_tags import RESCALE_TYPE
     values = {d.get(RESCALE_TYPE, "").strip() for d in per_slice}
@@ -209,7 +231,7 @@ def _source_size(content) -> tuple[int, int]:
     return len(files), sum(q.stat().st_size for q in files)
 
 
-def _metadata(image, per_slice, *, source, source_digest, source_size=(None, None), how="uncompressed",
+def _metadata(image, per_slice, *, files=(), source, source_digest, source_size=(None, None), how="uncompressed",
               n: int | None = None):
     """The duckn metadata of the copy, through duckn's own models: the geometry is
     ``from_sitk``'s (LPS - no flip either way), the rest is filled into its fields. ``n`` is the
@@ -220,10 +242,16 @@ def _metadata(image, per_slice, *, source, source_digest, source_size=(None, Non
     from duckn.models import SampleMetadata
     from duckn.sitk_adapter import from_sitk
 
-    from duckn.dicom_tags import tags_from_sitk
+    from duckn.dicom_tags import tags_from_files, tags_from_sitk
     vol = from_sitk(image)
     meta = vol.metadata
-    series, slices = tags_from_sitk(per_slice) if per_slice else ({}, [])
+    held = _holds_stored_values(per_slice)
+    fields: dict = {}
+    if files:
+        # the files' own headers (TAGS_VERSION 2): what SimpleITK's dictionaries cannot hold
+        series, slices, fields = tags_from_files(files, stored_values=held)
+    else:
+        series, slices = tags_from_sitk(per_slice, stored_values=held) if per_slice else ({}, [])
     thick, thick_each = _thickness(per_slice) if per_slice else (None, None)
     z = meta.axes[0]
     if thick is not None:
@@ -238,8 +266,9 @@ def _metadata(image, per_slice, *, source, source_digest, source_size=(None, Non
         meta.sample_units = units
     ext = dict(meta.extensions or {})
     if series or slices:
-        ext["dicom"] = {"version": DICOM_EXTENSION_VERSION, "tags": series}
+        ext["dicom"] = {"version": DICOM_EXTENSION_VERSION, **fields, "tags": series}
     ext["haversack"] = {"kind": KIND, "version": FORMATS[how], "reader_version": READER_VERSION,
+                        "tags_version": TAGS_VERSION if files else 1,
                         "source": source, "source_digest": source_digest,
                         "source_files": source_size[0], "source_bytes": source_size[1],
                         "reader": {"haversack": haversack.__version__,
@@ -384,7 +413,7 @@ def transcode(content, entry, *, source=None, source_digest=None) -> Path | None
         print(f"warning: {source or content} is copied whole: the slab reader could not plan it "
               f"({type(e).__name__}: {e})", file=sys.stderr, flush=True)
     try:
-        image, per_slice = nio.read_image_and_tags(content)
+        image, per_slice, files = nio.read_image_and_tags(content)
     except InputError:
         return None                          # refused: the original stays, and fails at read
     except Exception as e:                   # noqa: BLE001 - review, 2026-09-25
@@ -401,7 +430,7 @@ def transcode(content, entry, *, source=None, source_digest=None) -> Path | None
     partial = final.with_name("." + COPY_NAME + ".partial")
     try:
         how = compression()
-        vol = _metadata(image, per_slice, source=source, source_digest=source_digest,
+        vol = _metadata(image, per_slice, files=files, source=source, source_digest=source_digest,
                         source_size=_source_size(content), how=how)
         _write(vol, partial, how)
         back = read_copy(partial, check_name=False)
@@ -434,7 +463,7 @@ def _transcode_streamed(stream, content, entry, *, source, source_digest) -> Pat
     n = int(stream.shape[0])
 
     def attributes(per_slice):
-        vol = _metadata(geometry, per_slice, source=source, source_digest=source_digest,
+        vol = _metadata(geometry, per_slice, files=stream.files, source=source, source_digest=source_digest,
                         source_size=size, how="zstd", n=n)
         return duckn_attrs(vol.metadata)
     try:
@@ -595,7 +624,11 @@ def _with_tags(image, attrs: dict):
             # read without them rather than not at all
             restored = {}
         for key, value in restored.items():
-            image.SetMetaData(key, value)
+            # public tags only: what a SimpleITK read of the files shows (it loads no private
+            # tags unless asked), and never a private binary value as base64 in a header
+            # written from this image
+            if int(key[:4], 16) % 2 == 0:
+                image.SetMetaData(key, value)
     return image
 
 

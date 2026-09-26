@@ -189,6 +189,84 @@ def test_the_encoder_follows_the_spec_rules():
         "0008|0060": "CT", "0018|0060": "120", "0028|1050": "40\\400"}
 
 
+
+def _enrich(series: Path, *, rescale: bool = True) -> Path:
+    """What SimpleITK's dictionaries do not hold, added to every file: a sequence, a binary value
+    (an ICC profile), a private block with its creator, and an empty text value; ``rescale=False``
+    takes the rescale out, so the copy holds the stored values themselves."""
+    from pydicom.dataset import Dataset
+    from pydicom.sequence import Sequence
+    for i, f in enumerate(sorted(series.iterdir())):
+        ds = pydicom.dcmread(f)
+        code = Dataset()
+        code.CodeValue, code.CodingSchemeDesignator, code.CodeMeaning = "T-D3000", "SRT", "Chest"
+        ds.AnatomicRegionSequence = Sequence([code])
+        ds.add_new(0x00282000, "OB", b"\x01\x02\x03\x04")
+        ds.add_new(0x00190010, "LO", "ACME 1.0")
+        ds.add_new(0x00191001, "DS", str(1000 + i))           # a private per-slice number
+        ds.StudyDescription = ""
+        if not rescale:
+            for k in ("RescaleIntercept", "RescaleSlope", "RescaleType"):
+                delattr(ds, k)
+            ds.PixelRepresentation = 0
+            ds.PixelData = np.arange(30, dtype=np.uint16).reshape(6, 5).tobytes()
+        ds.save_as(f, enforce_file_format=True)
+    return series
+
+
+def _attrs(copy: Path) -> dict:
+    with zipfile.ZipFile(copy) as z:
+        return json.loads(z.read("zarr.json"))["attributes"]["duckn"]
+
+
+@pytest.mark.parametrize("form", ["uncompressed", "zstd"])
+def test_the_tags_are_the_files_own_headers(tmp_path, monkeypatch, form):
+    """TAGS_VERSION 2 (2026-09-26): sequences, binary values, private tags - through pydicom,
+    whether the copy is written whole (uncompressed) or a slab at a time (zstd)."""
+    monkeypatch.setenv(ic.COMPRESSION_ENV, form)
+    copy = ic.transcode(_enrich(write_series(tmp_path / "s")), tmp_path / "entry")
+    d = _attrs(copy)
+    ext = d["extensions"]
+    tags = ext["dicom"]["tags"]
+    assert tags["AnatomicRegionSequence"] == [
+        {"CodeValue": "T-D3000", "CodingSchemeDesignator": "SRT", "CodeMeaning": "Chest"}]
+    assert tags["ICCProfile"] == "AQIDBA==" and tags["00190010"] == "ACME 1.0"
+    assert tags["StudyDescription"] == ""                     # empty text: "", never null
+    assert ic.slice_tags(copy, "00191001") == [1000.0 + i for i in range(6)]
+    assert ic.slice_tags(copy, "SOPInstanceUID")[0]           # per-slice identity kept
+    assert ext["dicom"]["source_transfer_syntax"] == "1.2.840.10008.1.2.1"
+    assert not {"TransferSyntaxUID", "MediaStorageSOPInstanceUID"} & tags.keys()
+    assert ext["haversack"]["tags_version"] == ic.TAGS_VERSION == 2
+    # rescaled to HU (and widened): the stored-value bits are no longer true of the copy
+    assert not {"BitsStored", "HighBit", "BitsAllocated", "PixelRepresentation"} & tags.keys()
+
+
+def test_both_forms_record_the_same_tags(tmp_path, monkeypatch):
+    series = _enrich(write_series(tmp_path / "s"))
+    got = []
+    for form in ("uncompressed", "zstd"):
+        monkeypatch.setenv(ic.COMPRESSION_ENV, form)
+        d = _attrs(ic.transcode(series, tmp_path / form))
+        got.append((d["extensions"]["dicom"], [s.get("metadata") for s in d["axes"][0]["samples"]]))
+    assert got[0] == got[1]
+
+
+def test_a_copy_of_stored_values_keeps_bits_stored(tmp_path):
+    copy = ic.transcode(_enrich(write_series(tmp_path / "s"), rescale=False), tmp_path / "entry")
+    tags = _attrs(copy)["extensions"]["dicom"]["tags"]
+    assert (tags["BitsStored"], tags["HighBit"]) == (16, 15)
+    assert "BitsAllocated" not in tags
+
+
+def test_only_public_text_tags_go_back_onto_the_image(tmp_path):
+    """A SimpleITK read of the files shows no private tags; a header written from the image
+    must never carry a base64 profile or a private block."""
+    img = nio.read_image(ic.transcode(_enrich(write_series(tmp_path / "s")), tmp_path / "entry"))
+    keys = set(img.GetMetaDataKeys())
+    assert "0008|0060" in keys
+    assert not {"0028|2000", "0019|0010"} & keys
+    assert "0008|2218" not in keys                            # a sequence has no string form
+
 # -- one form per entry ----------------------------------------------------------------------
 
 def _fetching_cache(tmp_path, make):

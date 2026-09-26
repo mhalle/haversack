@@ -36,7 +36,8 @@ class Stream:
     """A source read a slab at a time: its geometry (SimpleITK's x, y, z order), pixel type, the
     array shape (z, y, x), and ``slabs(n)`` yielding ``(array (k, y, x), per-slice tag dicts)``
     in z order, ``k <= n``. ``tags`` is a single file's header dictionary, for a source whose
-    slabs carry none."""
+    slabs carry none. ``files``: a DICOM series' files in that z order, as
+    :func:`haversack.io.read_image_and_tags` names them (their headers give the copy's tags)."""
     origin: tuple
     spacing: tuple
     direction: tuple
@@ -45,6 +46,7 @@ class Stream:
     shape: tuple
     slabs: Callable[[int], Iterator[tuple]]
     tags: list
+    files: tuple = ()
 
 
 def stream_of(content) -> Stream | None:
@@ -144,7 +146,8 @@ def _dicom_series(directory: Path) -> Stream | None:
                     for i in range(len(a))]
             yield a, tags
     return Stream(origin=origin, spacing=spacing, direction=direction, pixel_id=pixel_id,
-                  dtype=dtype, shape=(len(files), size[1], size[0]), slabs=slabs, tags=[])
+                  dtype=dtype, shape=(len(files), size[1], size[0]), slabs=slabs, tags=[],
+                  files=tuple(files))
 
 
 #: NIfTI-1 datatype codes a slab is read as, all single-component
