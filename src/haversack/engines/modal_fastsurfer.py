@@ -52,18 +52,15 @@ def _fs_image():
     )
     if _FS_CKPT:
         # Ship a local checkpoint directory into the image (a user's pre-fetched copy).
-        fs_image = fs_image.add_local_dir(_FS_CKPT, remote_path="/opt/fastsurfer-checkpoints", copy=True)
-    else:
-        # Bake the ~66 MB checkpoints at BUILD via haversack's own Zenodo fetch (sha256-verified,
-        # stdlib) - so cold containers never download them, and the build never touches
-        # FastSurfer's b2share host, whose certificate chain fails in the container (2026-09-03).
-        fs_image = fs_image.run_commands(
-            "PYTHONPATH=/root/pkg python -c "
-            "'from haversack.engines.fastsurfer import ensure_checkpoints;"
-            "ensure_checkpoints(\"/opt/fastsurfer-checkpoints\")'")
-    fs_image = (fs_image
-                .env({"HAVERSACK_FASTSURFER_CHECKPOINTS": "/opt/fastsurfer-checkpoints"})
-                .env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ}))
+        fs_image = (fs_image
+                    .add_local_dir(_FS_CKPT, remote_path="/opt/fastsurfer-checkpoints", copy=True)
+                    .env({"HAVERSACK_FASTSURFER_CHECKPOINTS": "/opt/fastsurfer-checkpoints"}))
+    # Otherwise the checkpoints come with the `fastsurfer` extra (fastsurfer-vinn-weights,
+    # 2026-09-26) in the uv_sync above: cold containers never download them, and the build no
+    # longer fetches from Zenodo - that step made every deploy depend on Zenodo being up (a 504
+    # failed two, 2026-09-07), and it re-ran on every code change, since it came after the
+    # source copy in the layer chain. `fastsurfer.checkpoints_to_use` finds them installed.
+    fs_image = fs_image.env({k: os.environ[k] for k in _RUNTIME_KNOBS if k in os.environ})
     return fs_image
 
 

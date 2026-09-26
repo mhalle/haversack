@@ -441,6 +441,37 @@ def ensure_checkpoints(directory=None, *, progress=None) -> Path:
     return d
 
 
+def packaged_checkpoint_dir() -> Path | None:
+    """The checkpoints installed as a package (``fastsurfer-vinn-weights``, which the
+    ``fastsurfer`` extra adds), when every file there matches :data:`CHECKPOINTS` - haversack's
+    own pins, not the package's copy of them - else None. Looked up, never imported blindly:
+    the package is optional."""
+    import hashlib
+    import importlib.util
+    spec = importlib.util.find_spec("fastsurfer_vinn_weights")
+    if spec is None or not spec.submodule_search_locations:
+        return None
+    d = Path(list(spec.submodule_search_locations)[0])
+    for name, sha in CHECKPOINTS.items():
+        f = d / name
+        if not (f.is_file() and hashlib.sha256(f.read_bytes()).hexdigest() == sha):
+            return None
+    return d
+
+
+def checkpoints_to_use(*, progress=None) -> Path:
+    """Where a run reads its checkpoints (2026-09-26): ``HAVERSACK_FASTSURFER_CHECKPOINTS`` when
+    set (a directory the operator chose, filled from Zenodo if short); else the installed
+    ``fastsurfer-vinn-weights`` package when its files match the pins - no network at all; else
+    the cache, fetched from Zenodo once per machine."""
+    import os as _os
+    if not _os.environ.get("HAVERSACK_FASTSURFER_CHECKPOINTS"):
+        packaged = packaged_checkpoint_dir()
+        if packaged is not None:
+            return packaged
+    return ensure_checkpoints(progress=progress)
+
+
 def checkpoint_args(directory=None) -> list:
     """``--ckpt_*`` arguments pointing FastSurfer at :func:`checkpoint_dir` (or ``directory``)."""
     d = Path(directory) if directory is not None else checkpoint_dir()
@@ -462,11 +493,11 @@ def _get_runner(device: str, batch_size: int, viewagg_device: str = "auto"):
         return runner
     from FastSurferCNN import run_prediction as rp
 
-    ensure_checkpoints()                              # our own Zenodo fetch, sha256-verified
+    ckpt = checkpoints_to_use()                       # packaged, or the cache (Zenodo once)
     args = rp.make_parser().parse_args(
         ["--t1", "x", "--sd", "x", "--device", device,
          "--batch_size", str(int(batch_size)), "--viewagg_device", viewagg_device,
-         *checkpoint_args()])
+         *checkpoint_args(ckpt)])
     # Mirror main()'s constructor EXACTLY, every knob from the parsed args - the
     # init defaults are NOT the CLI defaults (e.g. image_size init=True but CLI
     # "auto"), and a wrong conform knob yields a degenerate segmentation.

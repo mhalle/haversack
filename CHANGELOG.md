@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **FastSurfer's checkpoints install as a package.** The three FastSurferVINN v2.0.0 files
+  (67 MB, Apache-2.0, unmodified from Zenodo) are published as `fastsurfer-vinn-weights`
+  (github.com/mhalle/fastsurfer-vinn-weights) and installed by the `fastsurfer` extra. The Modal
+  FastSurfer image takes them from there: its build no longer fetches from Zenodo, which made
+  every deploy depend on Zenodo being up (a 504 failed two) and re-ran on every code change. A
+  run uses, in order, `HAVERSACK_FASTSURFER_CHECKPOINTS`, the installed package when its files
+  match haversack's own pinned digests, and the Zenodo-filled cache, as before.
 - **Review of the day's work, 2026-09-26.** A deploy decides every engine flag and forwards the
   decision: with FastSurfer core, a deploy from a lean install built no FastSurfer worker while the
   api container, which has FastSurfer, listed its tasks and would have spawned a worker that was

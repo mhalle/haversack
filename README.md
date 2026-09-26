@@ -466,9 +466,10 @@ tasks, API, CLI and server. An installed runtime is the switch: `haversack tasks
 engine's task as installed when its package is importable, and refuses it otherwise with
 the install line.
 
-FastSurfer comes with haversack (it adds under 1 MB), and its checkpoints (66 MB,
-DOI-versioned) download once from Zenodo into `~/.cache/haversack/fastsurfer-checkpoints` the
-first time it runs. `HAVERSACK_FASTSURFER=0` switches it off:
+FastSurfer comes with haversack (it adds under 1 MB). Its checkpoints (67 MB, DOI-versioned,
+Apache-2.0) come with the `fastsurfer` extra, or else download once from Zenodo into
+`~/.cache/haversack/fastsurfer-checkpoints` the first time it runs. `HAVERSACK_FASTSURFER=0`
+switches it off:
 
 ```bash
 haversack segment t1.nii.gz --task fastsurfer:asegdkt -o brain.seg.nrrd

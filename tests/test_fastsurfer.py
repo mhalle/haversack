@@ -1,6 +1,8 @@
 """FastSurfer engine: the geometry (restore_logits) and the LUT, tested with
 synthetic logits so no FastSurfer install or GPU is needed. The FastSurfer-
 dependent compute (conform + inference) is validated by the live Modal smoke."""
+import sys
+
 import numpy as np
 import pytest
 
@@ -554,3 +556,79 @@ def test_ensure_checkpoints_fetches_verifies_and_is_idempotent(monkeypatch, tmp_
     from haversack.errors import ResourceError
     with pytest.raises(ResourceError, match="sha256"):
         fs.ensure_checkpoints(tmp_path)
+
+
+# -- the checkpoints as a package (fastsurfer-vinn-weights, 2026-09-26) --------------------------
+
+def _fake_weights_package(tmp_path, monkeypatch, *, corrupt=None):
+    """A `fastsurfer_vinn_weights` package on sys.path whose three files the pins match."""
+    import hashlib
+    from haversack.engines import fastsurfer as fs
+    pkg = tmp_path / "site" / "fastsurfer_vinn_weights"
+    pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    pins = {}
+    for name in fs.CHECKPOINT_NAMES:
+        body = f"weights of {name}".encode()
+        (pkg / name).write_bytes(body + (b"!" if name == corrupt else b""))
+        pins[name] = hashlib.sha256(body).hexdigest()
+    monkeypatch.setattr(fs, "CHECKPOINTS", pins)
+    monkeypatch.syspath_prepend(str(tmp_path / "site"))
+    monkeypatch.delitem(sys.modules, "fastsurfer_vinn_weights", raising=False)
+    return pkg
+
+
+def test_installed_checkpoints_are_used_and_nothing_is_fetched(tmp_path, monkeypatch):
+    from haversack import fetchlib
+    from haversack.engines import fastsurfer as fs
+    pkg = _fake_weights_package(tmp_path, monkeypatch)
+    monkeypatch.delenv("HAVERSACK_FASTSURFER_CHECKPOINTS", raising=False)
+    monkeypatch.setattr(fetchlib, "open", lambda *a, **k: pytest.fail("fetched from Zenodo"))
+    assert fs.checkpoints_to_use() == pkg
+    assert fs.checkpoint_args(fs.checkpoints_to_use())[1] == str(pkg / fs.CHECKPOINT_NAMES[0])
+
+
+def test_a_packaged_file_that_does_not_match_the_pins_is_not_used(tmp_path, monkeypatch):
+    """Checked against haversack's own pins: a package that shipped other bytes falls back to
+    the cache (fetched from Zenodo), never runs on them."""
+    from haversack.engines import fastsurfer as fs
+    _fake_weights_package(tmp_path, monkeypatch, corrupt=fs.CHECKPOINT_NAMES[1])
+    monkeypatch.delenv("HAVERSACK_FASTSURFER_CHECKPOINTS", raising=False)
+    fetched = []
+    monkeypatch.setattr(fs, "ensure_checkpoints", lambda **k: fetched.append(1) or tmp_path / "cache")
+    assert fs.packaged_checkpoint_dir() is None
+    assert fs.checkpoints_to_use() == tmp_path / "cache" and fetched == [1]
+
+
+def test_the_operators_directory_outranks_the_package(tmp_path, monkeypatch):
+    from haversack.engines import fastsurfer as fs
+    _fake_weights_package(tmp_path, monkeypatch)
+    monkeypatch.setenv("HAVERSACK_FASTSURFER_CHECKPOINTS", str(tmp_path / "mine"))
+    monkeypatch.setattr(fs, "ensure_checkpoints", lambda **k: fs.checkpoint_dir())
+    assert fs.checkpoints_to_use() == tmp_path / "mine"
+
+
+def test_the_real_weights_package_matches_the_pins():
+    """When installed (the `fastsurfer` extra), the published package's files ARE the pinned
+    checkpoints - two independent statements of the same three digests."""
+    pytest.importorskip("fastsurfer_vinn_weights")
+    import fastsurfer_vinn_weights as w
+    from haversack.engines import fastsurfer as fs
+    assert w.SHA256 == fs.CHECKPOINTS
+    assert fs.packaged_checkpoint_dir() == w.directory()
+
+
+def test_the_worker_image_takes_its_weights_from_the_extra_not_zenodo():
+    """The image build fetched from Zenodo after the source copy: every deploy depended on Zenodo
+    and re-fetched on every code change. Read as source (the adapter builds a Modal image)."""
+    import tomllib
+    from pathlib import Path
+
+    import haversack
+    pkg = Path(haversack.__file__).parent
+    src = (pkg / "engines" / "modal_fastsurfer.py").read_text(encoding="utf-8")
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+    assert "ensure_checkpoints" not in code and "zenodo" not in code.lower()
+    assert '"fastsurfer"' in code.split("uv_sync(", 1)[1].split(")", 1)[0]
+    extras = tomllib.loads((pkg.parents[1] / "pyproject.toml").read_text())["project"]["optional-dependencies"]
+    assert "fastsurfer-vinn-weights" in extras["fastsurfer"]
