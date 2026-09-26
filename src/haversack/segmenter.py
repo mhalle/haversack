@@ -208,6 +208,33 @@ class Segmenter:
         d["inputs"] = declared_inputs(d)
         return d
 
+    def _portable_id(self, wid) -> str:
+        """A weights id as the result key may carry it: the same on every machine.
+
+        A catalog task that installs a model FOLDER (MOOSE, MRSegmentator, DentalSegmentator,
+        TotalVibe, CADS) names it by its absolute path, and until 2026-09-26 that path went into
+        every such result's key - ``/Users/<someone>/.totalsegmentator/.../Dataset444_Ribs/...``
+        on a laptop, ``/weights/moose/...`` on Modal - so a cache was portable only between
+        machines that happened to share a weights root. A folder under the weights root is
+        named by its path relative to that root (``moose/Dataset444_Ribs/<model folder>``): the
+        catalog's bucket, the dataset and the model, which is what identifies it; the version
+        beside it is the install sidecar's, as before. A dataset id (all of TotalSegmentator)
+        is already portable and is left alone, and so is a folder OUTSIDE every root - a
+        caller's own model, which nothing but its path identifies."""
+        p = Path(str(wid)).expanduser()
+        if not p.is_absolute():
+            return str(wid)
+        roots = [getattr(self.catalog, "root", None), getattr(self.weights, "root", None)]
+        here = p.resolve()
+        for root in roots:
+            if root is None:
+                continue
+            try:
+                return here.relative_to(Path(root).expanduser().resolve()).as_posix()
+            except ValueError:
+                continue
+        return str(wid)
+
     def describe(self, task) -> dict:
         """What a task is and what it needs, without running or downloading anything.
 
@@ -291,7 +318,7 @@ class Segmenter:
              "configuration": self.policy["configuration"]}
         installed, channels = [], None
         for wid in spec.weights_ids:
-            entry = {"id": str(wid), "installed": False}
+            entry = {"id": self._portable_id(wid), "installed": False}
             try:
                 if self.weights.have(wid):
                     choice = spec.model_choice(wid)

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **A catalog model's result key is the same on every machine.** Tasks that install a model
+  folder (MOOSE, MRSegmentator, DentalSegmentator, TotalVibe, CADS) put the folder's absolute
+  path into every result key - `/Users/<someone>/.totalsegmentator/...` on one machine,
+  `/weights/...` on Modal - so a result cache moved between machines with different weights roots
+  missed every such result. The folder is now named relative to the weights root
+  (`moose/Dataset444_Ribs/<model folder>`), beside the installed version as before. These
+  catalogs' results recompute once; TotalSegmentator keys and a caller's own model folder outside
+  the weights root are unchanged.
 - **MOOSE models run in the orientation they were trained in.** Every MOOSE model was fed the
   input's own axis order, and none was trained that way: moosez fed its models LAS (through
   dicom2nifti) until July 2025 and RAS since, when six models were retrained for it. On DICOM
