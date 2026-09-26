@@ -545,7 +545,12 @@ store on first use - its input copy byte for byte, or its original files, with i
 and leaves fetched inputs to be fetched again. Its expiry is decision 1's (two minor releases
 after the release that makes this store the default, or 90 days, whichever is later).
 
-(d), the soak (`tools/soak_input_store.py`), ran 15 minutes (2026-09-26): one real server
+(d) PASSED on its second 15-minute run (2026-09-26, after the `grid: "model"` fix): 323 jobs,
+all done, 47 input_gone after eviction, 92 IDC jobs, no 5xx, no digest mismatch, nothing left in
+staging or views, every ref's blobs present, no orphan. Not shown by either run: a kill landing
+mid-FETCH - no job was lost to the SIGKILL either time, so the kill fell between fetches (the
+restart was exercised: requests retried while the server was down). The dead-staging reap is
+held by a unit test instead. The first run, the same 15 minutes: one real server
 with the flag, a 0.3 GB input budget, three clients uploading, storing and re-referencing
 variants of a CT and submitting one IDC series under random options, 10 % `no-cache`, the
 server SIGKILLed at minute 5 and restarted. 336 jobs: 322 done, 51 references answered 410
