@@ -142,6 +142,13 @@ def _dicom_series(directory: Path) -> Stream | None:
     files = _series_files(directory, rescales)
     if files is None:
         return None
+    # GDCM hands over other values than the files mean for MONOCHROME1 and a Modality LUT, which
+    # io._true_values corrects on the whole read; a slab read would copy GDCM's (2026-09-26)
+    import pydicom
+    head = pydicom.dcmread(str(files[0]), stop_before_pixels=True, force=True)
+    if (str(head.get("PhotometricInterpretation", "")).strip().upper() == "MONOCHROME1"
+            or "ModalityLUTSequence" in head):
+        return None
     first = sitk.ImageFileReader()
     first.SetFileName(files[0])
     first.ReadImageInformation()

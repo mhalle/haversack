@@ -218,12 +218,6 @@ def _thickness(per_slice):
     return None, nums
 
 
-#: What a VOI (window) states is in the units of the values AFTER the modality transform; the
-#: keywords, and SimpleITK's keys for them (2026-09-26).
-_VOI = ("WindowCenter", "WindowWidth", "WindowCenterWidthExplanation", "VOILUTFunction",
-        "VOILUTSequence")
-_VOI_TAGS = frozenset({0x00281050, 0x00281051, 0x00281055, 0x00281056, 0x00283010})
-_PHOTOMETRIC = 0x00280004
 #: What describes a grayscale or palette pixel beside a vector image's pixels: Samples per
 #: Pixel, Photometric Interpretation, Planar Configuration, and the palette's descriptors,
 #: data and segmented data (2026-09-26: an export of a PALETTE COLOR file wrote RGB pixels under
@@ -232,10 +226,6 @@ _COLOR_TAGS = frozenset({0x00280002, 0x00280004, 0x00280006,
                          0x00281101, 0x00281102, 0x00281103, 0x00281111, 0x00281112, 0x00281113,
                          0x00281199, 0x00281201, 0x00281202, 0x00281203,
                          0x00281221, 0x00281222, 0x00281223})
-
-
-def _monochrome1(per_slice) -> bool:
-    return any(str(d.get("0028|0004", "")).strip().upper() == "MONOCHROME1" for d in per_slice)
 
 
 def _implied_pixel_id(bits_allocated: int, representation: int, samples: int, photometric: str):
@@ -259,14 +249,16 @@ def _holds_stored_values(per_slice, pixel_id=None, *, value_transform: bool = Fa
     group, say they held stored values). All must hold: every slice's top-level rescale is the
     identity or absent (one that does not parse is not); no Pixel Value Transformation Sequence
     anywhere (``value_transform``, from the headers: SimpleITK's dictionaries show no
-    sequences); not MONOCHROME1; and ``pixel_id``, SimpleITK's output type, is the type Bits
+    sequences); and ``pixel_id``, SimpleITK's output type, is the type Bits
     Allocated and Pixel Representation imply - a widened or converted type holds other values.
     Unknown (``pixel_id`` None, no slices) is False.
 
     Load-bearing: it decides whether anything stated in stored-value units is written at all
     (dicom-spec §5.10) - a CT's Pixel Padding Value -2000 is -3024 in the copy's HU, and the file
     must never say otherwise to a reader of it alone."""
-    if not per_slice or pixel_id is None or value_transform or _monochrome1(per_slice):
+    # (MONOCHROME1 is not a condition since io._true_values undoes GDCM's complement: its
+    # voxels then ARE the stored values wherever the rescale is the identity)
+    if not per_slice or pixel_id is None or value_transform:
         return False
     implied = set()
     for d in per_slice:
@@ -326,12 +318,6 @@ class _Headers:
         return self
 
 
-def _drop_keywords(series: dict, slices: list, names) -> None:
-    for d in (series, *slices):
-        for name in names:
-            d.pop(name, None)
-
-
 def stored_values_of(path) -> bool:
     """What a copy says of its voxels: True only when it states they are the source's stored
     values. A copy that does not say (one written before the field) counts as rescaled - the
@@ -354,10 +340,9 @@ def honest_metadata(image, stored_values: bool, *, modality_lut: bool = False):
     Intercept -1024 and Pixel Padding Value -2000, and writes both into an NRRD header. Keys that
     are not DICOM tags (``ITK_...``, a NIfTI's own) are left alone. Returns ``image``.
 
-    Three more, found by review the same day. A MONOCHROME1 image: GDCM inverts its values, so
-    its Photometric Interpretation and its window (the VOI tags) describe values the pixels do
-    not hold. A Modality LUT GDCM did not apply (``modality_lut``): the window is in the LUT's
-    output units, the pixels are stored values. A vector image (RGB pixels, from RGB or a
+    One more, found by review the same day (MONOCHROME1 and an unapplied Modality LUT, which
+    once dropped the window here, are now corrected by the reader, io._true_values). A vector
+    image (RGB pixels, from RGB or a
     palette GDCM expanded): Samples per Pixel, Photometric Interpretation, Planar Configuration
     and the palette describe a pixel it does not have."""
     try:
@@ -367,11 +352,6 @@ def honest_metadata(image, stored_values: bool, *, modality_lut: bool = False):
     else:
         judge = True
     also: set = set()
-    if (image.HasMetaDataKey("0028|0004")
-            and image.GetMetaData("0028|0004").strip().upper() == "MONOCHROME1"):
-        also |= _VOI_TAGS | {_PHOTOMETRIC}
-    if modality_lut:
-        also |= _VOI_TAGS
     if image.GetNumberOfComponentsPerPixel() > 1:
         also |= _COLOR_TAGS
     for key in list(image.GetMetaDataKeys()):
@@ -397,7 +377,8 @@ def judge_file(image, path):
     from .io import _is_dicom_file
     facts = _Headers([path] if _is_dicom_file(Path(path)) else []).finish()
     per = [{k: image.GetMetaData(k) for k in image.GetMetaDataKeys()}]
-    return (_holds_stored_values(per, image.GetPixelID(), value_transform=facts.value_transform),
+    return (_holds_stored_values(per, image.GetPixelID(),
+                                 value_transform=facts.value_transform or facts.modality_lut),
             facts.modality_lut)
 
 
@@ -445,7 +426,7 @@ def _metadata(image, per_slice, *, files=(), source, source_digest, source_size=
         # the files' own headers (TAGS_VERSION 2): what SimpleITK's dictionaries cannot hold
         try:
             series, slices, fields = tags_from_datasets(heads, stored_values=held, private=False)
-            if held and heads.value_transform:
+            if held and (heads.value_transform or heads.modality_lut):
                 # an Enhanced object's rescale, seen only in its functional groups: the values
                 # are not the stored ones, so convert again without the stored-unit attributes
                 # (one header - an Enhanced object is one file - so this costs nothing)
@@ -462,21 +443,17 @@ def _metadata(image, per_slice, *, files=(), source, source_digest, source_size=
             print(f"warning: the DICOM headers of {source or files[0]} did not convert "
                   f"({type(e).__name__}: {e}); the copy carries SimpleITK's tags instead",
                   file=sys.stderr, flush=True)
-            held = held and not heads.finish().value_transform
+            facts = heads.finish()
+            held = held and not (facts.value_transform or facts.modality_lut)
             series = None
     if series is None:
         series, slices = (tags_from_sitk(per_slice, stored_values=held, private=False)
                           if per_slice else ({}, []))
         if series or any(slices):
             fields = {"stored_values": held}   # what tags_from_datasets states itself
-    # A window is stated in the values after the modality transform: beside a MONOCHROME1
-    # image's inverted values, or beside stored values a Modality LUT was not applied to, it
-    # describes values the copy does not hold - and MONOCHROME1 itself is untrue of inverted
-    # values (review, 2026-09-26). After duckn's conversion, whichever converted.
-    if _monochrome1(per_slice):
-        _drop_keywords(series, slices, _VOI + ("PhotometricInterpretation",))
-    elif heads.modality_lut:
-        _drop_keywords(series, slices, _VOI)
+    # (MONOCHROME1 and a Modality LUT once dropped the window and Photometric Interpretation
+    # here, beside GDCM's inverted or un-looked-up values; io._true_values now reads the values
+    # the files mean, so both are true of the copy again - 2026-09-26)
     thick, thick_each = _thickness(per_slice) if per_slice else (None, None)
     z = meta.axes[0]
     if thick is not None:

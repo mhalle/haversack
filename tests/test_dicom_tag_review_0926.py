@@ -187,7 +187,9 @@ def test_the_judgment_asks_the_pixel_type_the_decode_produced():
     assert ic._holds_stored_values([d], None) is False
     assert ic._holds_stored_values([{"0028|0103": "0"}], sitk.sitkUInt16) is False   # no bits
     assert ic._holds_stored_values([d], sitk.sitkUInt16, value_transform=True) is False
-    assert ic._holds_stored_values([{**d, "0028|0004": "MONOCHROME1"}], sitk.sitkUInt16) is False
+    # MONOCHROME1 is not a condition: io._true_values undoes GDCM's complement, so with no
+    # rescale the voxels ARE the stored values (the user's call, 2026-09-26)
+    assert ic._holds_stored_values([{**d, "0028|0004": "MONOCHROME1"}], sitk.sitkUInt16) is True
     # RGB is its stored values; a palette GDCM expanded, or YBR it converted, is not
     rgb = {"0028|0100": "8", "0028|0103": "0", "0028|0002": "3", "0028|0004": "RGB"}
     assert ic._holds_stored_values([rgb], sitk.sitkVectorUInt8) is True
@@ -199,15 +201,32 @@ def test_the_judgment_asks_the_pixel_type_the_decode_produced():
     assert ic._holds_stored_values([d, {**d, "0028|0103": "1"}], sitk.sitkUInt16) is False
 
 
-def test_a_monochrome1_copy_is_not_stored_values(tmp_path, form):
-    """GDCM inverts MONOCHROME1 (stored 100 is 3995 in a 12-bit copy): the type is the stored
-    one and there is no rescale, and still the values are not the stored ones."""
+def test_gdcm_complements_monochrome1_and_the_reader_undoes_it(tmp_path, form):
+    """The premise, held so a SimpleITK that stops complementing fails loudly: GDCM reads a
+    MONOCHROME1 stored 100 (12-bit) as 3995. haversack's reader undoes it (2026-09-26, the
+    user's call: fix the reader, as for the slice-axis sign): the copy holds 100, which with no
+    rescale is the stored value - and its Photometric Interpretation and window are true of it."""
     series = _monochrome1(write_series(tmp_path / "s", n=3))
+    one = sorted(series.iterdir())[0]
+    assert sitk.GetArrayFromImage(sitk.ReadImage(str(one))).ravel()[0] == 4095 - 100
+    assert list(sitk.GetArrayFromImage(nio.read_image(series))[:, 0, 0]) == [100, 101, 102]
     copy = ic.transcode(series, tmp_path / "e")
-    assert sitk.GetArrayFromImage(ic.read_copy(copy))[0, 0, 0] == 4095 - 100
+    assert list(sitk.GetArrayFromImage(ic.read_copy(copy))[:, 0, 0]) == [100, 101, 102]
     d = _attrs(copy)["extensions"]["dicom"]
-    assert d["stored_values"] is False
-    assert not {"BitsStored", "HighBit"} & _everything(copy)
+    assert d["stored_values"] is True and d["tags"]["BitsStored"] == 12
+    assert d["tags"]["PhotometricInterpretation"] == "MONOCHROME1"
+    assert d["tags"]["WindowCenter"] == [100]
+
+
+def test_a_rescaled_monochrome1_reads_as_its_real_values(tmp_path):
+    """With a rescale GDCM complements THEN rescales (stored 100, intercept -1024: 2971); the
+    real value is -924."""
+    def rescale(i, ds):
+        ds.RescaleSlope, ds.RescaleIntercept = 1, -1024
+    series = _edit(_monochrome1(write_series(tmp_path / "s", n=3)), rescale)
+    assert list(sitk.GetArrayFromImage(nio.read_image(series))[:, 0, 0]) == [-924, -923, -922]
+    copy = ic.transcode(series, tmp_path / "e")
+    assert _attrs(copy)["extensions"]["dicom"]["stored_values"] is False
 
 
 def test_an_enhanced_objects_functional_group_rescale_is_not_stored_values(tmp_path, form):
@@ -243,46 +262,58 @@ def test_an_export_of_an_enhanced_file_keeps_no_stored_unit_tag(tmp_path):
         assert key not in h, key
 
 
-# -- 2. MONOCHROME1 and a Modality LUT: the window is not about these values -----------------
-
-def test_a_monochrome1_copy_states_no_photometric_interpretation_and_no_window(tmp_path, form):
-    copy = ic.transcode(_monochrome1(write_series(tmp_path / "s", n=3)), tmp_path / "e")
-    stated = _everything(copy)
-    for name in ("PhotometricInterpretation", "WindowCenter", "WindowWidth",
-                 "WindowCenterWidthExplanation", "VOILUTFunction"):
-        assert name not in stated, name
-    assert "Modality" in stated                                  # the rest stays
-
+# -- 2. MONOCHROME1 and a Modality LUT: read as the values the file means ----------------------
 
 @pytest.mark.parametrize("what", ["copy", "file"])
-def test_an_export_of_monochrome1_states_no_photometric_interpretation_and_no_window(
-        tmp_path, what):
+def test_an_export_of_monochrome1_is_its_real_values_with_its_own_description(tmp_path, what):
     series = _monochrome1(write_series(tmp_path / "s", n=3))
     src = ic.transcode(series, tmp_path / "e") if what == "copy" else sorted(series.iterdir())[0]
-    h = _nrrd_header(nio.convert(src, tmp_path / "x.nrrd"))
-    for key in ("0028|0004", "0028|1050", "0028|1051", "0028|1055", "0028|1056", "0028|0101"):
-        assert key not in h, key
-    assert "0008|0060:=CT" in h
+    out = nio.convert(src, tmp_path / "x.nrrd")
+    assert sitk.GetArrayFromImage(sitk.ReadImage(str(out))).ravel()[0] == 100
+    h = _nrrd_header(out)
+    assert "0028|0004:=MONOCHROME1" in h and "0028|1050:=100" in h and "0008|0060:=CT" in h
 
 
-def test_a_modality_lut_gdcm_does_not_apply_leaves_stored_values_and_no_window(tmp_path, form):
+def test_gdcm_does_not_apply_a_modality_lut_and_the_reader_does(tmp_path, form):
+    """The premise, held so a SimpleITK that starts applying tables fails loudly: GDCM reads a
+    stored 100 as 100 beside a table mapping it to 207. haversack's reader applies the table:
+    the copy holds 207 (not stored values), and the window - stated in the table's output - is
+    true of it again; the stored-unit padding and Bits Stored are not."""
     series = _modality_lut(write_series(tmp_path / "s", n=3))
-    # the premise, held here so that a SimpleITK that starts applying the LUT fails loudly
-    # rather than leaving a rule that drops a window then true: stored 100 would be 207
-    assert list(sitk.GetArrayFromImage(nio.read_image(series))[:, 0, 0]) == [100, 101, 102]
+    one = sorted(series.iterdir())[0]
+    assert sitk.GetArrayFromImage(sitk.ReadImage(str(one))).ravel()[0] == 100
+    assert list(sitk.GetArrayFromImage(nio.read_image(series))[:, 0, 0]) == [207, 209, 211]
     copy = ic.transcode(series, tmp_path / "e")
+    assert list(sitk.GetArrayFromImage(ic.read_copy(copy))[:, 0, 0]) == [207, 209, 211]
     d = _attrs(copy)["extensions"]["dicom"]
-    assert d["stored_values"] is True                           # the voxels ARE stored values
-    assert d["tags"]["BitsStored"] == 12 and d["tags"]["PixelPaddingValue"] == 0
-    assert not {"WindowCenter", "WindowWidth"} & _everything(copy)
-    assert d["tags"]["PhotometricInterpretation"] == "MONOCHROME2"   # true of these values
+    assert d["stored_values"] is False
+    assert d["tags"]["WindowCenter"] == [500]
+    assert not {"BitsStored", "PixelPaddingValue"} & _everything(copy)
 
 
-def test_an_export_of_a_file_with_an_unapplied_modality_lut_states_no_window(tmp_path):
+def test_an_export_of_a_file_with_a_modality_lut_is_its_real_values(tmp_path):
     f = sorted(_modality_lut(write_series(tmp_path / "s", n=2)).iterdir())[0]
-    h = _nrrd_header(nio.convert(f, tmp_path / "x.nrrd"))
-    assert "0028|1050" not in h and "0028|1051" not in h
-    assert "0028|0101:=12" in h and "0028|0120:=0" in h         # stored values: still true
+    out = nio.convert(f, tmp_path / "x.nrrd")
+    assert sitk.GetArrayFromImage(sitk.ReadImage(str(out))).ravel()[0] == 207
+    h = _nrrd_header(out)
+    assert "0028|1050:=500" in h
+    assert "0028|0101" not in h and "0028|0120" not in h        # stored units: not these values
+
+
+def test_a_table_and_a_rescale_in_one_file_is_refused(tmp_path):
+    """DICOM says the table wins; GDCM applies the rescale. No choice is made silently."""
+    def both(i, ds):
+        ds.RescaleSlope, ds.RescaleIntercept = 1, -1024
+    series = _edit(_modality_lut(write_series(tmp_path / "s", n=2)), both)
+    with pytest.raises(InputError, match="Modality LUT Sequence and a rescale"):
+        nio.read_image(series)
+
+
+def test_a_slab_read_declines_monochrome1_and_modality_lut_series(tmp_path):
+    from haversack.input_stream import stream_of
+    assert stream_of(_monochrome1(write_series(tmp_path / "a", n=3))) is None
+    assert stream_of(_modality_lut(write_series(tmp_path / "b", n=3))) is None
+    assert stream_of(write_series(tmp_path / "c", n=3)) is not None      # the control
 
 
 # -- 3. a color export describes no grayscale or palette pixel -------------------------------
@@ -595,3 +626,39 @@ def test_a_copy_states_the_convention_version(tmp_path):
     """duckn-spec §3.1: `version` should always be present - a copy wrote none."""
     copy = ic.transcode(write_series(tmp_path / "s"), tmp_path / "e")
     assert _attrs(copy)["version"] == "1.0"
+
+
+def test_a_signed_monochrome1_reads_as_its_real_values(tmp_path):
+    """Signed data: GDCM's complement is -v-1 (a stored -1000 reads as 999), measured."""
+    def signed(i, ds):
+        ds.PhotometricInterpretation = "MONOCHROME1"
+        ds.BitsStored, ds.HighBit, ds.PixelRepresentation = 16, 15, 1
+        for k in ("RescaleIntercept", "RescaleSlope", "RescaleType"):
+            if k in ds:
+                delattr(ds, k)
+        ds.PixelData = np.full((ds.Rows, ds.Columns), -1000 + i, np.int16).tobytes()
+    series = _edit(write_series(tmp_path / "s", n=3), signed)
+    one = sorted(series.iterdir())[0]
+    assert sitk.GetArrayFromImage(sitk.ReadImage(str(one))).ravel()[0] == 999
+    assert list(sitk.GetArrayFromImage(nio.read_image(series))[:, 0, 0]) == [-1000, -999, -998]
+
+
+def test_monochrome1_with_a_modality_lut_is_uncomplemented_then_looked_up(tmp_path):
+    """GDCM complements (no rescale to apply) and applies no table: the stored value is
+    recovered first, then looked up - stored 100 -> 207."""
+    def mono1(i, ds):
+        ds.PhotometricInterpretation = "MONOCHROME1"
+    series = _edit(_modality_lut(write_series(tmp_path / "s", n=3)), mono1)
+    one = sorted(series.iterdir())[0]
+    assert sitk.GetArrayFromImage(sitk.ReadImage(str(one))).ravel()[0] == 4095 - 100
+    assert list(sitk.GetArrayFromImage(nio.read_image(series))[:, 0, 0]) == [207, 209, 211]
+
+
+def test_a_correction_that_disagrees_with_the_file_is_refused(tmp_path):
+    """Should a SimpleITK stop complementing MONOCHROME1, undoing a complement GDCM did not make
+    would invert the values: the check against pydicom's own values refuses, never passes it."""
+    series = _monochrome1(write_series(tmp_path / "s", n=3))
+    files = sorted(str(f) for f in series.iterdir())
+    as_if_uncomplemented = nio.read_image(series)       # already the real values (100, ...)
+    with pytest.raises(InputError, match="could not be corrected"):
+        nio._true_values(as_if_uncomplemented, files)

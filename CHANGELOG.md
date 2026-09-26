@@ -38,13 +38,20 @@
   MONOCHROME1 image, applied an Enhanced CT's rescale from its functional groups (100 read as
   -924), or read the values into a wider type. Now only when every slice's rescale is the
   identity or absent (one that does not parse is not), no Pixel Value Transformation Sequence
-  is anywhere, the image is not MONOCHROME1, and SimpleITK's pixel type is the one Bits
-  Allocated and Pixel Representation imply. `get -o` of a plain file judges it the same way.
-- **A MONOCHROME1 copy or export states no Photometric Interpretation and no window.** Its
-  values are inverted, so MONOCHROME1 and a window in the source's units describe values the
-  file does not hold. Where a Modality LUT is present, which SimpleITK does not apply, the values
-  are the stored ones but a window is in the LUT's output units: the window goes, the stored
-  values' own attributes stay.
+  or Modality LUT is anywhere, and SimpleITK's pixel type is the one Bits Allocated and Pixel
+  Representation imply. `get -o` of a plain file judges it the same way.
+- **MONOCHROME1 and a Modality LUT read as the values the file means** (the reader, so
+  `segment`, input copies and `get -o` alike). GDCM complements a MONOCHROME1 image's stored
+  values (a 12-bit 100 read as 3995; with intercept -1024 as 2971 instead of -924) and never
+  applies a Modality LUT Sequence (stored 100 read as 100 beside a table mapping it to 207).
+  Photometric Interpretation is a display rule, not a value mapping: the reader undoes the
+  complement slice by slice and applies the table, and checks the result against pydicom's own
+  values wherever pydicom can decode the pixels, refusing on any disagreement. A file stating
+  both a table and a rescale is refused (DICOM says the table wins; GDCM applies the rescale).
+  The slab reader hands such series to the whole read. This changes the values `segment` sees
+  for these inputs - measured GDCM behavior is pinned by tests, so a SimpleITK that changes it
+  fails loudly. Their window and Photometric Interpretation are true of the values again, and
+  stay in copies and exports.
 - **`get -o` of a color image describes the pixels it has.** An export of a PALETTE COLOR file
   wrote RGB pixels under "Samples per Pixel 1, PALETTE COLOR" and the palette itself; a vector
   image now carries no Samples per Pixel, Photometric Interpretation, Planar Configuration or

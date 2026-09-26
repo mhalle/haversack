@@ -186,6 +186,91 @@ def _check_frame_positions(p, image) -> None:
             "to place frames where they were not acquired")
 
 
+def _true_values(image, files):
+    """``image`` with the values its DICOM files mean, where GDCM hands over others (2026-09-26,
+    the user's call: fix the reader, as for the slice-axis sign). Two cases, measured:
+
+    - **MONOCHROME1.** GDCM complements each stored value within Bits Stored (unsigned: 2^b-1-v;
+      signed: -v-1) and then applies the rescale: an unsigned 12-bit 100 read as 3995, a signed
+      -1000 as 999. Photometric Interpretation is a DISPLAY rule - the values mean what the
+      Modality LUT stage makes of them, as for any other image - so the complement is undone,
+      slice by slice with each slice's rescale: real = K - out, K = 2i + s(2^b-1) unsigned,
+      2i - s signed.
+    - **A Modality LUT Sequence.** GDCM applies a rescale but never a lookup table: the pixels
+      were STORED values beside a window stated in the table's output. The table is applied
+      (pydicom's ``apply_modality_lut``, which clamps as DICOM says). A file stating a table AND
+      a rescale is refused: DICOM says the table wins, GDCM applies the rescale.
+
+    ``files``: the DICOM files in the image's slice order, or one file for all of a multi-frame
+    file's frames. Where pydicom can decode the first file's pixels, the corrected first slice
+    is checked against the values it computes itself, and a disagreement is refused - never
+    passed on. Anything else is returned as it was."""
+    import pydicom
+    import SimpleITK as sitk
+    try:
+        first = pydicom.dcmread(str(files[0]), stop_before_pixels=True, force=True)
+    except Exception:                          # noqa: BLE001 - not a header pydicom reads
+        return image
+    def facts(h):
+        return (str(h.get("PhotometricInterpretation", "")).strip().upper() == "MONOCHROME1",
+                "ModalityLUTSequence" in h)
+    mono1, lut = facts(first)
+    if not (mono1 or lut) or image.GetNumberOfComponentsPerPixel() != 1:
+        return image
+    n = int(image.GetSize()[2]) if image.GetDimension() == 3 else 1
+    if len(files) == n:
+        heads = [first] + [pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
+                           for f in files[1:]]
+    elif len(files) == 1:
+        heads = [first] * n
+    else:
+        raise InputError(f"{files[0]}: {len(files)} files for {n} slices")
+    if any(facts(h) != (mono1, lut) for h in heads):
+        raise InputError(f"{files[0]}: the series mixes MONOCHROME1 or a Modality LUT across its "
+                         "slices, which one volume cannot hold as one kind of value")
+    if lut and any("RescaleSlope" in h or "RescaleIntercept" in h for h in heads):
+        raise InputError(f"{files[0]}: a Modality LUT Sequence and a rescale in one file - DICOM "
+                         "says the table wins, GDCM applies the rescale; refusing to choose")
+    from pydicom.pixels import apply_modality_lut
+    out = sitk.GetArrayFromImage(image)
+    if out.ndim == 2:
+        out = out[None]
+    real = np.empty(out.shape, dtype=np.float64)
+    for k, h in enumerate(heads):
+        o = out[k].astype(np.float64)
+        top = float(2 ** int(h.BitsStored) - 1)
+        signed = int(h.get("PixelRepresentation", 0) or 0) == 1
+        if lut:
+            stored = (-o - 1 if signed else top - o) if mono1 else o
+            real[k] = apply_modality_lut(stored.astype(np.int64), h)
+        else:
+            s = float(h.get("RescaleSlope", 1) or 1)
+            i = float(h.get("RescaleIntercept", 0) or 0)
+            real[k] = (2 * i - s if signed else 2 * i + s * top) - o
+    try:                                       # the check: pydicom's own values, where it decodes
+        full = pydicom.dcmread(str(files[0]), force=True)
+        px = full.pixel_array
+        want = np.asarray(apply_modality_lut(px[0] if px.ndim == 3 else px, full), dtype=np.float64)
+    except Exception:                          # noqa: BLE001 - no decoder here: nothing to check
+        want = None
+    if want is not None and not np.allclose(real[0], want, rtol=0, atol=1e-6):
+        raise InputError(f"{files[0]}: GDCM's values could not be corrected to the file's own "
+                         f"({'MONOCHROME1' if mono1 else 'Modality LUT'}): refusing it")
+    if np.all(real == np.round(real)):
+        lo, hi = real.min(), real.max()
+        for dt in (out.dtype, np.int16, np.uint16, np.int32):
+            if np.issubdtype(dt, np.integer) and np.iinfo(dt).min <= lo and hi <= np.iinfo(dt).max:
+                real = real.astype(dt)
+                break
+    if real.dtype == np.float64 and np.issubdtype(out.dtype, np.floating):
+        real = real.astype(out.dtype)
+    fixed = sitk.GetImageFromArray(real if image.GetDimension() == 3 else real[0])
+    fixed.CopyInformation(image)
+    for key in image.GetMetaDataKeys():
+        fixed.SetMetaData(key, image.GetMetaData(key))
+    return fixed
+
+
 def _sitk_reason(e: Exception) -> str:
     """The last line of a SimpleITK error: the reason, without the C++ source location and
     without the quoted path (the caller names the file)."""
@@ -321,6 +406,7 @@ def _read_image(path, *, tags: bool):
         image.SetOrigin(origin)
         image.SetDirection(direction)
         image.SetSpacing(spacing)
+        image = _true_values(image, files)      # MONOCHROME1 and Modality LUT (2026-09-26)
     else:
         _readable(p)
         try:
@@ -332,9 +418,11 @@ def _read_image(path, *, tags: bool):
         # a multi-frame DICOM file's frames are placed by the reader on a uniform grid: held
         # against the frames' own positions (2026-09-26); asked only of a file with frames
         several = image.GetDimension() == 3 and image.GetSize()[2] > 1
-        dicom = _is_dicom_file(p) if (several or tags) else False
+        dicom = _is_dicom_file(p)
         if several and dicom:
             _check_frame_positions(p, image)
+        if dicom:
+            image = _true_values(image, [p])    # MONOCHROME1 and Modality LUT (2026-09-26)
         if tags:
             per_slice = [{k: image.GetMetaData(k) for k in image.GetMetaDataKeys()}]
             if dicom:
@@ -628,8 +716,10 @@ def convert(src, dst, *, compress: bool = True) -> Path:
             raise InputError(f"cannot read {src} as an image: {_sitk_reason(e)}") from None
         # as it stands, but never with frames placed where they were not acquired: the gapped
         # series lesson above, for a multi-frame file's frames (2026-09-26)
-        if img.GetDimension() == 3 and img.GetSize()[2] > 1 and _is_dicom_file(src):
-            _check_frame_positions(src, img)
+        if _is_dicom_file(src):
+            if img.GetDimension() == 3 and img.GetSize()[2] > 1:
+                _check_frame_positions(src, img)
+            img = _true_values(img, [src])      # the values the file means, as segment reads
     # A header written from the image must not contradict its pixels (2026-09-26): SimpleITK
     # keeps the file's rescale, padding and bit tags beside pixels it has already rescaled, and
     # writes them all into an NRRD header. A copy says what its voxels are; a file read here is
