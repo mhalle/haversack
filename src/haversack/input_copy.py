@@ -211,8 +211,10 @@ def _thickness(per_slice):
 
 def _holds_stored_values(per_slice) -> bool:
     """Whether the copy's voxels are the source's STORED values - no slice asks for a rescale
-    other than the identity - so Bits Stored / High Bit are still true of them (dicom-spec
-    §5.10). SimpleITK applies a rescale where the files state one, and widens the type."""
+    other than the identity. SimpleITK applies a rescale where the files state one, and widens
+    the type. Load-bearing: it decides whether anything stated in stored-value units is written
+    at all (dicom-spec §5.10) - a CT's Pixel Padding Value -2000 is -3024 in the copy's HU, and
+    the file must never say otherwise to a reader of it alone."""
     if not per_slice:
         return False
     for d in per_slice:
@@ -260,6 +262,8 @@ def _metadata(image, per_slice, *, files=(), source, source_digest, source_size=
         series, slices, fields = tags_from_files(files, stored_values=held)
     else:
         series, slices = tags_from_sitk(per_slice, stored_values=held) if per_slice else ({}, [])
+        if series or any(slices):
+            fields = {"stored_values": held}   # what tags_from_files states itself
     thick, thick_each = _thickness(per_slice) if per_slice else (None, None)
     z = meta.axes[0]
     if thick is not None:

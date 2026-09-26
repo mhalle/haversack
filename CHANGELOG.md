@@ -13,6 +13,12 @@
   provenance, never what an engine reads, so this is not a reader-version change. Only public
   text tags go back onto an image read from a copy, so no private block or base64 value lands
   in a header written from it. Needs duckn 0.5.3.
+- **A copy's header never contradicts its voxels.** A copy holds rescaled values (HU for CT);
+  the tags said what the files said in STORED units. Real GE and Siemens CT state Pixel
+  Padding Value -2000: in the copy the padding is -3024, and masking -2000 masks nothing.
+  Stored-unit attributes (Bits Stored, High Bit, the pixel value ranges, Pixel Padding Value
+  and Range Limit, Real World Value Mapping) are now written only when the copy holds the
+  stored values, and the dicom extension says which it holds (`stored_values`).
 - **A copy's header is deflated; its chunks stay stored.** With the files' own tags a header can
   be most of a copy: a 92-slice Siemens MR carries 1.8 MB (Siemens' private per-slice blocks,
   as base64) in a 4.2 MB copy. Deflated it is 85 KB, and the copy 2.5 MB; a 709-slice CT's

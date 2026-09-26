@@ -288,6 +288,47 @@ def test_the_header_is_deflated_where_the_tags_are_large(tmp_path):
     assert h.file_size > 20 * 15_000 and h.compress_size < h.file_size / 10
 
 
+def _pad(series: Path) -> Path:
+    for f in sorted(series.iterdir()):
+        ds = pydicom.dcmread(f)
+        ds.add_new(0x00280120, "SS" if ds.PixelRepresentation else "US",
+                   -2000 if ds.PixelRepresentation else 0)       # Pixel Padding Value
+        ds.add_new(0x00280107, "SS" if ds.PixelRepresentation else "US", 1199)  # Largest
+        ds.save_as(f, enforce_file_format=True)
+    return series
+
+
+@pytest.mark.parametrize("form", ["uncompressed", "zstd"])
+def test_nothing_the_file_says_contradicts_its_voxels(tmp_path, monkeypatch, form):
+    """The user's rule (2026-09-26): the header must not contradict the data a reader gets from
+    this file alone. A CT's padding -2000 is in STORED units; the copy holds HU (intercept
+    -1024), where it is -3024 - so the stored-unit attributes are not written, and the file
+    says its values are not the stored ones."""
+    monkeypatch.setenv(ic.COMPRESSION_ENV, form)
+    copy = ic.transcode(_pad(write_series(tmp_path / "s")), tmp_path / "entry")
+    d = _attrs(copy)["extensions"]["dicom"]
+    per_slice = {k for s in _attrs(copy)["axes"][0].get("samples") or []
+                 for k in ((s.get("metadata") or {}).get("dicom") or {})}
+    everything = d["tags"].keys() | per_slice
+    assert not {"PixelPaddingValue", "LargestImagePixelValue", "BitsStored"} & everything
+    assert d["stored_values"] is False
+
+
+def test_a_copy_of_stored_values_states_them_and_says_so(tmp_path):
+    copy = ic.transcode(_pad(_enrich(write_series(tmp_path / "s"), rescale=False)),
+                        tmp_path / "entry")
+    d = _attrs(copy)["extensions"]["dicom"]
+    assert d["stored_values"] is True
+    assert d["tags"]["PixelPaddingValue"] == 0 and d["tags"]["LargestImagePixelValue"] == 1199
+
+
+def test_the_simpleitk_path_says_which_values_it_holds(tmp_path):
+    """Tags from SimpleITK's dictionaries (no file list: a caller's own image) state it too."""
+    image, per_slice, _ = nio.read_image_and_tags(write_series(tmp_path / "s"))
+    vol = ic._metadata(image, per_slice, source=None, source_digest=None)
+    assert vol.metadata.extensions["dicom"]["stored_values"] is False
+
+
 def test_only_public_text_tags_go_back_onto_the_image(tmp_path):
     """A SimpleITK read of the files shows no private tags; a header written from the image
     must never carry a base64 profile or a private block."""
