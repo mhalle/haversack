@@ -571,6 +571,17 @@ form, one store behavior - and `haversack get` gives the copy: `get SPEC` prints
 convert), so the rule is "no raw export", not "every input has a copy". Originals remain
 recoverable where the header design below proves a byte-exact rebuild.
 
+**The cached form is the standard form of input (the user, 2026-09-26).** With the flag, a
+LOCAL file or folder is ingested too - named by the digest of its bytes, exactly as an upload
+(a folder as a tree digest, one file as that file) - and read as its copy: `sources.materialize`
+takes local paths, and `segment` sends them there. One identity for the same bytes wherever
+they sit, and one reader for every input. What cannot be taken as an image, and haversack's own
+form (a copy, a duckn store), pass through as they are. Verified: `ts.v2:total_fast` on a local
+CT wrote identical labels and geometry with and without the flag, and the result's provenance
+names the user's file, not the cache. Flag-on suite: 20 legacy tests fail - the 16 layout ones,
+3 that pin the raw export the user dropped, and one reading `.input.json` beside the returned
+path (the record is right through `input_record`: both series of a study folder, one of one).
+
 **DICOM headers (designed with the user, 2026-09-26; not built).** They serve two purposes,
 kept apart. For USE, JSON - the duckn dicom extension's keyword-keyed tags, sourced from
 pydicom (duckn's `dicom_convert`: private tags, sequences, binary values in base64) rather

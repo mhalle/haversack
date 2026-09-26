@@ -695,6 +695,36 @@ class CommandInputs:
                     return files[0]
         return read
 
+    def ingest(self, path, *, progress=None) -> Path:
+        """A LOCAL file or folder as an input: stored under the digest of its bytes (a folder
+        as a tree digest, one file as that file - ContentStore's rules, as an upload) and
+        handed back as its export. What the store cannot take as an image is handed back as
+        it is - it would be refused as an upload - and so is haversack's own form (a copy, a
+        duckn store): there is nothing to convert, and storing one again would only copy it.
+
+        Every use hashes the file to learn its identity (a 131 MB series: a fraction of a
+        second); the decode the copy saves is ~40 times that."""
+        from .content import UnidentifiedContent
+        from .duckn_io import is_duckn_store
+        from .input_copy import is_copy
+        path = Path(path)
+        if is_copy(path) or is_duckn_store(path):
+            return path
+        try:
+            from .content import digest_file
+            digest = None
+            if path.is_file():
+                digest = digest_file(path)
+                if not self.store.has(digest):
+                    if progress:
+                        progress(f"storing {path.name} in the input cache")
+                    self.store.put_file(path, computed=digest)
+            else:
+                digest = self.store.put_dir(path)      # hashes every member; stores once
+        except UnidentifiedContent:
+            return path
+        return self.get_or_fetch(digest, fetch=None)
+
     def forget(self, identity: str) -> None:
         self.store.forget(identity)
         shutil.rmtree(self.export_dir(identity), ignore_errors=True)

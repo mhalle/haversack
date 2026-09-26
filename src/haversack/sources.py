@@ -2047,6 +2047,13 @@ def materialize(spec, *, cache_dir=None, sources=None, progress=None, credential
     reg = registry(sources) if sources is not None else registry(default_sources() + [HttpSource()])
     parsed = parse_input(spec, known=reg)
     if parsed is None:
+        from .inputstore import command_inputs, input_store_enabled
+        if input_store_enabled() and Path(spec).exists():
+            # the cached form is the standard form of input (the user, 2026-09-26): a local
+            # file or folder is ingested - named by the digest of its bytes, as an upload is -
+            # and read as its copy, like every other input
+            store = command_inputs(Path(cache_dir) / "store" if cache_dir else default_input_store())
+            return store.ingest(Path(spec), progress=progress)
         return Path(spec)
     kind, ident = parsed
     src = reg.get("http" if kind == "https" else kind)

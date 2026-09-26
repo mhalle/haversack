@@ -1994,6 +1994,11 @@ def _cmd_segment(args) -> int:
             return str(materialize(spec, progress=progress))
         if not Path(spec).exists():
             raise InputError(f"input not found: {spec}")
+        from .inputstore import input_store_enabled
+        if input_store_enabled():
+            # a local input is ingested, as every input is (the cached form is the standard
+            # form, 2026-09-26); materialize names it by its bytes and hands back its copy
+            return str(materialize(spec, progress=progress))
         return spec
 
     def run_one(spec):

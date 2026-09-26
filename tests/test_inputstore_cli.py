@@ -151,3 +151,82 @@ def test_an_input_the_reader_refused_is_not_exported_as_fetched(fake, tmp_path, 
     assert cli.main(["get", "fake:bad", "-o", str(tmp_path / "out") + "/"]) != 0
     assert "does not hand out the files as fetched" in capsys.readouterr().err
     assert not (tmp_path / "out" / "bad").exists()
+
+
+# -- the cached form as the standard form of input (2026-09-26) ---------------------------------
+
+def test_a_local_file_is_ingested_and_read_as_its_copy(fake, tmp_path):
+    import SimpleITK as sitk
+    src = tmp_path / "local" / "ct.nii.gz"
+    src.parent.mkdir()
+    sitk.WriteImage(sitk.GetImageFromArray(np.full((6, 6, 6), 3, np.int16)), str(src))
+    got = sources.materialize(str(src))
+    assert got.name == "input.duckn.zip"
+    assert sources.materialize(str(src)) == got                 # one identity: its bytes
+    from haversack import io
+    assert (sitk.GetArrayFromImage(io.read_image(got)) == 3).all()
+
+
+def test_the_same_bytes_anywhere_are_one_input(fake, tmp_path):
+    import shutil
+    import SimpleITK as sitk
+    a = tmp_path / "a" / "ct.nii.gz"
+    a.parent.mkdir()
+    sitk.WriteImage(sitk.GetImageFromArray(np.full((6, 6, 6), 4, np.int16)), str(a))
+    b = tmp_path / "b" / "other-name.nii.gz"
+    b.parent.mkdir()
+    shutil.copyfile(a, b)
+    assert sources.materialize(str(a)) == sources.materialize(str(b))
+
+
+def test_a_local_series_folder_is_one_tree_input(fake, tmp_path):
+    from test_several_series import THREE, write_series
+    d = write_series(tmp_path / "dcm", 3, THREE, value=6)
+    got = sources.materialize(str(d))
+    assert got.name == "input.duckn.zip"
+
+
+def test_what_is_not_an_image_and_haversacks_own_form_pass_through(fake, tmp_path):
+    txt = tmp_path / "notes.txt"
+    txt.write_text("x")
+    assert sources.materialize(str(txt)) == txt
+    copy = sources.materialize(str(_nifti_at(tmp_path / "n.nii.gz")))
+    assert sources.materialize(str(copy)) == copy
+
+
+def test_without_the_flag_a_local_path_is_read_where_it_is(tmp_path, monkeypatch):
+    monkeypatch.delenv("HAVERSACK_INPUT_STORE", raising=False)
+    p = _nifti_at(tmp_path / "n.nii.gz")
+    assert sources.materialize(str(p)) == p
+
+
+def _nifti_at(path):
+    import SimpleITK as sitk
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    sitk.WriteImage(sitk.GetImageFromArray(np.zeros((5, 5, 5), np.int16)), str(path))
+    return Path(path)
+
+
+def test_cli_segment_reads_a_local_input_as_its_copy(fake, tmp_path, monkeypatch, capsys):
+    from haversack import pipeline
+    from test_local_sources import _Saved
+    src = _nifti_at(tmp_path / "local" / "ct.nii.gz")
+    got = {}
+    monkeypatch.setattr(pipeline, "segment", lambda image, task, **kw: got.update(image=image) or _Saved())
+    rc = cli.main(["segment", str(src), "--task", "total_fast", "-o", str(tmp_path / "out.nii.gz")])
+    assert rc == 0, capsys.readouterr().err
+    assert Path(got["image"]).name == "input.duckn.zip"
+
+
+def test_a_duckn_folder_store_is_read_where_it_is_not_stored_as_a_tree(fake, tmp_path):
+    """A duckn/zarr directory is haversack's own form already. Without the guard it would be
+    ingested as a tree of chunk files - a new identity for bytes nobody sent as an input."""
+    import SimpleITK as sitk
+    from duckn.io import write as duckn_write
+    from duckn.sitk_adapter import from_sitk
+    store = tmp_path / "vol.zarr"
+    duckn_write(from_sitk(sitk.GetImageFromArray(np.zeros((4, 5, 6), np.int16))), store, format="zarr")
+    assert sources.materialize(str(store)) == store
+    assert sources.materialize(str(store)) == store
+    from haversack import inputstore
+    assert inputstore._COMMAND == {} or all(not c.store._refs() for c in inputstore._COMMAND.values())
