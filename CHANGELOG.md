@@ -2,14 +2,20 @@
 
 ## [Unreleased]
 
-- **A catalog model's result key is the same on every machine.** Tasks that install a model
-  folder (MOOSE, MRSegmentator, DentalSegmentator, TotalVibe, CADS) put the folder's absolute
-  path into every result key - `/Users/<someone>/.totalsegmentator/...` on one machine,
-  `/weights/...` on Modal - so a result cache moved between machines with different weights roots
-  missed every such result. The folder is now named relative to the weights root
-  (`moose/Dataset444_Ribs/<model folder>`), beside the installed version as before. These
-  catalogs' results recompute once; TotalSegmentator keys and a caller's own model folder outside
-  the weights root are unchanged.
+## [0.14.0] - 2026-09-26
+
+MOOSE models fed the orientation they were trained in, and moosez's body-composition workflow; a
+task's rank field as a cached, listed result (`kind=rankfield`); cached inputs kept as decoded,
+compressed copies; embeddings (0.13.0's `encode`) listed and addressable by path; FastSurfer,
+duckn, zarr, rankfield and pydicom in the core install; Python 3.12 to 3.14. **What recomputes,
+once:** every MOOSE result (its key gains `orient=`), the results of MOOSE, MRSegmentator,
+DentalSegmentator, TotalVibe and CADS (their key named the weights folder by its absolute path),
+and FastSurfer's (engine epoch 2); `CACHE_EPOCH` stays. **Who must change:** a caller of 0.13.0's
+`haversack encode` / `kind=encode` (now `embed`, below); an install made with plain `pip` (core
+packages come from git tags: use `uv pip`); an environment with torch older than 2.14.
+
+### MOOSE
+
 - **MOOSE models run in the orientation they were trained in.** Every MOOSE model was fed the
   input's own axis order, and none was trained that way: moosez fed its models LAS (through
   dicom2nifti) until July 2025 and RAS since, when six models were retrained for it. On DICOM
@@ -26,87 +32,17 @@
   `clin_ct_fast_vertebrae`: the image is cut to the head-to-foot extent of L1-L5, body composition
   runs on that cut, and the result keeps only the slices of L3's largest connected piece. haversack
   ran the model on the whole image. The crop model installs with the task.
-- **FastSurfer's checkpoints install as a package.** The three FastSurferVINN v2.0.0 files
-  (67 MB, Apache-2.0, unmodified from Zenodo) are published as `fastsurfer-vinn-weights`
-  (github.com/mhalle/fastsurfer-vinn-weights) and installed by the `fastsurfer` extra. The Modal
-  FastSurfer image takes them from there: its build no longer fetches from Zenodo, which made
-  every deploy depend on Zenodo being up (a 504 failed two) and re-ran on every code change. A
-  run uses, in order, `HAVERSACK_FASTSURFER_CHECKPOINTS`, the installed package when its files
-  match haversack's own pinned digests, and the Zenodo-filled cache, as before.
-- **Review of the day's work, 2026-09-26.** A deploy decides every engine flag and forwards the
-  decision: with FastSurfer core, a deploy from a lean install built no FastSurfer worker while the
-  api container, which has FastSurfer, listed its tasks and would have spawned a worker that was
-  never deployed. FastSurfer's labels, its task's structures and the segments index name the 17
-  right-hemisphere cortical ids its split creates (`ctx-rh-*`, which were `label_20xx` in every
-  FastSurfer header); FastSurfer results recompute once (its engine cache epoch is 2). A restore
-  recognizes FastSurfer stores written before 0.13.0 and records what it could not do in the
-  written file's provenance, not only on stderr. Install hints no longer send anyone to plain
-  `pip` (these packages are not on PyPI) or to a FastSurfer environment (it is core). Tests now
-  hold the core dependencies, the supported Pythons against CI's matrix, CI installing every
-  git-sourced core package, and a dozen checks mutation testing showed nothing exercised.
-- **The streamed input copy defers to the reader wherever the two could differ.** A review found
-  four inputs it copied differently from what `io.read_image` reads - and a copy replaces the
-  original: a series whose end slice has no DICOM preamble (copied one slice short), an end slice
-  missing its position or orientation, and a CT beside a secondary capture of another series (both
-  refused by the reader, copied anyway), and a gzipped NIfTI whose `vox_offset` is below the header
-  size (copied shifted by the header's bytes). Any DICOM file the header listing cannot place now
-  hands the folder to the whole read, and such a NIfTI too. Separately, a series whose first and
-  last slices share a position read with NaN spacing; it is refused now as a duplicate slice.
-- **FastSurfer is part of haversack.** `fastsurfer-lean` is a core dependency (under 1 MB now;
-  its weights still download on first use), so `fastsurfer:*` tasks work after a plain install
-  and a FastSurfer rank field's restore always lateralizes the cortex. The engine is on wherever
-  it is installed; `HAVERSACK_FASTSURFER=0` switches it off, and a Modal deploy builds its worker
-  unless told not to. torch's floor becomes 2.14 (the fork's). `haversack[fastsurfer]` still
-  installs (an empty alias). CI now installs it and runs the FastSurfer tests.
-- **Python 3.13 and 3.14.** haversack required 3.12 because FastSurfer's command-line
-  definitions handed argparse a `str | None` as a type, which 3.14's argparse refuses. Fixed in
-  the fork (fastsurfer-lean v2.5.4-lean4, with its deprecated SciPy imports), since upstream has
-  the same code. The fast suite passes on 3.12, 3.13 and 3.14, and FastSurfer and
-  `ts.v2:total_fast` write byte-identical labels on 3.14 and 3.12. CI now runs 3.12 and 3.14.
-  The one `asyncio.iscoroutinefunction` (removed in 3.16) is `inspect`'s.
-- **duckn, zarr, rankfield and pydicom are core.** Every cached input is kept as a duckn copy
-  (pydicom is its DICOM dictionary) and a task's rank field is a duckn store, so the `duckn`
-  extra had become a requirement in practice; every deployed image installed it already. It
-  adds 14.3 MB. `haversack[duckn]` still installs (an empty alias), and the `embed` extra is now
-  only feldglas and nibabel. The default `segment IN -o labels.nii.gz` still imports none of
-  them. The README's install section said a plain `pip install` works for the bare install; it
-  has not since provender became core - haversack's own packages install from git tags, which
-  `uv pip install` reads and pip cannot - and now says so.
-- **FastSurfer installs lighter: fastsurfer-lean v2.5.4-lean3.** The fork's inference no
-  longer depends on h5py, matplotlib or torchvision (each was imported only for training code,
-  or for a one-transform `Compose`); they moved to its `train` extra. Inside haversack that
-  removes h5py (10.5 MB) - nnU-Net already brings the others - so the engine now adds under
-  1 MB to an install; on its own the fork is ~70 MB lighter. Labels are byte-identical to lean2
-  (ds000114 sub-09, run where none of the three was installed), and the FastSurfer identity
-  stays `2.5.4`, so no result key moves. Weights still download on first use (64 MB).
-- **A FastSurfer store restores onto its input.** `haversack restore` refused the input grid
-  for these stores (FastSurfer's field lives on its own conformed grid, rotated from an oblique
-  input, which a frame cannot describe) and could only restore onto the conformed grid. The
-  store already recorded both grids; the restore now maps between them in world space
-  (rankfield's new world-geometry restore) and applies FastSurfer's own cortical
-  lateralization after the argmax, as FastSurfer does - before, every restore named the right
-  hemisphere's cortical parcels with the left ids. Against FastSurfer's labels on two oblique
-  T1s (5.7 and 13.7 degrees): 99.996 % of voxels, every structure's Dice at least 0.998. Needs
-  rankfield 0.3.7 (pinned, with feldglas 0.1.5 pinning it too).
-- **`haversack embed` finishes cleanly again.** Since the embedding rename it wrote the field and
-  then failed printing its summary (exit 1). Refusals name things by their current names: an
-  unknown job kind lists `rankfield`, rank-field refusals say "rank field", and an unknown
-  encoder lists every encoder rather than its own family's.
-- **Faster submits and finishes on Modal.** Profiled on a deployment with three fresh IDC CTs:
-  a submit answered from the result cache copied the result into the api container to read its
-  record, and concurrent ones queued behind each other's copies (1-4 s each); it now reads the
-  record and checks which artifacts exist in place (0.9-1.0 s end to end, from 2.4-5.4 s). The
-  route answers a submit from the record it just wrote instead of reading it back. A worker places
-  the job's own scratch copy - the fallback used once a result is evicted - after reporting done
-  rather than before (0.7-1.5 s of every job's latency), and the `.seg.nrrd` header no longer
-  sorts the whole label map to list the labels present (1 s on a 418 M-voxel map). Results,
-  keys and file bytes are unchanged.
-- **An input copy is written a slab at a time.** Transcoding a DICOM series or a gzipped NIfTI
-  held the volume several times over - 3.3 GB at peak for a 709-slice CT, where Modal's api
-  container (which transcodes uploads) has 2 GB. The compressed copy is written a chunk of 32
-  slices at a time and checked the same way: 526 MB for that CT, 130-350 MB for six others, every
-  chunk byte-identical to the whole-volume path's, at 5-90 % more time (compression is no longer
-  parallel across chunks). Other formats and the uncompressed form take the whole path as before.
+- **A catalog model's result key is the same on every machine.** Tasks that install a model
+  folder (MOOSE, MRSegmentator, DentalSegmentator, TotalVibe, CADS) put the folder's absolute
+  path into every result key - `/Users/<someone>/.totalsegmentator/...` on one machine,
+  `/weights/...` on Modal - so a result cache moved between machines with different weights roots
+  missed every such result. The folder is now named relative to the weights root
+  (`moose/Dataset444_Ribs/<model folder>`), beside the installed version as before. These
+  catalogs' results recompute once; TotalSegmentator keys and a caller's own model folder outside
+  the weights root are unchanged.
+
+### Rank fields
+
 - **A task's ranked store is a cached result, and holds the task's own field.** `POST /v1/jobs`
   with `kind=rankfield` (`haversack remote submit ... -o <name>.duckn.zip`) computes a task's
   output distribution - the store `segment -o x.duckn.zip` writes - and caches it as labels
@@ -128,6 +64,49 @@
   a multi-layer cascade store is still refused whole (its stages sit on different grids since
   the upstream crop), which the one-layer store no longer is. The ranked store is now
   documented (README, SERVER.md).
+- **The kind is `rankfield`** (named for rankfield's own object, a `RankField`, as the other
+  kinds are named for what they return): `kind=rankfield`, `rankfield.duckn.zip`,
+  `GET /v1/rankfields`, `links.rankfield`, `haversack remote rankfields`, and the key tag
+  `rankfield=rf...`. It was `ranked` on main for a day; no deployment ran it, so there are no
+  aliases. The prose and the modules keep "ranked store" for the duckn zip that holds the field.
+- **Rank fields are listed**: `GET /v1/rankfields` (`haversack remote rankfields`,
+  `RemoteClient.rankfields`) is the segmentations and embeddings listing for the third kind -
+  filters by `identity` and `task`, cursors, newest published first, `links.rankfield` for a store
+  with a path, and a key round trip so a store keyed under weights or formats this server no
+  longer writes is not offered. The anonymous twin lists them when its operator opts in, as
+  the other two.
+- **A FastSurfer store restores onto its input.** `haversack restore` refused the input grid
+  for these stores (FastSurfer's field lives on its own conformed grid, rotated from an oblique
+  input, which a frame cannot describe) and could only restore onto the conformed grid. The
+  store already recorded both grids; the restore now maps between them in world space
+  (rankfield's new world-geometry restore) and applies FastSurfer's own cortical
+  lateralization after the argmax, as FastSurfer does - before, every restore named the right
+  hemisphere's cortical parcels with the left ids. Against FastSurfer's labels on two oblique
+  T1s (5.7 and 13.7 degrees): 99.996 % of voxels, every structure's Dice at least 0.998. Needs
+  rankfield 0.3.7 (pinned, with feldglas 0.1.5 pinning it too).
+- **The ranked encoder's budget counts the memory torch already holds for reuse.** Right
+  after a network, `network.ranked_encode_budget` read ZERO on an M2 (`lung_vessels` on a 0.625 mm
+  CTPA: the host had 2.6 GiB available, under `device_budget_bytes`' 3 GiB headroom, while
+  2.5-2.8 GiB of what the driver held was torch's cache of the network's freed
+  activations), so every such encode ran one plane a slab. That was harmless while
+  rankfield's selection was the cost, and costs 2.09 s against 0.75 s once rankfield's Metal
+  kernel makes the selection cheap. `network.reusable_cache_bytes(device)` - the driver's
+  holding less live tensors on MPS, reserved less allocated on CUDA, where `mem_get_info`
+  also leaves that cache out - is added to the fresh reading; `device_budget_bytes` itself,
+  which the accumulator's placement reads too, is unchanged. Same run: the budget is
+  rankfield's full 1 GiB default, the peak footprint 5.87 GB as before, and the stored arrays
+  identical. With rankfield 0.3.6's kernel the fine stage's encode took 0.75-0.78 s in two
+  runs, 14.1 s on 0.13.0; one run in three read 3.7 s while the machine was swapping.
+- rankfield is pinned at `v0.3.6` (floor `>=0.3.6` in the duckn and encode extras) and feldglas
+  at `v0.1.3`, in `pyproject.toml` and CI's list.
+  rankfield 0.3.6 runs its encoder's selection as a Metal kernel on MPS and as one stable sort
+  when every class is kept (depth >= K) - byte-identical to its torch path, which stays the
+  reference: a K=5 field's encode went 13.2 s -> 0.74 s on an M2, 1.12 -> 0.49 s on an A10.
+  feldglas 0.1.3 is 0.1.2 with the same rankfield pin, which uv needs to resolve
+  `haversack[encode]`.
+
+### Cached inputs
+
 - **Cached inputs are kept decoded.** A DICOM series was decoded on every job that read it -
   13 s for a 709-slice CT on a Modal worker, 45 s cold from a volume another container wrote -
   whether or not it had been read a minute earlier. The series cache and the input store now keep
@@ -145,54 +124,6 @@
   the `duckn` extra (as a data dictionary: SimpleITK's tag keys to keywords); every Modal image
   that stores inputs carries the extra, and one without it still reads uncompressed copies.
   `docs/input-copy.md` is the specification.
-- **The review's second batch** (each pinned by a test that fails on c93b699; 13 of 13 mutants
-  killed):
-  - The embedding worker makes input copies: its image lacked pydicom (the `embed` extra has
-    none), so every cached `idc:` embedding paid the full DICOM read. It also no longer pre-reads
-    the next job's image, which the encoder discarded.
-  - The anonymous twin reloads its weights volume (throttled) when a key would be `unknown`: a
-    task a worker installed after the twin started had every result 404 on the anonymous path.
-  - A read-only result-store server reaches rank fields and nnU-Net encoders' embeddings: every
-    kind now records what a reader keys it on (only segmentations did), and the reader's versions
-    function takes the kind.
-  - Each deliverable renders on its own, and one that fails or has nothing to show is said on
-    the job (`deliverables_unavailable`), so its link goes: a failed preview used to cost the
-    statistics too, and the job kept linking both.
-  - Advice the server can follow: a missing deliverable's 404 says a plain submit renders it
-    only where a cache hit renders (the local server); on Modal it says to recompute with
-    `Cache-Control: no-cache`. A rank field's or an embedding's job artifact 404 says only a
-    segmentation renders deliverables. IDC refusals no longer point at a `/v1/resolve` that does
-    not exist.
-- **Fixes from the 2026-09-25 server review** (four adversarial reviewers, one black-box against
-  the live deployment; each fix pinned by a test that fails on 9c69466, 10 of 10 mutants killed):
-  - On Modal a submit of a key already computing JOINS that job, as the local server does and as
-    SERVER.md says; it used to start a second computation and publish the key twice (seen on the
-    live deployment). The in-flight marker is claimed atomically (`modal.Dict.put(...,
-    skip_if_exists=True)`), so two api containers cannot both win; a flight is joined only with
-    the same source credentials (recorded as a digest, never the token); what a joiner asks
-    rendered joins a queued job's list; and a joiner's DELETE releases the flight rather than
-    cancelling it for the others.
-  - An upload job's input resolves only from a committed store entry: one evicted after the
-    submit, being written again by a re-upload of the same bytes, was handed to the job half
-    written, and its labels published under the whole content's key. The job now fails naming
-    the fix (send the bytes again).
-  - `PUT` and `POST /v1/inputs` store off the event loop: the input copy made the store's adopt a
-    whole-volume decode, compression and verify, which stalled every other request to the
-    container for the length of it.
-  - A series the reader fails on with something other than a refusal (SimpleITK's error on
-    slices of different sizes) keeps its original, as before the input copy: it had been thrown
-    away - a fetched input downloaded again on every job, an upload answered 500.
-- **The kind is `rankfield`** (named for rankfield's own object, a `RankField`, as the other
-  kinds are named for what they return): `kind=rankfield`, `rankfield.duckn.zip`,
-  `GET /v1/rankfields`, `links.rankfield`, `haversack remote rankfields`, and the key tag
-  `rankfield=rf...`. It was `ranked` on main for a day; no deployment ran it, so there are no
-  aliases. The prose and the modules keep "ranked store" for the duckn zip that holds the field.
-- **Rank fields are listed**: `GET /v1/rankfields` (`haversack remote rankfields`,
-  `RemoteClient.rankfields`) is the segmentations and embeddings listing for the third kind -
-  filters by `identity` and `task`, cursors, newest published first, `links.rankfield` for a store
-  with a path, and a key round trip so a store keyed under weights or formats this server no
-  longer writes is not offered. The anonymous twin lists them when its operator opts in, as
-  the other two.
 - **Input copies are compressed by default** (`HAVERSACK_INPUT_COPY_COMPRESSION`, default `zstd`;
   `uncompressed` for the other form): the smallest form measured, at a read of up to about a second
   against the DICOM decode it replaces. The experimental VoxTell and MONAI images cannot read a
@@ -226,37 +157,23 @@
   A VISTA3D evaluation against TotalSegmentator (four CTs, median Dice 0.82-0.92, pelvic
   structures reported on chest-only scans, non-commercial weights) found no case for adding it.
 
-- **A Modal deployment can take the local server's bearer token, and `haversack remote`
-  reaches it.** `haversack modal deploy --token T`, or `HAVERSACK_SERVER_TOKEN` in its
-  environment, stores the token in the Modal Secret `<app name>-token` (through Modal's API,
-  never a command line) and gates the api the way `haversack serve --token` does, in place of
-  Modal proxy auth - whose `Modal-Key` / `Modal-Secret` headers the bundled client never
-  sent, so until now it could reach a deployment only with no auth at all. Only the api
-  function mounts the Secret; no image, worker or anonymous twin holds the token, and a
-  container asked for one that finds none refuses to start instead of serving open. The
-  deploy prints which auth it chose. Without a token nothing changes: proxy auth, as before.
-- **`HAVERSACK_SERVER_TOKEN` is the server side's token variable** - read by `haversack
-  serve` and `haversack modal deploy` after `--token`, and by nothing else. A token passed as
-  `--token` sits in the process list, where `ps` shows it to every user of the machine, for
-  as long as the command runs (a note says so); the variable does not. The client keeps
-  `HAVERSACK_TOKEN`, which no server reads, so a token exported for `remote` can never
-  become a server's or switch a deployment's auth mode.
-- **Cached embeddings are listed, and have a path.** `GET /v1/embeddings` (`haversack remote
-  embeddings`, `RemoteClient.embeddings` / `iter_embeddings`) is the segmentations listing
-  asking for the other kind: the same token, paging and computed `identity` filter, `encoder`
-  in place of `task`, a row kept only when its meta says it is an embedding, and a key round
-  trip through the encoder's own versions, so a field keyed under weights the server no longer
-  runs is not offered. A row with one source identity has `links.embedding`,
-  `/v1/<source>/<id>/<encoder>/embedding.zarr.zip` (`embedding_int8.zarr.zip` for int8): a
-  READ door beside the labels' - 200 with an `ETag` and 304, `HEAD`, 202 while a job for it
-  runs, 404 `no-store` otherwise, and a 503 rather than a 404 from a stale Modal view. It
-  computes nothing, whatever `Prefer` says: an embedding is computed by `POST /v1/jobs
-  kind=embed`, whose cache hit costs the same. The anonymous twin serves the same paths.
-  Before this a field was reachable only through the job that made it. Modal's
-  `weights_versions` and the twin's `weights_fn` take the kind, as `submit` already keyed.
-- **`{"int8": false}` is the default embedding, not a second one.** The options were kept as
-  sent, so an explicit `false` keyed apart from `{}` - the same bytes, computed twice, and
-  never found by a path, which asks for the default by `{}`.
+- **An input copy is written a slab at a time.** Transcoding a DICOM series or a gzipped NIfTI
+  held the volume several times over - 3.3 GB at peak for a 709-slice CT, where Modal's api
+  container (which transcodes uploads) has 2 GB. The compressed copy is written a chunk of 32
+  slices at a time and checked the same way: 526 MB for that CT, 130-350 MB for six others, every
+  chunk byte-identical to the whole-volume path's, at 5-90 % more time (compression is no longer
+  parallel across chunks). Other formats and the uncompressed form take the whole path as before.
+- **The streamed input copy defers to the reader wherever the two could differ.** A review found
+  four inputs it copied differently from what `io.read_image` reads - and a copy replaces the
+  original: a series whose end slice has no DICOM preamble (copied one slice short), an end slice
+  missing its position or orientation, and a CT beside a secondary capture of another series (both
+  refused by the reader, copied anyway), and a gzipped NIfTI whose `vox_offset` is below the header
+  size (copied shifted by the header's bytes). Any DICOM file the header listing cannot place now
+  hands the folder to the whole read, and such a NIfTI too. Separately, a series whose first and
+  last slices share a position read with NaN spacing; it is refused now as a duplicate slice.
+
+### Embeddings
+
 - **An encoder's output is an EMBEDDING, and the commands and protocol say so.** 0.13.0 called
   it "encode" everywhere, the word rankfield already uses for the ranked encoding of a
   segmentation's logits - so "the encoder's budget" meant rankfield's and "the encoder
@@ -274,26 +191,141 @@
   ranked side, haversack's own names say "ranked": `network.ranked_encode_budget`,
   `RANKED_ENCODE_BUDGET_FRACTION` / `_CEILING`, and the provenance field
   `ranked_encode_budget_bytes` (it was `encode_memory_budget_bytes`; no key moves).
-- **The ranked encoder's budget counts the memory torch already holds for reuse.** Right
-  after a network, `network.ranked_encode_budget` read ZERO on an M2 (`lung_vessels` on a 0.625 mm
-  CTPA: the host had 2.6 GiB available, under `device_budget_bytes`' 3 GiB headroom, while
-  2.5-2.8 GiB of what the driver held was torch's cache of the network's freed
-  activations), so every such encode ran one plane a slab. That was harmless while
-  rankfield's selection was the cost, and costs 2.09 s against 0.75 s once rankfield's Metal
-  kernel makes the selection cheap. `network.reusable_cache_bytes(device)` - the driver's
-  holding less live tensors on MPS, reserved less allocated on CUDA, where `mem_get_info`
-  also leaves that cache out - is added to the fresh reading; `device_budget_bytes` itself,
-  which the accumulator's placement reads too, is unchanged. Same run: the budget is
-  rankfield's full 1 GiB default, the peak footprint 5.87 GB as before, and the stored arrays
-  identical. With rankfield 0.3.6's kernel the fine stage's encode took 0.75-0.78 s in two
-  runs, 14.1 s on 0.13.0; one run in three read 3.7 s while the machine was swapping.
-- rankfield is pinned at `v0.3.6` (floor `>=0.3.6` in the duckn and encode extras) and feldglas
-  at `v0.1.3`, in `pyproject.toml` and CI's list.
-  rankfield 0.3.6 runs its encoder's selection as a Metal kernel on MPS and as one stable sort
-  when every class is kept (depth >= K) - byte-identical to its torch path, which stays the
-  reference: a K=5 field's encode went 13.2 s -> 0.74 s on an M2, 1.12 -> 0.49 s on an A10.
-  feldglas 0.1.3 is 0.1.2 with the same rankfield pin, which uv needs to resolve
-  `haversack[encode]`.
+- **Cached embeddings are listed, and have a path.** `GET /v1/embeddings` (`haversack remote
+  embeddings`, `RemoteClient.embeddings` / `iter_embeddings`) is the segmentations listing
+  asking for the other kind: the same token, paging and computed `identity` filter, `encoder`
+  in place of `task`, a row kept only when its meta says it is an embedding, and a key round
+  trip through the encoder's own versions, so a field keyed under weights the server no longer
+  runs is not offered. A row with one source identity has `links.embedding`,
+  `/v1/<source>/<id>/<encoder>/embedding.zarr.zip` (`embedding_int8.zarr.zip` for int8): a
+  READ door beside the labels' - 200 with an `ETag` and 304, `HEAD`, 202 while a job for it
+  runs, 404 `no-store` otherwise, and a 503 rather than a 404 from a stale Modal view. It
+  computes nothing, whatever `Prefer` says: an embedding is computed by `POST /v1/jobs
+  kind=embed`, whose cache hit costs the same. The anonymous twin serves the same paths.
+  Before this a field was reachable only through the job that made it. Modal's
+  `weights_versions` and the twin's `weights_fn` take the kind, as `submit` already keyed.
+- **`{"int8": false}` is the default embedding, not a second one.** The options were kept as
+  sent, so an explicit `false` keyed apart from `{}` - the same bytes, computed twice, and
+  never found by a path, which asks for the default by `{}`.
+- **`haversack embed` finishes cleanly again.** Since the embedding rename it wrote the field and
+  then failed printing its summary (exit 1). Refusals name things by their current names: an
+  unknown job kind lists `rankfield`, rank-field refusals say "rank field", and an unknown
+  encoder lists every encoder rather than its own family's.
+
+### Server and Modal
+
+- **Faster submits and finishes on Modal.** Profiled on a deployment with three fresh IDC CTs:
+  a submit answered from the result cache copied the result into the api container to read its
+  record, and concurrent ones queued behind each other's copies (1-4 s each); it now reads the
+  record and checks which artifacts exist in place (0.9-1.0 s end to end, from 2.4-5.4 s). The
+  route answers a submit from the record it just wrote instead of reading it back. A worker places
+  the job's own scratch copy - the fallback used once a result is evicted - after reporting done
+  rather than before (0.7-1.5 s of every job's latency), and the `.seg.nrrd` header no longer
+  sorts the whole label map to list the labels present (1 s on a 418 M-voxel map). Results,
+  keys and file bytes are unchanged.
+- **Fixes from the 2026-09-25 server review** (four adversarial reviewers, one black-box against
+  the live deployment; each fix pinned by a test that fails on 9c69466, 10 of 10 mutants killed):
+  - On Modal a submit of a key already computing JOINS that job, as the local server does and as
+    SERVER.md says; it used to start a second computation and publish the key twice (seen on the
+    live deployment). The in-flight marker is claimed atomically (`modal.Dict.put(...,
+    skip_if_exists=True)`), so two api containers cannot both win; a flight is joined only with
+    the same source credentials (recorded as a digest, never the token); what a joiner asks
+    rendered joins a queued job's list; and a joiner's DELETE releases the flight rather than
+    cancelling it for the others.
+  - An upload job's input resolves only from a committed store entry: one evicted after the
+    submit, being written again by a re-upload of the same bytes, was handed to the job half
+    written, and its labels published under the whole content's key. The job now fails naming
+    the fix (send the bytes again).
+  - `PUT` and `POST /v1/inputs` store off the event loop: the input copy made the store's adopt a
+    whole-volume decode, compression and verify, which stalled every other request to the
+    container for the length of it.
+  - A series the reader fails on with something other than a refusal (SimpleITK's error on
+    slices of different sizes) keeps its original, as before the input copy: it had been thrown
+    away - a fetched input downloaded again on every job, an upload answered 500.
+- **The review's second batch** (each pinned by a test that fails on c93b699; 13 of 13 mutants
+  killed):
+  - The embedding worker makes input copies: its image lacked pydicom (the `embed` extra has
+    none), so every cached `idc:` embedding paid the full DICOM read. It also no longer pre-reads
+    the next job's image, which the encoder discarded.
+  - The anonymous twin reloads its weights volume (throttled) when a key would be `unknown`: a
+    task a worker installed after the twin started had every result 404 on the anonymous path.
+  - A read-only result-store server reaches rank fields and nnU-Net encoders' embeddings: every
+    kind now records what a reader keys it on (only segmentations did), and the reader's versions
+    function takes the kind.
+  - Each deliverable renders on its own, and one that fails or has nothing to show is said on
+    the job (`deliverables_unavailable`), so its link goes: a failed preview used to cost the
+    statistics too, and the job kept linking both.
+  - Advice the server can follow: a missing deliverable's 404 says a plain submit renders it
+    only where a cache hit renders (the local server); on Modal it says to recompute with
+    `Cache-Control: no-cache`. A rank field's or an embedding's job artifact 404 says only a
+    segmentation renders deliverables. IDC refusals no longer point at a `/v1/resolve` that does
+    not exist.
+- **A Modal deployment can take the local server's bearer token, and `haversack remote`
+  reaches it.** `haversack modal deploy --token T`, or `HAVERSACK_SERVER_TOKEN` in its
+  environment, stores the token in the Modal Secret `<app name>-token` (through Modal's API,
+  never a command line) and gates the api the way `haversack serve --token` does, in place of
+  Modal proxy auth - whose `Modal-Key` / `Modal-Secret` headers the bundled client never
+  sent, so until now it could reach a deployment only with no auth at all. Only the api
+  function mounts the Secret; no image, worker or anonymous twin holds the token, and a
+  container asked for one that finds none refuses to start instead of serving open. The
+  deploy prints which auth it chose. Without a token nothing changes: proxy auth, as before.
+- **`HAVERSACK_SERVER_TOKEN` is the server side's token variable** - read by `haversack
+  serve` and `haversack modal deploy` after `--token`, and by nothing else. A token passed as
+  `--token` sits in the process list, where `ps` shows it to every user of the machine, for
+  as long as the command runs (a note says so); the variable does not. The client keeps
+  `HAVERSACK_TOKEN`, which no server reads, so a token exported for `remote` can never
+  become a server's or switch a deployment's auth mode.
+
+### Packaging, Python and FastSurfer
+
+- **duckn, zarr, rankfield and pydicom are core.** Every cached input is kept as a duckn copy
+  (pydicom is its DICOM dictionary) and a task's rank field is a duckn store, so the `duckn`
+  extra had become a requirement in practice; every deployed image installed it already. It
+  adds 14.3 MB. `haversack[duckn]` still installs (an empty alias), and the `embed` extra is now
+  only feldglas and nibabel. The default `segment IN -o labels.nii.gz` still imports none of
+  them. The README's install section said a plain `pip install` works for the bare install; it
+  has not since provender became core - haversack's own packages install from git tags, which
+  `uv pip install` reads and pip cannot - and now says so.
+- **FastSurfer is part of haversack.** `fastsurfer-lean` is a core dependency (under 1 MB now;
+  its weights still download on first use), so `fastsurfer:*` tasks work after a plain install
+  and a FastSurfer rank field's restore always lateralizes the cortex. The engine is on wherever
+  it is installed; `HAVERSACK_FASTSURFER=0` switches it off, and a Modal deploy builds its worker
+  unless told not to. torch's floor becomes 2.14 (the fork's). `haversack[fastsurfer]` still
+  installs (an empty alias). CI now installs it and runs the FastSurfer tests.
+- **FastSurfer installs lighter: fastsurfer-lean v2.5.4-lean3.** The fork's inference no
+  longer depends on h5py, matplotlib or torchvision (each was imported only for training code,
+  or for a one-transform `Compose`); they moved to its `train` extra. Inside haversack that
+  removes h5py (10.5 MB) - nnU-Net already brings the others - so the engine now adds under
+  1 MB to an install; on its own the fork is ~70 MB lighter. Labels are byte-identical to lean2
+  (ds000114 sub-09, run where none of the three was installed), and the FastSurfer identity
+  stays `2.5.4`, so no result key moves. Weights still download on first use (64 MB).
+- **FastSurfer's checkpoints install as a package.** The three FastSurferVINN v2.0.0 files
+  (67 MB, Apache-2.0, unmodified from Zenodo) are published as `fastsurfer-vinn-weights`
+  (github.com/mhalle/fastsurfer-vinn-weights) and installed by the `fastsurfer` extra. The Modal
+  FastSurfer image takes them from there: its build no longer fetches from Zenodo, which made
+  every deploy depend on Zenodo being up (a 504 failed two) and re-ran on every code change. A
+  run uses, in order, `HAVERSACK_FASTSURFER_CHECKPOINTS`, the installed package when its files
+  match haversack's own pinned digests, and the Zenodo-filled cache, as before.
+- **Python 3.13 and 3.14.** haversack required 3.12 because FastSurfer's command-line
+  definitions handed argparse a `str | None` as a type, which 3.14's argparse refuses. Fixed in
+  the fork (fastsurfer-lean v2.5.4-lean4, with its deprecated SciPy imports), since upstream has
+  the same code. The fast suite passes on 3.12, 3.13 and 3.14, and FastSurfer and
+  `ts.v2:total_fast` write byte-identical labels on 3.14 and 3.12. CI now runs 3.12 and 3.14.
+  The one `asyncio.iscoroutinefunction` (removed in 3.16) is `inspect`'s.
+
+### Review
+
+- **Review of the day's work, 2026-09-26.** A deploy decides every engine flag and forwards the
+  decision: with FastSurfer core, a deploy from a lean install built no FastSurfer worker while the
+  api container, which has FastSurfer, listed its tasks and would have spawned a worker that was
+  never deployed. FastSurfer's labels, its task's structures and the segments index name the 17
+  right-hemisphere cortical ids its split creates (`ctx-rh-*`, which were `label_20xx` in every
+  FastSurfer header); FastSurfer results recompute once (its engine cache epoch is 2). A restore
+  recognizes FastSurfer stores written before 0.13.0 and records what it could not do in the
+  written file's provenance, not only on stderr. Install hints no longer send anyone to plain
+  `pip` (these packages are not on PyPI) or to a FastSurfer environment (it is core). Tests now
+  hold the core dependencies, the supported Pythons against CI's matrix, CI installing every
+  git-sourced core package, and a dozen checks mutation testing showed nothing exercised.
 
 ## [0.13.0] - 2026-09-23
 
