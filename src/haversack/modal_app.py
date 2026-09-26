@@ -204,6 +204,17 @@ _RUNTIME_KNOBS = ("HAVERSACK_SHM_CACHE_GB", "HAVERSACK_JOBS_TTL_H", "HAVERSACK_R
                   "HAVERSACK_EMBED", "HAVERSACK_ENCODER_VOLUME",
                   *_engines.engine_env_vars())
 
+# Every engine flag is DECIDED here, on the deploying side, and forwarded as that decision.
+# An unset flag means "on where installed" (registry.enabled), and each container would ask
+# that of its OWN environment: since FastSurfer became core the api image has it installed
+# while a deploy from a lean install built no FastSurfer worker - the api then listed its tasks
+# and spawned a worker class that was never deployed (review, 2026-09-25). Only where this
+# module is imported to DEPLOY (modal.is_local()); in a container the forwarded value is set.
+if modal.is_local():
+    for _name, _eng in _engines.ENGINES.items():
+        if _eng.enabled_env and _eng.enabled_env not in os.environ:
+            os.environ[_eng.enabled_env] = "1" if _engines.enabled(_name) else "0"
+
 #: Read in a container but delivered by a Modal Secret, never by the image env: forwarding
 #: one would bake a credential into an image. test_every_import_time_knob_reaches_the_container
 #: exempts exactly these from the forwarding rule and fails if one is ever forwarded.

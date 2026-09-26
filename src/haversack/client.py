@@ -27,7 +27,7 @@ class RemoteClient:
             import httpx
         except ImportError as e:
             raise InputError("the remote client needs httpx: uv sync --extra remote "
-                             "(or pip install 'haversack[remote]')") from e
+                             "(or uv pip install 'haversack[remote] @ git+https://github.com/mhalle/haversack')") from e
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         self.token_source = token_source          # named in a 401, so a stale or wrong
                                                   # token is traceable to where it came from

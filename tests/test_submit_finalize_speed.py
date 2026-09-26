@@ -85,14 +85,21 @@ def test_the_route_answers_a_submit_from_the_record_in_hand(monkeypatch, tmp_pat
     assert body["state"] == mm.ModalExecutor().status_of(body["id"])["state"]
 
 
-def test_status_of_record_is_status_of(monkeypatch):
+def test_status_of_record_says_what_a_status_says(monkeypatch):
+    """Against a literal, not against status_of - which calls status_of_record (the first
+    version of this test compared the function with itself)."""
     from haversack import modal_app as m
     rec = {"id": "j", "task": "t", "state": "done", "result": {"a": 1}, "kind": "rankfield",
-           "cache_key": "k", "secret_field": "x", "tokens_id": "y"}
+           "cache_key": "k", "version": "v1", "deliverables": ["preview"],
+           "deliverables_unavailable": {"preview": "x"}, "secret_field": "x", "tokens_id": "y",
+           "call_id": "fc", "source": [{"kind": "idc"}]}
     monkeypatch.setattr(m, "jobs_dict", {"j": rec})
     ex = m.ModalExecutor()
-    assert ex.status_of_record(rec) == ex.status_of("j")
-    assert "tokens_id" not in ex.status_of_record(rec)
+    assert ex.status_of_record(rec) == {
+        "id": "j", "task": "t", "state": "done", "result": {"a": 1}, "kind": "rankfield",
+        "cache_key": "k", "version": "v1", "deliverables": ["preview"],
+        "deliverables_unavailable": {"preview": "x"}}
+    assert ex.status_of("j") == ex.status_of_record(rec)
 
 
 # -- the worker: the job's own scratch copy -------------------------------------------------
@@ -162,3 +169,56 @@ def test_the_header_names_the_present_labels_without_sorting_the_volume(monkeypa
     plain = _header(arr, monkeypatch, no_scipy=True)
     strip = lambda d: {k: v for k, v in d.items() if not k.endswith("_Extent")}   # noqa: E731
     assert strip(md) == strip(plain)
+
+
+def test_a_hit_submit_racing_reloads_never_misses(monkeypatch, tmp_path):
+    """`_cache_record` reads under `_cache_view` shared: a reload in another thread hides the
+    volume (measured on Modal, 2026-09-19), and a lookup without the lock missed and was believed
+    - a hit answered as a miss. The test_stale_volume_view race, aimed at the submit's lookup."""
+    import threading
+
+    from haversack.serve import ResultCache
+    from test_stale_volume_view import _HidingVolume, _NrrdSeg
+    m, jobs, vol, ex, client = _modal(monkeypatch, tmp_path, refusals=0)
+    src = tmp_path / "worker" / RESULT_NAME
+    src.parent.mkdir(parents=True)
+    _NrrdSeg().save(src)
+    ResultCache(m.CACHE_ROOT).put("k" * 64, src, {"outputs": []}, {"task": "total_fast"})
+    monkeypatch.setattr(m, "cache_vol", _HidingVolume(tmp_path / "cache"))
+    monkeypatch.setattr(m, "CACHE_FRESH_S", 0.0)          # every lookup asks for a reload
+    misses, errors = [], []
+
+    def ask():
+        for _ in range(40):
+            try:
+                if ex._cache_record("k" * 64) is None:
+                    misses.append(1)
+            except Exception as e:             # noqa: BLE001
+                errors.append(e)
+    threads = [threading.Thread(target=ask) for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert not errors, errors[:3]
+    assert not misses, f"{len(misses)} of 320 hit lookups missed"
+
+
+def test_a_failed_scratch_copy_after_done_leaves_the_job_done(worker):
+    """The copy lands after `done`; if it fails, the job is still done and its entry served -
+    an exception there reached `_execute_job`'s handler with `done` already emitted."""
+    m, jobs, scratch, cache = worker
+    real = scratch.commit
+    calls = []
+
+    def commit():
+        calls.append(jobs["kf"]["state"])
+        if jobs["kf"]["state"] == "done":
+            raise OSError("volume gone")
+        return real()
+    scratch.commit = commit
+    _submit(m, jobs, "kf")
+    m._execute_job(_Ctx(), "kf")
+    for t in threading.enumerate():
+        if t.name == "haversack-artifacts":
+            t.join(5)
+    assert "done" in calls and jobs["kf"]["state"] == "done", jobs["kf"].get("error")
+    assert ResultCache(m.CACHE_ROOT).get("key-kf") is not None

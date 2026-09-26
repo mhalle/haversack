@@ -6958,7 +6958,7 @@ def main_serve(args) -> int:
         import uvicorn
     except ImportError as e:
         raise InputError("the server needs the serve extra: uv sync --extra serve "
-                         "(or pip install 'haversack[serve]')") from e
+                         "(or uv pip install 'haversack[serve] @ git+https://github.com/mhalle/haversack')") from e
     import tempfile
 
     from .segmenter import Segmenter

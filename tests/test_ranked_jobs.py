@@ -169,6 +169,7 @@ def test_refusals_name_their_cause(tmp_path, monkeypatch):
     monkeypatch.setattr(ranked_output, "supports_store_output", lambda task: False)
     r = post(client)
     assert r.status_code == 422 and "no_distribution" in r.text
+    assert "rank field" in r.json()["detail"]["message"]            # the wire name, not "ranked"
     assert store.calls == [] and seg.calls == []
     assert set((tmp_path / "work").iterdir()) == before, "a refused submit leaves no job directory"
     ex.close()
@@ -193,7 +194,7 @@ def test_a_server_that_cannot_write_a_store_says_so_before_any_job_exists(tmp_pa
     assert ex.ranked_stores is False
     before = set((tmp_path / "work").iterdir())
     r = post(client)
-    assert r.status_code == 501 and ".duckn.zip" in r.text
+    assert r.status_code == 501 and ".duckn.zip" in r.text and "rank fields" in r.text
     assert set((tmp_path / "work").iterdir()) == before and store.calls == []
     ex.close()
 

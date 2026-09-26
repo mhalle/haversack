@@ -956,7 +956,7 @@
             "version": "2.5.4"
           }
         ],
-        "table_sha256": "068ec41d30d52c1c20fe84e04911119d9aa52bb82adbeca55e155edcab90daed",
+        "table_sha256": "6fa3c37189806531e818e5a01c36eae6f446222ed4837e5345a374e52dd5ec61",
         "modality": "MR (T1)",
         "listing": "1"
       },
@@ -1226,12 +1226,36 @@
           "value": 2002
         },
         {
+          "id": "ctx-rh-caudalmiddlefrontal",
+          "value": 2003
+        },
+        {
           "id": "ctx-rh-cuneus",
           "value": 2005
         },
         {
+          "id": "ctx-rh-entorhinal",
+          "value": 2006
+        },
+        {
+          "id": "ctx-rh-fusiform",
+          "value": 2007
+        },
+        {
+          "id": "ctx-rh-inferiorparietal",
+          "value": 2008
+        },
+        {
+          "id": "ctx-rh-inferiortemporal",
+          "value": 2009
+        },
+        {
           "id": "ctx-rh-isthmuscingulate",
           "value": 2010
+        },
+        {
+          "id": "ctx-rh-lateraloccipital",
+          "value": 2011
         },
         {
           "id": "ctx-rh-lateralorbitofrontal",
@@ -1246,12 +1270,28 @@
           "value": 2014
         },
         {
+          "id": "ctx-rh-middletemporal",
+          "value": 2015
+        },
+        {
           "id": "ctx-rh-parahippocampal",
           "value": 2016
         },
         {
           "id": "ctx-rh-paracentral",
           "value": 2017
+        },
+        {
+          "id": "ctx-rh-parsopercularis",
+          "value": 2018
+        },
+        {
+          "id": "ctx-rh-parsorbitalis",
+          "value": 2019
+        },
+        {
+          "id": "ctx-rh-parstriangularis",
+          "value": 2020
         },
         {
           "id": "ctx-rh-pericalcarine",
@@ -1274,13 +1314,41 @@
           "value": 2025
         },
         {
+          "id": "ctx-rh-rostralanteriorcingulate",
+          "value": 2026
+        },
+        {
+          "id": "ctx-rh-rostralmiddlefrontal",
+          "value": 2027
+        },
+        {
           "id": "ctx-rh-superiorfrontal",
           "value": 2028
+        },
+        {
+          "id": "ctx-rh-superiorparietal",
+          "value": 2029
+        },
+        {
+          "id": "ctx-rh-superiortemporal",
+          "value": 2030
+        },
+        {
+          "id": "ctx-rh-supramarginal",
+          "value": 2031
+        },
+        {
+          "id": "ctx-rh-transversetemporal",
+          "value": 2034
+        },
+        {
+          "id": "ctx-rh-insula",
+          "value": 2035
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-26",
+        "by": "haversack 0.13.0"
       }
     },
     "monai:brats_mri_segmentation": {

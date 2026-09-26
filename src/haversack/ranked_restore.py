@@ -43,6 +43,8 @@ class Restored:
     interp: str
     roi: tuple | None = None
     notes: tuple = ()
+    #: the store is FastSurfer's (``is_fastsurfer``): the split ran unless a note says otherwise
+    fastsurfer: bool = False
 
     def image(self, orientation: str | None = "input"):
         """A SimpleITK image of the labels: in the input's own orientation when the store
@@ -251,10 +253,24 @@ def restore(store, *, grid="input", interp: str = "linear", roi=None, device="au
             raise
         labels, notes = _engine_rules(parts, r.labels, roi)
         return Restored(labels=labels, grid=r.grid, geometry=r.geometry, frame=r.frame,
-                        parts=r.parts, interp=r.interp, roi=r.roi, notes=notes)
+                        parts=r.parts, interp=r.interp, roi=r.roi, notes=notes,
+                        fastsurfer=is_fastsurfer(parts))
     finally:
         if owned:
             st.close()
+
+
+def is_fastsurfer(parts) -> bool:
+    """Whether a store's field is FastSurfer's. ``labels_named_by`` says so on stores written
+    since 0.13.0; one written before carries only the task and the softmax block's engine, and
+    was left unlateralized with no word said (review, 2026-09-25)."""
+    meta = parts[0].field.meta
+    if str(meta.get("labels_named_by") or "").startswith("fastsurfer:"):
+        return True
+    if str(meta.get("task") or "").startswith("fastsurfer:"):
+        return True
+    softmax = meta.get("softmax")
+    return isinstance(softmax, dict) and softmax.get("engine") == "fastsurfer"
 
 
 def _engine_rules(parts, labels, roi):
@@ -267,8 +283,7 @@ def _engine_rules(parts, labels, roi):
     with the left ids until this applied FastSurfer's own rule (2026-09-25; with it the input
     grid restore of the ds000114 T1 store matches the served labels, see the tests). The rule
     reads the whole brain, so an roi restore is left as the field says, and says so."""
-    task = str(parts[0].field.meta.get("labels_named_by") or "")
-    if not task.startswith("fastsurfer:"):
+    if not is_fastsurfer(parts):
         return labels, ()
     if roi is not None:
         return labels, ("cortical parcels are not lateralized in an roi restore (FastSurfer's rule "
@@ -324,8 +339,18 @@ def main_cli(argv=None) -> int:
         ext = st.root.attrs.asdict()["duckn"]["extensions"]
     names = {_value(s): s.get("name", "") for s in (ext.get("seg") or {}).get("segments", [])
              if _value(s) is not None and not _is_background(s)}
+    if res.fastsurfer and not res.notes:
+        # the split made right-hemisphere ids no stored segment names (the store holds the
+        # network's channels): name them as FastSurfer's own labels output names them
+        from .engines.fastsurfer import output_lut
+        lut = output_lut()
+        for v in set(np.unique(res.labels).tolist()) - set(names) - {0}:
+            if v in lut:
+                names[int(v)] = lut[v]["name"]
     prov = {"restored_from": str(a.store), "interp": a.interp, "grid": list(res.grid.shape),
             "spacing": list(res.grid.spacing), "parts": res.parts,
+            # a deviation is never only on stderr (house rule): what this restore did not do
+            **({"notes": list(res.notes)} if res.notes else {}),
             "haversack": (ext.get("haversack") or {}).get("haversack_version")}
     Segmentation(labels=img, schema=LabelSchema(names=names), grid=res.grid, spec=None,
                  provenance=prov).save(out)

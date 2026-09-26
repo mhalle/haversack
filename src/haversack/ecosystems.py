@@ -409,9 +409,10 @@ class ModelEcosystem:
             eng = _registry.ENGINES[self.engine]
             raise UnsupportedModel(
                 f"{self.name} is an engine, not an nnU-Net task: it runs on the "
-                f"{self.engine} engine, which has no TaskSpec. Run it from the engine's "
-                f"own environment (uv sync --extra {eng.extra}; Segmenter routes it there) "
-                f"or deploy with {eng.enabled_env}=1 to serve it from an engine worker.")
+                f"{self.engine} engine, which has no TaskSpec: run it through Segmenter (or "
+                f"`haversack segment`), which routes it to the engine - where the engine is "
+                f"missing, {_registry.install_hint(eng)} - or deploy with {eng.enabled_env}=1 "
+                f"to serve it from an engine worker.")
         raise NotImplementedError
 
     def info(self, task: str, root) -> dict:
@@ -1752,8 +1753,8 @@ class FastSurferEcosystem(ImageBakedEcosystem):
     def structures(self) -> list:
         """The real DKTatlas label names, from the engine's own LUT - so a client
         can enumerate them like any other task's."""
-        from .engines.fastsurfer import load_lut
-        return sorted(v["name"] for v in load_lut().values())
+        from .engines.fastsurfer import output_lut      # what it writes: split, both hemispheres
+        return sorted(v["name"] for v in output_lut().values())
 
     #: FastSurfer's repository (the pinned fork changes packaging only): the identity of its
     #: class lists. `FastSurferCNN/config/FastSurfer_ColorLUT.tsv` is byte-identical at every

@@ -311,14 +311,16 @@ def test_a_folder_the_listing_cannot_place_takes_the_whole_read(tmp_path, make):
         assert got is not None and nio.read_image(got).GetSize() == expected
 
 
-def test_a_nifti_whose_data_offset_is_below_the_header_is_read_whole(tmp_path):
+@pytest.mark.parametrize("offset", [0.0, 100.0, 347.0])
+def test_a_nifti_whose_data_offset_is_below_the_header_is_read_whole(tmp_path, offset):
     """niftilib reads a single file from its 348-byte header's end when vox_offset says less;
-    seeking to vox_offset read header bytes as voxels (0: a copy shifted by 174 values)."""
+    seeking to vox_offset read header bytes as voxels (0: a copy shifted by 174 values). Every
+    offset below the format's minimum, not only 0 - a guard at `>= 1` passed the first test."""
     from haversack import io as nio
     a = (np.arange(10 * 6 * 5) % 997).astype("int16").reshape(10, 6, 5) + 3
     src = _nifti_gz(tmp_path / "v.nii.gz", a)
     raw = bytearray(gzip.decompress(src.read_bytes()))
-    raw[108:112] = struct.pack("<f", 0.0)
+    raw[108:112] = struct.pack("<f", offset)
     src.write_bytes(gzip.compress(bytes(raw)))
     ref = sitk.GetArrayFromImage(nio.read_image(src))
     assert input_stream.stream_of(src) is None
@@ -340,3 +342,66 @@ def test_a_duplicated_end_slice_is_refused_not_read_with_nan_geometry(tmp_path):
     ds.save_as(d / "AA0000.dcm", enforce_file_format=True)
     with pytest.raises(InputError, match="duplicate"):
         nio.read_image(d)
+
+
+def test_a_nifti_scaled_only_by_an_intercept_is_read_whole(tmp_path):
+    """slope 1, intercept 100: SimpleITK reads the stored values plus 100; the stream would have
+    copied them raw, and its check compares the copy with the stream, never with the reader."""
+    from haversack import io as nio
+    a = np.arange(10 * 6 * 5, dtype=np.float32).reshape(10, 6, 5)
+    src = _nifti_gz(tmp_path / "v.nii.gz", a)
+    raw = bytearray(gzip.decompress(src.read_bytes()))
+    raw[116:120] = struct.pack("<f", 100.0)
+    src.write_bytes(gzip.compress(bytes(raw)))
+    ref = sitk.GetArrayFromImage(nio.read_image(src))
+    assert ref.min() == 100.0
+    assert input_stream.stream_of(src) is None
+    got = ic.transcode(src, tmp_path / "e")
+    np.testing.assert_array_equal(sitk.GetArrayFromImage(nio.read_image(got)), ref)
+
+
+def test_a_nifti_with_a_header_extension_streams_from_its_data(tmp_path, monkeypatch):
+    """An extension moves the data past byte 352; the stream seeks to vox_offset and must equal
+    the whole copy (a stream reading from 352 took the extension's bytes as voxels)."""
+    a = (np.arange(10 * 6 * 5) % 997).astype("int16").reshape(10, 6, 5)
+    src = _nifti_gz(tmp_path / "v.nii.gz", a)
+    raw = bytearray(gzip.decompress(src.read_bytes()))
+    ext = struct.pack("<ii", 16, 0) + b"extension-body"[:8]         # esize 16, ecode 0
+    raw = raw[:348] + bytes([1, 0, 0, 0]) + ext + raw[352:]
+    raw[108:112] = struct.pack("<f", 352.0 + len(ext))
+    src.write_bytes(gzip.compress(bytes(raw)))
+    assert input_stream.stream_of(src) is not None
+    _same_file(*_both(src, tmp_path, monkeypatch))
+
+
+def test_a_stray_text_file_does_not_cost_the_slab_path(tmp_path):
+    """Only a DICOM file the listing cannot place hands the folder over; a README beside the
+    series is not DICOM and is passed over, as GDCM passes it over."""
+    src = write_series(tmp_path / "s", n=10)
+    (src / "notes.txt").write_text("acquired on the old scanner\n")
+    assert input_stream.stream_of(src) is not None
+
+
+def _placed(tmp_path, monkeypatch):
+    seen = []
+    real = ic._check_streamed
+    monkeypatch.setattr(ic, "_check_streamed", lambda *a: (seen.append(a), real(*a)))
+    assert ic.transcode(write_series(tmp_path / "s", n=10), tmp_path / "e") is not None
+    _, stream, digests = seen[0]
+    return real, (ic.copy_path(tmp_path / "e"), stream, digests)       # the PLACED copy
+
+
+def test_the_check_catches_a_copy_placed_elsewhere(tmp_path, monkeypatch):
+    import dataclasses
+    real, (path, stream, digests) = _placed(tmp_path, monkeypatch)
+    moved = dataclasses.replace(stream, origin=tuple(v + 1.0 for v in stream.origin))
+    with pytest.raises(ValueError, match="geometry"):
+        real(path, moved, digests)
+
+
+def test_the_check_catches_a_copy_of_another_shape(tmp_path, monkeypatch):
+    import dataclasses
+    real, (path, stream, digests) = _placed(tmp_path, monkeypatch)
+    other = dataclasses.replace(stream, shape=(stream.shape[0] + 1,) + tuple(stream.shape[1:]))
+    with pytest.raises(ValueError, match="layout"):
+        real(path, other, digests)

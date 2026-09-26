@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+- **Review of the day's work, 2026-09-26.** A deploy decides every engine flag and forwards the
+  decision: with FastSurfer core, a deploy from a lean install built no FastSurfer worker while the
+  api container, which has FastSurfer, listed its tasks and would have spawned a worker that was
+  never deployed. FastSurfer's labels, its task's structures and the segments index name the 17
+  right-hemisphere cortical ids its split creates (`ctx-rh-*`, which were `label_20xx` in every
+  FastSurfer header); FastSurfer results recompute once (its engine cache epoch is 2). A restore
+  recognizes FastSurfer stores written before 0.13.0 and records what it could not do in the
+  written file's provenance, not only on stderr. Install hints no longer send anyone to plain
+  `pip` (these packages are not on PyPI) or to a FastSurfer environment (it is core). Tests now
+  hold the core dependencies, the supported Pythons against CI's matrix, CI installing every
+  git-sourced core package, and a dozen checks mutation testing showed nothing exercised.
 - **The streamed input copy defers to the reader wherever the two could differ.** A review found
   four inputs it copied differently from what `io.read_image` reads - and a copy replaces the
   original: a series whose end slice has no DICOM preamble (copied one slice short), an end slice

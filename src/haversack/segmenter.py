@@ -109,9 +109,8 @@ class Segmenter:
         if not registry.available(eng.name):
             raise UnsupportedModel(
                 f"{task} runs on the {eng.name} engine, which is not installed in this "
-                f"environment. It has its own: UV_PROJECT_ENVIRONMENT=.venvs/{eng.name} "
-                f"uv sync --extra {eng.extra} --extra serve, then run haversack from it "
-                f"(or deploy with {eng.enabled_env}=1 to run it on Modal).")
+                f"environment: {registry.install_hint(eng)} (or deploy with "
+                f"{eng.enabled_env}=1 to run it on Modal).")
         # An engine task never reaches catalog.get(), where an nnU-Net task's `@version` is
         # honored, so a pin was dropped here and the one build there is ran instead.
         # prepare() is the catalog's own door for a pinned version: it refuses one this

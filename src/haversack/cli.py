@@ -69,9 +69,8 @@ def _need_inference_stack(task=None) -> None:
     if not missing:
         return
     if eng is not None and eng.name != registry.NNUNETV2:
-        raise InputError(f"{task} runs on the {eng.name} engine ({', '.join(missing)} not installed), "
-                         f"which has its own environment: UV_PROJECT_ENVIRONMENT=.venvs/{eng.name} "
-                         f"uv sync --extra {eng.extra} --extra serve, then run haversack from it")
+        raise InputError(f"{task} runs on the {eng.name} engine ({', '.join(missing)} not installed): "
+                         f"{registry.install_hint(eng)}")
     raise InputError(f"segmenting needs {', '.join(missing)}, not installed here: {INSTALL_HINT}")
 
 
@@ -329,7 +328,7 @@ def _command_line() -> click.Group:
         epilog=_verbatim("""examples:
   haversack segment ct.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
   haversack segment dicom_dir/ --task ts.v2:total --spacing 1 -o labels.nii.gz
-  haversack segment t1.nii.gz --task fastsurfer:asegdkt -o brain.seg.nrrd      (from the fastsurfer venv)
+  haversack segment t1.nii.gz --task fastsurfer:asegdkt -o brain.seg.nrrd
   haversack segment "zenodo:<recid>/amos22.zip!amos22/imagesVa/amos_0575.nii.gz" --task mrsegmentator:base -o amos.seg.nrrd
   haversack segment a.nii.gz b.nii.gz dicom_dir/ --task ts.v2:total_fast --format seg.nrrd -o out/   (batch: out/<name>_total_fast.seg.nrrd)"""),
         params=[
@@ -1116,7 +1115,7 @@ def _cmd_modal(args) -> int:
         import modal  # noqa: F401
     except ImportError:
         print("needs the modal extra: uv sync --extra modal "
-              "(or pip install 'haversack[modal]')", file=sys.stderr)
+              "(or uv pip install 'haversack[modal] @ git+https://github.com/mhalle/haversack')", file=sys.stderr)
         return 2
     import os
     import subprocess
@@ -1189,7 +1188,7 @@ def _cmd_serve_store(args) -> int:
         import uvicorn
     except ImportError as e:
         raise InputError("the server needs the serve extra: uv sync --extra serve "
-                         "(or pip install 'haversack[serve]')") from e
+                         "(or uv pip install 'haversack[serve] @ git+https://github.com/mhalle/haversack')") from e
     from .objectcache import read_only_app
     from .serve import _version
     local = Path(args.cache_dir or tempfile.mkdtemp(prefix="haversack-serve-store-"))

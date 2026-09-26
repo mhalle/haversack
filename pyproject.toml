@@ -124,6 +124,10 @@ fastsurfer = []
 # it is shown to install beside the others. The package
 # brings its own tree (nnunetv2, dynamic-network-architectures, transformers,
 # huggingface_hub); weights + the precomputed text-embedding bank come from the HF hub.
+# PROJECT MODE ONLY (`uv sync --extra voxtell`, as its Modal image does): voxtell pins
+# torch<2.9, which only [tool.uv] override-dependencies lifts, and `uv pip install
+# 'haversack[voxtell]'` does not read it - with fastsurfer-lean core (torch>=2.14) that no
+# longer resolves (review, 2026-09-25). Experimental, Modal-only; no README line installs it.
 voxtell = ["voxtell"]
 # The MONAI engine: a CATALOG of model-zoo bundles, not one model. `monai` brings the
 # runtime; the rest is the union of the curated bundles' own required_packages_version

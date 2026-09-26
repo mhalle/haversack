@@ -99,6 +99,10 @@ class Engine:
     #: The extra that installs that runtime, in its own environment (pyproject's
     #: [tool.uv] conflicts): UV_PROJECT_ENVIRONMENT=.venvs/<name> uv sync --extra <extra>.
     extra: str | None = None
+    #: The runtime is a CORE dependency (FastSurfer, 2026-09-25): ``extra`` is then an empty
+    #: alias, and a missing runtime means an install made without haversack's dependencies,
+    #: not an engine environment to create - :func:`install_hint` answers accordingly.
+    core: bool = False
     #: The DISTRIBUTION names this engine brings, for `/v1/version`'s package
     #: report - which pins the rev a deployment is actually running. Not
     #: derivable from `runtime_module`: the import name and the distribution
@@ -180,10 +184,14 @@ def _fastsurfer_compute(image, **kw):
 def _fastsurfer_label_names(task: str) -> dict:
     """FreeSurfer aparc+aseg id -> name, read from FastSurfer's own color LUT.
 
-    Ignores ``task``: this engine has one label namespace whatever it is asked for.
+    Ignores ``task``: this engine has one label namespace whatever it is asked for. The OUTPUT
+    table (``output_lut``: the network's 79 plus the 17 right-hemisphere ids its split creates),
+    since 2026-09-25 - what the labels carry, what the task lists as its structures, and what the
+    segments index finds. The ranked builder reads it too, and names only the channels a store
+    holds, so the extra ids are never segments of a store.
     """
-    from .fastsurfer import label_names
-    return label_names()
+    from .fastsurfer import output_lut
+    return {i: v["name"] for i, v in output_lut().items()}
 
 
 def _synthstrip_identity() -> list[dict]:
@@ -228,15 +236,18 @@ ENGINES: dict[str, Engine] = {
         enabled_env="HAVERSACK_FASTSURFER",
         weights_identity=_fastsurfer_identity,
         compute=_fastsurfer_compute,
-        runtime_module="FastSurferCNN", extra="fastsurfer",
+        runtime_module="FastSurferCNN", extra="fastsurfer", core=True,
         dist=("fastsurfer-lean",),
         label_names=_fastsurfer_label_names,
         cache_store=("fastsurfer-checkpoints", "HAVERSACK_FASTSURFER_CHECKPOINTS"),
         behavior=GRADED_RESTORE,
         processing_knobs=False,
         # 1 (2026-09-12): inputs finer than 0.7 mm are processed at 0.7 (VOX_FLOOR_MM in
-        # engines/fastsurfer.py), where they used to run on FastSurfer's unfloored "min"
-        cache_epoch="1",
+        # engines/fastsurfer.py), where they used to run on FastSurfer's unfloored "min".
+        # 2 (2026-09-25): the 17 right-hemisphere cortical ids the split creates are named
+        # (`fastsurfer.output_lut`) where the header said `label_2003` ...: same voxels, other
+        # header bytes - an engine-only change, so this epoch and not serve.CACHE_EPOCH
+        cache_epoch="2",
         description="FastSurferVINN 2.5D view-aggregation parcellation",
     ),
     "synthstrip": Engine(
@@ -318,12 +329,28 @@ def available(name: str) -> bool:
     return eng.runtime_module is None or importlib.util.find_spec(eng.runtime_module) is not None
 
 
+#: How haversack itself is installed with its dependencies (uv reads the git sources its own
+#: packages come from; plain pip cannot, and these names are not on PyPI).
+REINSTALL = "uv pip install 'haversack @ git+https://github.com/mhalle/haversack'"
+
+
+def install_hint(eng: Engine) -> str:
+    """How to get ``eng``'s runtime where it is missing - one answer for every message that
+    says so (three sites had their own, and all three kept telling people to build a
+    FastSurfer environment after FastSurfer became core)."""
+    if eng.core:
+        return ("it comes with haversack, and this environment was installed without "
+                f"haversack's dependencies (a lean or --no-deps install): {REINSTALL}")
+    return (f"it has its own environment: UV_PROJECT_ENVIRONMENT=.venvs/{eng.name} "
+            f"uv sync --extra {eng.extra} --extra serve, then run haversack from it")
+
+
 def enabled(name: str) -> bool:
     """Whether ``name`` can run here. The environment flag decides when it is set
     (``=1`` on, ``=0`` off - the Modal deploy sets it per image); when it is unset,
     an engine that can run in-process is enabled exactly when its runtime is
-    installed, so a per-engine venv (``uv sync --extra fastsurfer``) needs no
-    further switch. Read on every call (never cached) so a test can monkeypatch
+    installed, so a core engine (FastSurfer) or a per-engine venv (``uv sync --extra
+    synthstrip``) needs no further switch. Read on every call (never cached) so a test can monkeypatch
     either signal; callers that must decide at import time - Modal resolves
     decorators then - snapshot the result themselves."""
     eng = ENGINES[name]

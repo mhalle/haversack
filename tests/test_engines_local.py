@@ -97,7 +97,8 @@ def test_segmenter_refuses_an_engine_task_without_its_runtime(monkeypatch, tmp_p
     monkeypatch.delenv("HAVERSACK_FASTSURFER", raising=False)
     _spec_says(monkeypatch, False)
     from haversack.segmenter import Segmenter
-    with pytest.raises(UnsupportedModel, match="uv sync --extra fastsurfer"):
+    # FastSurfer is core: its absence is a lean install, never an engine venv to build
+    with pytest.raises(UnsupportedModel, match="uv pip install 'haversack @ git"):
         Segmenter(weights=tmp_path).segment("t1.nii.gz", "fastsurfer:asegdkt")
 
 
@@ -117,7 +118,8 @@ def test_cli_stack_check_is_per_engine(monkeypatch, tmp_path, capsys):
     rc = cli.main(["segment", str(tmp_path / "t1.nii.gz"), "--task", "fastsurfer:asegdkt",
                    "-o", str(tmp_path / "out.seg.nrrd")])
     err = capsys.readouterr().err
-    assert rc == 2 and "fastsurfer engine" in err and "--extra fastsurfer" in err
+    assert rc == 2 and "fastsurfer engine" in err and "uv pip install 'haversack @ git" in err
+    assert ".venvs/fastsurfer" not in err                 # core since 2026-09-25
     assert "lean install" not in err                      # the wrong remedy would mislead
 
 

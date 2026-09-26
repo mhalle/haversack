@@ -75,6 +75,28 @@ SPLIT_AFTER_THE_NETWORK = frozenset({
     1026, 1027, 1029, 1030, 1031, 1034, 1035})
 
 
+def output_lut() -> dict[int, dict]:
+    """:func:`load_lut` plus the right-hemisphere entries the split CREATES: ``id + 1000`` for
+    each id in :data:`SPLIT_AFTER_THE_NETWORK`, named ``ctx-rh-*`` after its left twin with the
+    twin's color, as FreeSurfer's own table names and colors them. For what FastSurfer WRITES -
+    split labels, and a store restored with the split - never for the network's channels,
+    which the shipped table (FastSurfer's own, held equal to it by a test) describes exactly.
+    Without these the 17 split ids were written as ``label_2003`` ... (review, 2026-09-25)."""
+    lut = load_lut()
+    for v in SPLIT_AFTER_THE_NETWORK:
+        twin = lut.get(v)
+        if twin and v + 1000 not in lut:
+            lut[v + 1000] = {**twin, "name": twin["name"].replace("ctx-lh-", "ctx-rh-", 1)}
+    return lut
+
+
+def segment_names(values) -> dict[int, str]:
+    """The names FastSurfer's labels output writes for ``values`` (0 left out): the split's
+    right-hemisphere ids included (:func:`output_lut`); an id no table knows as ``label_<id>``."""
+    lut = output_lut()
+    return {int(v): lut.get(int(v), {}).get("name", f"label_{int(v)}") for v in values if int(v)}
+
+
 def lateralized(value: int) -> bool:
     """Whether a network CHANNEL with this id is exactly the structure its id names - false
     for the ids :data:`SPLIT_AFTER_THE_NETWORK` lists, which are bilateral until the split."""
@@ -712,9 +734,7 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", batch_size: int = 8
     out_img = sitk.GetImageFromArray(labels_arr.astype(np.uint16))
     out_img.CopyInformation(t1_img)                   # input grid + orientation
 
-    lut = load_lut()
-    present = sorted(int(v) for v in np.unique(labels_arr) if v)
-    names = {v: lut.get(v, {}).get("name", f"label_{v}") for v in present}
+    names = segment_names(np.unique(labels_arr))
     grid = Grid(shape=tuple(int(s) for s in labels_arr.shape),
                 spacing=tuple(float(s) for s in reversed(t1_img.GetSpacing())),
                 origin=tuple(float(o) for o in reversed(t1_img.GetOrigin())))

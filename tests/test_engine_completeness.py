@@ -125,9 +125,19 @@ class EveryEngineDeclaresWhatInstallsIt(unittest.TestCase):
         problems = []
         for name, e in _optional_engines().items():
             if name in CORE_RUNTIME:
-                if not set(e.dist) & (core - {"torch", "numpy", "scipy", "scikit-image"}):
-                    problems.append(f"{name}: a core engine's dist={e.dist} names no core "
-                                    "dependency of its own")
+                # The distribution its runtime module is IMPORTED from - asked of the installed
+                # metadata, not of a list of shared names: `dist=("fastsurfer-lan", "pydicom")`
+                # passed the first version of this rule, anchored on a core package that is not
+                # FastSurfer's (review, 2026-09-25). The core list still has to name it.
+                import importlib.metadata as md
+                owners = md.packages_distributions().get(e.runtime_module or "", [])
+                owners = {o.lower() for o in owners}
+                if not owners:
+                    problems.append(f"{name}: its runtime module {e.runtime_module!r} is core "
+                                    "but not installed here, so its distribution is unknown")
+                elif not owners & {d.lower() for d in e.dist} or not owners & core:
+                    problems.append(f"{name}: dist={e.dist} must name {sorted(owners)}, the core "
+                                    f"distribution {e.runtime_module!r} is imported from")
                 continue
             own = extras.get(e.extra or "", set()) - core
             if not (set(e.dist) & own):
