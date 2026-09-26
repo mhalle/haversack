@@ -88,6 +88,19 @@ def _series_geometry(files) -> tuple[tuple, tuple, tuple]:
         raise InputError("DICOM series mixes image orientations or pixel spacings; "
                          "not a single uniform volume")
     row, col = iops[0][:3], iops[0][3:]
+    n_hat, dz = _slice_axis(ipps, row, col)
+    direction = np.stack([row, col, n_hat], axis=1)    # columns = x, y, z axes
+    ps = spacings[0]                                    # (row spacing, column spacing)
+    return (tuple(float(v) for v in ipps[0]),
+            tuple(float(v) for v in direction.ravel()),
+            (float(ps[1]), float(ps[0]), dz))
+
+
+def _slice_axis(ipps, row, col) -> tuple[np.ndarray, float]:
+    """``(unit slice normal, step in mm)`` of positions ``ipps`` (n x 3, in slice order) on
+    planes spanned by ``row`` and ``col`` - or :class:`InputError` when they are not one uniform
+    orthogonal grid. The rule :func:`_series_geometry` applies to a series and
+    :func:`_check_frame_positions` to a multi-frame file's frames (2026-09-26)."""
     span = ipps[-1] - ipps[0]
     extent = float(np.linalg.norm(span))
     if not extent > 0:
@@ -113,11 +126,64 @@ def _series_geometry(files) -> tuple[tuple, tuple, tuple]:
         raise InputError("non-uniform slice spacing "
                          f"(steps {steps.min():.3f}-{steps.max():.3f} mm): "
                          "missing or duplicate slices")
-    direction = np.stack([row, col, n_hat], axis=1)    # columns = x, y, z axes
-    ps = spacings[0]                                    # (row spacing, column spacing)
-    return (tuple(float(v) for v in ipps[0]),
-            tuple(float(v) for v in direction.ravel()),
-            (float(ps[1]), float(ps[0]), dz))
+    return n_hat, dz
+
+
+def _frame_positions(p) -> np.ndarray | None:
+    """Each frame's Image Position (Patient) from a multi-frame file's Per-frame Functional
+    Groups (header only), in frame order - or None when not every frame states one (then there
+    is nothing to check the reader against)."""
+    try:
+        import pydicom
+        ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=True)
+        frames = ds.get("PerFrameFunctionalGroupsSequence")
+        if not frames:
+            return None
+        out = []
+        for item in frames:
+            plane = item.get("PlanePositionSequence")
+            if not plane or "ImagePositionPatient" not in plane[0]:
+                return None
+            out.append([float(v) for v in plane[0].ImagePositionPatient])
+    except Exception:                          # noqa: BLE001 - an unreadable header (or no
+        return None                            # pydicom: a lean install) states nothing
+    return np.asarray(out, dtype=np.float64)
+
+
+def _check_frame_positions(p, image) -> None:
+    """Refuse a multi-frame DICOM file whose frames SimpleITK places where they were not
+    acquired (2026-09-26). GDCM places an Enhanced file's frames on a uniform grid from the
+    first frame's position and one spacing, whatever each frame's own position says: frames at
+    z 10, 12, 16, 18 were placed at 10, 11, 12, 13, and the copy then carried the true per-frame
+    positions beside that grid. The frames' positions are checked the way
+    :func:`_series_geometry` checks a series' slices - one uniform step along the image normal -
+    and against the grid the reader built: its origin, slice spacing and slice direction. A file
+    whose frames state no positions is read as before."""
+    n = int(image.GetSize()[2])
+    if n < 2:
+        return
+    ipps = _frame_positions(p)
+    if ipps is None:
+        return
+    if len(ipps) != n:
+        raise InputError(f"{p}: {len(ipps)} frame positions for {n} frames: the frames cannot "
+                         "be placed where they were acquired")
+    direction = np.asarray(image.GetDirection(), dtype=np.float64).reshape(3, 3)
+    try:
+        n_hat, dz = _slice_axis(ipps, direction[:, 0], direction[:, 1])
+    except InputError as e:
+        raise InputError(f"{p}: the frames' positions (Per-frame Functional Groups) are not "
+                         f"one uniform grid - {e}") from None
+    origin = np.asarray(image.GetOrigin(), dtype=np.float64)
+    spacing = float(image.GetSpacing()[2])
+    tol = max(0.01, 1e-3 * dz)
+    if (np.linalg.norm(ipps[0] - origin) > tol or abs(spacing - dz) > tol
+            or np.abs(direction[:, 2] - n_hat).max() > 1e-3):
+        raise InputError(
+            f"{p}: the reader places the frames {spacing:.3f} mm apart from "
+            f"{tuple(round(float(v), 3) for v in origin)}, but the file places them "
+            f"{dz:.3f} mm apart from {tuple(round(float(v), 3) for v in ipps[0])}: refusing "
+            "to place frames where they were not acquired")
 
 
 def _sitk_reason(e: Exception) -> str:
@@ -226,10 +292,26 @@ def _read_image(path, *, tags: bool):
             raise InputError(f"no DICOM series found in {p}"
                              + (f" ({len(loose)} non-DICOM files)" if loose else ""))
         reader.SetFileNames(files)
-        if tags:
-            # the per-slice dictionaries come from the same decode (measured: no cost)
-            reader.MetaDataDictionaryArrayUpdateOn()
+        # the per-slice dictionaries come from the same decode (measured: no cost); always
+        # wanted now, for the rescale check below
+        reader.MetaDataDictionaryArrayUpdateOn()
         image = reader.Execute()
+        # The series reader takes its output pixel type from the FIRST file and converts every
+        # slice to it: a series whose first slice states no rescale (unsigned stored values)
+        # and whose later slices say intercept -1024 read as uint16, the negative values
+        # wrapped to 64612 (2026-09-26). Read again in a type every slice's values fit.
+        wide = _mixed_rescale_type(
+            [_rescale_pair(reader.GetMetaData(i, "0028|1053")
+                           if reader.HasMetaDataKey(i, "0028|1053") else None,
+                           reader.GetMetaData(i, "0028|1052")
+                           if reader.HasMetaDataKey(i, "0028|1052") else None)
+             for i in range(len(files))],
+            [reader.GetMetaData(i, "0028|0100") if reader.HasMetaDataKey(i, "0028|0100")
+             else None for i in range(len(files))],
+            image.GetPixelID())
+        if wide is not None:
+            reader.SetOutputPixelType(wide)
+            image = reader.Execute()
         if tags:
             per_slice = [{k: reader.GetMetaData(i, k) for k in reader.GetMetaDataKeys(i)}
                          for i in range(len(files))]
@@ -247,18 +329,64 @@ def _read_image(path, *, tags: bool):
             if "orthonormal" not in str(e):
                 raise InputError(f"cannot read {p} as an image: {_sitk_reason(e)}") from None
             image = _read_with_snapped_affine(p, e)
+        # a multi-frame DICOM file's frames are placed by the reader on a uniform grid: held
+        # against the frames' own positions (2026-09-26); asked only of a file with frames
+        several = image.GetDimension() == 3 and image.GetSize()[2] > 1
+        dicom = _is_dicom_file(p) if (several or tags) else False
+        if several and dicom:
+            _check_frame_positions(p, image)
         if tags:
             per_slice = [{k: image.GetMetaData(k) for k in image.GetMetaDataKeys()}]
-            if _is_dicom_file(p):
+            if dicom:
                 files = [str(p)]
     if image.GetDimension() != 3:
         raise InputError(f"expected a 3D image; {p} has {image.GetDimension()} dimensions")
     return image, per_slice, files
 
 
+def _rescale_pair(slope, intercept) -> tuple[float, float] | None:
+    """A slice's (Rescale Slope, Rescale Intercept) as numbers - absent as the identity (1, 0) -
+    or None when either does not parse. Takes SimpleITK's strings or pydicom's values."""
+    def number(v, default):
+        if v is None:
+            return default
+        text = str(v).strip().split("\\")[0].strip()
+        return float(text) if text else default
+    try:
+        return number(slope, 1.0), number(intercept, 0.0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _mixed_rescale_type(pairs, bits_allocated=(), current=None) -> int | None:
+    """The SimpleITK pixel type a series must be read in when its slices do not share one
+    rescale and ``current`` - the type the reader took from the FIRST file, and converts every
+    slice to - cannot hold them all; None when it can, when they share one, or when one does not
+    parse (which no type fixes). Found 2026-09-26: an unsigned first slice without rescale and
+    later slices at intercept -1024 read as uint16, -924 wrapped to 64612; a first slice at slope
+    1 and later ones at 0.5 read as int32, the halves truncated. Integer rescales of values up to
+    16 bits fit int32 - what GDCM itself gives a rescaled integer series; anything else needs
+    float64, as GDCM gives a fractional slope. A series whose first file already reads in such a
+    type (PET's per-slice slopes: float64) is read once, as before."""
+    import SimpleITK as sitk
+    if not pairs or None in pairs or all(p == pairs[0] for p in pairs):
+        return None
+    try:
+        wide = any(int(str(b).strip()) > 16 for b in bits_allocated if b not in (None, ""))
+    except ValueError:
+        wide = True
+    need = (sitk.sitkInt32 if all(float(v).is_integer() for p in pairs for v in p) and not wide
+            else sitk.sitkFloat64)
+    if current == sitk.sitkFloat64 or current == need:
+        return None
+    return need
+
+
 def _is_dicom_file(p: Path) -> bool:
     """A single file read as an image that is DICOM: the Part 10 preamble, or DICOM without it
-    (:func:`_dicom_by_force`). Asked only when tags are wanted."""
+    (:func:`_dicom_by_force`). Asked when tags are wanted, and of a file with several frames
+    (whose positions are checked, 2026-09-26) - so on every volume read, where a lean install
+    has no pydicom to judge a preamble-less file by: that is not DICOM to it."""
     try:
         with open(p, "rb") as f:
             head = f.read(132)
@@ -266,8 +394,12 @@ def _is_dicom_file(p: Path) -> bool:
         return False
     if len(head) == 132 and head[128:132] == b"DICM":
         return True
-    return not p.name.lower().endswith((".nii", ".nii.gz", ".nrrd", ".nhdr", ".mha", ".mhd")) \
-        and _dicom_by_force(p)
+    if p.name.lower().endswith((".nii", ".nii.gz", ".nrrd", ".nhdr", ".mha", ".mhd")):
+        return False
+    try:
+        return _dicom_by_force(p)
+    except ImportError:
+        return False
 
 
 def _read_with_snapped_affine(p, itk_error, tol: float = 1e-3):
@@ -494,16 +626,23 @@ def convert(src, dst, *, compress: bool = True) -> Path:
             img = sitk.ReadImage(str(src))
         except RuntimeError as e:
             raise InputError(f"cannot read {src} as an image: {_sitk_reason(e)}") from None
+        # as it stands, but never with frames placed where they were not acquired: the gapped
+        # series lesson above, for a multi-frame file's frames (2026-09-26)
+        if img.GetDimension() == 3 and img.GetSize()[2] > 1 and _is_dicom_file(src):
+            _check_frame_positions(src, img)
     # A header written from the image must not contradict its pixels (2026-09-26): SimpleITK
     # keeps the file's rescale, padding and bit tags beside pixels it has already rescaled, and
     # writes them all into an NRRD header. A copy says what its voxels are; a file read here is
-    # judged by its own rescale.
-    from .input_copy import _holds_stored_values, honest_metadata, stored_values_of
+    # judged as the copy judges its source - by what the decode did (its rescale, MONOCHROME1,
+    # its pixel type against the stored one, the header's sequences), review of 2026-09-26.
+    from .input_copy import honest_metadata, judge_file, stored_values_of
     if is_copy(src):
-        stored = stored_values_of(src)
+        stored, modality_lut = stored_values_of(src), False
+    elif src.is_dir() or is_duckn_store(src):
+        stored, modality_lut = False, False  # SimpleITK's series reader keeps no dictionary
     else:
-        stored = _holds_stored_values([{k: img.GetMetaData(k) for k in img.GetMetaDataKeys()}])
-    honest_metadata(img, stored)
+        stored, modality_lut = judge_file(img, src)
+    honest_metadata(img, stored, modality_lut=modality_lut)
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(img, str(dst), compress)
     return Path(dst)

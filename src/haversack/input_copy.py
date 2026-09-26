@@ -71,7 +71,7 @@ READER_VERSION = 3
 #: TAGS_VERSION; tags that are WRONG are.)
 #: What the copy's DICOM tags were made by - NOT part of :data:`READER_VERSION`, though the
 #: tags once were (2026-09-26): they are provenance, never what an engine reads, so a copy with
-#: an older kind of tags is still exact and is kept; ``Input.dicom()`` reports which kind it
+#: an older kind of tags is still exact and is kept; ``Input.tags()`` reports which kind it
 #: holds. 1 (absent): SimpleITK's dictionaries. 2: the files' own headers through pydicom
 #: (``duckn.dicom_tags.tags_from_files``) - sequences and binary values, the dicom-spec rules
 #: settled that day (nothing in stored-value units beside rescaled voxels; ``stored_values``
@@ -218,21 +218,118 @@ def _thickness(per_slice):
     return None, nums
 
 
-def _holds_stored_values(per_slice) -> bool:
-    """Whether the copy's voxels are the source's STORED values - no slice asks for a rescale
-    other than the identity. SimpleITK applies a rescale where the files state one, and widens
-    the type. Load-bearing: it decides whether anything stated in stored-value units is written
-    at all (dicom-spec §5.10) - a CT's Pixel Padding Value -2000 is -3024 in the copy's HU, and
-    the file must never say otherwise to a reader of it alone."""
-    if not per_slice:
+#: What a VOI (window) states is in the units of the values AFTER the modality transform; the
+#: keywords, and SimpleITK's keys for them (2026-09-26).
+_VOI = ("WindowCenter", "WindowWidth", "WindowCenterWidthExplanation", "VOILUTFunction",
+        "VOILUTSequence")
+_VOI_TAGS = frozenset({0x00281050, 0x00281051, 0x00281055, 0x00281056, 0x00283010})
+_PHOTOMETRIC = 0x00280004
+#: What describes a grayscale or palette pixel beside a vector image's pixels: Samples per
+#: Pixel, Photometric Interpretation, Planar Configuration, and the palette's descriptors,
+#: data and segmented data (2026-09-26: an export of a PALETTE COLOR file wrote RGB pixels under
+#: "Samples per Pixel 1, PALETTE COLOR" and the palette itself).
+_COLOR_TAGS = frozenset({0x00280002, 0x00280004, 0x00280006,
+                         0x00281101, 0x00281102, 0x00281103, 0x00281111, 0x00281112, 0x00281113,
+                         0x00281199, 0x00281201, 0x00281202, 0x00281203,
+                         0x00281221, 0x00281222, 0x00281223})
+
+
+def _monochrome1(per_slice) -> bool:
+    return any(str(d.get("0028|0004", "")).strip().upper() == "MONOCHROME1" for d in per_slice)
+
+
+def _implied_pixel_id(bits_allocated: int, representation: int, samples: int, photometric: str):
+    """The SimpleITK pixel type that holds a file's STORED values as they are: what Bits
+    Allocated and Pixel Representation imply, a vector of them for RGB; None for anything whose
+    stored values no pixel type holds unchanged (a palette, YBR, 1-bit, float pixel data)."""
+    import SimpleITK as sitk
+    scalar = {(8, 0): sitk.sitkUInt8, (8, 1): sitk.sitkInt8, (16, 0): sitk.sitkUInt16,
+              (16, 1): sitk.sitkInt16, (32, 0): sitk.sitkUInt32, (32, 1): sitk.sitkInt32}
+    if samples == 1:
+        return scalar.get((bits_allocated, representation))
+    if samples == 3 and photometric == "RGB" and representation == 0:
+        return {8: sitk.sitkVectorUInt8, 16: sitk.sitkVectorUInt16}.get(bits_allocated)
+    return None
+
+
+def _holds_stored_values(per_slice, pixel_id=None, *, value_transform: bool = False) -> bool:
+    """Whether the voxels SimpleITK decoded are the source's STORED values - judged from what
+    the decode did, not from the top-level rescale alone (2026-09-26, review: that let a
+    MONOCHROME1 file, which GDCM inverts, and an Enhanced CT, whose rescale sits in a functional
+    group, say they held stored values). All must hold: every slice's top-level rescale is the
+    identity or absent (one that does not parse is not); no Pixel Value Transformation Sequence
+    anywhere (``value_transform``, from the headers: SimpleITK's dictionaries show no
+    sequences); not MONOCHROME1; and ``pixel_id``, SimpleITK's output type, is the type Bits
+    Allocated and Pixel Representation imply - a widened or converted type holds other values.
+    Unknown (``pixel_id`` None, no slices) is False.
+
+    Load-bearing: it decides whether anything stated in stored-value units is written at all
+    (dicom-spec §5.10) - a CT's Pixel Padding Value -2000 is -3024 in the copy's HU, and the file
+    must never say otherwise to a reader of it alone."""
+    if not per_slice or pixel_id is None or value_transform or _monochrome1(per_slice):
         return False
+    implied = set()
     for d in per_slice:
         try:
             if float(d.get("0028|1053", "1") or 1) != 1 or float(d.get("0028|1052", "0") or 0) != 0:
                 return False
-        except ValueError:
+            implied.add(_implied_pixel_id(int(str(d["0028|0100"]).strip()),
+                                          int(str(d.get("0028|0103", "0")).strip() or 0),
+                                          int(str(d.get("0028|0002", "1")).strip() or 1),
+                                          str(d.get("0028|0004", "")).strip().upper()))
+        except (KeyError, ValueError):
             return False
-    return True
+    return len(implied) == 1 and pixel_id in implied
+
+
+class _Headers:
+    """The files' headers, read once through pydicom for duckn's conversion
+    (:func:`duckn.dicom_tags.tags_from_datasets`), noting on the way what SimpleITK's
+    dictionaries cannot show because it lives in a sequence: a Pixel Value Transformation
+    Sequence (an Enhanced object's rescale, which GDCM applies), and a Modality LUT Sequence
+    (which GDCM does NOT apply - a test holds that - so the voxels stay stored values while a
+    window is stated after the LUT)."""
+
+    def __init__(self, files):
+        self.files = [str(f) for f in files]
+        self.read = 0
+        self.value_transform = False
+        self.modality_lut = False
+
+    def __iter__(self):
+        import pydicom
+        while self.read < len(self.files):
+            ds = pydicom.dcmread(self.files[self.read], stop_before_pixels=True, force=True)
+            self.read += 1
+            self._note(ds)
+            yield ds
+
+    def _note(self, ds) -> None:
+        if 0x00283000 in ds:
+            self.modality_lut = True
+        if 0x00289145 in ds:
+            self.value_transform = True
+        for groups in (0x52009229, 0x52009230):   # Shared / Per-frame Functional Groups
+            if groups in ds and any(0x00289145 in item for item in (ds[groups].value or [])):
+                self.value_transform = True
+
+    def finish(self) -> "_Headers":
+        """Note what the headers not yet read state - after a conversion that failed midway, or
+        for a judgment without one. A header that does not read states nothing."""
+        while self.read < len(self.files):
+            try:
+                next(iter(self))
+            except StopIteration:
+                break
+            except Exception:                  # noqa: BLE001 - that file states nothing
+                self.read += 1
+        return self
+
+
+def _drop_keywords(series: dict, slices: list, names) -> None:
+    for d in (series, *slices):
+        for name in names:
+            d.pop(name, None)
 
 
 def stored_values_of(path) -> bool:
@@ -247,7 +344,7 @@ def stored_values_of(path) -> bool:
             .get("stored_values") is True)
 
 
-def honest_metadata(image, stored_values: bool):
+def honest_metadata(image, stored_values: bool, *, modality_lut: bool = False):
     """Strip from ``image``'s metadata dictionary every DICOM key that could contradict its
     pixels in a header written from it (dicom-spec §5.10 / §9, the user's rule of 2026-09-26):
     what duckn's fields state instead (geometry, rescale, bits allocated), anything in
@@ -255,13 +352,28 @@ def honest_metadata(image, stored_values: bool):
     curve groups, group lengths, and every private element. SimpleITK keeps all of these from the
     file it read - a CT read by ``sitk.ReadImage`` has HU pixels and still says Rescale
     Intercept -1024 and Pixel Padding Value -2000, and writes both into an NRRD header. Keys that
-    are not DICOM tags (``ITK_...``, a NIfTI's own) are left alone. Returns ``image``."""
+    are not DICOM tags (``ITK_...``, a NIfTI's own) are left alone. Returns ``image``.
+
+    Three more, found by review the same day. A MONOCHROME1 image: GDCM inverts its values, so
+    its Photometric Interpretation and its window (the VOI tags) describe values the pixels do
+    not hold. A Modality LUT GDCM did not apply (``modality_lut``): the window is in the LUT's
+    output units, the pixels are stored values. A vector image (RGB pixels, from RGB or a
+    palette GDCM expanded): Samples per Pixel, Photometric Interpretation, Planar Configuration
+    and the palette describe a pixel it does not have."""
     try:
         from duckn.dicom_tags import EXCLUDED, STORED_ENCODING
     except ImportError:                      # no rules to judge by: keep no DICOM key at all
         EXCLUDED, STORED_ENCODING, judge = frozenset(), frozenset(), False
     else:
         judge = True
+    also: set = set()
+    if (image.HasMetaDataKey("0028|0004")
+            and image.GetMetaData("0028|0004").strip().upper() == "MONOCHROME1"):
+        also |= _VOI_TAGS | {_PHOTOMETRIC}
+    if modality_lut:
+        also |= _VOI_TAGS
+    if image.GetNumberOfComponentsPerPixel() > 1:
+        also |= _COLOR_TAGS
     for key in list(image.GetMetaDataKeys()):
         group, _, element = key.partition("|")
         try:
@@ -271,10 +383,22 @@ def honest_metadata(image, stored_values: bool):
         tag = (g << 16) | e
         drop = (not judge or tag in EXCLUDED or e == 0 or g == 0x0002 or g % 2 == 1
                 or 0x5000 <= g <= 0x50FF or 0x6000 <= g <= 0x60FF
-                or (not stored_values and tag in STORED_ENCODING))
+                or (not stored_values and tag in STORED_ENCODING) or tag in also)
         if drop:
             image.EraseMetaData(key)
     return image
+
+
+def judge_file(image, path):
+    """``(stored_values, modality_lut)`` for ``image`` as SimpleITK read it from the one file
+    ``path`` - :func:`_holds_stored_values` on its dictionary and pixel type, with what the
+    file's header says in sequences when it is DICOM. What ``get -o`` of a plain file hands
+    :func:`honest_metadata` (2026-09-26)."""
+    from .io import _is_dicom_file
+    facts = _Headers([path] if _is_dicom_file(Path(path)) else []).finish()
+    per = [{k: image.GetMetaData(k) for k in image.GetMetaDataKeys()}]
+    return (_holds_stored_values(per, image.GetPixelID(), value_transform=facts.value_transform),
+            facts.modality_lut)
 
 
 def _sample_units(per_slice):
@@ -303,19 +427,52 @@ def _metadata(image, per_slice, *, files=(), source, source_digest, source_size=
     from duckn.models import SampleMetadata
     from duckn.sitk_adapter import from_sitk
 
-    from duckn.dicom_tags import tags_from_files, tags_from_sitk
+    from duckn.dicom_tags import tags_from_datasets, tags_from_files, tags_from_sitk
     vol = from_sitk(image)
     meta = vol.metadata
-    held = _holds_stored_values(per_slice)
+    # judged from what the decode did: SimpleITK's dictionaries and its output type (a streamed
+    # copy's stand-in carries the stream's), and the headers' sequences as they are read
+    held = _holds_stored_values(per_slice, image.GetPixelID())
+    heads = _Headers(files)
     fields: dict = {}
+    tags_version = 1
+    series = slices = None
     if files:
         # the files' own headers (TAGS_VERSION 2): what SimpleITK's dictionaries cannot hold
-        series, slices, fields = tags_from_files(files, stored_values=held, private=False)
-    else:
+        try:
+            series, slices, fields = tags_from_datasets(heads, stored_values=held, private=False)
+            if held and heads.value_transform:
+                # an Enhanced object's rescale, seen only in its functional groups: the values
+                # are not the stored ones, so convert again without the stored-unit attributes
+                # (one header - an Enhanced object is one file - so this costs nothing)
+                held = False
+                series, slices, fields = tags_from_files(files, stored_values=False,
+                                                         private=False)
+            tags_version = TAGS_VERSION
+        except Exception as e:             # noqa: BLE001 - the tags are provenance (2026-09-26)
+            # A malformed value in any file (a KVP of "abc") made the conversion raise, and the
+            # whole copy was lost over it - of a series SimpleITK reads, which it copied before
+            # tags came from the headers. Never lose a copy over tags: SimpleITK's dictionaries
+            # (tags_version 1) instead, as the other failures here warn.
+            import sys
+            print(f"warning: the DICOM headers of {source or files[0]} did not convert "
+                  f"({type(e).__name__}: {e}); the copy carries SimpleITK's tags instead",
+                  file=sys.stderr, flush=True)
+            held = held and not heads.finish().value_transform
+            series = None
+    if series is None:
         series, slices = (tags_from_sitk(per_slice, stored_values=held, private=False)
                           if per_slice else ({}, []))
         if series or any(slices):
-            fields = {"stored_values": held}   # what tags_from_files states itself
+            fields = {"stored_values": held}   # what tags_from_datasets states itself
+    # A window is stated in the values after the modality transform: beside a MONOCHROME1
+    # image's inverted values, or beside stored values a Modality LUT was not applied to, it
+    # describes values the copy does not hold - and MONOCHROME1 itself is untrue of inverted
+    # values (review, 2026-09-26). After duckn's conversion, whichever converted.
+    if _monochrome1(per_slice):
+        _drop_keywords(series, slices, _VOI + ("PhotometricInterpretation",))
+    elif heads.modality_lut:
+        _drop_keywords(series, slices, _VOI)
     thick, thick_each = _thickness(per_slice) if per_slice else (None, None)
     z = meta.axes[0]
     if thick is not None:
@@ -332,7 +489,7 @@ def _metadata(image, per_slice, *, files=(), source, source_digest, source_size=
     if series or slices:
         ext["dicom"] = {"version": DICOM_EXTENSION_VERSION, **fields, "tags": series}
     ext["haversack"] = {"kind": KIND, "version": FORMATS[how], "reader_version": READER_VERSION,
-                        "tags_version": TAGS_VERSION if files else 1,
+                        "tags_version": tags_version,
                         "source": source, "source_digest": source_digest,
                         "source_files": source_size[0], "source_bytes": source_size[1],
                         "reader": {"haversack": haversack.__version__,

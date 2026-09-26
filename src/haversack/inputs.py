@@ -11,7 +11,7 @@ parsing DICOM again and without knowing where the cache keeps anything:
     x.identity          # what names it: the source identifier, or the digest of its bytes
     x.image()           # a SimpleITK image, geometry resolved
     x.array((100, 132)) # slices 100..131 only - a compressed copy decodes just their chunks
-    x.tags()            # its DICOM tags as JSON: {"series": {...}, "slices": [{...}, ...]}
+    x.tags()            # its DICOM tags as JSON: {"series": {...}, "slices": [{...}, ...], ...}
     x.record            # where it came from: origin, license, citation, the bytes' digest
 
 A path under the cache is not the interface: eviction moves things, and ``open`` is what
@@ -79,19 +79,29 @@ class Input:
         return arr if slices is None else arr[slices[0]:slices[1]]
 
     def tags(self) -> dict:
-        """The DICOM tags the copy carries, as JSON: ``{"series": {keyword: value},
-        "slices": [{keyword: value}, ...]}`` in duckn's dicom encoding - empty for an input
-        that is not DICOM, or not a copy. (Sourced from SimpleITK's dictionary today; the
-        header design in docs/cache-consolidation.md moves it to pydicom, fuller, same shape.)"""
+        """The DICOM tags the copy carries, as JSON: ``{"series": {keyword: value}, "slices":
+        [{keyword: value}, ...], "stored_values": bool, "tags_version": int}`` in duckn's dicom
+        encoding - empty for an input that is not DICOM, or not a copy. The tags are the files'
+        own headers, read through pydicom by duckn's one conversion (``tags_version`` 2; 1 is
+        SimpleITK's dictionaries, what a copy holds when its headers did not convert).
+        ``stored_values`` says whether the voxels are the source's STORED values: only then is
+        anything stated in stored-value units (Bits Stored, Pixel Padding Value) carried - it is
+        what a reader checks such a value against (2026-09-26)."""
         if not self.is_copy:
             return {}
         from .input_copy import _duckn, _layout
         attrs = _duckn(_layout(self.path)[0])
-        series = ((attrs.get("extensions") or {}).get("dicom") or {}).get("tags") or {}
+        ext = attrs.get("extensions") or {}
+        dicom = ext.get("dicom") or {}
+        series = dicom.get("tags") or {}
         axes = attrs.get("axes") or []
         samples = (axes[0].get("samples") or []) if axes else []
         slices = [((s.get("metadata") or {}).get("dicom") or {}) for s in samples]
-        return {"series": series, "slices": slices} if (series or any(slices)) else {}
+        if not (series or any(slices)):
+            return {}
+        return {"series": series, "slices": slices,
+                "stored_values": dicom.get("stored_values") is True,
+                "tags_version": int((ext.get("haversack") or {}).get("tags_version") or 1)}
 
 
 def open(spec, *, cache_dir=None) -> Input:            # noqa: A001 - the module's verb

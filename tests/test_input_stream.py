@@ -4,8 +4,8 @@ What these hold, against the ways a streamed copy could differ from the whole-vo
 
 - it IS the whole-volume copy: the same zarr.json (bar the reader's own version stamp) and every
   compressed chunk byte for byte - on a series, a tilted one, one stored in descending order
-  under shuffled file names, one whose slices carry different rescales, and gzipped NIfTIs of
-  both byte orders;
+  under shuffled file names, one whose slices carry different rescales the first file's type
+  holds, and gzipped NIfTIs of both byte orders;
 - the header-only listing gives GDCM's order;
 - what only the whole read can promise falls back to it: two series, a scaled or 4-D NIfTI,
   the uncompressed form; what the reader refuses is refused;
@@ -92,12 +92,28 @@ def _vary_rescale(folder: Path, fractional_from=None) -> Path:
     lambda d: write_series(d, n=10, tilt_mm=0.03),
     lambda d: _shuffle_names(write_series(d, steps=[31.0 - 2 * i for i in range(10)])),
     lambda d: _vary_rescale(write_series(d, n=10)),
-    lambda d: _vary_rescale(write_series(d, n=10), fractional_from=4),
-], ids=["series", "tilted", "descending-shuffled", "per-slice-rescale", "later-slabs-fractional"])
+], ids=["series", "tilted", "descending-shuffled", "per-slice-rescale"])
 def test_a_streamed_series_copy_is_the_whole_copy(tmp_path, monkeypatch, make):
     src = make(tmp_path / "s")
     assert input_stream.stream_of(src) is not None
     _same_file(*_both(src, tmp_path, monkeypatch))
+
+
+def test_later_fractional_slopes_are_read_whole_in_a_type_that_holds_them(tmp_path):
+    """Slabs read in the FIRST file's type (int32 here, for slope 1): later slices at slope 0.5
+    lost their halves in it - and so did the whole read, which converts every slice to that type
+    too, so the two copies agreed on truncated values (this case sat in the parametrization
+    above until 2026-09-26). The slab reader declines such a series; the whole read reads it in
+    float64, every slice's modality values exact."""
+    src = _vary_rescale(write_series(tmp_path / "s", n=10), fractional_from=4)
+    assert input_stream.stream_of(src) is None
+    copy = ic.transcode(src, tmp_path / "e")
+    got = sitk.GetArrayFromImage(ic.read_copy(copy))
+    assert got.dtype == np.float64
+    for k, f in enumerate(sorted(src.glob("*.dcm"))):     # write order is slice order here
+        ds = pydicom.dcmread(f)
+        want = ds.pixel_array * float(ds.RescaleSlope) + float(ds.RescaleIntercept)
+        np.testing.assert_array_equal(got[k], want)
 
 
 def _nifti_gz(path: Path, a: np.ndarray, *, big_endian=False, slope=1.0) -> Path:

@@ -32,6 +32,48 @@
   header goes from 0.75 MB to 41 KB. Only the header changes: the chunks are still stored, as
   the mapped reader and duckn's zip guide need. Copies written before read as before; code
   from before this change calls a deflated header another layout (stale, fetched again).
+- **Whether a copy holds the stored values is judged from what the decode did.** It was judged
+  from the top-level Rescale Slope and Intercept alone, so it said "stored values" - and kept
+  Bits Stored and the padding value - where SimpleITK had done something else: inverted a
+  MONOCHROME1 image, applied an Enhanced CT's rescale from its functional groups (100 read as
+  -924), or read the values into a wider type. Now only when every slice's rescale is the
+  identity or absent (one that does not parse is not), no Pixel Value Transformation Sequence
+  is anywhere, the image is not MONOCHROME1, and SimpleITK's pixel type is the one Bits
+  Allocated and Pixel Representation imply. `get -o` of a plain file judges it the same way.
+- **A MONOCHROME1 copy or export states no Photometric Interpretation and no window.** Its
+  values are inverted, so MONOCHROME1 and a window in the source's units describe values the
+  file does not hold. Where a Modality LUT is present, which SimpleITK does not apply, the values
+  are the stored ones but a window is in the LUT's output units: the window goes, the stored
+  values' own attributes stay.
+- **`get -o` of a color image describes the pixels it has.** An export of a PALETTE COLOR file
+  wrote RGB pixels under "Samples per Pixel 1, PALETTE COLOR" and the palette itself; a vector
+  image now carries no Samples per Pixel, Photometric Interpretation, Planar Configuration or
+  palette.
+- **A header that does not convert never costs the copy.** A malformed value in any file (a KVP
+  of "abc") made the tag conversion raise, and the whole copy was lost - of a series SimpleITK
+  reads. The copy now carries SimpleITK's own tags instead (`tags_version: 1`) and a warning
+  says why.
+- **A multi-frame file whose frames the reader would misplace is refused.** SimpleITK places an
+  Enhanced object's frames on a uniform grid whatever their own positions say: frames acquired
+  at z 10, 12, 16 and 18 were read at 10, 11, 12 and 13, with no warning, and the copy then
+  carried the true positions beside that grid. The frames' positions are now checked as a
+  series' slices are (one uniform step along the normal, and the grid the reader built), and a
+  file that does not agree is refused, by `segment` and `get -o` alike. A file whose frames state
+  no positions reads as before.
+- **A series whose slices do not share one rescale reads every value.** The series reader
+  converts every slice to the FIRST file's pixel type: an unsigned first slice without a rescale
+  and later slices at intercept -1024 read as uint16, -924 wrapped to 64612; a first slice at
+  slope 1 and later ones at 0.5 lost the halves. Such a series is now read in a type that holds
+  them all (int32, or float64 for a fractional slope), and the slab reader leaves it to that
+  read. A series whose first file already reads in such a type (PET's per-slice slopes) is read
+  once, as before.
+- **`Input.tags()` says what the copy holds**: `stored_values` (whether anything stated in
+  stored-value units is about these voxels) and `tags_version` beside the series and per-slice
+  tags.
+- **Deploying across these changes: stop the app first.** Old and new code sharing one inputs
+  store each call the other's copies stale (reader version 3, the deflated header) - a Modal
+  redeploy with warm old containers would have each side replace the other's uploads on
+  re-upload, and answer `input_gone` in between. `modal app stop` before the deploy.
 
 - **A Modal deployment can keep its results in an object store.** `haversack modal deploy
   --result-store s3://bucket/prefix` (R2, S3, any S3-compatible store) makes the store the one

@@ -62,7 +62,7 @@ def stream_of(content) -> Stream | None:
     return None
 
 
-def _series_files(directory: Path) -> list | None:
+def _series_files(directory: Path, rescales: list | None = None) -> list | None:
     """The one series' image files in ``directory``, in the order GDCM's
     ``GetGDCMSeriesFileNames`` gives them - ascending position along the slice normal - read
     from headers alone; None when the directory is not exactly one series of image slices.
@@ -80,9 +80,14 @@ def _series_files(directory: Path) -> list | None:
     slice missing its position or orientation) - hands the directory to the whole read, which
     decides as it always did (review, 2026-09-25). Skipping them instead dropped an end slice
     the reader keeps (a 40-slice series copied as 39), and wrote copies of folders the reader
-    refuses (a missing position; two series side by side), each placed as the input."""
+    refuses (a missing position; two series side by side), each placed as the input.
+
+    ``rescales``, when given, receives each listed slice's (slope, intercept) - or None where
+    one does not parse - in the order returned (2026-09-26, for :func:`_dicom_series`)."""
     import numpy as np
     import pydicom
+
+    from .io import _rescale_pair
     slices, series = [], set()
     for f in sorted(directory.iterdir()):
         if not f.is_file() or f.name.startswith("."):
@@ -98,12 +103,28 @@ def _series_files(directory: Path) -> list | None:
             return None                        # a DICOM object that is not a placed slice
         series.add(str(ds.get("SeriesInstanceUID", "")))
         slices.append((f, [float(v) for v in ds.ImagePositionPatient],
-                       [float(v) for v in ds.ImageOrientationPatient]))
+                       [float(v) for v in ds.ImageOrientationPatient],
+                       _rescale_pair(_raw(ds, 0x00281053), _raw(ds, 0x00281052)),
+                       ds.get("BitsAllocated")))
     if len(series) != 1 or len(slices) < 2:
         return None                            # none, or several: the whole read decides
     iop = np.asarray(slices[0][2])
     normal = np.cross(iop[:3], iop[3:])
-    return [str(f) for f, ipp, _ in sorted(slices, key=lambda s: float(np.dot(s[1], normal)))]
+    ordered = sorted(slices, key=lambda s: float(np.dot(s[1], normal)))
+    if rescales is not None:
+        rescales[:] = [(s[3], s[4]) for s in ordered]
+    return [str(s[0]) for s in ordered]
+
+
+def _raw(ds, tag: int):
+    """A header value as its text, never converted: pydicom's DS conversion raises on a malformed
+    value, and whether such a series reads at all is the whole read's to decide."""
+    if tag not in ds:
+        return None
+    value = ds.get_item(tag).value
+    if isinstance(value, bytes):
+        return value.decode("latin-1")
+    return None if value is None else str(value)
 
 
 def _dicom_by_force(f: Path) -> bool:
@@ -116,8 +137,9 @@ def _dicom_by_force(f: Path) -> bool:
 def _dicom_series(directory: Path) -> Stream | None:
     import SimpleITK as sitk
 
-    from .io import _series_geometry
-    files = _series_files(directory)
+    from .io import _mixed_rescale_type, _series_geometry
+    rescales: list = []
+    files = _series_files(directory, rescales)
     if files is None:
         return None
     first = sitk.ImageFileReader()
@@ -128,6 +150,13 @@ def _dicom_series(directory: Path) -> Stream | None:
         return None                # color, or a multi-frame file: not a slice per file
     origin, direction, spacing = _series_geometry(files)     # refuses what the reader refuses
     pixel_id = first.GetPixelID()
+    # Slabs are read in the FIRST file's pixel type, as the whole read reads; slices that do not
+    # share one rescale can lose values in it (2026-09-26: -924 wrapped to 64612 in uint16).
+    # The whole read then reads in a type that holds them; a rescale that does not parse is its
+    # decision too.
+    pairs = [r for r, _ in rescales]
+    if None in pairs or _mixed_rescale_type(pairs, [b for _, b in rescales], pixel_id) is not None:
+        return None
     dtype = sitk.GetArrayViewFromImage(sitk.Image([1, 1, 1], pixel_id)).dtype
 
     def slabs(n: int):
