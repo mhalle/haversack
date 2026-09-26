@@ -220,7 +220,12 @@ def test_an_enhanced_objects_functional_group_rescale_is_not_stored_values(tmp_p
     d = _attrs(copy)["extensions"]["dicom"]
     assert d["stored_values"] is False
     assert not {"BitsStored", "HighBit", "PixelPaddingValue"} & d["tags"].keys()
-    assert "SharedFunctionalGroupsSequence" in d["tags"]        # the file's own header still
+    # duckn >= 0.5.4 applies the exclusions inside the Shared Functional Groups: the rescale
+    # (Pixel Value Transformation) and the geometry macros are gone, and this file's groups
+    # held nothing else - so a reader cannot apply the rescale a second time
+    shared = d["tags"].get("SharedFunctionalGroupsSequence") or [{}]
+    assert all("PixelValueTransformationSequence" not in item for item in shared)
+    assert "PerFrameFunctionalGroupsSequence" not in d["tags"]
 
 
 def test_an_enhanced_object_without_a_value_transform_is_its_stored_values(tmp_path):
@@ -321,7 +326,27 @@ def _malformed_kvp(series: Path) -> Path:
     return series
 
 
-def test_a_malformed_value_keeps_the_copy_with_simpleitks_tags(tmp_path, form, capsys):
+def test_a_malformed_value_keeps_the_copy_and_itself_as_text(tmp_path, form):
+    """duckn >= 0.5.4 keeps a value it cannot parse as its text: the copy keeps the files' own
+    tags (tags_version 2), with that one value as written."""
+    series = _malformed_kvp(write_series(tmp_path / "s"))
+    copy = ic.transcode(series, tmp_path / "e", source="fixture:1")
+    assert copy is not None
+    d = _attrs(copy)["extensions"]
+    assert d["haversack"]["tags_version"] == 2
+    assert "abc" in str(d["dicom"]["tags"].get("KVP")) or any(
+        "abc" in str(t) for t in ic.slice_tags(copy, "KVP"))
+
+
+def test_a_tag_conversion_failure_keeps_the_copy_with_simpleitks_tags(tmp_path, form, capsys,
+                                                                       monkeypatch):
+    """Whatever the files' headers do to the tag conversion, haversack never loses the copy
+    over tags: it falls back to SimpleITK's dictionaries (tags_version 1) and says so."""
+    import duckn.dicom_tags as dtags
+
+    def refuse(*a, **k):
+        raise ValueError("could not convert string to float: 'abc'")
+    monkeypatch.setattr(dtags, "tags_from_datasets", refuse)
     series = _malformed_kvp(write_series(tmp_path / "s"))
     ref = nio.read_image(series)
     copy = ic.transcode(series, tmp_path / "e", source="fixture:1")
