@@ -145,6 +145,15 @@ class ModalDeployAuth(unittest.TestCase):
         self.assertNotIn("HAVERSACK_TOKEN", s["env"])
         self.assertIn("Modal proxy auth", s["stderr"])
 
+    def test_a_result_store_set_for_serve_is_said_not_to_reach_modal(self):
+        """HAVERSACK_RESULT_STORE is read by `serve`; a deploy inheriting it keeps its results
+        on the cache volume, and says so rather than ignore it (2026-09-26)."""
+        s = self._deploy(["--cache-volume", "shared-cache"],
+                         {"HAVERSACK_RESULT_STORE": "s3://bucket/prefix"})
+        self.assertIn("HAVERSACK_RESULT_STORE is set", s["stderr"])
+        self.assertIn("(shared-cache)", s["stderr"])
+        self.assertNotIn("RESULT_STORE", self._deploy([], {})["stderr"])
+
     def test_no_proxy_auth_without_a_token_says_it_is_open(self):
         s = self._deploy(["--no-proxy-auth"], {})
         self.assertEqual(s["env"]["HAVERSACK_PROXY_AUTH"], "0")

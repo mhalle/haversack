@@ -1138,6 +1138,13 @@ def _cmd_modal(args) -> int:
     for k in ("HAVERSACK_TOKEN_SECRET", "HAVERSACK_SERVER_TOKEN", "HAVERSACK_TOKEN"):
         env.pop(k, None)
     app_name = env.get("HAVERSACK_APP_NAME") or "haversack-serve"
+    if env.get("HAVERSACK_RESULT_STORE"):
+        # set for a local `serve`, and read by nothing on Modal: the deployment keeps its
+        # results on its cache volume. Said, not silently ignored (2026-09-26).
+        volume = env.get("HAVERSACK_CACHE_VOLUME") or f"{app_name}-cache"
+        print(f"note: HAVERSACK_RESULT_STORE is set, but a Modal deployment keeps its results "
+              f"on its cache volume ({volume}); a result store on Modal is not built yet",
+              file=sys.stderr)
     if token:
         if token_source == "--token":
             print(TOKEN_FLAG_NOTE, file=sys.stderr)

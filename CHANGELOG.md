@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- **`haversack modal deploy` says when `HAVERSACK_RESULT_STORE` is set**: nothing on Modal reads
+  it, and a deployment keeps its results on its cache volume, which it now names in a note
+  instead of ignoring the variable.
 - **A server with `--result-store` names the store at startup**, beside its local copy (any
   credentials in the URL cut). Nothing said which store a writer publishes into.
 - **A NIfTI upload no longer prints GDCM's "No Series were found" into the server log.** Every
