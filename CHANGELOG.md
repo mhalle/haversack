@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **A FastSurfer store restores onto its input.** `haversack restore` refused the input grid
+  for these stores (FastSurfer's field lives on its own conformed grid, rotated from an oblique
+  input, which a frame cannot describe) and could only restore onto the conformed grid. The
+  store already recorded both grids; the restore now maps between them in world space
+  (rankfield's new world-geometry restore) and applies FastSurfer's own cortical
+  lateralization after the argmax, as FastSurfer does - before, every restore named the right
+  hemisphere's cortical parcels with the left ids. Against FastSurfer's labels on two oblique
+  T1s (5.7 and 13.7 degrees): 99.996 % of voxels, every structure's Dice at least 0.998. Needs
+  rankfield with world-geometry restores (unreleased; the tests skip on 0.3.6).
 - **`haversack embed` finishes cleanly again.** Since the embedding rename it wrote the field and
   then failed printing its summary (exit 1). Refusals name things by their current names: an
   unknown job kind lists `rankfield`, rank-field refusals say "rank field", and an unknown

@@ -42,6 +42,7 @@ class Restored:
     parts: list[str]
     interp: str
     roi: tuple | None = None
+    notes: tuple = ()
 
     def image(self, orientation: str | None = "input"):
         """A SimpleITK image of the labels: in the input's own orientation when the store
@@ -108,10 +109,57 @@ def parts_of(root) -> list[rf.Part]:
         raise InputError(str(e)) from None          # haversack's one-line error contract
 
 
+#: duckn's space for LPS millimeters: the one a target grid is read in (rankfield's Geometry
+#: is LPS; a target in any other space is refused rather than silently mirrored)
+_LPS = "left-posterior-superior"
+
+
+def input_geometry(part: rf.Part):
+    """The world grid ``"input"`` means for ``part`` when it has no frame: the ``target_grid``
+    its emit recorded, as a rankfield Geometry - or None.
+
+    A frame is how an nnU-Net part restores onto its input: the exact rule its model grid was
+    made by. FastSurfer's field lives on a grid FastSurfer resampled in WORLD space from the
+    input (its conformed 1 mm grid), which a frame cannot describe; its emit records the
+    input grid instead (``target_grid``), and the conformed grid is the part's own array
+    geometry. The two geometries are the whole map - input index -> world -> conformed index
+    (``rankfield.Affine``) - so nothing else is stored (2026-09-25; before, `haversack
+    restore` refused "input" for these stores and restored only onto the conformed grid)."""
+    if part.field.frame:
+        return None
+    t = part.field.meta.get("target_grid")
+    if not isinstance(t, dict):
+        return None
+    if t.get("space") != _LPS:
+        raise InputError(f"the part's target grid is in {t.get('space')!r} space; this reader "
+                         f"reads it in {_LPS!r} only")
+    return rf.Geometry(shape=tuple(int(n) for n in t["samples"]),
+                       directions=tuple(tuple(float(v) for v in a["space_direction"]) for a in t["axes"]),
+                       origin=tuple(float(v) for v in t["space_origin"]))
+
+
+def _world(parts, grid):
+    """``grid`` as the library takes it: the recorded input geometry for ``"input"`` on an
+    unframed store that has one, else as given."""
+    if grid in ("input", None):
+        geo = input_geometry(parts[0])
+        if geo is not None:
+            return geo
+    return grid
+
+
+def _grid_of(part, grid):
+    """``(output Grid, frame)`` for ``grid`` - a world Geometry included."""
+    if isinstance(grid, rf.Geometry):
+        return rf.Grid(grid.shape, spacing=grid.spacing), None
+    return rf.resolve_grid(part, grid)
+
+
 def resolve_grid(store, grid="input"):
     st, root, owned = _open(store)
     try:
-        return rf.resolve_grid(parts_of(root)[0], grid)
+        parts = parts_of(root)
+        return _grid_of(parts[0], _world(parts, grid))
     finally:
         if owned:
             st.close()
@@ -139,7 +187,8 @@ def roi_of(store, labels, *, grid="input", halo: int = 1) -> tuple:
     st, root, owned = _open(store)
     try:
         parts = parts_of(root)
-        grid_out, _ = rf.resolve_grid(parts[0], grid)
+        grid = _world(parts, grid)
+        grid_out, _ = _grid_of(parts[0], grid)
         segs = root.attrs.asdict()["duckn"]["extensions"]["seg"]["segments"]
         want = {int(v) for v in labels}
         extents = []
@@ -151,7 +200,8 @@ def roi_of(store, labels, *, grid="input", halo: int = 1) -> tuple:
                     extents.append((i, s["extent"]))
         if not extents:
             raise InputError(f"none of {sorted(want)} has an extent in this store")
-        return rf.roi_of(parts, extents, grid_out, halo=halo)
+        return rf.roi_of(parts, extents, grid_out, halo=halo,
+                         **({"world": grid} if isinstance(grid, rf.Geometry) else {}))
     finally:
         if owned:
             st.close()
@@ -173,8 +223,9 @@ def restore(store, *, grid="input", interp: str = "linear", roi=None, device="au
             torch.device(device)
         except RuntimeError as e:
             raise InputError(f"--device {device!r}: {e}") from None
+        grid = _world(parts, grid)
         try:
-            g, _ = rf.resolve_grid(parts[0], grid)
+            g, _ = _grid_of(parts[0], grid)
         except ValueError as e:
             raise InputError(str(e)) from None
         box = roi or tuple((0, n) for n in g.shape)
@@ -198,11 +249,43 @@ def restore(store, *, grid="input", interp: str = "linear", roi=None, device="au
                                  f"({voxels:,} voxels) does not fit in memory on {device}; ask for a "
                                  f"coarser spacing or an roi") from None
             raise
-        return Restored(labels=r.labels, grid=r.grid, geometry=r.geometry, frame=r.frame,
-                        parts=r.parts, interp=r.interp, roi=r.roi)
+        labels, notes = _engine_rules(parts, r.labels, roi)
+        return Restored(labels=labels, grid=r.grid, geometry=r.geometry, frame=r.frame,
+                        parts=r.parts, interp=r.interp, roi=r.roi, notes=notes)
     finally:
         if owned:
             st.close()
+
+
+def _engine_rules(parts, labels, roi):
+    """What the engine does to its argmax that the field cannot say: ``(labels, notes)``.
+
+    FastSurfer's network has one channel for each of 17 cortical parcels on BOTH hemispheres,
+    and FastSurfer lateralizes them after the argmax (``split_cortex_labels``: each connected
+    piece to the nearer hemisphere's white matter). A store holds the network's classes, so
+    every restore of one - conformed grid or input grid - named the right hemisphere's parcels
+    with the left ids until this applied FastSurfer's own rule (2026-09-25; with it the input
+    grid restore of the ds000114 T1 store matches the served labels, see the tests). The rule
+    reads the whole brain, so an roi restore is left as the field says, and says so."""
+    task = str(parts[0].field.meta.get("labels_named_by") or "")
+    if not task.startswith("fastsurfer:"):
+        return labels, ()
+    if roi is not None:
+        return labels, ("cortical parcels are not lateralized in an roi restore (FastSurfer's rule "
+                        "reads both hemispheres' white matter)",)
+    try:
+        from FastSurferCNN.data_loader.data_utils import split_cortex_labels
+    except ImportError:
+        return labels, ("cortical parcels are not lateralized: FastSurfer's rule needs the "
+                        "fastsurfer extra (pip install 'haversack[fastsurfer]')",)
+    wide = labels.astype(np.int32)              # the rule compares against 1003..2035
+    try:
+        split = split_cortex_labels(wide)
+    except Exception as e:                      # noqa: BLE001 - e.g. no white matter to anchor on
+        return labels, (f"cortical parcels are not lateralized: FastSurfer's rule failed "
+                        f"({type(e).__name__}: {e})",)
+    top = int(split.max()) if split.size else 0
+    return split.astype(np.uint8 if top < 256 else np.uint16), ()
 
 
 def main_cli(argv=None) -> int:
@@ -230,6 +313,8 @@ def main_cli(argv=None) -> int:
         raise InputError(f"--spacing must be positive, got {a.spacing}")
     res = restore(a.store, grid=(a.spacing if a.spacing is not None else "input"), interp=a.interp,
                   device=a.device, progress=say)
+    for n in res.notes:
+        print(f"note: {n}", file=sys.stderr)
     img = res.image("input")
     out = Path(a.output)
     from .ranked_store import open_store
@@ -237,7 +322,7 @@ def main_cli(argv=None) -> int:
     from .values import LabelSchema
     with open_store(Path(a.store), "r") as st:
         ext = st.root.attrs.asdict()["duckn"]["extensions"]
-    names = {_value(s): s.get("name", "") for s in ext["seg"]["segments"]
+    names = {_value(s): s.get("name", "") for s in (ext.get("seg") or {}).get("segments", [])
              if _value(s) is not None and not _is_background(s)}
     prov = {"restored_from": str(a.store), "interp": a.interp, "grid": list(res.grid.shape),
             "spacing": list(res.grid.spacing), "parts": res.parts,
