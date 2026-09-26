@@ -233,3 +233,80 @@ class ConvertTakesTheSameGeometry(unittest.TestCase):
         """The same series with its files written top-first: GDCM sorts by position, so the
         order they were stored in must not matter."""
         self.converts_to_where_its_slices_are(list(reversed(ascending(n=6))))
+
+
+# -- the input copy and a multi-frame file meet the same bug (2026-09-26) --------------------
+
+@pytest.mark.parametrize("form", ["uncompressed", "zstd"])
+@pytest.mark.parametrize("stored", ["ascending", "descending"])
+def test_an_input_copy_of_a_negative_sbs_series_is_where_its_slices_are(tmp_path, monkeypatch,
+                                                                       form, stored):
+    """The copy is written whole (uncompressed) or a slab at a time (zstd), each with its own
+    file list: every voxel slice must sit where its file's IPP says, and the per-slice tags on
+    sample k must be THAT file's - a copy is read in place of the series, so a copy that
+    reversed the slice axis (GDCM's sign, from the negative 0018,0088) or paired slice k with
+    another file's tags would be the 2026-08-24 bug again, or a header contradicting its data."""
+    import SimpleITK as sitk
+
+    from haversack import input_copy as ic
+    monkeypatch.setenv(ic.COMPRESSION_ENV, form)
+    ipps = ascending(n=6)
+    if stored == "descending":
+        ipps = list(reversed(ipps))
+    src = tmp_path / "series"
+    src.mkdir()
+    write_series(src, ipps, sbs=-1.0)                  # slice file i: pixels = i, IPP ipps[i]
+    by_index = {int(pydicom.dcmread(f).PixelData[0]): pydicom.dcmread(f) for f in src.iterdir()}
+    copy = ic.transcode(src, tmp_path / "entry")
+    assert copy is not None and ic.stored_compression(copy) == form
+    image = io.read_image(copy)
+    arr = sitk.GetArrayFromImage(image)
+    sop = ic.slice_tags(copy, "SOPInstanceUID")
+    number = ic.slice_tags(copy, "InstanceNumber")
+    for k in range(arr.shape[0]):
+        i = int(arr[k, 0, 0])                          # which file this voxel slice came from
+        np.testing.assert_allclose(image.TransformIndexToPhysicalPoint((0, 0, k)), ipps[i],
+                                   atol=1e-4)
+        assert sop[k] == by_index[i].SOPInstanceUID
+        assert number[k] == by_index[i].InstanceNumber
+    ref = io.read_image(src)                           # and exactly what `segment` reads
+    np.testing.assert_allclose(image.GetOrigin(), ref.GetOrigin(), atol=1e-6)
+    np.testing.assert_allclose(image.GetDirection(), ref.GetDirection(), atol=1e-9)
+    np.testing.assert_array_equal(arr, sitk.GetArrayFromImage(ref))
+
+
+@pytest.mark.parametrize("zs", [[10, 12, 14, 16], [16, 14, 12, 10]], ids=["up", "down"])
+@pytest.mark.parametrize("sbs", [2.0, -2.0, None], ids=["sbs+", "sbs-", "no-sbs"])
+def test_a_multi_frame_file_is_placed_by_its_frames_whatever_the_spacing_sign(tmp_path, zs,
+                                                                             sbs):
+    """An Enhanced file can carry the same signed Spacing Between Slices, in its Pixel Measures.
+    Measured 2026-09-26: SimpleITK places the frames by their own positions, so the sign does
+    not flip them - this holds that, frame by frame, and holds haversack's frame check to
+    accepting it (a reader that DID follow the sign would now be refused, never believed)."""
+    import SimpleITK as sitk
+    from test_dicom_tag_review_0926 import _enhanced
+    f = _enhanced(tmp_path / "enh.dcm", zs, rescale=False)
+    if sbs is not None:
+        ds = pydicom.dcmread(f)
+        ds.SharedFunctionalGroupsSequence[0].PixelMeasuresSequence[0].SpacingBetweenSlices = sbs
+        ds.save_as(f, enforce_file_format=True)
+    image = io.read_image(f)                           # runs _check_frame_positions
+    arr = sitk.GetArrayFromImage(image)
+    for k in range(len(zs)):
+        frame = int((arr[k, 0, 0] - 100) // 12)        # _enhanced: frame j's pixels start 100+12j
+        assert image.TransformIndexToPhysicalPoint((0, 0, k))[2] == pytest.approx(zs[frame])
+
+
+def test_the_frame_check_refuses_a_reader_that_follows_the_sign(tmp_path, monkeypatch):
+    """Should a SimpleITK ever place frames by the spacing's sign rather than by their
+    positions, the frame check must refuse - never let the reversed grid through."""
+    import SimpleITK as sitk
+    from test_dicom_tag_review_0926 import _enhanced
+    f = _enhanced(tmp_path / "enh.dcm", [10, 12, 14, 16], rescale=False)
+    image = sitk.ReadImage(str(f))
+    flipped = sitk.Image(image)
+    d = list(image.GetDirection())
+    d[2], d[5], d[8] = -d[2], -d[5], -d[8]             # the slice axis reversed about frame 0
+    flipped.SetDirection(d)
+    with pytest.raises(InputError, match="frames"):
+        io._check_frame_positions(f, flipped)
