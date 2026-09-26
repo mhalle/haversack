@@ -329,7 +329,21 @@ The proposed order - each step behind a flag, with deployments untouched until t
      from 73.7 s to 4.9 s (15 requests a key), and a first copy of them from 200 s to 19 s.
 6. **Inputs** onto the same store (the older step 4 below, unchanged in intent). Designed
    2026-09-26 - see "Step 6: inputs, as designed" below.
-7. **Modal last**, onto R2 directly.
+7. **Modal last**, onto R2 directly. **BUILT 2026-09-26** (branch `claude/modal-r2-results`,
+   the user's decision after the measurements under "Large inputs"): results in an object
+   store as the one authority, each container with only a local copy on its own disk; inputs,
+   uploads, scratch and weights stay on their volumes (inputs are caches: a hosted one is
+   cheaper to fetch again than to share). `haversack modal deploy --result-store
+   s3://bucket/prefix` makes the Secret `<app>-result-store` from the deploying AWS_* under
+   haversack's OWN names, and one scheduled function sweeps (`HAVERSACK_RESULT_SWEEP_HOURS`).
+   The first deploy's IDC fetch went to R2 and was refused: obstore reads AWS_ENDPOINT for
+   every S3 store in a process - fixed on both sides (explicit store client; the public
+   buckets state AWS's endpoint). Smoked on `haversack-r2-smoke` (L40S, bearer token, the
+   twin on; torn down, its volumes, Dict, Secrets and 12 R2 objects deleted; no cache volume
+   was ever made): 13 of 13 - compute 78 s cold, a hit 0.5 s, api and twin by path with the
+   same ETag, HEAD and 304 on the twin, the preview rendered into the store, both listings,
+   no-cache republished, delete 404 at both; the bucket held 10 blobs, one ref (the
+   tombstone) and one tasks/ note.
 8. **Delete the old protocols** - `ResultCache`'s and the hybrid's - in one commit, as the
    older step 6 said.
 

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **A Modal deployment can keep its results in an object store.** `haversack modal deploy
+  --result-store s3://bucket/prefix` (R2, S3, any S3-compatible store) makes the store the one
+  authority for results: every container reads and writes it, keeps only a local copy on its
+  own disk, and no cache volume exists - so the volume reload race and its machinery are out of
+  a result's path. The store's credentials are read from the deploying environment into a
+  Modal Secret. One scheduled function reclaims unreferenced bytes daily.
+- **A public-bucket fetch is not redirected by the environment.** With another S3 service's
+  endpoint exported (as a result store on R2 needs), every IDC and public-bucket fetch went
+  there and was refused; those stores now state AWS's endpoint and region themselves.
 - **`haversack.inputs`: inputs by reference, in haversack's own form.** `inputs.open(spec)` takes
   a hosted source, a local file or folder, or a held upload's digest, and returns the input with
   its identity, provenance record, image, voxels (`array(slices)` reads only those slices from an
