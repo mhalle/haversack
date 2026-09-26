@@ -17,8 +17,6 @@ import pytest
 rf = pytest.importorskip("rankfield")
 torch = pytest.importorskip("torch")
 pytest.importorskip("zarr")
-if not hasattr(rf, "Affine"):
-    pytest.skip("rankfield without world-grid restores", allow_module_level=True)
 
 from haversack import ranked_restore as R  # noqa: E402
 from haversack.errors import InputError  # noqa: E402
