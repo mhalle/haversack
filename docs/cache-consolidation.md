@@ -587,6 +587,25 @@ file or folder, a held upload digest - returns an `Input` with `identity`, `reco
 `array(slices)` (from a copy only the chunks holding those slices, or the mapped slices
 themselves) and `tags()` (JSON). A path under the cache is not the interface.
 
+**Large inputs: R2 vs a Modal Volume vs fetching again, measured inside Modal (2026-09-26).** One
+CPU container (4 cores), `haversack-r2-bench` (ephemeral, its Volume and R2 objects deleted),
+random bytes, one stream per transfer:
+
+| | 100 MB | 300 MB |
+|---|---|---|
+| R2 put (3 runs) | 54-64 MB/s | 95-105 MB/s |
+| R2 get (3 runs) | 37-56 MB/s | 62-80 MB/s |
+| Volume write + commit | 1.1 GB/s + 2.6 s | 1.2 GB/s + 2.7 s |
+| Volume read, fresh container (cold / warm) | 108 MB/s / 5.6 GB/s | 259 MB/s / 7.4 GB/s |
+
+R2 small objects: 62 ms a HEAD or a 1 KB GET. Fetching the NLST series again from IDC's public
+bucket (249 files, 131 MB, 32 at a time): 0.09 s to list, 0.82 s to fetch - 160 MB/s, faster
+than a single-stream R2 GET of the same size (~2-3 s). So a hosted input is cheaper to fetch
+again than to share: inputs stay CACHES (a Volume or a container's own disk), and only results,
+which cost GPU time and are small, are worth a shared store. Not measured: parallel ranged R2
+GETs (which would raise its rate), and the cost of re-making the copy after a re-fetch (a decode
+- seconds for this series, ~12 s for a 709-slice one).
+
 **DICOM headers (designed with the user, 2026-09-26; not built).** They serve two purposes,
 kept apart. For USE, JSON - the duckn dicom extension's keyword-keyed tags, sourced from
 pydicom (duckn's `dicom_convert`: private tags, sequences, binary values in base64) rather
