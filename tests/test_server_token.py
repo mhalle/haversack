@@ -161,7 +161,11 @@ class ModalDeployAuth(unittest.TestCase):
         and no credential rides the deploy's environment or command line."""
         s = self._deploy_store(["--app-name", "unit-app", "--result-store", "s3://bucket/results"],
                                self._CREDS)
-        self.assertEqual(s["put"], [("unit-app-result-store", self._CREDS)])
+        # under haversack's own names: as AWS_* they reached every S3 client in a worker
+        self.assertEqual(s["put"], [("unit-app-result-store", {
+            "HAVERSACK_RESULT_STORE_" + k[4:]: v for k, v in self._CREDS.items()})])
+        from haversack import modal_app
+        self.assertEqual(set(s["put"][0][1]), set(modal_app.STORE_CREDENTIAL_VARS))
         self.assertEqual(s["env"]["HAVERSACK_RESULT_STORE"], "s3://bucket/results")
         self.assertEqual(s["env"]["HAVERSACK_RESULT_STORE_SECRET"], "unit-app-result-store")
         for v in ("AKID-123", "SECRET-456"):

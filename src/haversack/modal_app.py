@@ -236,7 +236,9 @@ if modal.is_local():
 #: Read in a container but delivered by a Modal Secret, never by the image env: forwarding
 #: one would bake a credential into an image. test_every_import_time_knob_reaches_the_container
 #: exempts exactly these from the forwarding rule and fails if one is ever forwarded.
-_SECRET_VARS = ("HAVERSACK_TOKEN",)
+_SECRET_VARS = ("HAVERSACK_TOKEN", "HAVERSACK_RESULT_STORE_ACCESS_KEY_ID",
+                "HAVERSACK_RESULT_STORE_SECRET_ACCESS_KEY", "HAVERSACK_RESULT_STORE_ENDPOINT",
+                "HAVERSACK_RESULT_STORE_REGION")
 
 # Base image (the ASGI api container + the nnU-Net GPU Worker). uv-NATIVE: the nnU-Net
 # worker's deps come from pyproject extras - `torch` (torch/nnunetv2/scipy/scikit-image),
@@ -319,11 +321,43 @@ def _results_mount() -> dict:
 
 #: The store's credentials, on every function that reads or writes results (the api, the
 #: twin, every worker); ``required_keys`` fails a deploy at once if the Secret lacks one.
-_STORE_SECRETS = ([modal.Secret.from_name(
-    RESULT_STORE_SECRET, required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ENDPOINT"])]
-    if RESULT_STORE else [])
+#: The Secret's keys are haversack's own names, never AWS_*: obstore reads AWS_ENDPOINT and
+#: AWS_REGION (and the keys) from the environment for EVERY S3 store in the process, so a
+#: worker holding the store's credentials under those names sent its IDC fetches to R2, which
+#: refused them (the first store deploy, 2026-09-26). The store is built from these names
+#: explicitly (``_store_client``), and nothing else in a container can see them.
+STORE_CREDENTIAL_VARS = ("HAVERSACK_RESULT_STORE_ACCESS_KEY_ID",
+                         "HAVERSACK_RESULT_STORE_SECRET_ACCESS_KEY",
+                         "HAVERSACK_RESULT_STORE_ENDPOINT", "HAVERSACK_RESULT_STORE_REGION")
+_STORE_SECRETS = ([modal.Secret.from_name(RESULT_STORE_SECRET,
+                                          required_keys=list(STORE_CREDENTIAL_VARS[:3]))]
+                  if RESULT_STORE else [])
 _results_guard = threading.Lock()
 _results_held: dict = {}
+
+
+def _store_client(url: str):
+    """``(store, prefix)`` for the result store: an S3-compatible store built from the Secret's
+    own names (STORE_CREDENTIAL_VARS) - explicitly, so no AWS_* variable exists to reach any
+    other S3 client in the container - or, where those are absent (a store that needs none,
+    a test's memory://), the ordinary URL form."""
+    access = os.environ.get("HAVERSACK_RESULT_STORE_ACCESS_KEY_ID")
+    if not access:
+        from haversack.objectcache import open_store
+        return open_store(url)
+    from urllib.parse import urlparse
+
+    from obstore.store import S3Store
+    u = urlparse(url)
+    if u.scheme not in ("s3", "s3a") or not u.netloc:
+        raise ValueError(f"HAVERSACK_RESULT_STORE={url!r}: credentials are for an s3:// store")
+    prefix = u.path.strip("/")
+    return S3Store(u.netloc, config={
+        "aws_access_key_id": access,
+        "aws_secret_access_key": os.environ["HAVERSACK_RESULT_STORE_SECRET_ACCESS_KEY"],
+        "aws_endpoint": os.environ["HAVERSACK_RESULT_STORE_ENDPOINT"],
+        "aws_region": os.environ.get("HAVERSACK_RESULT_STORE_REGION") or "auto"}), \
+        (f"{prefix}/" if prefix else "")
 
 
 def _results(*, read_only: bool = False):
@@ -334,9 +368,9 @@ def _results(*, read_only: bool = False):
     with _results_guard:
         got = _results_held.get(read_only)
         if got is None:
-            from haversack.objectcache import SharedResultCache, open_store
+            from haversack.objectcache import SharedResultCache
             from haversack.serve import ResultCache
-            store, prefix = open_store(RESULT_STORE)
+            store, prefix = _store_client(RESULT_STORE)
             local = ResultCache(LOCAL_RESULTS_ROOT + ("-ro" if read_only else ""), keep=RESULTS_KEEP)
             got = _results_held[read_only] = SharedResultCache(
                 store, local, prefix=prefix, check=not read_only, read_only=read_only)

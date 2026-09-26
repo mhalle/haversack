@@ -197,3 +197,32 @@ def test_the_module_imports_as_a_store_deployment_defines_it():
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
                        timeout=120)
     assert r.returncode == 0 and "ok" in r.stdout, r.stderr[-2000:]
+
+
+def test_the_store_client_is_built_from_haversacks_own_names_and_no_aws_variable(monkeypatch):
+    """A worker holding the store's credentials as AWS_* sent its IDC fetches to R2 (the first
+    store deploy, 2026-09-26). The Secret's names are haversack's; the client is explicit."""
+    from haversack import modal_app as m
+    for k in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ENDPOINT", "AWS_REGION"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HAVERSACK_RESULT_STORE_ACCESS_KEY_ID", "AK")
+    monkeypatch.setenv("HAVERSACK_RESULT_STORE_SECRET_ACCESS_KEY", "SK")
+    monkeypatch.setenv("HAVERSACK_RESULT_STORE_ENDPOINT", "https://acct.r2.cloudflarestorage.com")
+    store, prefix = m._store_client("s3://haversack-backing/deploy/results")
+    assert prefix == "deploy/results/"
+    cfg = {str(k).lower(): v for k, v in dict(store.config).items()}
+    assert "r2.cloudflarestorage.com" in str(cfg.get("endpoint") or cfg.get("aws_endpoint"))
+    import os
+    assert not [k for k in os.environ if k.startswith("AWS_")]
+
+
+def test_a_public_bucket_fetch_ignores_an_s3_service_named_in_the_environment(monkeypatch):
+    """The same defect's other half, anywhere (a local `serve --result-store` with R2's
+    variables exported): the public-bucket stores say AWS's endpoint and region themselves."""
+    from haversack.sources import _object_store
+    monkeypatch.setenv("AWS_ENDPOINT", "https://acct.r2.cloudflarestorage.com")
+    monkeypatch.setenv("AWS_REGION", "auto")
+    for bucket, region in (("idc-open-data", None), ("msd-for-monai", "us-west-2")):
+        cfg = {str(k).lower(): v for k, v in dict(_object_store("aws", bucket, region).config).items()}
+        endpoint = str(cfg.get("endpoint") or cfg.get("aws_endpoint"))
+        assert "amazonaws.com" in endpoint and "r2" not in endpoint, cfg

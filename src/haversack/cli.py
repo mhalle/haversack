@@ -1163,7 +1163,10 @@ def _cmd_modal(args) -> int:
                              "store's credentials are read from this environment into a Modal "
                              "Secret at deploy")
         secret = f"{app_name}-result-store"
-        _put_secret(secret, {k: os.environ[k] for k in _STORE_CREDENTIALS if os.environ.get(k)})
+        # under haversack's OWN names in the Secret (modal_app.STORE_CREDENTIAL_VARS): as
+        # AWS_* they reached every S3 client in a worker, and its IDC fetches went to R2
+        _put_secret(secret, {_STORE_SECRET_NAMES[k]: os.environ[k]
+                             for k in _STORE_CREDENTIALS if os.environ.get(k)})
         env["HAVERSACK_RESULT_STORE"] = store
         env["HAVERSACK_RESULT_STORE_SECRET"] = secret
         if args.cache_volume:
@@ -1188,6 +1191,8 @@ def _cmd_modal(args) -> int:
 #: What an object store's credentials are called in the environment (obstore's names); the
 #: first three are required, the region optional (R2 says "auto").
 _STORE_CREDENTIALS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ENDPOINT", "AWS_REGION")
+#: ...and what each is called inside the Modal Secret (modal_app.STORE_CREDENTIAL_VARS).
+_STORE_SECRET_NAMES = {k: "HAVERSACK_RESULT_STORE_" + k[len("AWS_"):] for k in _STORE_CREDENTIALS}
 
 
 def _put_secret(name: str, values: dict) -> None:

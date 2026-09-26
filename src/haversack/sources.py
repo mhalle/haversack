@@ -535,9 +535,15 @@ def _object_store(cloud: str, bucket: str, region: str | None = None):
         config = {"aws_skip_signature": "true",
                   # path-style: a dotted bucket name (openneuro.org) cannot be
                   # virtual-hosted without breaking TLS
-                  "aws_virtual_hosted_style_request": "false"}
-        if region:
-            config["aws_region"] = region
+                  "aws_virtual_hosted_style_request": "false",
+                  # AWS's own endpoint and region, SAID: obstore reads AWS_ENDPOINT and
+                  # AWS_REGION from the process environment for every S3 store, and a process
+                  # whose environment points at another S3 service - a result store on R2 -
+                  # sent every public-bucket fetch there, refused (found smoking the Modal
+                  # result store, 2026-09-26: the worker's IDC fetch went to R2)
+                  "aws_region": region or "us-east-1",
+                  "aws_endpoint": (f"https://s3.{region}.amazonaws.com" if region
+                                   else "https://s3.amazonaws.com")}
         return S3Store.from_url(f"s3://{bucket}", config=config)
     if cloud == "gcp":
         from obstore.store import GCSStore
