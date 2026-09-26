@@ -589,3 +589,9 @@ def test_a_deflated_header_is_what_the_copy_is_written_with(tmp_path):
         assert z.getinfo("zarr.json").compress_type == zipfile.ZIP_DEFLATED
         assert all(i.compress_type == zipfile.ZIP_STORED
                    for i in z.infolist() if i.filename.startswith("c/"))
+
+
+def test_a_copy_states_the_convention_version(tmp_path):
+    """duckn-spec §3.1: `version` should always be present - a copy wrote none."""
+    copy = ic.transcode(write_series(tmp_path / "s"), tmp_path / "e")
+    assert _attrs(copy)["version"] == "1.0"

@@ -430,6 +430,10 @@ def _metadata(image, per_slice, *, files=(), source, source_digest, source_size=
     from duckn.dicom_tags import tags_from_datasets, tags_from_files, tags_from_sitk
     vol = from_sitk(image)
     meta = vol.metadata
+    # the convention's version, which duckn-spec says should always be present: duckn's
+    # from_sitk wrote none before 0.5.4 (found checking copies against the spec, 2026-09-26).
+    # 1.0: a copy uses no 1.1 field (lut transforms, structured units, space_transforms).
+    meta.version = meta.version or "1.0"
     # judged from what the decode did: SimpleITK's dictionaries and its output type (a streamed
     # copy's stand-in carries the stream's), and the headers' sequences as they are read
     held = _holds_stored_values(per_slice, image.GetPixelID())
