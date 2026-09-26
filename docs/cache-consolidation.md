@@ -490,6 +490,15 @@ by `test_a_job_on_a_stored_copy_keys_and_computes_as_on_the_original`).
 - **The command line's cache** uses the same store, which puts inputs under `haversack cache`
   for the first time and ends a third protocol.
 
+**Which inputs a shared store carries is a setting (the user's decision, 2026-09-26)**:
+`--share-inputs none|hosted|all` (`HAVERSACK_SHARE_INPUTS`), default `hosted`. `none` keeps
+every input on the host; `hosted` lets inputs fetched from public sources (IDC, TCIA,
+OpenNeuro, Zenodo, ...) go to the shared store and keeps UPLOADS on the host they were
+uploaded to, since an upload may be patient data; `all` shares uploads too (Modal opts in at
+step 7: its uploads already live in Modal's cloud today). Whatever the setting, every server
+keeps a local store (decision 2), and that is where an unshared input lives; a sync carries
+only what the setting allows.
+
 **Migration.** A fetched input is public and re-fetchable: legacy entries are not read, only
 evicted (the epoch rule already works that way). An UPLOAD cannot be re-fetched, so legacy
 upload entries are read by a shim and converted on first use, under the time-limited rule of
