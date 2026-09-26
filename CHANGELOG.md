@@ -3,22 +3,29 @@
 ## [Unreleased]
 
 - **An input copy's DICOM tags are the files' own headers.** They were SimpleITK's per-slice
-  dictionaries, which hold no sequences, no binary values and (as haversack read them) no
-  private tags. They are now read through pydicom by duckn's one tag conversion, under
-  dicom-spec's rules as settled on 2026-09-26: sequences, binary values as base64, private tags
-  with their creators, per-slice identifiers kept, empty text as `""`, the source's transfer
+  dictionaries, which hold no sequences and no binary values. They are now read through pydicom
+  by duckn's one tag conversion, under dicom-spec's rules as settled on 2026-09-26: sequences,
+  binary values as base64, per-slice identifiers kept, NO private elements (haversack cannot
+  vouch for a vendor's private data against the copy's voxels; the source keeps them), empty text as `""`, the source's transfer
   syntax recorded, and Bits Stored / High Bit only where the copy holds the source's stored
   values (a rescaled CT does not). About 1 s more per 709-slice series, once. Copies record
-  `tags_version: 2`; existing copies stay valid and keep their thinner tags - tags are
-  provenance, never what an engine reads, so this is not a reader-version change. Only public
-  text tags go back onto an image read from a copy, so no private block or base64 value lands
-  in a header written from it. Needs duckn 0.5.3.
+  `tags_version: 2`. Needs duckn 0.5.3.
 - **A copy's header never contradicts its voxels.** A copy holds rescaled values (HU for CT);
   the tags said what the files said in STORED units. Real GE and Siemens CT state Pixel
   Padding Value -2000: in the copy the padding is -3024, and masking -2000 masks nothing.
   Stored-unit attributes (Bits Stored, High Bit, the pixel value ranges, Pixel Padding Value
   and Range Limit, Real World Value Mapping) are now written only when the copy holds the
   stored values, and the dicom extension says which it holds (`stored_values`).
+- **Existing input copies are fetched again (reader version 3).** Copies made before this carry
+  that stale padding value and hand it to every header exported from them, so they are stale: a
+  hosted input is fetched again on its next use, and an upload answers 410 `input_gone` and must
+  be sent again.
+- **`get -o` writes no header that contradicts its pixels.** SimpleITK keeps a DICOM file's
+  Rescale Intercept -1024 and Pixel Padding Value -2000 beside pixels it has already rescaled,
+  and writes both into an NRRD header, where a reader would rescale twice and mask the wrong
+  value. An exported image now carries no DICOM key duckn's fields state instead, nothing in
+  stored-value units unless its pixels are the stored values, no private element, file meta,
+  overlay or curve group.
 - **A copy's header is deflated; its chunks stay stored.** With the files' own tags a header can
   be most of a copy: a 92-slice Siemens MR carries 1.8 MB (Siemens' private per-slice blocks,
   as base64) in a 4.2 MB copy. Deflated it is 85 KB, and the copy 2.5 MB; a 709-slice CT's

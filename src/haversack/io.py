@@ -494,6 +494,16 @@ def convert(src, dst, *, compress: bool = True) -> Path:
             img = sitk.ReadImage(str(src))
         except RuntimeError as e:
             raise InputError(f"cannot read {src} as an image: {_sitk_reason(e)}") from None
+    # A header written from the image must not contradict its pixels (2026-09-26): SimpleITK
+    # keeps the file's rescale, padding and bit tags beside pixels it has already rescaled, and
+    # writes them all into an NRRD header. A copy says what its voxels are; a file read here is
+    # judged by its own rescale.
+    from .input_copy import _holds_stored_values, honest_metadata, stored_values_of
+    if is_copy(src):
+        stored = stored_values_of(src)
+    else:
+        stored = _holds_stored_values([{k: img.GetMetaData(k) for k in img.GetMetaDataKeys()}])
+    honest_metadata(img, stored)
     Path(dst).parent.mkdir(parents=True, exist_ok=True)
     sitk.WriteImage(img, str(dst), compress)
     return Path(dst)

@@ -62,13 +62,22 @@ FORMATS = {"uncompressed": 1, "zstd": 2}
 #: fetched again, an upload counts as evicted (410 input_gone). 2 (2026-09-25): the tags come from
 #: ``duckn.dicom_tags``, which leaves binary-VR values out where haversack's own converter kept
 #: SimpleITK's strings of them - bumped before any deployment held a copy, so it cost nothing.
-READER_VERSION = 2
+READER_VERSION = 3
+#: 3 (2026-09-26): copies made under 2 carry, from SimpleITK's dictionaries, tags stated in
+#: STORED-value units beside rescaled voxels - a CT's Pixel Padding Value -2000 where the copy's
+#: padding is -3024 - and hand them to every header exported from them. The user's rule: nothing
+#: haversack stores may let its bytes be misread. So they are stale: a fetched input is fetched
+#: again, an upload is gone. (Tags that are merely THINNER are not a reader change - see
+#: TAGS_VERSION; tags that are WRONG are.)
 #: What the copy's DICOM tags were made by - NOT part of :data:`READER_VERSION`, though the
 #: tags once were (2026-09-26): they are provenance, never what an engine reads, so a copy with
 #: an older kind of tags is still exact and is kept; ``Input.dicom()`` reports which kind it
 #: holds. 1 (absent): SimpleITK's dictionaries. 2: the files' own headers through pydicom
-#: (``duckn.dicom_tags.tags_from_files``) - sequences, binary values, private tags, and the
-#: dicom-spec rules settled that day (Bits Stored only where the copy holds stored values).
+#: (``duckn.dicom_tags.tags_from_files``) - sequences and binary values, the dicom-spec rules
+#: settled that day (nothing in stored-value units beside rescaled voxels; ``stored_values``
+#: says which the copy holds), and NO private elements: haversack cannot vouch for a vendor's
+#: private data against the copy's voxels, and the source keeps the originals for anyone who
+#: wants them (the user's call, 2026-09-26).
 TAGS_VERSION = 2
 #: The operator's switch: ``HAVERSACK_INPUT_COPY=0`` keeps originals, as before this existed.
 ENV = "HAVERSACK_INPUT_COPY"
@@ -226,6 +235,48 @@ def _holds_stored_values(per_slice) -> bool:
     return True
 
 
+def stored_values_of(path) -> bool:
+    """What a copy says of its voxels: True only when it states they are the source's stored
+    values. A copy that does not say (one written before the field) counts as rescaled - the
+    safe reading, which never lets a stored-unit tag stand beside its voxels."""
+    try:
+        meta, *_ = _layout(Path(path))
+    except NotACopy:
+        return False
+    return (((_duckn(meta).get("extensions") or {}).get("dicom") or {})
+            .get("stored_values") is True)
+
+
+def honest_metadata(image, stored_values: bool):
+    """Strip from ``image``'s metadata dictionary every DICOM key that could contradict its
+    pixels in a header written from it (dicom-spec §5.10 / §9, the user's rule of 2026-09-26):
+    what duckn's fields state instead (geometry, rescale, bits allocated), anything in
+    stored-value units unless the pixels ARE the stored values, the file meta group, overlay and
+    curve groups, group lengths, and every private element. SimpleITK keeps all of these from the
+    file it read - a CT read by ``sitk.ReadImage`` has HU pixels and still says Rescale
+    Intercept -1024 and Pixel Padding Value -2000, and writes both into an NRRD header. Keys that
+    are not DICOM tags (``ITK_...``, a NIfTI's own) are left alone. Returns ``image``."""
+    try:
+        from duckn.dicom_tags import EXCLUDED, STORED_ENCODING
+    except ImportError:                      # no rules to judge by: keep no DICOM key at all
+        EXCLUDED, STORED_ENCODING, judge = frozenset(), frozenset(), False
+    else:
+        judge = True
+    for key in list(image.GetMetaDataKeys()):
+        group, _, element = key.partition("|")
+        try:
+            g, e = int(group, 16), int(element, 16)
+        except ValueError:
+            continue
+        tag = (g << 16) | e
+        drop = (not judge or tag in EXCLUDED or e == 0 or g == 0x0002 or g % 2 == 1
+                or 0x5000 <= g <= 0x50FF or 0x6000 <= g <= 0x60FF
+                or (not stored_values and tag in STORED_ENCODING))
+        if drop:
+            image.EraseMetaData(key)
+    return image
+
+
 def _sample_units(per_slice):
     from duckn.dicom_tags import RESCALE_TYPE
     values = {d.get(RESCALE_TYPE, "").strip() for d in per_slice}
@@ -259,9 +310,10 @@ def _metadata(image, per_slice, *, files=(), source, source_digest, source_size=
     fields: dict = {}
     if files:
         # the files' own headers (TAGS_VERSION 2): what SimpleITK's dictionaries cannot hold
-        series, slices, fields = tags_from_files(files, stored_values=held)
+        series, slices, fields = tags_from_files(files, stored_values=held, private=False)
     else:
-        series, slices = tags_from_sitk(per_slice, stored_values=held) if per_slice else ({}, [])
+        series, slices = (tags_from_sitk(per_slice, stored_values=held, private=False)
+                          if per_slice else ({}, []))
         if series or any(slices):
             fields = {"stored_values": held}   # what tags_from_files states itself
     thick, thick_each = _thickness(per_slice) if per_slice else (None, None)
@@ -676,11 +728,12 @@ def _with_tags(image, attrs: dict):
             # read without them rather than not at all
             restored = {}
         for key, value in restored.items():
-            # public tags only: what a SimpleITK read of the files shows (it loads no private
-            # tags unless asked), and never a private binary value as base64 in a header
-            # written from this image
-            if int(key[:4], 16) % 2 == 0:
-                image.SetMetaData(key, value)
+            image.SetMetaData(key, value)
+        # whatever the copy holds, nothing restored may contradict the voxels: a copy that does
+        # not say its voxels are the stored values is judged as rescaled
+        stored = (((attrs.get("extensions") or {}).get("dicom") or {})
+                  .get("stored_values") is True)
+        honest_metadata(image, stored)
     return image
 
 

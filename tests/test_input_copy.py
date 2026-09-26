@@ -231,9 +231,10 @@ def test_the_tags_are_the_files_own_headers(tmp_path, monkeypatch, form):
     tags = ext["dicom"]["tags"]
     assert tags["AnatomicRegionSequence"] == [
         {"CodeValue": "T-D3000", "CodingSchemeDesignator": "SRT", "CodeMeaning": "Chest"}]
-    assert tags["ICCProfile"] == "AQIDBA==" and tags["00190010"] == "ACME 1.0"
+    assert tags["ICCProfile"] == "AQIDBA=="
     assert tags["StudyDescription"] == ""                     # empty text: "", never null
-    assert ic.slice_tags(copy, "00191001") == [1000.0 + i for i in range(6)]
+    # no private element: haversack cannot vouch for a vendor's data; the source keeps it
+    assert "00190010" not in tags and not any(ic.slice_tags(copy, "00191001"))
     assert ic.slice_tags(copy, "SOPInstanceUID")[0]           # per-slice identity kept
     assert ext["dicom"]["source_transfer_syntax"] == "1.2.840.10008.1.2.1"
     assert not {"TransferSyntaxUID", "MediaStorageSOPInstanceUID"} & tags.keys()
@@ -276,16 +277,17 @@ def test_a_copy_written_with_a_stored_header_still_reads_and_is_not_stale(tmp_pa
 
 
 def test_the_header_is_deflated_where_the_tags_are_large(tmp_path):
-    """The reason for the deflated header: per-slice private blocks repeat almost exactly."""
-    series = _enrich(write_series(tmp_path / "s", n=20))
-    for i, f in enumerate(sorted(series.iterdir())):
+    """The reason for the deflated header: tags repeat. (Measured on Siemens' private per-slice
+    blocks, which copies no longer carry; a large public binary value stands in.)"""
+    series = write_series(tmp_path / "s", n=20)
+    for f in sorted(series.iterdir()):
         ds = pydicom.dcmread(f)
-        ds.add_new(0x00291010, "OB", bytes(range(256)) * 60 + bytes([i]))   # a CSA-like block
+        ds.add_new(0x00282000, "OB", bytes(range(256)) * 200)    # ICC Profile, 51 KB
         ds.save_as(f, enforce_file_format=True)
     copy = ic.transcode(series, tmp_path / "entry")
     with zipfile.ZipFile(copy) as z:
         h = z.getinfo("zarr.json")
-    assert h.file_size > 20 * 15_000 and h.compress_size < h.file_size / 10
+    assert h.file_size > 60_000 and h.compress_size < h.file_size / 10
 
 
 def _pad(series: Path) -> Path:
@@ -327,6 +329,42 @@ def test_the_simpleitk_path_says_which_values_it_holds(tmp_path):
     image, per_slice, _ = nio.read_image_and_tags(write_series(tmp_path / "s"))
     vol = ic._metadata(image, per_slice, source=None, source_digest=None)
     assert vol.metadata.extensions["dicom"]["stored_values"] is False
+
+
+def _one_file(tmp_path, rescale=True) -> Path:
+    series = _pad(_enrich(write_series(tmp_path / "s", n=2), rescale=rescale))
+    return sorted(series.iterdir())[0]
+
+
+def _nrrd_header(path: Path) -> str:
+    return path.read_bytes().split(b"\n\n")[0].decode(errors="replace")
+
+
+def test_an_exported_file_says_nothing_its_pixels_contradict(tmp_path):
+    """`get -o x.nrrd` of a single DICOM file: SimpleITK rescales the pixels and keeps the
+    file's Rescale Intercept -1024 and Pixel Padding Value -2000, and writes both into the NRRD
+    header - a reader would rescale twice and mask the wrong value. They are gone."""
+    out = nio.convert(_one_file(tmp_path), tmp_path / "x.nrrd")
+    h = _nrrd_header(out)
+    for key in ("0028|1052", "0028|1053", "0028|0120", "0028|0107", "0028|0101", "0019|"):
+        assert key not in h, key
+    assert "0008|0060:=CT" in h                               # the rest of the header stays
+
+
+def test_an_exported_file_of_stored_values_keeps_what_is_true(tmp_path):
+    out = nio.convert(_one_file(tmp_path, rescale=False), tmp_path / "x.nrrd")
+    h = _nrrd_header(out)
+    assert "0028|0120:=0" in h and "0028|0101:=16" in h       # true of these pixels
+
+
+def test_a_copy_that_does_not_say_what_it_holds_is_read_as_rescaled(tmp_path):
+    """A copy from before the field: its restored tags are judged as beside rescaled voxels."""
+    copy = ic.transcode(_pad(write_series(tmp_path / "s")), tmp_path / "entry")
+    tags = {"PixelPaddingValue": -2000, "BitsStored": 16, "Modality": "CT", "00191001": "x"}
+    image = ic._with_tags(sitk.Image([2, 2, 2], sitk.sitkInt32),
+                          {"extensions": {"dicom": {"tags": tags}}})
+    assert set(image.GetMetaDataKeys()) == {"0008|0060"}
+    assert ic.stored_values_of(copy) is False
 
 
 def test_only_public_text_tags_go_back_onto_the_image(tmp_path):
