@@ -10,6 +10,12 @@
   coordinate exactly half a voxel past the source's last sample as outside rather than clamping it
   onto that sample (it picks a sample that does not exist). New there and available here:
   `to_labels(transparent="zero")`, `to_labels(out_start=...)` for slab-by-slab restores.
+- **The network no longer runs in the channels_last_3d memory layout** (`TorchModel(channels_last=False)`
+  is the default; `True` still works). It was slower on both devices measured, with the same tiles:
+  the sliding window of TotalSegmentator v3's organs model at 1.5 mm on an A10 took 6.84 s with it
+  and 4.33 s without; `total_fast` at 3 mm on an M2 took 20.7 s and 17.6 s. Labels change only
+  within fp16 rounding (99.983 % of voxels agree on `total_fast`). Not yet decided: whether that is
+  enough to bump the nnU-Net engine's `cache_epoch`, so cached results recompute.
 
 ## [0.15.0] - 2026-09-27
 

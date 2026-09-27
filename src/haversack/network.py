@@ -371,7 +371,7 @@ class TorchModel:
     Uses nnU-Net's own predictor to build the architecture from ``plans.json`` and load
     the checkpoints (so tiling, gaussian and fold handling stay nnU-Net's), then:
     ``ShuffleUp3d`` surgery (exact; lets the decoder run in half precision on MPS),
-    ``dtype`` / channels_last_3d, and a sliding-window loop with two accumulator
+    ``dtype``, and a sliding-window loop with two accumulator
     placements, chosen at run time from the device's actual free memory
     (``accumulate="auto"``, or force with ``"device"`` / ``"host"``):
 
@@ -383,7 +383,7 @@ class TorchModel:
       and it keeps whole-body inference inside a modest GPU budget.
     """
 
-    def __init__(self, folder, *, folds=(0,), device="auto", dtype: str = "fp16", channels_last: bool = True,
+    def __init__(self, folder, *, folds=(0,), device="auto", dtype: str = "fp16", channels_last: bool = False,
                  allow_transpose: bool = False,
                  surgery: bool = True, accumulate: str = "auto", step_size: float = 0.5,
                  activation_reserve_gb: float = DEFAULT_ACTIVATION_RESERVE_GB, batch_size="auto",
@@ -482,6 +482,9 @@ class TorchModel:
         """Move the network to ``self.device``. Idempotent; call from the thread that predicts."""
         if not self._on_device:
             self.net.to(self.device)
+            # Off by default (2026-09-27): channels_last_3d made the sliding window slower on both
+            # devices measured - organs model (831) at 1.5 mm on an A10, 6.84 s vs 4.33 s; total_fast
+            # (836) at 3 mm on an M2, 20.7 s vs 17.6 s - same tiles, fp16, labels within fp16 rounding.
             if self.channels_last:
                 self.net.to(memory_format=torch.channels_last_3d)
             self.gaussian = self._gaussian_cpu.to(self.device)
