@@ -62,13 +62,18 @@ FORMATS = {"uncompressed": 1, "zstd": 2}
 #: fetched again, an upload counts as evicted (410 input_gone). 2 (2026-09-25): the tags come from
 #: ``duckn.dicom_tags``, which leaves binary-VR values out where haversack's own converter kept
 #: SimpleITK's strings of them - bumped before any deployment held a copy, so it cost nothing.
-READER_VERSION = 3
+READER_VERSION = 4
 #: 3 (2026-09-26): copies made under 2 carry, from SimpleITK's dictionaries, tags stated in
 #: STORED-value units beside rescaled voxels - a CT's Pixel Padding Value -2000 where the copy's
 #: padding is -3024 - and hand them to every header exported from them. The user's rule: nothing
 #: haversack stores may let its bytes be misread. So they are stale: a fetched input is fetched
 #: again, an upload is gone. (Tags that are merely THINNER are not a reader change - see
 #: TAGS_VERSION; tags that are WRONG are.)
+#: 4 (2026-09-26, review of the reader): an Enhanced file's per-frame rescales, slices of one
+#: rescale in other pixel types, MONOCHROME1 or a table on a later slice, and an Enhanced
+#: MONOCHROME1 file read as other values under 3; a palette in stored units rode beside
+#: rescaled voxels; and every read is now held against pydicom's decode. Copies made under 3
+#: are stale for the same reason 2's were.
 #: What the copy's DICOM tags were made by - NOT part of :data:`READER_VERSION`, though the
 #: tags once were (2026-09-26): they are provenance, never what an engine reads, so a copy with
 #: an older kind of tags is still exact and is kept; ``Input.tags()`` reports which kind it
@@ -228,6 +233,24 @@ _COLOR_TAGS = frozenset({0x00280002, 0x00280004, 0x00280006,
                          0x00281221, 0x00281222, 0x00281223})
 
 
+#: A palette, and what says the pixels are shown through one: its descriptors (whose first
+#: mapped value is a STORED value), data, segmented data and UIDs, and Pixel Presentation. Beside
+#: rescaled voxels they map values the voxels no longer hold - a grayscale CT with a supplemental
+#: palette kept descriptors in stored units beside HU (review, 2026-09-26) - so they are held to
+#: the stored-unit rule: stated only beside the stored values. duckn adds them to its
+#: ``STORED_ENCODING`` in 0.5.5; haversack holds the rule itself until it pins that release.
+_PALETTE_TAGS = frozenset({0x00281101, 0x00281102, 0x00281103, 0x00281104,
+                           0x00281111, 0x00281112, 0x00281113, 0x00281199,
+                           0x00281201, 0x00281202, 0x00281203, 0x00281204,
+                           0x00281211, 0x00281212, 0x00281213, 0x00281214,
+                           0x00281221, 0x00281222, 0x00281223, 0x00089205})
+
+
+def _palette_keywords() -> frozenset:
+    from pydicom.datadict import keyword_for_tag
+    return frozenset(keyword_for_tag(t) for t in _PALETTE_TAGS)
+
+
 def _implied_pixel_id(bits_allocated: int, representation: int, samples: int, photometric: str):
     """The SimpleITK pixel type that holds a file's STORED values as they are: what Bits
     Allocated and Pixel Representation imply, a vector of them for RGB; None for anything whose
@@ -354,6 +377,8 @@ def honest_metadata(image, stored_values: bool, *, modality_lut: bool = False):
     also: set = set()
     if image.GetNumberOfComponentsPerPixel() > 1:
         also |= _COLOR_TAGS
+    if not stored_values:
+        also |= _PALETTE_TAGS
     for key in list(image.GetMetaDataKeys()):
         group, _, element = key.partition("|")
         try:
@@ -451,6 +476,11 @@ def _metadata(image, per_slice, *, files=(), source, source_digest, source_size=
                           if per_slice else ({}, []))
         if series or any(slices):
             fields = {"stored_values": held}   # what tags_from_datasets states itself
+    if not held:
+        # a palette maps stored values: not beside these voxels (_PALETTE_TAGS, 2026-09-26)
+        drop = _palette_keywords()
+        series = {k: v for k, v in (series or {}).items() if k not in drop}
+        slices = [{k: v for k, v in (d or {}).items() if k not in drop} for d in (slices or [])]
     # (MONOCHROME1 and a Modality LUT once dropped the window and Photometric Interpretation
     # here, beside GDCM's inverted or un-looked-up values; io._true_values now reads the values
     # the files mean, so both are true of the copy again - 2026-09-26)

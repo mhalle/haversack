@@ -129,133 +129,211 @@ def _slice_axis(ipps, row, col) -> tuple[np.ndarray, float]:
     return n_hat, dz
 
 
-def _frame_positions(p) -> np.ndarray | None:
-    """Each frame's Image Position (Patient) from a multi-frame file's Per-frame Functional
-    Groups (header only), in frame order - or None when not every frame states one (then there
-    is nothing to check the reader against)."""
+def _header(f):
+    """pydicom's reading of a DICOM file's header, never its pixels (by force: GDCM reads a file
+    without its preamble too) - what the file says its values mean. Asked of every file the
+    reader decodes (2026-09-26): the corrections and the check below need each slice's own."""
+    import pydicom
     try:
-        import pydicom
-        ds = pydicom.dcmread(str(p), stop_before_pixels=True, force=True)
-        frames = ds.get("PerFrameFunctionalGroupsSequence")
-        if not frames:
+        return pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
+    except Exception as e:                     # noqa: BLE001 - whatever pydicom raises
+        raise InputError(f"{f}: its DICOM header does not read ({type(e).__name__}), so what "
+                         "its values mean is unknown") from None
+
+
+def _text(ds, tag: int):
+    """A header value as its text, never converted: pydicom's DS conversion raises on a malformed
+    value, and what to make of one is the caller's to decide."""
+    if tag not in ds:
+        return None
+    value = ds.get_item(tag).value
+    if isinstance(value, bytes):
+        return value.decode("latin-1")
+    return None if value is None else str(value)
+
+
+#: A rescale nobody states (as opposed to one stated as the identity, or one that does not parse)
+_UNSTATED = object()
+
+
+def _stated_rescale(item):
+    """(slope, intercept) of the rescale ``item`` (a dataset or a Pixel Value Transformation
+    item) states - None when it does not parse, :data:`_UNSTATED` when it states none."""
+    if item is None or (0x00281053 not in item and 0x00281052 not in item):
+        return _UNSTATED
+    return _rescale_pair(_text(item, 0x00281053), _text(item, 0x00281052))
+
+
+def _group_rescale(groups, k: int = 0):
+    """The rescale functional-group item ``k`` of ``groups`` states, or :data:`_UNSTATED`."""
+    if not groups or k >= len(groups):
+        return _UNSTATED
+    seq = groups[k].get("PixelValueTransformationSequence")
+    return _stated_rescale(seq[0]) if seq else _UNSTATED
+
+
+def _states_rescale(ds) -> bool:
+    """Whether ``ds`` states a rescale anywhere: top level, shared or per-frame groups."""
+    per = ds.get("PerFrameFunctionalGroupsSequence") or []
+    return (_stated_rescale(ds) is not _UNSTATED
+            or _group_rescale(ds.get("SharedFunctionalGroupsSequence")) is not _UNSTATED
+            or any(_group_rescale(per, k) is not _UNSTATED for k in range(len(per))))
+
+
+def _frame_rescales(ds, n: int):
+    """``(applied, meant)`` for the file ``ds`` read as ``n`` frames: the rescale GDCM applies to
+    EVERY frame, and the one each frame means. GDCM takes the Shared Functional Groups' rescale,
+    else the first frame's own, else the top-level one - measured 2026-09-26: an Enhanced file
+    with a shared (1, -1024) and per-frame (2, -500), (1, -1024), (0.5, 7) read every frame at
+    (1, -1024); without the shared one, at (2, -500): up to 3513 off. A frame means its own
+    (Per-frame Functional Groups), else the shared, else the top-level one. The identity where
+    nothing is stated; None where the statement does not parse."""
+    shared = _group_rescale(ds.get("SharedFunctionalGroupsSequence"))
+    per = ds.get("PerFrameFunctionalGroupsSequence")
+    top = _stated_rescale(ds)
+    own = [_group_rescale(per, k) for k in range(n)]
+
+    def first(*stated):
+        return next((s for s in stated if s is not _UNSTATED), (1.0, 0.0))
+    return first(shared, own[0] if own else _UNSTATED, top), [first(o, shared, top) for o in own]
+
+
+def _pydicom_meaning(file, head, index, rescale, lut: bool, scalar: bool, depth: int = 0):
+    """The values slice/frame ``index`` of ``file`` means, decoded by pydicom's own decoders -
+    its stored values through the file's modality mapping (the Modality LUT, else ``rescale``,
+    the frame's own, functional groups included, which pydicom's ``apply_modality_lut`` does not
+    read) - or None where pydicom cannot decode the file (a decoder it lacks: nothing to check).
+    A vector image's are its color values: a palette's through the palette, and - where the
+    image holds ``depth`` = 8 bits a component and the palette's entries are 16 - their high
+    bytes, as GDCM expands a palette into 8-bit RGB (measured 2026-09-26: 9472 -> 37 on
+    pydicom's OBXXXX1A, and on a synthetic palette): a coarser form of the same colors."""
+    import pydicom
+    from pydicom.pixels import apply_color_lut, apply_modality_lut, pixel_array
+    try:
+        px = pixel_array(str(file), index=index)
+    except Exception:                          # noqa: BLE001 - e.g. no preamble: read by force
+        try:
+            px = pydicom.dcmread(str(file), force=True).pixel_array
+            px = px[index] if index is not None else px
+        except Exception:                      # noqa: BLE001 - no decoder here
             return None
-        out = []
-        for item in frames:
-            plane = item.get("PlanePositionSequence")
-            if not plane or "ImagePositionPatient" not in plane[0]:
-                return None
-            out.append([float(v) for v in plane[0].ImagePositionPatient])
-    except Exception:                          # noqa: BLE001 - an unreadable header (or no
-        return None                            # pydicom: a lean install) states nothing
-    return np.asarray(out, dtype=np.float64)
+    px = np.asarray(px)
+    if not scalar:
+        if str(head.get("PhotometricInterpretation", "")).strip().upper() == "PALETTE COLOR":
+            px = apply_color_lut(px, head)
+            if depth == 8 and px.dtype.itemsize == 2:
+                px = px // 256
+        return px.astype(np.float64)
+    if lut:
+        return np.asarray(apply_modality_lut(px, head), dtype=np.float64)
+    return px.astype(np.float64) * rescale[0] + rescale[1]
 
 
-def _check_frame_positions(p, image) -> None:
-    """Refuse a multi-frame DICOM file whose frames SimpleITK places where they were not
-    acquired (2026-09-26). GDCM places an Enhanced file's frames on a uniform grid from the
-    first frame's position and one spacing, whatever each frame's own position says: frames at
-    z 10, 12, 16, 18 were placed at 10, 11, 12, 13, and the copy then carried the true per-frame
-    positions beside that grid. The frames' positions are checked the way
-    :func:`_series_geometry` checks a series' slices - one uniform step along the image normal -
-    and against the grid the reader built: its origin, slice spacing and slice direction. A file
-    whose frames state no positions is read as before."""
-    n = int(image.GetSize()[2])
-    if n < 2:
-        return
-    ipps = _frame_positions(p)
-    if ipps is None:
-        return
-    if len(ipps) != n:
-        raise InputError(f"{p}: {len(ipps)} frame positions for {n} frames: the frames cannot "
-                         "be placed where they were acquired")
-    direction = np.asarray(image.GetDirection(), dtype=np.float64).reshape(3, 3)
-    try:
-        n_hat, dz = _slice_axis(ipps, direction[:, 0], direction[:, 1])
-    except InputError as e:
-        raise InputError(f"{p}: the frames' positions (Per-frame Functional Groups) are not "
-                         f"one uniform grid - {e}") from None
-    origin = np.asarray(image.GetOrigin(), dtype=np.float64)
-    spacing = float(image.GetSpacing()[2])
-    tol = max(0.01, 1e-3 * dz)
-    if (np.linalg.norm(ipps[0] - origin) > tol or abs(spacing - dz) > tol
-            or np.abs(direction[:, 2] - n_hat).max() > 1e-3):
-        raise InputError(
-            f"{p}: the reader places the frames {spacing:.3f} mm apart from "
-            f"{tuple(round(float(v), 3) for v in origin)}, but the file places them "
-            f"{dz:.3f} mm apart from {tuple(round(float(v), 3) for v in ipps[0])}: refusing "
-            "to place frames where they were not acquired")
-
-
-def _true_values(image, files):
-    """``image`` with the values its DICOM files mean, where GDCM hands over others (2026-09-26,
-    the user's call: fix the reader, as for the slice-axis sign). Two cases, measured:
+def _true_values(image, files, heads=None):
+    """``image`` with the values its DICOM files mean, where GDCM hands over others - and checked
+    against pydicom's own decode (2026-09-26, the user's call: fix the reader, as for the
+    slice-axis sign). What GDCM does, measured:
 
     - **MONOCHROME1.** GDCM complements each stored value within Bits Stored (unsigned: 2^b-1-v;
       signed: -v-1) and then applies the rescale: an unsigned 12-bit 100 read as 3995, a signed
       -1000 as 999. Photometric Interpretation is a DISPLAY rule - the values mean what the
-      Modality LUT stage makes of them, as for any other image - so the complement is undone,
-      slice by slice with each slice's rescale: real = K - out, K = 2i + s(2^b-1) unsigned,
-      2i - s signed.
-    - **A Modality LUT Sequence.** GDCM applies a rescale but never a lookup table: the pixels
-      were STORED values beside a window stated in the table's output. The table is applied
-      (pydicom's ``apply_modality_lut``, which clamps as DICOM says). A file stating a table AND
-      a rescale is refused: DICOM says the table wins, GDCM applies the rescale.
+      Modality LUT stage makes of them, as for any other image - so the complement is undone.
+    - **A Modality LUT Sequence.** GDCM applies a rescale but never a lookup table. The table is
+      applied (pydicom's ``apply_modality_lut``, which clamps as DICOM says). A file stating a
+      table AND a rescale is refused: DICOM says the table wins, GDCM applies the rescale.
+    - **An Enhanced file's per-frame rescales.** GDCM applies one rescale to every frame
+      (:func:`_frame_rescales`); a frame that states another is rescaled from its stored values
+      with its own.
+
+    Every slice (a series' headers, read once: ~0.3 s for 709 slices) is asked, not the first
+    alone: a MONOCHROME1 or a table on slice 2 of 3 went through uncorrected (review,
+    2026-09-26). A series mixing them, or a rescale that does not parse, is refused.
+
+    **The check.** Wherever pydicom can decode the file, the first and the last slice (frame)
+    are held against the values pydicom decodes and maps itself, corrected or not, and a
+    disagreement is refused - never passed on. GDCM decoded an RLE 16-bit RGB, an Explicit VR
+    Big Endian 32-bit dose (250085395 for 1249000) and a 1-bit SEG (0/255 for 0/1) wrongly
+    without a word (review, 2026-09-26). A decoder pydicom lacks means no check, except for a
+    per-frame rescale correction, which is refused unchecked.
 
     ``files``: the DICOM files in the image's slice order, or one file for all of a multi-frame
-    file's frames. Where pydicom can decode the first file's pixels, the corrected first slice
-    is checked against the values it computes itself, and a disagreement is refused - never
-    passed on. Anything else is returned as it was."""
-    import pydicom
+    file's frames; ``heads``: their headers, when the caller has read them."""
     import SimpleITK as sitk
-    try:
-        first = pydicom.dcmread(str(files[0]), stop_before_pixels=True, force=True)
-    except Exception:                          # noqa: BLE001 - not a header pydicom reads
-        return image
-    def facts(h):
-        return (str(h.get("PhotometricInterpretation", "")).strip().upper() == "MONOCHROME1",
-                "ModalityLUTSequence" in h)
-    mono1, lut = facts(first)
-    if not (mono1 or lut) or image.GetNumberOfComponentsPerPixel() != 1:
-        return image
+    files = [str(f) for f in files]
+    heads = list(heads) if heads is not None else [_header(f) for f in files]
     n = int(image.GetSize()[2]) if image.GetDimension() == 3 else 1
     if len(files) == n:
-        heads = [first] + [pydicom.dcmread(str(f), stop_before_pixels=True, force=True)
-                           for f in files[1:]]
+        slots = []
+        for f, h in zip(files, heads):
+            applied, (meant,) = _frame_rescales(h, 1)
+            slots.append((f, h, None, applied, meant))
     elif len(files) == 1:
-        heads = [first] * n
+        applied, meants = _frame_rescales(heads[0], n)
+        slots = [(files[0], heads[0], k if n > 1 else None, applied, m)
+                 for k, m in enumerate(meants)]
     else:
         raise InputError(f"{files[0]}: {len(files)} files for {n} slices")
-    if any(facts(h) != (mono1, lut) for h in heads):
-        raise InputError(f"{files[0]}: the series mixes MONOCHROME1 or a Modality LUT across its "
-                         "slices, which one volume cannot hold as one kind of value")
-    if lut and any("RescaleSlope" in h or "RescaleIntercept" in h for h in heads):
-        raise InputError(f"{files[0]}: a Modality LUT Sequence and a rescale in one file - DICOM "
-                         "says the table wins, GDCM applies the rescale; refusing to choose")
-    from pydicom.pixels import apply_modality_lut
-    out = sitk.GetArrayFromImage(image)
-    if out.ndim == 2:
+    scalar = image.GetNumberOfComponentsPerPixel() == 1
+    mono1 = [str(h.get("PhotometricInterpretation", "")).strip().upper() == "MONOCHROME1"
+             for _, h, *_ in slots]
+    lut = ["ModalityLUTSequence" in h for _, h, *_ in slots]
+    fix = frames_differ = False
+    if scalar:
+        if len(set(zip(mono1, lut))) > 1:
+            raise InputError(f"{files[0]}: the series mixes MONOCHROME1 or a Modality LUT across "
+                             "its slices, which one volume cannot hold as one kind of value")
+        if lut[0] and any(_states_rescale(h) for h in heads):
+            raise InputError(f"{files[0]}: a Modality LUT Sequence and a rescale in one file - "
+                             "DICOM says the table wins, GDCM applies the rescale; refusing to "
+                             "choose")
+        if any(a is None or m is None for *_, a, m in slots):
+            raise InputError(f"{files[0]}: a Rescale Slope or Intercept that is not a number: "
+                             "what the values mean is unknown")
+        frames_differ = any(m != a for *_, a, m in slots) and not lut[0]
+        fix = mono1[0] or lut[0] or frames_differ
+    out = sitk.GetArrayViewFromImage(image)
+    if image.GetDimension() == 2:
         out = out[None]
-    real = np.empty(out.shape, dtype=np.float64)
-    for k, h in enumerate(heads):
-        o = out[k].astype(np.float64)
-        top = float(2 ** int(h.BitsStored) - 1)
-        signed = int(h.get("PixelRepresentation", 0) or 0) == 1
-        if lut:
-            stored = (-o - 1 if signed else top - o) if mono1 else o
-            real[k] = apply_modality_lut(stored.astype(np.int64), h)
-        else:
-            s = float(h.get("RescaleSlope", 1) or 1)
-            i = float(h.get("RescaleIntercept", 0) or 0)
-            real[k] = (2 * i - s if signed else 2 * i + s * top) - o
-    try:                                       # the check: pydicom's own values, where it decodes
-        full = pydicom.dcmread(str(files[0]), force=True)
-        px = full.pixel_array
-        want = np.asarray(apply_modality_lut(px[0] if px.ndim == 3 else px, full), dtype=np.float64)
-    except Exception:                          # noqa: BLE001 - no decoder here: nothing to check
-        want = None
-    if want is not None and not np.allclose(real[0], want, rtol=0, atol=1e-6):
-        raise InputError(f"{files[0]}: GDCM's values could not be corrected to the file's own "
-                         f"({'MONOCHROME1' if mono1 else 'Modality LUT'}): refusing it")
+    if fix:
+        from pydicom.pixels import apply_modality_lut
+        real = np.empty(out.shape, dtype=np.float64)
+        for k, (f, h, _, (sa, ia), (sm, im)) in enumerate(slots):
+            if sa == 0:
+                raise InputError(f"{f}: a Rescale Slope of 0: its stored values cannot be "
+                                 "recovered")
+            v = (out[k].astype(np.float64) - ia) / sa          # what GDCM rescaled
+            r = np.round(v)
+            if np.abs(v - r).max() < 1e-3:
+                v = r                                           # stored values are integers
+            if mono1[k]:                                        # GDCM's complement, undone
+                signed = int(h.get("PixelRepresentation", 0) or 0) == 1
+                v = -v - 1 if signed else float(2 ** int(h.BitsStored) - 1) - v
+            real[k] = apply_modality_lut(v.astype(np.int64), h) if lut[k] else sm * v + im
+    got = real if fix else out
+    what = ("MONOCHROME1" if mono1[0] else "Modality LUT" if lut[0] else "per-frame rescale")
+    checked = False
+    loose = 1e-6 if image.GetPixelID() in (sitk.sitkFloat32, sitk.sitkVectorFloat32) else 0.0
+    for k in sorted({0, n - 1}):
+        f, h, index, _, meant = slots[k]
+        want = _pydicom_meaning(f, h, index, meant, lut[k], scalar, 8 * out.dtype.itemsize)
+        if want is None:
+            continue
+        have = np.asarray(got[k], dtype=np.float64)
+        if have.shape != want.shape or not np.allclose(have, want, rtol=loose, atol=1e-6):
+            if fix:
+                raise InputError(f"{f}: GDCM's values could not be corrected to the file's own "
+                                 f"({what}): refusing it")
+            diff = (float(np.abs(have - want).max()) if have.shape == want.shape
+                    else f"shape {have.shape} for {want.shape}")
+            raise InputError(f"{f}: GDCM decodes other values than pydicom does from the same "
+                             f"file (slice {k}, max difference {diff}): refusing to guess which "
+                             "are right")
+        checked = True
+    if frames_differ and not checked:
+        raise InputError(f"{files[0]}: its frames state different rescales, which GDCM reads as "
+                         "one, and pydicom cannot decode it to check the correction: refusing it")
+    if not fix:
+        return image
     if np.all(real == np.round(real)):
         lo, hi = real.min(), real.max()
         for dt in (out.dtype, np.int16, np.uint16, np.int32):
@@ -269,6 +347,127 @@ def _true_values(image, files):
     for key in image.GetMetaDataKeys():
         fixed.SetMetaData(key, image.GetMetaData(key))
     return fixed
+
+
+def _frame_planes(ds):
+    """``(positions, orientations, pixel spacings)`` of a multi-frame file's frames, from its
+    header: the Per-frame Functional Groups' own, the orientation and spacing else the Shared
+    ones' (a frame stating none has None there) - or, for a file without per-frame groups, from
+    the Grid Frame Offset Vector (RTDOSE: relative to the position along the normal when its
+    first offset is 0, else the frames' z coordinates, DICOM C.8.8.3.2). None when the header
+    places no frame at all."""
+    def attr(item, seq, key):
+        s = item.get(seq) if item is not None else None
+        if not s or key not in s[0]:
+            return None
+        return [float(v) for v in s[0].get(key)]
+    shared = (ds.get("SharedFunctionalGroupsSequence") or [None])[0]
+    per = ds.get("PerFrameFunctionalGroupsSequence")
+    if per:
+        return ([attr(it, "PlanePositionSequence", "ImagePositionPatient") for it in per],
+                [attr(it, "PlaneOrientationSequence", "ImageOrientationPatient")
+                 or attr(shared, "PlaneOrientationSequence", "ImageOrientationPatient")
+                 for it in per],
+                [attr(it, "PixelMeasuresSequence", "PixelSpacing")
+                 or attr(shared, "PixelMeasuresSequence", "PixelSpacing") for it in per])
+    offsets = ds.get("GridFrameOffsetVector")
+    if offsets is None or "ImagePositionPatient" not in ds or "ImageOrientationPatient" not in ds:
+        return None
+    off = [float(v) for v in (offsets if hasattr(offsets, "__len__") else [offsets])]
+    ipp = np.array([float(v) for v in ds.ImagePositionPatient])
+    iop = [float(v) for v in ds.ImageOrientationPatient]
+    normal = np.cross(iop[:3], iop[3:])
+    pos = ([list(ipp + o * normal) for o in off] if off and off[0] == 0
+           else [[ipp[0], ipp[1], o] for o in off])
+    return pos, [iop] * len(off), [None] * len(off)
+
+
+def _check_frame_positions(p, image) -> None:
+    """Refuse a multi-frame DICOM file whose frames SimpleITK places where they were not
+    acquired (2026-09-26). GDCM places an Enhanced file's frames on a uniform grid from the
+    first frame's position and one spacing, whatever each frame's own position says: frames at
+    z 10, 12, 16, 18 were placed at 10, 11, 12, 13, and the copy then carried the true per-frame
+    positions beside that grid. The frames' positions are checked the way
+    :func:`_series_geometry` checks a series' slices - one uniform step along the image normal -
+    and against the grid the reader built: its origin, slice spacing and slice direction. A file
+    whose frames state no positions is read as before.
+
+    As a series is (review, 2026-09-26): frames whose orientation or pixel spacing differ from
+    each other are refused - GDCM took the first frame's for all, silently - and so is an RTDOSE
+    whose Grid Frame Offset Vector is not the uniform grid GDCM placed its frames on."""
+    n = int(image.GetSize()[2])
+    if n < 2:
+        return
+    try:
+        import pydicom
+        planes = _frame_planes(pydicom.dcmread(str(p), stop_before_pixels=True, force=True))
+    except Exception:                          # noqa: BLE001 - an unreadable header (or no
+        return                                 # pydicom: a lean install) states nothing
+    if planes is None:
+        return
+    positions, orientations, spacings = planes
+    if len(positions) != n:
+        raise InputError(f"{p}: {len(positions)} frame positions for {n} frames: the frames "
+                         "cannot be placed where they were acquired")
+    for stated in (orientations, spacings):
+        known = [np.asarray(v, dtype=np.float64) for v in stated if v is not None]
+        if known and any(v.shape != known[0].shape or np.abs(v - known[0]).max() > 1e-4
+                         for v in known):
+            raise InputError(f"{p}: its frames mix image orientations or pixel spacings "
+                             "(Per-frame Functional Groups): not a single uniform volume")
+    if any(v is None for v in positions):
+        return
+    ipps = np.asarray(positions, dtype=np.float64)
+    direction = np.asarray(image.GetDirection(), dtype=np.float64).reshape(3, 3)
+    try:
+        n_hat, dz = _slice_axis(ipps, direction[:, 0], direction[:, 1])
+    except InputError as e:
+        raise InputError(f"{p}: the frames' positions (Per-frame Functional Groups or Grid "
+                         f"Frame Offset Vector) are not one uniform grid - {e}") from None
+    origin = np.asarray(image.GetOrigin(), dtype=np.float64)
+    spacing = float(image.GetSpacing()[2])
+    tol = max(0.01, 1e-3 * dz)
+    if (np.linalg.norm(ipps[0] - origin) > tol or abs(spacing - dz) > tol
+            or np.abs(direction[:, 2] - n_hat).max() > 1e-3):
+        raise InputError(
+            f"{p}: the reader places the frames {spacing:.3f} mm apart from "
+            f"{tuple(round(float(v), 3) for v in origin)}, but the file places them "
+            f"{dz:.3f} mm apart from {tuple(round(float(v), 3) for v in ipps[0])}: refusing "
+            "to place frames where they were not acquired")
+
+
+def _check_gzip(p) -> None:
+    """Refuse a gzip file whose stream does not end as gzip says it must (2026-09-26, found by
+    a black-box review of the server): SimpleITK read a ``.nii.gz`` cut to half its length
+    without an error, as 47 % zeros, and it was copied and segmented. Python's gzip refuses it.
+    Decompressed once to the end - every member, the output thrown away - so a truncated stream
+    and one whose CRC or length does not match are both caught: ~0.05 s for a 23 MB NIfTI.
+    A file that is not gzip is left alone."""
+    import zlib
+    try:
+        f = open(p, "rb")
+    except OSError:
+        return                                 # absent or unreadable: the reader says which
+    with f:
+        if f.read(2) != b"\x1f\x8b":
+            return
+        f.seek(0)
+        d, ended = zlib.decompressobj(31), False
+        try:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                while chunk:
+                    if ended:                  # another member, or trailing bytes
+                        if chunk[:2] != b"\x1f\x8b":
+                            return             # gzip's own readers ignore what follows
+                        d, ended = zlib.decompressobj(31), False
+                    d.decompress(chunk)
+                    chunk, ended = (d.unused_data, True) if d.eof else (b"", False)
+        except zlib.error as e:
+            raise InputError(f"{p}: a corrupt gzip stream ({e}): refusing to read what "
+                             "survives of it") from None
+    if not ended:
+        raise InputError(f"{p}: the gzip stream ends early - the file is truncated; refusing to "
+                         "read what survives of it")
 
 
 def _sitk_reason(e: Exception) -> str:
@@ -376,27 +575,29 @@ def _read_image(path, *, tags: bool):
                 return _read_image(loose[0], tags=tags)
             raise InputError(f"no DICOM series found in {p}"
                              + (f" ({len(loose)} non-DICOM files)" if loose else ""))
+        if len(files) == 1:
+            # One file: a multi-frame object (an Enhanced CT, an RTDOSE) is a volume on its own
+            # and reads as that file, as it does given directly - a folder of it was refused
+            # "fewer than 2 slices" (review, 2026-09-26). One slice is still no volume.
+            image, per_slice, files = _read_image(Path(files[0]), tags=tags)
+            if image.GetSize()[2] < 2:
+                raise InputError("DICOM series has fewer than 2 slices; not a 3D volume")
+            return image, per_slice, files
+        heads = [_header(f) for f in files]     # every slice's, for the type and the values
         reader.SetFileNames(files)
-        # the per-slice dictionaries come from the same decode (measured: no cost); always
-        # wanted now, for the rescale check below
+        # the per-slice dictionaries come from the same decode (measured: no cost)
         reader.MetaDataDictionaryArrayUpdateOn()
-        image = reader.Execute()
+        image = _execute_series(reader, p)
         # The series reader takes its output pixel type from the FIRST file and converts every
         # slice to it: a series whose first slice states no rescale (unsigned stored values)
         # and whose later slices say intercept -1024 read as uint16, the negative values
-        # wrapped to 64612 (2026-09-26). Read again in a type every slice's values fit.
-        wide = _mixed_rescale_type(
-            [_rescale_pair(reader.GetMetaData(i, "0028|1053")
-                           if reader.HasMetaDataKey(i, "0028|1053") else None,
-                           reader.GetMetaData(i, "0028|1052")
-                           if reader.HasMetaDataKey(i, "0028|1052") else None)
-             for i in range(len(files))],
-            [reader.GetMetaData(i, "0028|0100") if reader.HasMetaDataKey(i, "0028|0100")
-             else None for i in range(len(files))],
-            image.GetPixelID())
+        # wrapped to 64612 (2026-09-26) - and so did slices of one rescale in other pixel
+        # types (signed after unsigned, 16 bits after 8: review, 2026-09-26). Read again in a
+        # type every slice's values fit.
+        wide = _series_type(heads, image.GetPixelID())
         if wide is not None:
             reader.SetOutputPixelType(wide)
-            image = reader.Execute()
+            image = _execute_series(reader, p)
         if tags:
             per_slice = [{k: reader.GetMetaData(i, k) for k in reader.GetMetaDataKeys(i)}
                          for i in range(len(files))]
@@ -406,9 +607,11 @@ def _read_image(path, *, tags: bool):
         image.SetOrigin(origin)
         image.SetDirection(direction)
         image.SetSpacing(spacing)
-        image = _true_values(image, files)      # MONOCHROME1 and Modality LUT (2026-09-26)
+        # the values the files mean, checked against pydicom's decode (2026-09-26)
+        image = _true_values(image, files, heads)
     else:
         _readable(p)
+        _check_gzip(p)                          # a truncated .nii.gz reads as zeros otherwise
         try:
             image = sitk.ReadImage(str(p))
         except RuntimeError as e:
@@ -422,7 +625,7 @@ def _read_image(path, *, tags: bool):
         if several and dicom:
             _check_frame_positions(p, image)
         if dicom:
-            image = _true_values(image, [p])    # MONOCHROME1 and Modality LUT (2026-09-26)
+            image = _true_values(image, [p])    # the values it means, checked (2026-09-26)
         if tags:
             per_slice = [{k: image.GetMetaData(k) for k in image.GetMetaDataKeys()}]
             if dicom:
@@ -446,28 +649,89 @@ def _rescale_pair(slope, intercept) -> tuple[float, float] | None:
         return None
 
 
-def _mixed_rescale_type(pairs, bits_allocated=(), current=None) -> int | None:
+def _execute_series(reader, directory):
+    """``reader.Execute()``, a refusal where GDCM raises: a signed 12-bit MONOCHROME1 series
+    made it raise a bare RuntimeError (review, 2026-09-26)."""
+    try:
+        return reader.Execute()
+    except RuntimeError as e:
+        raise InputError(f"cannot read the DICOM series in {directory}: {_sitk_reason(e)}") \
+            from None
+
+
+def _series_type(heads, current) -> int | None:
+    """:func:`_mixed_rescale_type` of a series from its slices' headers (pydicom datasets)."""
+    return _mixed_rescale_type(
+        [_rescale_pair(_text(h, 0x00281053), _text(h, 0x00281052)) for h in heads],
+        [_number(h, "BitsAllocated") for h in heads], current,
+        bits_stored=[_number(h, "BitsStored") for h in heads],
+        representation=[_number(h, "PixelRepresentation") for h in heads])
+
+
+def _number(ds, keyword):
+    """An integer (US) attribute's value, or its text where it does not convert - which
+    :func:`_mixed_rescale_type` reads as a width it cannot know."""
+    try:
+        return ds.get(keyword)
+    except Exception:                          # noqa: BLE001 - a malformed value
+        return "?"
+
+
+def _mixed_rescale_type(pairs, bits_allocated=(), current=None, *, bits_stored=(),
+                        representation=()) -> int | None:
     """The SimpleITK pixel type a series must be read in when its slices do not share one
-    rescale and ``current`` - the type the reader took from the FIRST file, and converts every
-    slice to - cannot hold them all; None when it can, when they share one, or when one does not
-    parse (which no type fixes). Found 2026-09-26: an unsigned first slice without rescale and
-    later slices at intercept -1024 read as uint16, -924 wrapped to 64612; a first slice at slope
-    1 and later ones at 0.5 read as int32, the halves truncated. Integer rescales of values up to
-    16 bits fit int32 - what GDCM itself gives a rescaled integer series; anything else needs
-    float64, as GDCM gives a fractional slope. A series whose first file already reads in such a
-    type (PET's per-slice slopes: float64) is read once, as before."""
+    rescale and pixel type and ``current`` - the type the reader took from the FIRST file, and
+    converts every slice to - cannot hold them all; None when it can, when they share one, or
+    when a rescale does not parse (which no type fixes). Found 2026-09-26: an unsigned first
+    slice without rescale and later slices at intercept -1024 read as uint16, -924 wrapped to
+    64612; a first slice at slope 1 and later ones at 0.5 read as int32, the halves truncated;
+    and (review, the same day) slices of ONE rescale in other pixel types - signed after
+    unsigned, Bits Stored 16 after 12, Bits Allocated 16 after 8 - wrapped the same way, as the
+    rescale alone was asked. Each slice's range is what its Bits Stored (else Bits Allocated)
+    and Pixel Representation allow, rescaled; integer rescales of values up to 16 bits fit
+    int32 - what GDCM itself gives a rescaled integer series; anything else needs float64, as
+    GDCM gives a fractional slope. A series whose first file already reads in such a type (PET's
+    per-slice slopes: float64) is read once, as before."""
     import SimpleITK as sitk
-    if not pairs or None in pairs or all(p == pairs[0] for p in pairs):
+    if not pairs or None in pairs or current == sitk.sitkFloat64:
+        return None
+
+    def column(values):
+        values = list(values)
+        return [None if v in (None, "") else str(v).strip() for v in values] \
+            + [None] * (len(pairs) - len(values))
+    kinds = list(zip(pairs, column(bits_allocated), column(bits_stored),
+                     column(representation)))
+    if all(k == kinds[0] for k in kinds):
         return None
     try:
-        wide = any(int(str(b).strip()) > 16 for b in bits_allocated if b not in (None, ""))
+        allocated = [None if a is None else int(a) for _, a, _, _ in kinds]
+        stored = [None if b is None else int(b) for _, _, b, _ in kinds]
+        signed = [r is not None and int(r) == 1 for _, _, _, r in kinds]
     except ValueError:
-        wide = True
-    need = (sitk.sitkInt32 if all(float(v).is_integer() for p in pairs for v in p) and not wide
-            else sitk.sitkFloat64)
-    if current == sitk.sitkFloat64 or current == need:
+        return sitk.sitkFloat64
+    wide = any(a is not None and a > 16 for a in allocated)
+    integral = all(float(v).is_integer() for p in pairs for v in p)
+    lo = hi = None
+    for (slope, intercept), a, b, sg in zip(pairs, allocated, stored, signed):
+        bits = b or a
+        if bits is None:
+            lo = hi = None                      # a slice of unknown width: no range to judge by
+            break
+        top = 2 ** bits
+        ends = [slope * v + intercept for v in ((-(top // 2), top // 2 - 1) if sg else (0, top - 1))]
+        lo = min(ends) if lo is None else min(lo, *ends)
+        hi = max(ends) if hi is None else max(hi, *ends)
+
+    def holds(pixel_id):
+        dt = sitk.GetArrayViewFromImage(sitk.Image([1, 1, 1], pixel_id)).dtype
+        return (lo is not None and np.issubdtype(dt, np.integer)
+                and np.iinfo(dt).min <= lo and hi <= np.iinfo(dt).max)
+    if integral and current is not None and holds(current):
         return None
-    return need
+    need = (sitk.sitkInt32 if integral and not wide and (lo is None or holds(sitk.sitkInt32))
+            else sitk.sitkFloat64)
+    return None if current == need else need
 
 
 def _is_dicom_file(p: Path) -> bool:
@@ -710,6 +974,7 @@ def convert(src, dst, *, compress: bool = True) -> Path:
         img = read_image(src)
     else:
         _readable(src)
+        _check_gzip(src)                        # never convert what survives of a truncation
         try:
             img = sitk.ReadImage(str(src))
         except RuntimeError as e:
@@ -719,7 +984,8 @@ def convert(src, dst, *, compress: bool = True) -> Path:
         if _is_dicom_file(src):
             if img.GetDimension() == 3 and img.GetSize()[2] > 1:
                 _check_frame_positions(src, img)
-            img = _true_values(img, [src])      # the values the file means, as segment reads
+            img = _true_values(img, [src])      # the values the file means, checked, as segment
+                                                # reads them
     # A header written from the image must not contradict its pixels (2026-09-26): SimpleITK
     # keeps the file's rescale, padding and bit tags beside pixels it has already rescaled, and
     # writes them all into an NRRD header. A copy says what its voxels are; a file read here is
