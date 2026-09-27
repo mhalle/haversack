@@ -211,3 +211,209 @@ def test_scrubbing_leaves_api_routes_alone():
     from haversack.serve import scrub_server_paths
     t = "see /v1/jobs/abc/result; /srv/w/series_cache/e1.r2!idc:x/series: bad."
     assert scrub_server_paths(t, ["/srv/w"]) == "see /v1/jobs/abc/result; series: bad."
+
+
+# -- 5. ?format= on a job's result -------------------------------------------------------------
+
+@pytest.mark.parametrize("fmt", ["bogus", "zarr.zip", "../../etc/passwd", ""])
+def test_an_unknown_format_is_refused_not_served_as_nrrd(tmp_path, fmt):
+    seg, ex, client = make(tmp_path)
+    jid = submit(client)
+    wait_state(client, jid, ("done",))
+    r = client.get(f"/v1/jobs/{jid}/result", params={"format": fmt})
+    assert r.status_code == 422, (fmt, r.status_code)
+    assert "nii.gz" in r.json()["detail"]["message"]
+
+
+def _real(tmp_path):
+    """A server whose results are real NRRDs, so a conversion can be read."""
+    from test_job_result_cache import _make
+    return _make(tmp_path)
+
+
+def test_nii_is_served_uncompressed_and_nii_gz_compressed(tmp_path):
+    seg, ex, client = _real(tmp_path)
+    jid = submit(client)
+    wait_state(client, jid, ("done",))
+    gz = client.get(f"/v1/jobs/{jid}/result", params={"format": "nii.gz"})
+    raw = client.get(f"/v1/jobs/{jid}/result", params={"format": "nii"})
+    assert gz.status_code == raw.status_code == 200
+    assert gz.content[:2] == b"\x1f\x8b" and raw.content[:2] != b"\x1f\x8b"
+    assert raw.content[344:348] == b"n+1\x00"
+    assert 'filename="' in raw.headers["content-disposition"]
+    assert raw.headers["content-disposition"].rstrip('"').endswith(".nii")
+    assert client.get(f"/v1/jobs/{jid}/result",
+                      params={"format": "seg.nrrd"}).content[:4] == b"NRRD"
+
+
+def test_a_converted_result_has_a_stable_validator_and_revalidates(tmp_path):
+    seg, ex, client = _real(tmp_path)
+    jid = submit(client)
+    wait_state(client, jid, ("done",))
+    url = f"/v1/jobs/{jid}/result"
+    a = client.get(url, params={"format": "nii.gz"})
+    b = client.get(url, params={"format": "nii.gz"})
+    assert a.headers["etag"] == b.headers["etag"]
+    assert "last-modified" not in a.headers
+    assert a.headers["etag"] != client.get(url).headers["etag"]        # not the NRRD's tag
+    assert a.headers["etag"] != client.get(url, params={"format": "nii"}).headers["etag"]
+    again = client.get(url, params={"format": "nii.gz"}, headers={"If-None-Match": a.headers["etag"]})
+    assert again.status_code == 304
+    h = client.head(url, params={"format": "nii.gz"})
+    assert h.status_code == 200 and h.headers["etag"] == a.headers["etag"]
+
+
+# -- 6. the job listing after a restart --------------------------------------------------------
+
+def test_the_job_listing_survives_a_restart(tmp_path):
+    seg, ex, client = make(tmp_path)
+    jid = submit(client)
+    wait_state(client, jid, ("done",))
+    ex.close()
+    ex2 = LocalExecutor(FakeSegmenter(), workdir=tmp_path)      # same workdir: a restart
+    client2 = TestClient(create_app(ex2))
+    assert client2.get(f"/v1/jobs/{jid}").json()["evicted"] is True
+    listed = {d["id"]: d for d in client2.get("/v1/jobs").json()["jobs"]}
+    assert jid in listed, listed
+    assert listed[jid]["state"] == "done" and listed[jid]["evicted"] is True
+    ex2.close()
+
+
+# -- 8. HTTP details ---------------------------------------------------------------------------
+
+def _tokened(tmp_path):
+    ex = LocalExecutor(FakeSegmenter(), workdir=tmp_path)
+    return ex, TestClient(create_app(ex, token="s3cret"))
+
+
+def test_a_401_names_the_scheme_that_would_do(tmp_path):
+    ex, client = _tokened(tmp_path)
+    r = client.get("/v1/jobs")
+    assert r.status_code == 401
+    assert r.headers["www-authenticate"].startswith("Bearer")
+
+
+@pytest.mark.parametrize("scheme", ["Bearer", "bearer", "BEARER"])
+def test_the_auth_scheme_is_case_insensitive(tmp_path, scheme):
+    ex, client = _tokened(tmp_path)
+    assert client.get("/v1/jobs", headers={"Authorization": f"{scheme} s3cret"}).status_code == 200
+    assert client.get("/v1/jobs", headers={"Authorization": f"{scheme} S3CRET"}).status_code == 401
+
+
+@pytest.mark.parametrize("path", ["/v1/health", "/v1/tasks", "/v1/sources"])
+def test_head_answers_where_get_does(tmp_path, path):
+    seg, ex, client = make(tmp_path)
+    got, probe = client.get(path), client.head(path)
+    assert got.status_code == probe.status_code == 200, (path, probe.status_code)
+    assert probe.content == b""
+    assert probe.headers["content-length"] == got.headers["content-length"]
+
+
+def test_head_on_a_job_status(tmp_path):
+    seg, ex, client = make(tmp_path)
+    jid = submit(client)
+    wait_state(client, jid, ("done",))
+    assert client.head(f"/v1/jobs/{jid}").status_code == 200
+    assert client.head("/v1/jobs/nosuch").status_code == 404
+
+
+def test_the_head_routes_stay_out_of_the_published_schema(tmp_path):
+    seg, ex, client = make(tmp_path)
+    ops = client.get("/openapi.json").json()["paths"]
+    assert "head" not in ops["/v1/health"] and "get" in ops["/v1/health"]
+
+
+def test_delete_on_an_artifact_url_is_405_with_allow(tmp_path, monkeypatch):
+    import haversack.serve as serve_mod
+    monkeypatch.setattr(serve_mod, "_idc_enabled", lambda: True)
+    seg, ex, client = make(tmp_path)
+    r = client.delete("/v1/idc/0be27d1c-9410-47ff-9c9f-a44b26a4bd55/total_fast/preview.png")
+    assert r.status_code == 405, r.text
+    assert set(r.headers["allow"].replace(" ", "").split(",")) >= {"GET", "HEAD"}
+    assert "DELETE" not in r.headers["allow"]
+
+
+def test_an_upper_case_digest_is_the_same_digest(tmp_path):
+    seg, ex, client = make(tmp_path)
+    b = volume_bytes(4343)
+    d = _digest(b)
+    up = "sha256:" + d.split(":", 1)[1].upper()
+    assert client.put(f"/v1/inputs/{up}", content=b).status_code == 200
+    assert client.get(f"/v1/inputs/{up}").status_code == 200
+    assert client.get(f"/v1/inputs/{d}").status_code == 200
+    r = client.post("/v1/jobs", data={"task": "total_fast", "source": json.dumps(
+        [{"kind": "input", "sha256": up}])})
+    assert r.status_code == 202, r.text
+    assert wait_state(client, r.json()["id"])["input_identity"] == [d]
+
+
+def test_a_cursor_from_another_listing_or_filter_is_a_422(tmp_path):
+    from test_job_result_cache import _make
+    seg, ex, client = _make(tmp_path)
+    for _ in range(2):
+        wait_state(client, submit(client), ("done",))
+    page = client.get("/v1/segmentations", params={"limit": 1}).json()
+    cur = page["next_cursor"]
+    assert cur
+    assert client.get("/v1/segmentations", params={"limit": 1, "cursor": cur}).status_code == 200
+    assert client.get("/v1/segmentations",
+                      params={"limit": 1, "cursor": cur, "task": "total"}).status_code == 422
+    assert client.get("/v1/rankfields", params={"limit": 1, "cursor": cur}).status_code == 422
+
+
+def test_a_file_beside_a_source_that_names_no_upload_is_refused(tmp_path):
+    seg, ex, client = make(tmp_path)
+    b = volume_bytes(4444)
+    client.put(f"/v1/inputs/{_digest(b)}", content=b)
+    r = client.post("/v1/jobs", files={"file": ("scan.nii.gz", volume_bytes(4445))},
+                    data={"task": "total_fast", "source": json.dumps(
+                        [{"kind": "input", "sha256": _digest(b)}])})
+    assert r.status_code == 422, r.text
+    assert r.json()["detail"]["code"] == "ambiguous_input"
+
+
+def test_a_done_job_reports_its_progress_complete(tmp_path):
+    seg, ex, client = make(tmp_path)
+    jid = submit(client)
+    s = wait_state(client, jid, ("done",))
+    assert s["progress"]["fraction"] == 1.0 and s["progress"]["stage"] == "done", s["progress"]
+
+
+def test_serve_exits_quietly_on_ctrl_c(tmp_path, capsys):
+    import sys
+    import types
+    from unittest import mock
+
+    from haversack import cache_admin, serve
+
+    class _Server:
+        def __init__(self, config):
+            pass
+
+        def run(self, sockets=None):
+            raise KeyboardInterrupt        # what asyncio's runner re-raises after uvicorn stops
+
+    class _Config:
+        def __init__(self, *a, **k):
+            pass
+
+        def bind_socket(self):
+            return types.SimpleNamespace(close=lambda: None)
+    uv = types.ModuleType("uvicorn")
+    uv.Server, uv.Config = _Server, _Config
+    args = types.SimpleNamespace(
+        token="t", no_token=False, host="127.0.0.1", port=0, device="cpu", dtype="auto",
+        model_root=None, cache_models=1, workdir=str(tmp_path), no_result_cache=True,
+        max_pending=4, keep_finished=4)
+    with mock.patch.dict(sys.modules, {"uvicorn": uv}), \
+            mock.patch.object(serve, "create_app", lambda ex, **k: object()), \
+            mock.patch.object(serve, "LocalExecutor"), \
+            mock.patch("haversack.segmenter.Segmenter"), \
+            mock.patch.object(cache_admin, "serve_token_path", lambda port: tmp_path / "tok.json"), \
+            mock.patch.object(cache_admin, "check_cache_root"):
+        try:
+            rc = serve.main_serve(args)
+        except KeyboardInterrupt:          # caught here, or it would stop the whole session
+            pytest.fail("the Ctrl-C escaped main_serve, to be printed as a traceback")
+        assert rc == 130
+    assert "stopped" in capsys.readouterr().err

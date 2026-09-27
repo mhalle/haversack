@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+- **A label map is refused from an image role however it is named.** A `result:` reference was
+  checked against the role it is bound to; the same segmentation stored by digest (`POST
+  /v1/inputs from_job=`, or a `.seg.nrrd` PUT) or uploaded with the job ran through
+  `ts.v2:total_fast` as if it were a CT and came back `done` with 73 structures. Now every input's
+  kind is read from its stored header and checked at submit (422 `wrong_input_kind`).
+- **Options are checked at submit as SERVER.md always said.** `grid` is 0.1 to 50 mm,
+  `envelope_mm` 0 to 500, both finite; `folds` is a non-empty list of distinct folds and, with
+  `configuration`, is checked against the installed model (`[0, 99]` ran fold 0 alone under a key
+  that said both; `3d_lowres` failed minutes later in the worker); every numeric option and
+  `no_cache` is strictly typed, since `"yes"` recomputed and `"1.5"` keyed apart from `1.5`. A
+  numeric grid whose output would pass 2^31 - 1 voxels fails before it allocates: `grid: 1e-6`
+  asked for 15.9e9 GiB.
+- **`?format=` on a job's result says what it serves.** An unknown value (`bogus`, `zarr.zip`,
+  `../../etc/passwd`, empty) was answered with the `.seg.nrrd` and a 200; it is a 422 naming
+  `nii.gz`, `nii` and `seg.nrrd`. `nii` sent gzip bytes under an uncompressed name and now sends
+  an uncompressed NIfTI (`remote submit -o x.nii` still asks for `nii.gz` and unpacks it, so it
+  works against a server of either version). A converted result's ETag was a
+  temporary file's, new on every request; it is a weak tag of the result's digest and the format,
+  so `If-None-Match` gets its 304, and no temporary file's Last-Modified is sent.
+- **The input store refuses what it cannot use, and says so as a 4xx.** A multipart body the
+  parser refuses (a part header past its limit, a delimiter other than the declared boundary) was a
+  500 that reset the connection; it is a 400, as on `POST /v1/jobs`. A multi-file POST of which no
+  file is a DICOM instance or an image header was stored as a tree every job would fail on; it is a
+  422 `unknown_format`. A `sha256:` digest is read in any case at every door.
+- **Server paths stay on the server.** A failed job's `error` named the work directory, the series
+  cache, an input store's per-process view; it names the file and keeps the rest in the server's log
+  and job store. PUT's refusal no longer names its temporary file.
+- **`GET /v1/jobs` lists what the server remembers.** After a restart it listed nothing while every
+  old job still answered by id; the job store's finished records are listed too, marked `evicted`.
+- **HTTP details from a black-box review.** A 401 carries `WWW-Authenticate: Bearer`; the scheme is
+  case-insensitive (`bearer` was refused); `/v1/health`, `/v1/tasks`, `/v1/sources` and
+  `/v1/jobs/<id>` answer `HEAD`; `DELETE` on an artifact's URL is a 405 naming `GET, HEAD`, not a
+  404; a listing cursor is bound to the listing and filters it was issued for, and one handed to
+  another is a 422 rather than a wrong page; a `file` part beside a source list with no upload is
+  refused as ambiguous instead of being ignored; a done job's progress reads `done` at 1.0, not
+  `finalize` at 0.97; `haversack serve` stops on Ctrl-C with one line and status 130, not a
+  traceback. SERVER.md now documents the `gs` source, the cancel response, and that a done job's
+  path links follow the key's current publication while `result` and the job's own routes are the
+  job's.
+
 - **An input copy's DICOM tags are the files' own headers.** They were SimpleITK's per-slice
   dictionaries, which hold no sequences and no binary values. They are now read through pydicom
   by duckn's one tag conversion, under dicom-spec's rules as settled on 2026-09-26: sequences,

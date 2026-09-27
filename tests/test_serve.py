@@ -320,8 +320,11 @@ def test_eviction_bounds_finished_jobs(tmp_path):
         except AssertionError:
             pass                                           # early ones may evict mid-wait
     time.sleep(0.1)
-    alive = [j["id"] for j in client.get("/v1/jobs").json()["jobs"]]
+    listed = client.get("/v1/jobs").json()["jobs"]
+    alive = [j["id"] for j in listed if not j.get("evicted")]
     assert len(alive) == 2 and ids[-1] in alive
+    # the evicted ones are still listed from the job store, as they answer by id (2026-09-26)
+    assert sorted(j["id"] for j in listed) == sorted(ids)
 
 
 def test_bad_options_and_unknown_job(tmp_path):

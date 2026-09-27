@@ -1246,17 +1246,22 @@ LIST_WORKERS = 32
 LIST_CHUNK = 256
 
 
-def encode_cursor(position) -> str:
+def encode_cursor(position, scope: str | None = None) -> str:
     """The listing's position ``(pointer mtime in ns, key)`` as the opaque token the wire
     carries. Versioned, so the server may change what a position is: a client only ever
-    hands back what it was given."""
+    hands back what it was given. ``scope`` names the listing and filters it was issued for
+    (2026-09-26): a position is a place in ONE ordered set, and handed to another listing -
+    another kind, another ``task`` - it answered a silently wrong page."""
     import base64
-    raw = json.dumps([1, int(position[0]), str(position[1])], separators=(",", ":"))
+    body = [1, int(position[0]), str(position[1])] + ([str(scope)] if scope else [])
+    raw = json.dumps(body, separators=(",", ":"))
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
 
 
-def decode_cursor(token: str) -> tuple:
-    """``encode_cursor``'s inverse; ValueError for anything this server did not issue."""
+def decode_cursor(token: str, scope: str | None = None) -> tuple:
+    """``encode_cursor``'s inverse; ValueError for anything this server did not issue, or
+    issued for another listing than ``scope`` (a cursor from before scopes names none, and
+    is taken as it always was)."""
     import base64
     import binascii
     try:
@@ -1264,10 +1269,12 @@ def decode_cursor(token: str) -> tuple:
         got = json.loads(base64.b64decode(token + pad, altchars=b"-_", validate=True))
     except (binascii.Error, ValueError, UnicodeDecodeError) as e:
         raise ValueError("not a cursor") from e
-    if (not isinstance(got, list) or len(got) != 3 or got[0] != 1
+    if (not isinstance(got, list) or len(got) not in (3, 4) or got[0] != 1
             or isinstance(got[1], bool) or not isinstance(got[1], int)
             or not isinstance(got[2], str) or not got[2]):
         raise ValueError("not a cursor")
+    if len(got) == 4 and scope is not None and got[3] != scope:
+        raise ValueError("another listing's cursor")
     return got[1], got[2]
 
 
@@ -2421,6 +2428,18 @@ def stored_input_kind(store, digest: str) -> str | None:
         return "image"
     except Exception:                      # noqa: BLE001 - unreadable here: the reader decides
         return None
+
+
+_DIGEST_SPELLING = re.compile(r"(?i)(sha256|sha256-tree):([0-9a-f]+)")
+
+
+def canonical_digest(value) -> str:
+    """A content digest as the server keys it: the algorithm and hex in lower case. Hex is
+    case-insensitive by definition, and ``sha256:<UPPER>`` was answered "not held" for content
+    the server held (2026-09-26). Anything else is returned stripped, for ``is_digest`` to
+    judge as before."""
+    v = str(value or "").strip()
+    return v.lower() if _DIGEST_SPELLING.fullmatch(v) else v
 
 
 _PATH_TAIL = r"(?:/[^\s'\"()\[\],;]*)?"
@@ -3722,6 +3741,11 @@ class LocalExecutor:
 
                 def _mark_done() -> None:
                     rec.state = "done"
+                    if rec.progress is not None:
+                        # the last snapshot, not the last stage's START: a done job kept
+                        # saying `finalize` at 0.97 (2026-09-26)
+                        rec.progress = {**rec.progress, "stage": "done", "detail": "",
+                                        "fraction": 1.0}
                     self._persist(rec)
 
                 with self._cv:
@@ -4002,7 +4026,31 @@ class LocalExecutor:
         return d
 
     def statuses(self) -> list[dict]:
-        return [self.status(r, brief=True) for r in self.jobs()]
+        """Every job this server knows: the ones in memory, then the terminal records the job
+        store keeps for ids memory no longer holds - a restart's, or a finished job past
+        ``--keep-finished`` - in the brief form, marked ``evicted`` as ``status_of`` marks
+        them. Until 2026-09-26 the listing was memory's alone, so after a restart it was empty
+        while each old job still answered by its id."""
+        live = [self.status(r, brief=True) for r in self.jobs()]
+        seen = {d["id"] for d in live}
+        try:
+            stored = self.jobs_db.all()
+        except Exception:                  # noqa: BLE001 - the store is bookkeeping: list memory
+            stored = []
+        for r in stored:
+            if r.get("id") in seen or r.get("state") not in TERMINAL:
+                continue
+            d = {"id": r["id"], "task": r.get("task"), "state": r.get("state"),
+                 "created": r.get("created"), "started": r.get("started"),
+                 "finished": r.get("finished"), "evicted": True}
+            if r.get("error"):
+                d["error"] = self._client_error(r["error"])
+            if r.get("kind") in NOT_LABELS:
+                d["kind"] = r["kind"]
+            if r.get("cached"):
+                d["cached"] = True
+            live.append(d)
+        return live
 
     def _publish(self, rec: JobRecord, key: str):
         """The cache put for a finished job; the publication's generation token.
@@ -4175,6 +4223,11 @@ def _progress_headers(progress: dict | None, extra: dict | None = None) -> dict:
 # colliding. Absolute tokens only (a menu entry means the same thing for
 # every task, case, and weights version); grow it when a real user asks.
 GRID_TOKENS = {"res-1mm": {"grid": 1.0}}
+
+#: The forms ``GET /v1/jobs/{id}/result?format=`` serves a label map in (2026-09-26): none (or
+#: ``seg.nrrd``) for the labels as computed, ``nii.gz`` and ``nii`` for the lossy conversion.
+#: Anything else is a 422 naming these.
+LABEL_FORMATS = (None, "seg.nrrd", "nii.gz", "nii")
 
 
 def _task_stem(task: str) -> str:
@@ -4534,6 +4587,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         when no route matched path and method both, so no dispatch depends on it, and it
         reads the router at request time, so the read-only twin (which drops routes
         after they are registered) answers for what it kept."""
+        allow = ", ".join(sorted(_allowed_methods(request))) or (
+            getattr(exc, "headers", None) or {}).get("Allow", "")
+        return JSONResponse({"detail": "Method Not Allowed"}, status_code=405,
+                            headers={"Allow": allow})
+
+    def _allowed_methods(request) -> set:
+        """The methods of the routes with the most literal template matching this URL: the
+        ``Allow`` of a 405 (see ``_method_not_allowed``)."""
         from starlette.routing import Match
         best, allowed = -1, set()
         for r in app.router.routes:
@@ -4545,9 +4606,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 best, allowed = literal, set(methods)
             elif literal == best:
                 allowed |= set(methods)
-        allow = ", ".join(sorted(allowed)) or (getattr(exc, "headers", None) or {}).get("Allow", "")
-        return JSONResponse({"detail": "Method Not Allowed"}, status_code=405,
-                            headers={"Allow": allow})
+        return allowed
 
     _confirm = getattr(executor, "confirm_absent", None)
 
@@ -4565,13 +4624,19 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         if token is None:              # --no-token: open to anything that reaches the
             return True                # port. No heuristics: an open server is open.
         import secrets
-        sent = request.headers.get("authorization", "")
-        return secrets.compare_digest(sent.encode(), f"Bearer {token}".encode())
+        # The scheme is case-insensitive (RFC 9110 11.1: `bearer` and `BEARER` are Bearer,
+        # refused until 2026-09-26); the credential after it is compared exactly, in constant
+        # time, and one space or more may separate them.
+        scheme, _, sent = request.headers.get("authorization", "").strip().partition(" ")
+        return scheme.lower() == "bearer" and secrets.compare_digest(
+            sent.strip().encode(), str(token).encode())
 
     def require_auth(request) -> None:
         if not authed(request):
+            # RFC 9110 11.6.1: a 401 MUST say which scheme would do (2026-09-26)
             raise HTTPException(401, "this server requires a bearer token for "
-                                     "anything beyond cached reads")
+                                     "anything beyond cached reads",
+                                headers={"WWW-Authenticate": 'Bearer realm="haversack"'})
 
     import datetime as _dt
     _started_at = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
@@ -4599,6 +4664,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         """
         require_auth(request)
         store = _store_or_404()
+        digest = canonical_digest(digest)
         if not is_digest(digest):
             raise HTTPException(422, {
                 "code": "bad_digest",
@@ -4634,6 +4700,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         """
         require_auth(request)              # anonymous never computes, and never stores
         store = _store_or_404()
+        digest = canonical_digest(digest)
         if not is_digest(digest):
             raise HTTPException(422, {
                 "code": "bad_digest",
@@ -5055,7 +5122,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         it stands, or ``<source>:<identifier>`` for a source this app mounts WITH a path
         surface, normalized and checked exactly as that surface does it - the listing's
         filter is the path surface's key derivation, asked for many tasks at once."""
-        raw = (raw or "").strip()
+        raw = canonical_digest(raw)
         if is_digest(raw):
             return raw
         prefix, sep, ident = raw.partition(":")
@@ -5071,6 +5138,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(422, f"{ident!r} is not a valid {prefix} identifier")
         return srcobj.identity(ident)
 
+    def _cursor_scope(request) -> str:
+        """Which listing, under which filters, a cursor belongs to: the route and every query
+        parameter but the page's own (``cursor``, ``limit``), digested."""
+        q = sorted((k, v) for k, v in request.query_params.multi_items()
+                   if k not in ("cursor", "limit"))
+        return hashlib.sha256(json.dumps([request.url.path, q]).encode()).hexdigest()[:16]
+
     def _listing_page(request, limit: int, cursor, identity):
         """What every listing checks before it looks at the cache - authorization (the twin
         lists anonymously, by its operator's opt-in), the page size, the cursor, the number
@@ -5083,10 +5157,11 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         after = None
         if cursor is not None:
             try:
-                after = decode_cursor(cursor)
-            except ValueError:
-                raise HTTPException(422, "cursor: not one this server issued; start again "
-                                         "without it") from None
+                after = decode_cursor(cursor, _cursor_scope(request))
+            except ValueError as e:
+                what = ("issued for another listing or other filters"
+                        if "another" in str(e) else "not one this server issued")
+                raise HTTPException(422, f"cursor: {what}; start again without it") from None
         if identity and len(identity) > LIST_IDENTITIES_MAX:
             raise HTTPException(422, f"at most {LIST_IDENTITIES_MAX} identities a request")
         return after
@@ -5232,7 +5307,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         rows, position = lister(keys=keys, limit=limit, after=after, accept=accept,
                                 match=of_wanted_task if want is not None else None)
         return {"segmentations": rows,
-                "next_cursor": encode_cursor(position) if position is not None else None}
+                "next_cursor": (encode_cursor(position, _cursor_scope(request))
+                                if position is not None else None)}
 
     @app.get("/v1/embeddings", tags=["results"], responses={
         422: {"description": "a filter or page the listing refuses: an identity that is "
@@ -5330,7 +5406,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 row["links"] = links
             out.append(row)
         return {"embeddings": out,
-                "next_cursor": encode_cursor(position) if position is not None else None}
+                "next_cursor": (encode_cursor(position, _cursor_scope(request))
+                                if position is not None else None)}
 
     @app.get("/v1/rankfields", tags=["results"], responses={
         422: {"description": "a filter or page the listing refuses: an identity that is "
@@ -5435,7 +5512,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 row["links"] = links
             out.append(row)
         return {"rankfields": out,
-                "next_cursor": encode_cursor(position) if position is not None else None}
+                "next_cursor": (encode_cursor(position, _cursor_scope(request))
+                                if position is not None else None)}
 
     @app.get("/v1/tasks/{task}", tags=["tasks"])
     def describe(task: str):
@@ -5524,6 +5602,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             if kind != "upload" and not _source_enabled(sources[kind]):
                 raise HTTPException(422, f"source kind {kind!r} is not enabled on this "
                                          "server (missing dependency)")
+        if file is not None and source and not any(
+                e.get("kind", "upload") == "upload" for e in src):
+            # Two inputs named for one request, and one would be dropped in silence: a
+            # `{"kind": "input"}` source ran and the `file` part was never read (2026-09-26)
+            raise HTTPException(422, {"code": "ambiguous_input",
+                                      "message": "this request sends a `file` part AND a `source` "
+                                                 "that names no upload; send one of them"})
         kind = src[0].get("kind", "upload") if src else "upload"
         if job_kind == "embed":
             return await _submit_embed(request, task, opts, src, asked, file, no_cache,
@@ -5784,8 +5869,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 # IS the digest, which is exactly what an upload of the same
                 # bytes produces - so referring and re-sending land on the same
                 # result-cache key, as they must.
-                digest = str(entry.get("sha256") or entry.get("digest")
-                             or entry.get("id") or "").strip()
+                digest = canonical_digest(entry.get("sha256") or entry.get("digest")
+                                          or entry.get("id") or "")
                 if not is_digest(digest):
                     raise HTTPException(422, {
                         "code": "bad_digest",
@@ -5987,6 +6072,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         require_auth(request)
         return _with_links(_status_or_404(jid))
 
+    # HEAD beside GET on the service routes and a job's status (RFC 9110 9.3.2: a server
+    # SHOULD answer HEAD wherever it answers GET; these were 405 until 2026-09-26). Separate
+    # routes, kept out of the schema: one route under both verbs publishes two operations with
+    # one id (see ARTIFACT_VIEWS). The server sends the GET's headers and no body.
+    for _path, _fn in (("/v1/health", health), ("/v1/tasks", tasks),
+                       ("/v1/sources", list_sources), ("/v1/jobs/{jid}", status)):
+        app.add_api_route(_path, _fn, methods=["HEAD"], include_in_schema=False)
+
     @app.get("/v1/jobs/{jid}/events", tags=["jobs"])
     async def events(request: Request, jid: str):
         require_auth(request)
@@ -6117,29 +6210,68 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         if is_store and format is not None:
             raise HTTPException(422, f"format={format!r}: a ranked store is served only as itself (a "
                                      ".duckn.zip); its labels are the task's segmentation job")
-        if head and format in ("nii.gz", "nii"):
-            from fastapi import Response
-            probe = Response(status_code=200, media_type="application/gzip")
-            del probe.headers["content-length"]    # Starlette's 0: not this body's length
-            return probe
+        if not (is_field or is_store) and format not in LABEL_FORMATS:
+            # Refused, never served as seg.nrrd (2026-09-26): `?format=bogus` answered 200 with
+            # the labels, so a client asking for a form this server does not make could not
+            # tell it got another
+            raise HTTPException(422, {
+                "code": "unknown_format",
+                "message": f"format={format!r} is not a form of a label map this server "
+                           f"serves; use one of {', '.join(repr(f) for f in LABEL_FORMATS if f)}, "
+                           "or none for the .seg.nrrd"})
+        if format == "seg.nrrd":
+            format = None                      # the labels as they are, said explicitly
         if format in ("nii.gz", "nii"):        # the LOSSY conversion, by request only
+            # The validator is the result's digest and the form, not the converted file's
+            # (2026-09-26): a temporary file's stat gave a new tag each request, so no client
+            # ever got a 304. Weak, because the conversion is a function of the labels, not a
+            # promise about every byte of the NIfTI writer's output.
+            conv_tag = f'W/"{etag_of(jid, res).strip(chr(34))}.{format}"'
+            media = "application/gzip" if format == "nii.gz" else "application/octet-stream"
+            name = f"{stem}_{jid}.{format}"
+            conv_headers = {"ETag": conv_tag,
+                            "Content-Disposition": f'attachment; filename="{name}"'}
+            fresh = not_modified(request, conv_tag)
+            if fresh is not None:
+                return fresh
+            if head:
+                from fastapi import Response
+                probe = Response(status_code=200, media_type=media, headers=conv_headers)
+                del probe.headers["content-length"]    # Starlette's 0: not this body's length
+                return probe
             import shutil
             import tempfile
 
             import SimpleITK as sitk
             from starlette.background import BackgroundTask
+            from starlette.responses import StreamingResponse
             tmpd = tempfile.mkdtemp(prefix="haversack-conv-")
-            out = Path(tmpd) / f"{stem}_{jid}.nii.gz"
+            out = Path(tmpd) / name
             try:
-                sitk.WriteImage(sitk.ReadImage(str(path)), str(out), True)
+                sitk.WriteImage(sitk.ReadImage(str(path)), str(out), format == "nii.gz")
             except RuntimeError:
                 shutil.rmtree(tmpd, ignore_errors=True)
                 if Path(path).exists():
                     raise
                 raise HTTPException(410, gone) from None   # left between check and read
-            return FileResponse(out, media_type="application/gzip", filename=out.name,
-                                background=BackgroundTask(shutil.rmtree, tmpd,
-                                                          ignore_errors=True))
+            conv = open(out, "rb")
+            size = os.fstat(conv.fileno()).st_size
+
+            async def converted():
+                try:
+                    while block := await asyncio.to_thread(conv.read, 1 << 20):
+                        yield block
+                finally:
+                    conv.close()
+
+            def _cleanup():
+                conv.close()
+                shutil.rmtree(tmpd, ignore_errors=True)
+            # streamed from an open handle, not a FileResponse: that stamps the temporary
+            # file's own ETag and Last-Modified, which say nothing about the result
+            return StreamingResponse(converted(), media_type=media,
+                                     headers={**conv_headers, "Content-Length": str(size)},
+                                     background=BackgroundTask(_cleanup))
         # The route a client uses for results that are NOT path-addressable -
         # uploads, and every multi-input job - so this is where revalidation
         # actually saves a download. The validator is the content digest of the
@@ -6821,6 +6953,13 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # as the task segment.
         @app.delete(base, tags=["results"])
         def evict_bare(request: Request, ident: str, task: str):
+            allow = _allowed_methods(request)
+            if "DELETE" not in allow:
+                # the greedy `{ident:path}` took an artifact's file name for the task: that URL
+                # has GET and HEAD, not DELETE, which is a 405 saying so - not the 404 "unknown
+                # resource" it was until 2026-09-26. A result is deleted at its task's URL.
+                return JSONResponse({"detail": "Method Not Allowed"}, status_code=405,
+                                    headers={"Allow": ", ".join(sorted(allow))})
             require_auth(request)
             key = keyed(norm(ident), task, {})
             if key is None:
@@ -7207,5 +7346,13 @@ def main_serve(args) -> int:
         print(f"token: from {token_source}", flush=True)
         if token_source == "--token":
             print(TOKEN_FLAG_NOTE, file=sys.stderr, flush=True)
-    server.run(sockets=[sock])
+    try:
+        server.run(sockets=[sock])
+    except KeyboardInterrupt:
+        # uvicorn has already shut down gracefully on the Ctrl-C; asyncio's runner re-raises
+        # it after, and it reached the interpreter as a traceback (2026-09-26). A server is
+        # stopped this way on purpose: say so, and exit 130 (128 + SIGINT, the status a shell
+        # reports for it) with the exit handlers run - the token file is removed by one.
+        print("haversack: stopped", file=sys.stderr, flush=True)
+        return 130
     return 0
