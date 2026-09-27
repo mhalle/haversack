@@ -59,6 +59,10 @@ dependencies = [
     "duckn>=0.6.1",
     "zarr>=3.3",
     "rankfield>=0.3.7",
+    # labelfield is the fused restore - logits to labels on any grid, the Metal / Triton / torch
+    # kernels and their geometry - lifted out of haversack into its own package (2026-09-27), from
+    # a git tag like rankfield. torch + numpy, as the kernel layer always was (test_layering).
+    "labelfield>=0.1.0",
     "pydicom>=2.4",
     # FastSurfer is core (2026-09-25, the user's call): the fork's inference needs nothing core
     # does not already bring (nnU-Net pulls pandas, nibabel, yacs, ...), so it adds 0.9 MB, and a
@@ -197,6 +201,7 @@ conflicts = [
 
 [tool.uv.sources]
 rankfield = { git = "https://github.com/mhalle/rankfield.git", tag = "v0.3.7" }
+labelfield = { git = "https://github.com/mhalle/labelfield.git", tag = "v0.1.0" }
 provender = { git = "https://github.com/mhalle/provender.git", tag = "v0.1.6" }
 # nnunetv2 comes from PyPI: haversack uses only stock nnunetv2 APIs (verified against 2.8.1). It
 # used to be a `path = "../upstream/nnUNet"` source here, but uv applies these sources to a

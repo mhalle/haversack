@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **The fused restore is labelfield now** ([mhalle/labelfield](https://github.com/mhalle/labelfield),
+  pinned to `v0.1.0` from its tag, like rankfield): the logits-to-labels kernels (Metal, Triton,
+  torch), their per-axis tables, `Grid`, `Mapping` and the float64 reference. `haversack.grid`,
+  `.mapping`, `.tables`, `.reference`, `.restore` and `.backends` re-export it, so every import
+  keeps working. Behavior is haversack's, with one edge rule tightened: a nearest restore treats a
+  coordinate exactly half a voxel past the source's last sample as outside rather than clamping it
+  onto that sample (it picks a sample that does not exist). New there and available here:
+  `to_labels(transparent="zero")`, `to_labels(out_start=...)` for slab-by-slab restores.
+
 ## [0.15.0] - 2026-09-27
 
 Every DICOM read checked against pydicom and corrected where SimpleITK misreads it; an input copy

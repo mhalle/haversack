@@ -26,8 +26,11 @@ def _package_dir() -> pathlib.Path:
 
 SRC = _package_dir()
 
+# grid, mapping, tables, reference, restore and backends re-export labelfield since 2026-09-27: the
+# extraction this layer was kept clean for. They stay classified here, and labelfield is torch +
+# numpy too, so the rules below still hold for everything they import.
 KERNEL = {"grid", "mapping", "tables", "restore", "resample", "reference", "shuffleup",
-          "ranked", "phantoms", "measure", "backends", "backends.metal", "backends.torch_gather", "backends.triton_gpu"}
+          "ranked", "phantoms", "measure", "backends"}
 PIPELINE = {"io", "preprocess", "frame", "network", "pipeline", "cli", "tasks", "values", "envelope",
             "weights_fetch", "trainers", "result", "cache", "segmenter", "weights", "progress", "job",
             "serve", "client", "modal_app", "sources", "ecosystems", "preview", "statistics",
@@ -212,7 +215,7 @@ class TestLayering(unittest.TestCase):
                 if mod in FORBIDDEN_FOR_KERNEL:
                     self.assertIn(name, SCIPY_OK_AT_CALL_TIME if mod == "scipy" else set(),
                                   f"{name}.py:{line} imports {mod!r} at module level; the kernel "
-                                  f"layer must stay torch + numpy (+ rankfield) so it can be extracted")
+                                  f"layer must stay torch + numpy (+ rankfield, labelfield) so it can be extracted")
 
     def test_every_core_dependency_is_actually_installed_here(self):
         """CI does not `uv sync` - it hand-lists what to install, so torch can come

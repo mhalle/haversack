@@ -28,7 +28,7 @@ uv pip install "haversack @ git+https://github.com/mhalle/haversack"
 ```
 
 Use `uv pip install`, not `pip install`: several of haversack's own packages (duckn,
-rankfield, provender, and the engines' forks) install from their git tags, which uv reads from
+rankfield, labelfield, provender, and the engines' forks) install from their git tags, which uv reads from
 the sources this project declares and pip cannot. Add `serve` to the extras for the local
 server, `remote` for the client:
 
