@@ -47,7 +47,14 @@ import numpy as np
 
 from .errors import InputError
 
-DUCKN_VERSION = "1.0"
+#: duckn convention 1.2 (2026-09-26): a store's groups carry duckn metadata (duckn-spec §3.3,
+#: defined then - before, the convention did not define it), and an encoded array's absent
+#: value_transforms reads as "not stated", which is the truth for codes (ranks, support, tail,
+#: occupancy, junction): their decode is the `ranked` block's, not a value mapping.
+DUCKN_VERSION = "1.2"
+#: the `haversack` block's own version (duckn-spec §3.1: every extension has one); 0.x marks it
+#: unstable, as the rule for unregistered extensions says
+HAVERSACK_EXTENSION_VERSION = "0.1"
 SPACE = "left-posterior-superior"
 ZIP_SUFFIX = ".zip"
 
@@ -393,11 +400,17 @@ def brick_attrs(direction_xyz, spacing_zyx, origin_xyz, brick: int, *, list_axis
 
 
 def part_attrs(ranked_block: dict) -> dict:
-    """A part group's attributes: the ``ranked`` extension block, nothing else."""
-    from duckn import DucknMetadata
-    from duckn.models import duckn_attrs
-    return duckn_attrs(DucknMetadata(version=DUCKN_VERSION,
-                                     extensions={"ranked": ranked_block}))
+    """A part group's attributes: the ``ranked`` extension block, nothing else - a GROUP's
+    duckn object (duckn-spec §3.3, convention 1.2)."""
+    return _group_attrs(extensions={"ranked": ranked_block})
+
+
+def _group_attrs(**fields) -> dict:
+    """A group's ``duckn`` object, through duckn's group model: version, intent and extensions
+    only, every extension versioned."""
+    from duckn import DucknGroupMetadata
+    meta = DucknGroupMetadata(version=DUCKN_VERSION, **fields)
+    return {"duckn": meta.model_dump(exclude_none=True)}
 
 
 def segment(id: str, name: str, label_values, *, layer: int | None = None,
@@ -422,7 +435,7 @@ _SCT = {"name": "SNOMED CT", "system_uri": "http://snomed.info/sct",
 
 
 def segmentation(segments, *, terminologies: dict | None = None,
-                 labeling_scheme: str | list[str] | None = None):
+                 labeling_scheme: str | list[str] | None = None, layers: list[str] | None = None):
     """The ``seg`` extension over ``segments``, checked against duckn's consistency rules:
     any error raises (duckn's validator reports, and a writer must not write one).
 
@@ -433,8 +446,17 @@ def segmentation(segments, *, terminologies: dict | None = None,
     from duckn import validate_seg_extension
     from duckn.diagnostics import raise_on
     terms = {k: TerminologyEntry(**v) for k, v in (terminologies or {}).items()}
+    # seg 0.10 (2026-09-26): the block sits on the STORE's group, so it names each layer's
+    # member and the extension that derives its labelmap - `ranked`, whose winning class at a
+    # voxel is the label (rankfield's format). Before, the layer order lived in the `haversack`
+    # block where no seg reader looks.
+    group = None if layers is None else [{"path": p, "labelmap_from": "ranked"} for p in layers]
     ext = SegmentationExtension(version=SEG_VERSION, terminologies=terms or None,
-                                labeling_scheme=labeling_scheme, segments=list(segments))
+                                labeling_scheme=labeling_scheme, segments=list(segments),
+                                layers=group)
+    if group is not None:
+        from duckn import SEG_GROUP_VERSION
+        ext.version = SEG_GROUP_VERSION
     raise_on(validate_seg_extension(ext))
     return ext
 
@@ -442,11 +464,11 @@ def segmentation(segments, *, terminologies: dict | None = None,
 def root_attrs(seg_ext, **extensions) -> dict:
     """The root group's attributes: the validated ``seg`` extension plus this package's own
     blocks (``haversack``, ``provenance``, ...), serialized by duckn."""
-    from duckn import DucknMetadata
-    from duckn.models import duckn_attrs
     ext = {"seg": seg_ext.model_dump(exclude_none=True)}
     ext.update(extensions)
-    return duckn_attrs(DucknMetadata(version=DUCKN_VERSION, extensions=ext))
+    if "haversack" in ext and "version" not in ext["haversack"]:
+        ext["haversack"] = {"version": HAVERSACK_EXTENSION_VERSION, **ext["haversack"]}
+    return _group_attrs(extensions=ext)
 
 
 # ----------------------------------------------------------------------------------------

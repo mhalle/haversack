@@ -116,7 +116,16 @@ def label_names() -> dict[int, str]:
     what we ship removes an environment dependency from a build step that once
     degraded silently and named all 78 segments ``label_<id>``.
     """
-    return {i: v["name"] for i, v in load_lut().items()}
+    names = {i: v["name"] for i, v in load_lut().items()}
+    # A store holds the network's CHANNELS, before the hemisphere split: the ids in
+    # SPLIT_AFTER_THE_NETWORK cover the structure on BOTH sides there, so their stored name drops
+    # the hemisphere rather than state a laterality that is untrue (the duckn conformance audit,
+    # 2026-09-26: "ctx-lh-insula" over both insulae). A labels output is split and keeps
+    # ctx-lh-/ctx-rh- (output_lut).
+    for i in SPLIT_AFTER_THE_NETWORK:
+        if i in names:
+            names[i] = names[i].replace("ctx-lh-", "ctx-", 1)
+    return names
 
 
 def sitk_to_nibabel(img):

@@ -311,7 +311,12 @@ def test_build_writes_the_same_store_into_a_directory_and_a_zip_and_both_verify(
         # the root went through duckn's model: the seg extension reads back validated -
         # the model's classes and a background segment, and nothing derived from them
         seg = rs.read_segmentation(sb.root)
-        assert seg.version == "0.9"
+        # seg 0.10's group form (2026-09-26): the store's block names its layers' parts
+        assert seg.version == "0.10"
+        assert [(r.path, r.labelmap_from) for r in seg.layers] == [
+            (f"parts/{i}", "ranked") for i in range(len(seg.layers))]
+        assert sb.root.attrs.asdict()["duckn"]["version"] == "1.2"
+        assert "version" in sb.root.attrs.asdict()["duckn"]["extensions"]["haversack"]
         assert all(not s.name.startswith("label_") for s in seg.segments)
         by_id = {s.id: s for s in seg.segments}
         assert by_id["background_0"].role == "background"
@@ -455,7 +460,7 @@ def test_the_upgrade_tool_parses_arguments_and_names_a_store_that_is_not_one(tmp
     with pytest.raises(SystemExit):
         up.main(["--no-such-flag", str(out)])
     up.main([str(out)])
-    assert "seg 0.9 -> 0.9" in capsys.readouterr().out
+    assert "seg 0.10 -> 0.10" in capsys.readouterr().out
     with rs.open_store(out) as st:
         assert all(s.layer is None for s in rs.read_segmentation(st.root).segments)
     bare = tmp_path / "bare.duckn"
@@ -498,7 +503,8 @@ def _segments_after_upgrade(path):
     with rs.open_store(path, "r") as st:
         raw = st.root.attrs.asdict()["duckn"]["extensions"]["seg"]
         back = rs.read_segmentation(st.root)
-    assert raw["version"] == "0.9"                     # rewritten, not merely readable
+    assert raw["version"] == "0.10"                    # rewritten, not merely readable
+    assert raw["layers"]                               # and the group form's layers kept
     return {s.id: s for s in back.segments}
 
 
