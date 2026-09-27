@@ -365,7 +365,7 @@ class TestLayering(unittest.TestCase):
                 continue
             if declared.get("git") != url:
                 problems.append(f"{name}: CI {url} != pyproject {declared.get('git')}")
-            pinned = declared.get("tag") or declared.get("rev")
+            pinned = declared.get("tag") or declared.get("rev") or declared.get("branch")
             if pinned != ref:
                 problems.append(f"{name}: CI pins {ref}, pyproject pins {pinned}")
         self.assertEqual(problems, [], "CI and pyproject disagree about a git dependency:\n  "

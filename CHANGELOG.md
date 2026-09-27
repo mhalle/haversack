@@ -2,18 +2,20 @@
 
 ## [Unreleased]
 
-- **rankfield, labelfield and feldglas are unpinned for now**: each tracks its `main` (in
-  pyproject and in CI), so a fix in one reaches haversack without a release of every package in
-  the chain. labelfield 0.1.2 on main evaluates the voxel-center rule as scipy does (nearest picks
-  at exact half-way ties are scipy's). duckn stays pinned.
+## [0.16.0rc1] - 2026-09-27
 
-- **Pins: rankfield v0.3.8, labelfield v0.1.1, feldglas v0.2.3, duckn v0.6.2.** rankfield 0.3.8
-  takes its geometry from labelfield, so a restore from a rank-field store and the live restore
-  now decide with the same code, including the tightened nearest edge rule. labelfield is a direct
-  git reference here, as rankfield declares it (uv reads a tag source beside rankfield's URL as a
-  conflict); feldglas 0.2.3 pins rankfield 0.3.8 and duckn 0.6.2, and duckn 0.6.2 is additive
-  (dicom-spec's groups by name). Still pending with the channels_last change: the cache epoch.
+A pre-release, with every sibling pinned to a tag: the fused restore moved to labelfield, the
+network off channels_last_3d (a third faster on CUDA), an input's DICOM tags as JSON, and the pins
+below. `CACHE_EPOCH` is not bumped yet (the user's call, more changes to come): the channels_last
+change moves labels within fp16 rounding, so a cached result from 0.15.0 can still be served.
 
+- **Pins: rankfield v0.3.9, labelfield v0.1.2, feldglas v0.2.4, duckn v0.6.2.** rankfield takes
+  its geometry from labelfield, so a restore from a rank-field store and the live restore decide
+  with the same code, including the tightened nearest edge rule and, from labelfield 0.1.2, the
+  voxel-center rule evaluated as scipy does (nearest picks at exact half-way ties are scipy's).
+  labelfield is a direct git reference, as rankfield declares it (uv reads a tag source beside
+  rankfield's URL as a conflict). Development continues on the `dev` branch, where the siblings
+  track each other's `dev`.
 - **The fused restore is labelfield now** ([mhalle/labelfield](https://github.com/mhalle/labelfield),
   pinned to `v0.1.0` from its tag, like rankfield): the logits-to-labels kernels (Metal, Triton,
   torch), their per-axis tables, `Grid`, `Mapping` and the float64 reference. `haversack.grid`,
