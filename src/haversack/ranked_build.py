@@ -837,16 +837,17 @@ def generator_steps(meta, items, engine, *, parts_kept="all", layers=("occupancy
     # a composed union's models are named in its `composed` block (haversack.ranked_compose)
     models = [p.get("softmax", {}) for _n, p in items if p.get("softmax")] + [
         c["softmax"] for _n, p in items for c in (p.get("composed") or {}).get("parts", [])
-        if c.get("softmax")]
+        if c.get("softmax")] + [c for _n, p in items for c in p.get("crop_models", [])]
+    models = [_stated(m) for m in models]
     seg = {"name": "Segmentation",
            "description": f"{meta.get('task')} via the {engine} engine; the pre-argmax logit "
                           "field was captured between the network and the restore",
-           "software": {"name": "haversack", "version": haversack_v,
-                        "url": "https://github.com/mhalle/haversack"},
-           "parameters": {"task": meta.get("task"), "engine": engine,
-                          "depth": meta.get("depth"), "clip": meta.get("clip"),
-                          "envelope_mm": meta.get("envelope_mm"),
-                          "device": meta.get("device")}}
+           "software": _stated({"name": "haversack", "version": haversack_v,
+                                "url": "https://github.com/mhalle/haversack"}),
+           "parameters": _stated({"task": meta.get("task"), "engine": engine,
+                                  "depth": meta.get("depth"), "clip": meta.get("clip"),
+                                  "envelope_mm": meta.get("envelope_mm"),
+                                  "device": meta.get("device")})}
     if models:
         seg["method"] = {"name": meta.get("task"),
                          "version": ", ".join(sorted({str(m.get("version")) for m in models})),
@@ -856,11 +857,26 @@ def generator_steps(meta, items, engine, *, parts_kept="all", layers=("occupancy
              "description": "top-N ranks with quantized gaps, packed as zarr v3 with one shard "
                             "per array, plus the derived layers: a per-brick occupancy index, the "
                             "nearest-surface distance field and the triple-line junction layer",
-             "software": {"name": "ranked_build_store.py", "version": haversack_v},
-             "parameters": {"depth": meta.get("depth"), "clip": meta.get("clip"),
-                            "brick": [BRICK, BRICK, BRICK], "parts_kept": parts_kept,
-                            "derived_layers": list(layers),
-                            "distance_voxels": distance_voxels}}]
+             # what ran is this module - in-process from `segment -o x.duckn.zip` or a server
+             # job, not the tools/ script the name once said (audit, 2026-09-26)
+             "software": _stated({"name": "haversack.ranked_build", "version": haversack_v,
+                                  "url": "https://github.com/mhalle/haversack"}),
+             "parameters": _stated({"depth": meta.get("depth"), "clip": meta.get("clip"),
+                                    "brick": [BRICK, BRICK, BRICK], "parts_kept": parts_kept,
+                                    "derived_layers": list(layers),
+                                    "distance_voxels": distance_voxels})}]
+
+
+def _stated(record):
+    """``record`` with what is not known left out, at every depth: the provenance extension
+    uses no nulls ("omit fields that are unknown", §7) and duckn no sentinels - so no
+    ``device: null``, no ``sha256: null``, no ``version: "unknown"`` (audit, 2026-09-26)."""
+    if isinstance(record, dict):
+        return {k: _stated(v) for k, v in record.items()
+                if v is not None and not (isinstance(v, str) and v == "unknown")}
+    if isinstance(record, list):
+        return [_stated(v) for v in record]
+    return record
 
 
 def build(src, out, case, parts="all", allow_unnamed=False,
@@ -1037,11 +1053,17 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
                 trunc = float(distance_voxels) * min(eff)
                 dist = distance_field(rk_all, su_all, part["clip"], eff, trunc, levels=rf_levels(block))
             chunks, shards = layout(dist.shape)
+            # the one encoded array whose decode IS a value mapping: stated, so any duckn reader
+            # gets millimeters - the distance truncated at T (q = 0 is "at or beyond T", which
+            # truncates to T), exact up to the uint8 quantum (duckn 1.2, 2026-09-26)
+            dattrs = attrs(direction, eff, origin, list_axis=False, centering=centering)
+            dattrs["duckn"]["value_transforms"] = [{"name": "linear", "parameters": {
+                "slope": -trunc / DISTANCE_MAX, "intercept": trunc}}]
+            dattrs["duckn"]["sample_units"] = "mm"
             dz = g.create_array("distance", shape=dist.shape, dtype=dist.dtype,
                                 chunks=chunks, shards=shards,
                                 compressors=zarr.codecs.ZstdCodec(level=9),
-                                attributes=attrs(direction, eff, origin, list_axis=False,
-                                                 centering=centering))
+                                attributes=dattrs)
             dz[:] = dist
             # Decode parameters, not descriptions: the quantum is truncation/max, so without
             # them the array is a uint8 with no scale. They sit beside `clip`/`support_max`,
@@ -1121,7 +1143,8 @@ def _build_into(st, src, out, case, parts, allow_unnamed, distance_voxels, names
                                             if len(schemes) == 1 else list(schemes)),
                      terminologies={key: {k: sc[k] for k in ("name", "system_uri", "version",
                                                              "definition_url")}
-                                    for key, sc in schemes.items()} or None),
+                                    for key, sc in schemes.items()} or None,
+                     layers=[f"parts/{o['index']}" for o in order]),
         haversack={"haversack_version": dict(items)[order[0]["name"]].get("haversack"),
                    "engine": engine, "task": meta["task"], "case": case,
                    # what the emit says the input is called (ranked_output.main): a file's name,

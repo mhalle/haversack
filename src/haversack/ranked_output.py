@@ -276,10 +276,18 @@ def _task_field(out, metas, depth, *, device=None, say=print):
     """The staged parts reduced to the task's own field: crop stages dropped, a union composed.
     Returns the metas of what remains (one part). A part the pipeline marked ``role: crop`` is a
     cascade's crop stage; FastSurfer and single models pass through untouched."""
+    # a crop stage's model is not stored, but it chose the box that became the store's grid: its
+    # softmax record rides on the kept part(s) for the provenance (duckn §4.7 audit, 2026-09-26:
+    # the models list read as complete without it)
+    crop_models = [dict(m["softmax"], role="crop") for m in metas.values()
+                   if m.get("role") == "crop" and m.get("softmax")]
     for part in [p for p, m in metas.items() if m.get("role") == "crop"]:
         _drop(out, part)
         del metas[part]
         say(f"  {part:<12} crop stage: not stored (its box is in the provenance)")
+    if crop_models:
+        for m in metas.values():
+            m["crop_models"] = crop_models
     if len(metas) < 2:
         return metas
     from .ranked_compose import compose
@@ -295,6 +303,8 @@ def _task_field(out, metas, depth, *, device=None, say=print):
             if k not in ("softmax", "tail_temperatures", "max_tail_at_temperature", "part")}
     base.update(cmeta)
     base.update(labels=[int(v) for v in labels], part=name, task=task, labels_named_by=task)
+    if crop_models:
+        base["crop_models"] = crop_models
     for p, *_ in parts:
         _drop(out, p)
     np.save(out / f"{name}_ranks.npy", ranks)

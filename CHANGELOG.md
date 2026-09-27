@@ -67,6 +67,20 @@
   traceback. SERVER.md now documents the `gs` source, the cancel response, and that a done job's
   path links follow the key's current publication while `result` and the job's own routes are the
   job's.
+- **Rank-field stores conform to duckn convention 1.2** (the owner's decisions after the
+  conformance audit, 2026-09-26). The store's groups carry duckn group metadata (duckn-spec §3.3,
+  defined in 1.2 - before, the convention did not define metadata on a group), and the `seg` block
+  is seg 0.10's group form: `layers` names each layer's part and the `ranked` extension that
+  derives its labels, where before the layer order sat in the `haversack` block no seg reader
+  reads. The `haversack` extension has a `version`. The encoded arrays (ranks, support, tail,
+  occupancy, junction) declare 1.2, so their absent `value_transforms` reads as "not stated" -
+  true of codes - instead of claiming the codes are the quantity; `distance` states its mapping,
+  linear in millimeters (the distance truncated at T, exact up to the uint8 quantum). The
+  provenance leaves out what is not known (no `device: null`, `sha256: null`, `version:
+  "unknown"`), names the module that ran (`haversack.ranked_build`, not a tools/ script), and
+  records a cascade's crop model with `role: crop`. FastSurfer stores name the 17 channels that
+  hold both hemispheres before the split `ctx-<parcel>`, not `ctx-lh-<parcel>`.
+  `tools/ranked_upgrade_seg.py` writes the group form.
 
 - **An input copy's DICOM tags are the files' own headers.** They were SimpleITK's per-slice
   dictionaries, which hold no sequences and no binary values. They are now read through pydicom

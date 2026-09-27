@@ -77,7 +77,9 @@ def _upgrade(st, store: Path) -> None:
     new_seg = segmentation(                              # duckn's rules are checked here
         segments, terminologies={k: v.model_dump(exclude_none=True)
                                  for k, v in (seg.terminologies or {}).items()},
-        labeling_scheme=seg.labeling_scheme)             # one key, or a cascade's several
+        labeling_scheme=seg.labeling_scheme,             # one key, or a cascade's several
+        # seg 0.10: the block is the store group's, naming each layer's part (2026-09-26)
+        layers=[f"parts/{i}" for i in range(len(order))])
 
     pv = dict(ext.get("provenance") or {"version": "1.0"})
     steps = [s for s in pv.get("processing", []) if s.get("name") != STEP]
