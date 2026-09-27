@@ -488,12 +488,12 @@ what the copy does about it, and what holds it:
 
 | Obligation | What a copy does | Held by |
 |---|---|---|
-| State only what is true of the array (duckn §4.7) | Voxels are the values the files mean: GDCM's slice-axis sign is never trusted (geometry from IPP), its MONOCHROME1 complement is undone, an unapplied Modality LUT is applied, a multi-frame file whose frames are not one uniform grid is refused | `test_io_series.py`, `test_dicom_tag_review_0926.py` |
+| State only what is true of the array (duckn §4.7) | Voxels are the values the files mean: GDCM's slice-axis sign is never trusted (geometry from IPP), its MONOCHROME1 complement is undone and an unapplied Modality LUT applied (asked of every slice), each Enhanced frame is rescaled with its own rescale, a series is read in a type that holds every slice's values; a multi-frame file whose frames are not one uniform grid (positions, orientation, spacing, an RTDOSE's offsets) is refused; the first and last slice or frame are held against pydicom's own decode and a disagreement refused; a truncated or corrupt gzip is refused | `test_io_series.py`, `test_dicom_tag_review_0926.py`, `test_reader_review_0926.py` |
 | `version` always present (duckn §3.1) | `1.0` (no 1.1 field is used) | `test_a_copy_states_the_convention_version` |
 | No `value_transforms` means stored = real (duckn §3.1); materialize drops transforms (§4.3) | Values are materialized; no transform is written | the reader tests above |
 | Keep a source extension only while a faithful re-encoding (duckn §4.5) | Same grid, same quantity (§4.3 materialization): the `dicom` extension stays; nothing a copy is derived into carries it | `test_input_copy.py` |
 | Say what kind of values (dicom §3.1) | `stored_values`, judged from what the decode did | `test_dicom_tag_review_0926.py` |
-| Nothing in stored-value units beside other values (dicom §5.10) | Bits Stored, pixel ranges, padding, Real World Value Mapping only when `stored_values` is true | same |
+| Nothing in stored-value units beside other values (dicom §5.10) | Bits Stored, pixel ranges, padding, Real World Value Mapping - and a palette (descriptors, data, UIDs, Pixel Presentation: haversack's own rule until duckn 0.5.5 lists them) - only when `stored_values` is true | same, and `test_reader_review_0926.py` |
 | Private elements only if vouched for (dicom §9) | None: the source keeps them | `test_the_tags_are_the_files_own_headers` |
 | Tags split, encoded and excluded as the spec says (dicom §2, §4, §6, §9) | duckn's one conversion (`tags_from_files`) | duckn's own suite |
 | A header written from the copy contradicts nothing (duckn §4.7, for `get -o`) | `honest_metadata` on every export | `test_input_copy.py`, `test_dicom_tag_review_0926.py` |

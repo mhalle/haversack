@@ -74,6 +74,50 @@
   them all (int32, or float64 for a fractional slope), and the slab reader leaves it to that
   read. A series whose first file already reads in such a type (PET's per-slice slopes) is read
   once, as before.
+- **Every DICOM read is held against pydicom's own decode.** GDCM decoded some files wrongly
+  without a word: an Explicit VR Big Endian 32-bit RT dose read 250085395 where the file holds
+  1249000, RLE-compressed 16- and 32-bit RGB read other colors, a 1-bit SEG read 0/255 for 0/1.
+  The reader now decodes the first and the last slice (or frame) with pydicom as well, maps
+  them through the file's own modality mapping (functional-group rescales included), and
+  refuses any disagreement - on `segment`, input copies and `get -o` alike, and the slab reader
+  hands such a series to the whole read. Where pydicom has no decoder for a file there is
+  nothing to check it by, and it reads as before. A palette expanded to 8-bit RGB is compared
+  as GDCM makes it (the high byte of a 16-bit palette entry). About 0.3 s more per 709-slice
+  series, for its headers.
+- **Each frame of an Enhanced file reads with its own rescale.** GDCM applies ONE rescale to
+  every frame - the shared functional group's, else the first frame's - so a file whose frames
+  state different ones read up to 3513 off. Each frame is now rescaled from its stored values
+  with its own, and the result is checked against pydicom; where it cannot be, the file is
+  refused. An Enhanced MONOCHROME1 file with its rescale in the functional groups, refused
+  until now, reads as its values.
+- **MONOCHROME1 and a Modality LUT are asked of every slice.** Only the first slice was: a
+  table or MONOCHROME1 on a later slice went through uncorrected, on the whole read and the
+  slab read. A series that mixes them is refused, and a rescale that does not parse is too -
+  what its values mean is unknown.
+- **Slices of one rescale in different pixel types read every value.** The type rule asked only
+  whether the rescales differed: slices of one rescale, signed after unsigned, 16 bits stored
+  after 12 or allocated after 8, were read in the first file's type and wrapped. Each slice's
+  range now comes from its Bits Stored and Pixel Representation, rescaled.
+- **A folder holding one multi-frame file reads as that file**, as the file does on its own; it
+  was refused as "fewer than 2 slices". One single slice is still no volume.
+- **Frames that are not one grid are refused, whatever places them.** An Enhanced file whose
+  frames differ in orientation or pixel spacing read all of them as the first frame's, and an
+  RT dose whose Grid Frame Offset Vector is uneven was placed on a uniform grid; both are now
+  refused, as a series is.
+- **A truncated or corrupt `.nii.gz` is refused.** SimpleITK read a gzipped NIfTI cut to half
+  its length without an error, as 47 % zeros, and it was copied and segmented. The reader now
+  reads the gzip stream to its end first and refuses one that ends early or fails its CRC (the
+  whole read, `get -o` and a label map; the slab reader reads to the end of the stream and
+  keeps no copy of it). ~0.05 s for a 23 MB NIfTI.
+- **A palette is not stated beside rescaled voxels.** A palette's descriptors map STORED values
+  (their first mapped value is one), so a grayscale CT with a supplemental palette kept, in its
+  copy and its export, a palette that maps values its HU voxels no longer hold. Palette
+  descriptors, data and UIDs and Pixel Presentation now follow the stored-unit rule: kept only
+  beside the stored values.
+- **A signed 12-bit MONOCHROME1 series is a refusal, not a crash.** GDCM raises out of the series
+  reader on it; that was a bare RuntimeError.
+- **Existing input copies are fetched again (reader version 4).** Copies of the inputs above
+  made under version 3 hold the wrong values or tags.
 - **`Input.tags()` says what the copy holds**: `stored_values` (whether anything stated in
   stored-value units is about these voxels) and `tags_version` beside the series and per-slice
   tags.

@@ -152,7 +152,12 @@ def read_label_map(path, *, require_names: bool = True) -> LabelMap:
         # a nameless label map uploaded as a compressed volume is kept as its input copy
         # (docs/input-copy.md) - the same voxels and geometry; a .seg.nrrd, which carries its
         # names, never is
-        image = read_copy(file) if is_copy(file) else sitk.ReadImage(str(file))
+        if is_copy(file):
+            image = read_copy(file)
+        else:
+            from .io import _check_gzip
+            _check_gzip(file)                  # a truncated .nii.gz reads as zeros otherwise
+            image = sitk.ReadImage(str(file))
     except NotACopy:
         from .duckn_io import read_duckn_image
         image = read_duckn_image(file)
