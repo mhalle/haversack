@@ -56,7 +56,7 @@ dependencies = [
     # every deployed image already carried them. 14.3 MB beside core. duckn and rankfield come
     # from git tags, as provender does - which is why an install needs `uv pip`, not pip. The
     # default `segment IN -o labels.nii.gz` still imports none of them (rule 6, test_layering).
-    "duckn>=0.5.4",
+    "duckn>=0.6.0",
     "zarr>=3.3",
     "rankfield>=0.3.7",
     "pydicom>=2.4",
@@ -145,7 +145,7 @@ duckn = []
 # writes through `feldglas.store` (zarr + duckn's own models, like the ranked stores). The networks
 # need the torch extra (RADAR's encoder is built from nnU-Net's dynamic_network_architectures);
 # RADAR's input convention reorients through nibabel, as upstream's DataFolder does.
-embed = ["feldglas", "nibabel"]                    # duckn, zarr and rankfield are core
+embed = ["feldglas>=0.2.0", "nibabel"]                    # duckn, zarr and rankfield are core
 
 [build-system]
 requires = ["hatchling"]
@@ -219,11 +219,11 @@ voxtell = { git = "https://github.com/MIC-DKFZ/VoxTell.git", rev = "8ef0332aec5d
 # duckn = the metadata standard the ranked stores are written in (seg extension 0.8 as of
 # 0.4.0). A release tag, not a branch, so a sync is reproducible; to work on duckn itself,
 # `uv pip install -e ../duckn` after the sync puts the sibling checkout in front of it.
-duckn = { git = "https://github.com/mhalle/duckn.git", tag = "v0.5.4" }
+duckn = { git = "https://github.com/mhalle/duckn.git", tag = "v0.6.0" }
 # feldglas = the embedding-field format and its receiving end (client, `feldglas` command); haversack
 # writes fields through it. A release tag, like duckn; `uv pip install -e ../feldglas` after the
 # sync to work on both.
-feldglas = { git = "https://github.com/mhalle/feldglas.git", tag = "v0.1.7" }
+feldglas = { git = "https://github.com/mhalle/feldglas.git", tag = "v0.2.0" }
 # synthstrip-torch = our standalone SynthStrip inference package (StripModel + surfa conform
 # + SDT; weights fetched from MGH at runtime). Import namespace: synthstrip_torch.
 synthstrip-torch = { git = "https://github.com/mhalle/synthstrip-torch.git", tag = "v0.1.1" }
