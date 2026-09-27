@@ -277,3 +277,30 @@ def test_a_deployment_without_input_tags_says_501(server):
     r = client.get(URL, headers=AUTH)
     assert r.status_code == 501 and "haversack tags" in r.text
     assert fetches == []
+
+
+def test_the_client_asks_the_route_and_refuses_an_upload(server):
+    from haversack.client import RemoteClient
+    from haversack.errors import InputError
+    make, _ = server
+    ex, client = make()
+    client.headers.update(AUTH)
+    rc = RemoteClient("http://testserver")
+    rc._http = client                         # starlette's TestClient is an httpx.Client
+    body = rc.tags(f"idc:{SERIES}", select="ct", slices=False)
+    assert body["series"] == {"KVP": 120} and "slices" not in body
+    with pytest.raises(InputError, match="upload"):
+        rc.tags("sha256:" + "0" * 64)
+    with pytest.raises(InputError, match="<source>:<identifier>"):
+        rc.tags("not-a-spec")
+
+
+def test_the_command_prints_json_and_refuses_a_bad_name(tmp_path, monkeypatch, capsys):
+    from haversack.cli import main
+    monkeypatch.setenv("HAVERSACK_CACHE_DIR", str(tmp_path / "hc"))
+    folder = write_series(tmp_path / "ct")
+    assert main(["tags", str(folder), "--select", "ct", "--no-slices"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["series"] == {"KVP": 120} and "slices" not in out
+    assert main(["tags", str(folder), "--select", "Kvp"]) == 2
+    assert "neither a module" in capsys.readouterr().err
