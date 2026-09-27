@@ -614,6 +614,12 @@ processes asking for one export at once all get it). What changed, so it is not 
   transcode, so unrelated keys sharing one waited up to `ECONOMY_WAIT_S`; per-key lock files
   would end it but cannot be removed safely. Assessed, not otherwise changed.
 
+Soaked after the fixes (`tools/soak_input_store.py --minutes 3 --kill-at 1`, M2, MPS, uploads
+and digest references only, no IDC): 55 jobs, all done, 8 references 410 input_gone after
+eviction, the server SIGKILLed at minute 1 and restarted, no 5xx, no digest mismatch, no
+staging, view or temporary-write file left, every ref's blobs present, no orphan. The soak now
+also fails on a `*.provender-tmp` left after the store is reopened.
+
 One hazard found writing the tests and NOT changed: an export (and a view) is a hard link to its
 blob, so anything that writes INTO an exported file in place writes into the store's blob - and
 every other export of it. `haversack get` prints such a path. Replacing the file (write a new
