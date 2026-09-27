@@ -700,10 +700,10 @@ which cost GPU time and are small, are worth a shared store. Not measured: paral
 GETs (which would raise its rate), and the cost of re-making the copy after a re-fetch (a decode
 - seconds for this series, ~12 s for a 709-slice one).
 
-**DICOM headers (designed with the user, 2026-09-26; not built).** JSON for USE only: the duckn
+**DICOM headers (designed with the user, 2026-09-26; built 2026-09-27 as `Input.tags(select=, withhold=, per_slice=)`, `haversack tags` and `GET /v1/<source>/<identifier>/dicom.json` - hosted sources only, the user's call - see SERVER.md).** JSON for USE only: the duckn
 dicom extension's keyword-keyed tags, sourced from pydicom (duckn's `dicom_convert`: private
 tags, sequences, binary values in base64) rather than from SimpleITK's dictionary, which drops
-binary values - and served through an API (`haversack.inputs.open(spec).dicom()`, a route)
+binary values - and served through an API (`haversack.inputs.open(spec).tags()`, a route)
 rather than by anyone parsing DICOM. **No round trip (the user, the same day):** the copy is a
 faithful DATA product, not a byte-faithful archive; the original is downloadable from its source,
 more faithfully than a cache could hold it, and the input record says where. So no raw-header

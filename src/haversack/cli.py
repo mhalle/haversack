@@ -447,6 +447,24 @@ def _command_line() -> click.Group:
                          help='do not keep the raw data in the cache (only with -o)'),
         ])
     root.add_command(get)
+    tags = _Command(
+        'tags', callback=_dispatch(_cmd_tags, 'tags'),
+        short_help="an input's DICOM tags, as JSON",
+        help=("Prints the DICOM tags of one input as JSON, read from haversack's copy of it (the "
+              "input is fetched first if it is not cached): the series-level tags, then one "
+              'object per slice, in duckn\'s dicom encoding. Works for any input haversack '
+              'reads - a hosted source, a local DICOM folder or file. A non-DICOM input has none.'),
+        params=[
+            click.Argument(['source'],
+                           help='idc:<uuid> or another source, or a local DICOM folder or file'),
+            click.Option(['--select'], multiple=True,
+                         help=("keep only these: dicom-spec's groups (patient, study, series, "
+                               'equipment, ct, mr, pet, frame-of-reference, sop-common, '
+                               'image-quality) or PS3.6 keywords (KVP); repeat for several')),
+            click.Option(['--no-slices'], is_flag=True,
+                         help='leave out the per-slice tags (series-level only)'),
+        ])
+    root.add_command(tags)
 
     tasks = _Command(
         'tasks', callback=_dispatch(_cmd_tasks, 'tasks'),
@@ -722,6 +740,10 @@ def _command_line() -> click.Group:
                                '(s3://bucket/prefix, gs://..., az://..., or a directory '
                                'as file:///path; credentials from the environment); '
                                '--cache-dir becomes its local copy')),
+            click.Option(['--dicom-withhold'], envvar='HAVERSACK_DICOM_WITHHOLD',
+                         help=("DICOM values this server's dicom.json never hands back, as null "
+                               'with "anonymized": true: comma-separated dicom-spec groups '
+                               '(patient, study, equipment ...) or PS3.6 keywords')),
             click.Option(['--sweep-interval-hours'], type=float, default=24.0,
                          help=('how often this server reclaims bytes in the shared store '
                                'that no result refers to any more (0 turns it off). Only '
@@ -882,6 +904,23 @@ def _command_line() -> click.Group:
             click.Argument(['job_id'], help='the id `submit --no-wait` printed'),
         ])
     remote.add_command(remote_status)
+    remote_tags = _Command(
+        'tags', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
+        short_help="a hosted input's DICOM tags, from the server, as JSON",
+        help=('GET /v1/<source>/<identifier>/dicom.json (needs the token): the tags of the '
+              "server's copy of a hosted input, fetched first if the server does not hold it. "
+              'An upload\'s tags are never handed back; values the server\'s policy withholds '
+              'are null, with "anonymized": true.'),
+        params=[
+            click.Argument(['source'], help='idc:<crdc_series_uuid> or another hosted source'),
+            click.Option(['--select'], multiple=True,
+                         help=("keep only these: dicom-spec's groups (patient, study, series, "
+                               'equipment, ct, mr, pet, frame-of-reference, sop-common, '
+                               'image-quality) or PS3.6 keywords (KVP); repeat for several')),
+            click.Option(['--no-slices'], is_flag=True,
+                         help='leave out the per-slice tags (series-level only)'),
+        ])
+    remote.add_command(remote_tags)
     remote_fetch = _Command(
         'fetch', callback=_dispatch(_cmd_remote, 'remote', 'rcmd'),
         short_help="download a finished job's labels",
@@ -1383,6 +1422,9 @@ def _cmd_remote(args) -> int:
                              ",".join(map(str, e.get("identity") or [])) or "-", where]))
     elif args.rcmd == "status":
         print(json.dumps(c.status(args.job_id), indent=2))
+    elif args.rcmd == "tags":
+        print(json.dumps(c.tags(args.source, select=list(args.select) or None,
+                                slices=not args.no_slices), indent=1, ensure_ascii=False))
     elif args.rcmd == "fetch":
         print(c.fetch(args.job_id, args.output))
     elif args.rcmd == "cancel":
@@ -1718,6 +1760,23 @@ def _raw_export_refused() -> bool:
     keeps its raw export until the store becomes the default and the legacy code goes."""
     from .inputstore import input_store_enabled
     return input_store_enabled()
+
+
+def _cmd_tags(args) -> int:
+    """`haversack tags`: the input's DICOM tags, read from its copy (2026-09-27)."""
+    import json
+    from . import inputs
+    try:
+        x = inputs.open(args.source)
+        tags = x.tags(select=list(args.select) or None, per_slice=not args.no_slices)
+    except ValueError as e:                   # a group or keyword that is neither
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    if not tags:
+        print(f"{args.source}: no DICOM tags (the input is not DICOM)", file=sys.stderr)
+        return 1
+    print(json.dumps(tags, indent=1, ensure_ascii=False))
+    return 0
 
 
 def _cmd_get(args) -> int:

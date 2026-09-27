@@ -99,6 +99,32 @@ class RemoteClient:
             params["count_only"] = "true"
         return self._json("GET", "/v1/segments", params=params)
 
+    def tags(self, spec: str, *, select=None, slices: bool = True) -> dict:
+        """A hosted input's DICOM tags as the server's copy of it carries them
+        (``GET /v1/<source>/<identifier>/dicom.json``, authorized; the server fetches the
+        input if it does not hold it yet): ``{"series": {...}, "slices": [{...}, ...],
+        "stored_values": ..., "tags_version": ...}``, and ``"anonymized": true`` where the
+        server's policy withheld values (they are ``null``).
+
+        ``spec`` is ``<source>:<identifier>`` - ``idc:<crdc_series_uuid>`` and the like. An
+        upload's digest is refused: a server never hands an upload's content back. ``select``
+        keeps dicom-spec §5's groups (``"ct"``, ``"series"`` ...) and PS3.6 keywords
+        (``"KVP"``); ``slices=False`` leaves the per-slice tags out."""
+        from urllib.parse import quote
+        prefix, sep, ident = str(spec).partition(":")
+        if not sep or not ident or not prefix.replace("_", "").isalnum() or not prefix.islower():
+            raise InputError(f"expected <source>:<identifier> (e.g. idc:<crdc_series_uuid>), "
+                             f"got {spec!r}")
+        if prefix.startswith("sha256"):
+            raise InputError("a server hands back no upload's content, its tags included; "
+                             "read an upload's tags where the files are (`haversack tags PATH`)")
+        names = [select] if isinstance(select, str) else list(select or [])
+        params = [("select", n) for n in names]
+        if not slices:
+            params.append(("slices", "false"))
+        return self._json("GET", f"/v1/{prefix}/{quote(ident, safe='/@!:._-~')}/dicom.json",
+                          params=params)
+
     def segmentations(self, *, identity=None, task: str | None = None,
                       limit: int | None = None, cursor: str | None = None) -> dict:
         """One page of the results the server holds (``GET /v1/segmentations``, authorized):

@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **An input's DICOM tags, as JSON: `haversack tags`, `remote tags`,
+  `GET /v1/<source>/<identifier>/dicom.json`.** Read from the input copy (or, for a local
+  folder, converted exactly as a copy of it would be), with `select` by duckn dicom-spec's
+  groups (`ct`, `series`, `patient` ...) or PS3.6 keywords; a misspelled name is refused, not
+  answered empty. For a server, hosted sources only - an upload's tags are never handed back, as
+  its bytes are not (the user's decision) - and an operator's `--dicom-withhold` policy answers
+  what it names as `null` with `"anonymized": true`, never leaving it out silently. Modal
+  deployments answer 501 for now: their inputs live in the workers.
+- **A fetch record says whether a credential came with it** (`credentialed` in `.input.json`,
+  and so in a result's `provenance.inputs`), and each source says whether a credential could
+  reach private bytes (`credentials_reach_private`). The input cache files a fetch under the
+  source's identity whoever made it, so the tags route refuses what a credential fetched - and
+  an older record, which does not say, from a source where one could have.
+
 ## [0.15.0] - 2026-09-27
 
 Every DICOM read checked against pydicom and corrected where SimpleITK misreads it; an input copy

@@ -2871,6 +2871,10 @@ class _PrepareDone(Exception):
     """Control-flow escape: a prepare job finished; skip the segment path."""
 
 
+class TagsWithheld(Exception):
+    """An input's tags are not handed back: a credential may have reached its bytes."""
+
+
 class LocalExecutor:
     """A bounded FIFO of jobs ahead of one dispatcher thread.
 
@@ -2901,8 +2905,14 @@ class LocalExecutor:
                  cache_dir=None, keep_cached: int = 500,
                  input_cache_bytes: int = 8 << 30, read_fn=None, sources=None,
                  artifacts=("preview", "statistics"), jobs_ttl_h: float = 24.0, embed_fn=None,
-                 result_store=None, sweep_interval_h: float = 24.0):
+                 result_store=None, sweep_interval_h: float = 24.0, dicom_withhold=()):
         self.segmenter = segmenter
+        #: what ``dicom.json`` never hands back as a value: dicom-spec §5 groups and PS3.6
+        #: keywords, each value present replaced by null (§4.3) - the operator's policy, checked
+        #: here so a misspelled name stops the server rather than withholding nothing
+        from duckn.dicom_tags import keywords_named
+        keywords_named(dicom_withhold or ())
+        self.dicom_withhold = tuple(dicom_withhold or ())
         self.workdir = Path(workdir)
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.max_pending = int(max_pending)
@@ -3095,6 +3105,43 @@ class LocalExecutor:
         if prefix == "idc":
             return self._fetch_idc(ident, entry)
         return _fetch_recording_origin(self.sources[prefix], ident, entry, credentials)
+
+    def input_tags(self, prefix: str, ident: str, *, fetch: bool, select=None,
+                   per_slice: bool = True) -> dict | None:
+        """A hosted input's DICOM tags (``GET /v1/<prefix>/<identifier>/dicom.json``,
+        2026-09-27): ``inputs.Input.tags`` of what this server holds, the operator's
+        ``dicom_withhold`` applied. None when the input is not held and ``fetch`` is False
+        (HEAD, which never fetches); fetched otherwise, into the same cache a job reads.
+
+        Hosted sources only - an upload's tags are never handed back, as its bytes never are
+        (the user's decision). And not bytes a credential may have reached: the cache files
+        them under the source's identity whoever fetched them, so an entry whose record says a
+        credential came with its fetch - or that predates the record saying so, from a source
+        where one could reach private bytes - is refused with :class:`TagsWithheld`."""
+        from .inputs import Input
+        from .sources import read_input_record
+        src = self.sources[prefix]
+        key = source_cache_key({"kind": prefix, "id": ident}).key
+        self.series_cache.pin(key)             # BEFORE the look: eviction skips a pin
+        try:
+            if self.series_cache.has(key):
+                path = self.series_cache.path(key)
+            elif not fetch:
+                return None
+            else:
+                path = self.series_cache.get_or_fetch(key)
+            record = read_input_record(self.series_cache.entry(key)) or {}
+            said = record.get("credentialed")
+            if said is True or (said is None
+                                and getattr(src, "credentials_reach_private", False) is True):
+                raise TagsWithheld(
+                    f"{prefix}:{ident} was fetched with a credential"
+                    + ("" if said is True else ", or before this server recorded whether it was")
+                    + ": its content is not handed back to other callers")
+            return Input(f"{prefix}:{ident}", path, record).tags(
+                select=select, withhold=self.dicom_withhold or None, per_slice=per_slice)
+        finally:
+            self.series_cache.unpin(key)
 
     # -- intake --------------------------------------------------------------
     def new_job_dir(self) -> tuple[str, Path]:
@@ -7183,6 +7230,67 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
 
         _grid_routes(_register_artifacts)
 
+        if not read_only:                      # the twin can never authenticate: no route
+            _register_input_tags_for(prefix, srcobj)
+
+    def _register_input_tags_for(prefix: str, srcobj) -> None:
+        """``/v1/<prefix>/<identifier>/dicom.json``: the input's own DICOM tags as JSON
+        (2026-09-27). Its own function, not in ``_mount_source``'s closure, so its names
+        cannot shadow the path surface's."""
+        pat = srcobj.id_pattern
+
+        @_absence_is_never_stored
+        async def input_tags(request: Request, ident: str,
+                             select: list[str] | None = Query(None),
+                             slices: bool = True):
+            """The DICOM tags of the input this path names, as its input copy carries them
+            (duckn's dicom encoding): ``{"series": {...}, "slices": [{...}, ...],
+            "stored_values": ..., "tags_version": ...}``.
+
+            ``select`` (repeatable) keeps what it names - dicom-spec §5's groups (``ct``,
+            ``series``, ``patient`` ...) or PS3.6 keywords (``KVP``); ``slices=false`` leaves
+            the per-slice tags out. What this server's policy withholds is ``null``, with
+            ``"anonymized": true`` - never silently left out.
+
+            Needs the token, and fetches the input if this server does not hold it yet (a GET
+            is the request for it; HEAD never fetches, and says 404 until it is held). Hosted
+            sources only: an upload's tags are never handed back, as its bytes are not."""
+            require_auth(request)
+            fn = getattr(executor, "input_tags", None)
+            if not callable(fn):
+                raise HTTPException(501, "this deployment does not serve input tags; read them "
+                                         "with `haversack tags SPEC` where the input is")
+            ident = norm_ident(prefix, ident)
+            if not re.fullmatch(pat, ident):
+                raise HTTPException(422, {"code": "bad_identifier",
+                                          "message": f"not a {prefix} identifier: {ident}"})
+            try:
+                tags = await asyncio.to_thread(fn, prefix, ident,
+                                               fetch=request.method != "HEAD",
+                                               select=select, per_slice=slices)
+            except ValueError as e:            # a group or keyword that is neither
+                raise HTTPException(422, {"code": "bad_name", "message": str(e)}) from None
+            except TagsWithheld as e:
+                raise HTTPException(403, {"code": "input_withheld", "message": str(e)}) from None
+            except InputError as e:
+                raise HTTPException(422, {"code": "fetch_failed", "message": str(e)}) from None
+            if tags is None:
+                raise HTTPException(404, {"code": "not_held", "message": (
+                    f"this server does not hold {prefix}:{ident}; a GET fetches it")})
+            if not tags:
+                raise HTTPException(404, {"code": "no_dicom_tags", "message": (
+                    f"{prefix}:{ident} carries no DICOM tags (it is not DICOM)")})
+            from fastapi.responses import Response
+            body = json.dumps(tags, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            # private: a token's answer; no-cache: a policy change or a refetch changes it
+            return answer_body(request, Response(body, media_type="application/json"),
+                               {"Cache-Control": "private, no-cache", "ETag": body_etag(body)})
+
+        # two routes, one function, as the artifacts (FastAPI names an operation per route)
+        url = f"/v1/{prefix}/{{ident:path}}/dicom.json"
+        app.head(url, tags=["inputs"])(input_tags)
+        app.get(url, tags=["inputs"])(input_tags)
+
     for _prefix, _srcobj in sources.items():
         # a source that says it has no path surface gets none (`result`: its identity
         # needs a lookup, and a path is keyed without one - see resource_links, which
@@ -7299,7 +7407,10 @@ def main_serve(args) -> int:
                        keep_finished=args.keep_finished, cache_dir=cache_dir,
                        jobs_ttl_h=getattr(args, "jobs_ttl_hours", 24.0),
                        result_store=getattr(args, "result_store", None) or None,
-                       sweep_interval_h=getattr(args, "sweep_interval_hours", 24.0))
+                       sweep_interval_h=getattr(args, "sweep_interval_hours", 24.0),
+                       dicom_withhold=[n.strip() for n in
+                                       str(getattr(args, "dicom_withhold", None) or "").split(",")
+                                       if n.strip()])
     # The token: given (--token, then HAVERSACK_SERVER_TOKEN), generated, or - only when
     # asked for in so many words - none. A generated token goes to a file only this user can
     # read, and the bundled client on this machine reads it back, so personal use needs no

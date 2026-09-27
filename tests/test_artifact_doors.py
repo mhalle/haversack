@@ -102,9 +102,10 @@ def _urls(app, door: str, jid: str) -> list:
     lead = "/v1/jobs/" if door == "job" else "/v1/idc/"
     # an embedding's path names an ENCODER in the task's place, and a ranked store is another
     # job kind's output (kind=rankfield): neither is one of this result's files
-    # (tests/test_embeddings_listing.py and tests/test_ranked_jobs.py hold them on their own)
+    # (tests/test_embeddings_listing.py and tests/test_ranked_jobs.py hold them on their own);
+    # nor is an INPUT's dicom.json, which names no task (tests/test_input_tags.py)
     paths = sorted(p for p in _file_routes(app) if p.startswith(lead)
-                   and not p.endswith((".zarr.zip", ".duckn.zip")))
+                   and not p.endswith((".zarr.zip", ".duckn.zip", "/dicom.json")))
     return [p.replace("{ident:path}", U).replace("{task}", "total_fast").replace("{jid}", jid)
             for p in paths]
 

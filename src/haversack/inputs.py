@@ -97,19 +97,68 @@ class Input:
         arr = sitk.GetArrayFromImage(self.image())
         return arr if slices is None else arr[slices[0]:slices[1]]
 
-    def tags(self) -> dict:
+    def tags(self, *, select=None, withhold=None, per_slice: bool = True) -> dict:
         """The DICOM tags the copy carries, as JSON: ``{"series": {keyword: value}, "slices":
         [{keyword: value}, ...], "stored_values": bool, "tags_version": int}`` in duckn's dicom
-        encoding - empty for an input that is not DICOM, or not a copy. The tags are the files'
+        encoding - empty for an input that is not DICOM. An input that is not a copy (a local
+        folder read in place) is read and converted exactly as a copy of it would be, so the
+        answer is the same either way (2026-09-27). The tags are the files'
         own headers, read through pydicom by duckn's one conversion (``tags_version`` 2; 1 is
         SimpleITK's dictionaries, what a copy holds when its headers did not convert).
         ``stored_values`` says whether the voxels are the source's STORED values: only then is
         anything stated in stored-value units (Bits Stored, Pixel Padding Value) carried - it is
-        what a reader checks such a value against (2026-09-26)."""
-        if not self.is_copy:
+        what a reader checks such a value against (2026-09-26).
+
+        ``select`` keeps only what it names, at the series level and in every slice: dicom-spec
+        §5's groups by name (``"ct"``, ``"series"``, ``"patient"`` ...) and PS3.6 keywords
+        (``"KVP"``), mixed freely. ``withhold`` replaces every value it names with ``null``, at
+        every depth, and adds ``"anonymized": true`` when anything was - dicom-spec §4.3's
+        redaction, so a reader can tell a withheld value from one the files never had. An
+        unknown name is a ValueError (a misspelled keyword would otherwise select nothing and
+        say nothing). ``per_slice=False`` leaves the per-slice tags out (2026-09-27)."""
+        from duckn.dicom_tags import keywords_named
+        from duckn.dicom_tags import select as _select
+        from duckn.dicom_tags import withhold as _withhold
+        # one name is one name, not its letters
+        select = [select] if isinstance(select, str) else select
+        withhold = [withhold] if isinstance(withhold, str) else withhold
+        for names in (select, withhold):       # refused whether or not this input has tags
+            if names is not None:
+                keywords_named(names)
+        tags = self._tags()
+        if not tags:
             return {}
+        if not per_slice:
+            tags.pop("slices")
+        if select is not None:
+            tags["series"] = _select(tags["series"], select)
+            if "slices" in tags:
+                tags["slices"] = [_select(s, select) for s in tags["slices"]]
+        if withhold:
+            tags["series"], removed = _withhold(tags["series"], withhold)
+            if "slices" in tags:
+                done = [_withhold(s, withhold) for s in tags["slices"]]
+                tags["slices"] = [t for t, _ in done]
+                removed = removed or any(r for _, r in done)
+            if removed:
+                tags["anonymized"] = True
+        return tags
+
+    def _tags(self) -> dict:
         from .input_copy import _duckn, _layout
-        attrs = _duckn(_layout(self.path)[0])
+        if self.is_copy:
+            attrs = _duckn(_layout(self.path)[0])
+        else:
+            # not stored as a copy: the metadata a copy of it would carry, by the copy's own
+            # conversion (input_copy._metadata) - one conversion, whichever form is on hand
+            from . import io
+            from .input_copy import _metadata
+            image, per_slice, files = io.read_image_and_tags(self.path)
+            if not (per_slice or files):
+                return {}
+            vol = _metadata(image, per_slice, files=files, source=str(self.path),
+                            source_digest=None)
+            attrs = vol.metadata.model_dump(exclude_none=True)
         ext = attrs.get("extensions") or {}
         dicom = ext.get("dicom") or {}
         series = dicom.get("tags") or {}
