@@ -178,7 +178,7 @@ class EveryGitSourceIsPinnedToSomethingReal(unittest.TestCase):
     #: Git sources allowed to track a branch. Empty on main, where every sibling is pinned to a
     #: tag (a release); the dev branch names haversack's siblings here, which track each other's
     #: dev branches during development (2026-09-27). An engine source must always be pinned.
-    FLOATING_FOR_NOW: set = set()
+    FLOATING_FOR_NOW: set = {"rankfield", "feldglas"}           # the dev branch
 
     def test_every_git_source_is_pinned_by_tag_or_revision(self):
         sources = _pyproject()["tool"]["uv"]["sources"]

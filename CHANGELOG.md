@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+- **The dev branch tracks the siblings' dev branches** (rankfield, labelfield, feldglas), in
+  pyproject and CI, and CI runs on pushes to it. main stays at 0.16.0rc1 with every sibling
+  pinned; a release from dev pins them to tags again.
+
 ## [0.16.0rc1] - 2026-09-27
 
 A pre-release, with every sibling pinned to a tag: the fused restore moved to labelfield, the

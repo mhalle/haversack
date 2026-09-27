@@ -66,7 +66,7 @@ dependencies = [
     # it), and uv reads a tag source and a URL for one package as "conflicting URLs" even when they
     # name one commit - the two must be the same string. main pins tags (a release); the dev
     # branch tracks the siblings' dev branches.
-    "labelfield @ git+https://github.com/mhalle/labelfield.git@v0.1.2",
+    "labelfield @ git+https://github.com/mhalle/labelfield.git@dev",
     "pydicom>=2.4",
     # FastSurfer is core (2026-09-25, the user's call): the fork's inference needs nothing core
     # does not already bring (nnU-Net pulls pandas, nibabel, yacs, ...), so it adds 0.9 MB, and a
@@ -207,7 +207,7 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-rankfield = { git = "https://github.com/mhalle/rankfield.git", tag = "v0.3.9" }
+rankfield = { git = "https://github.com/mhalle/rankfield.git", branch = "dev" }   # dev tracks dev; main pins tags
 provender = { git = "https://github.com/mhalle/provender.git", tag = "v0.1.6" }
 # nnunetv2 comes from PyPI: haversack uses only stock nnunetv2 APIs (verified against 2.8.1). It
 # used to be a `path = "../upstream/nnUNet"` source here, but uv applies these sources to a
@@ -234,7 +234,7 @@ duckn = { git = "https://github.com/mhalle/duckn.git", tag = "v0.6.2" }
 # feldglas = the embedding-field format and its receiving end (client, `feldglas` command); haversack
 # writes fields through it. A release tag, like duckn; `uv pip install -e ../feldglas` after the
 # sync to work on both.
-feldglas = { git = "https://github.com/mhalle/feldglas.git", tag = "v0.2.4" }
+feldglas = { git = "https://github.com/mhalle/feldglas.git", branch = "dev" }     # dev tracks dev; main pins tags
 # synthstrip-torch = our standalone SynthStrip inference package (StripModel + surfa conform
 # + SDT; weights fetched from MGH at runtime). Import namespace: synthstrip_torch.
 synthstrip-torch = { git = "https://github.com/mhalle/synthstrip-torch.git", tag = "v0.1.1" }
