@@ -377,6 +377,51 @@ class Segmenter:
             d["attribution"] = attribution.for_task(spec.name, {**(info or {}), "modality": spec.modality})
         return self._introspection(d)
 
+    def option_problem(self, task, options: dict) -> tuple | None:
+        """``(option, what is wrong)`` with a request's ``folds`` or ``configuration`` for THIS
+        task's installed models, in one line naming what they have - or None when nothing is, or nothing can be
+        known yet (weights not installed: the run installs and checks them).
+
+        Asked at submit (2026-09-26, a black-box review): ``{"folds": [99]}`` and ``[0, 99]``
+        were accepted, and ``network.available_folds`` then failed the job or ran fold 0 alone
+        under a key that says 0 and 99; ``"configuration": "3d_lowres"`` failed minutes later
+        in the worker. Torch-free, reads directory names only, and never fetches.
+        """
+        folds = options.get("folds")
+        configuration = options.get("configuration")
+        if folds is None and configuration is None:
+            return None
+        from .tasks import _resolve_spec
+        try:
+            spec = _resolve_spec(task, self.catalog)
+        except Exception:                  # noqa: BLE001 - an engine's task, or unknown: the run's to report
+            return None
+        for wid in spec.weights_ids:
+            try:
+                if not self.weights.have(wid):
+                    return None
+                folder = Path(self.weights.resolve(
+                    wid, configuration=configuration or self.policy["configuration"],
+                    **spec.model_choice(wid)))
+            except HaversackError as e:
+                if configuration is not None:
+                    # the resolver's own words name what is installed ("...; have [...]")
+                    return ("configuration",
+                            f"configuration {configuration!r} is not installed for {task}: {e}; "
+                            "leave it unset for the model's default")
+                return None
+            if folds is None:
+                continue
+            have = sorted(int(p.name[5:]) for p in folder.glob("fold_*")
+                          if p.is_dir() and p.name[5:].isdigit())
+            if (folder / "fold_all").is_dir():
+                continue                   # trained on all data: satisfies any request
+            missing = [f for f in folds if f not in have]
+            if missing:
+                return ("folds", f"fold(s) {missing} are not in {task}'s model {folder.name.split('__')[-1]}"
+                        f"; it has {have or 'none'}")
+        return None
+
     def structures(self, task) -> list[str]:
         """The structure names a task produces, in label order.
 

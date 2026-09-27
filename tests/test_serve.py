@@ -3263,8 +3263,10 @@ def test_a_hostile_archive_cannot_escape_or_explode(tmp_path):
     _, ex, client = make(tmp_path)
     z = tmp_path / "evil.zip"
     with zipfile.ZipFile(z, "w") as f:
-        f.writestr("../../../etc/passwd", b"pwned")
-        f.writestr("/abs/IM1.dcm", b"slice")
+        # members a reader could identify (an NRRD header): since 2026-09-26 a tree of
+        # nothing readable is refused before it is stored, and this is about the paths
+        f.writestr("../../../etc/passwd", b"NRRD0004\n# pwned\n")
+        f.writestr("/abs/IM1.dcm", b"NRRD0004\n# slice\n")
     body = client.post("/v1/inputs",
                        files={"archive": ("evil.zip", z.read_bytes())}).json()
     where = ex.content.resolve(body["digest"])

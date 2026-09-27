@@ -309,6 +309,12 @@ def _validate_request(seg, task, sources: list, options: dict, *,
     try:
         if not unknown:
             validate_options(wire_params(eng.parameters, eng.processing_knobs), options)
+            # ...and against what the task's installed models HAVE: a schema cannot say
+            # which folds or configurations a checkpoint ships (2026-09-26)
+            asks = getattr(seg, "option_problem", None)
+            problem = asks(task, options) if asks is not None else None
+            if problem:
+                raise RequestError("invalid_parameter", problem[1], parameter=problem[0])
         inputs = declared_inputs(desc)
         if declared is not None:
             declared.update({str(i.get("name")): i for i in inputs or []})
@@ -2390,6 +2396,70 @@ def reference_input(staged):
     return staged
 
 
+def stored_input_kind(store, digest: str) -> str | None:
+    """The kind of content a stored input IS: ``labels`` for a label map with its names (a
+    ``.seg.nrrd``, or any NRRD carrying segment fields - what ``POST /v1/inputs from_job=``
+    promotes a result as), else ``image``; None when the entry cannot be looked at, which leaves
+    the decision to the reader as before.
+
+    A ``result:`` reference was checked against the role it is bound to from the day it existed;
+    the same bytes named by their digest were not (2026-09-26, a black-box review): a
+    segmentation stored with ``from_job`` ran through ``ts.v2:total_fast`` as its CT and came back
+    ``done`` with 73 structures. Read from the stored entry's header, never from a name the
+    caller chose: a label map is kept in its own file (``input_copy.wanted`` never transcodes one).
+    """
+    from .input_copy import _nrrd_header, is_copy
+    from .labelmap import LABELS_KIND
+    try:
+        where = Path(store.resolve(digest))
+        if where.is_dir() or is_copy(where):
+            return "image"                 # a series, or an image decoded into its input copy
+        with open(where, "rb") as f:
+            nrrd = f.read(4) == b"NRRD"    # the content, not the name an upload was sent under
+        if nrrd and any(k.startswith("segment") for k in _nrrd_header(where)):
+            return LABELS_KIND
+        return "image"
+    except Exception:                      # noqa: BLE001 - unreadable here: the reader decides
+        return None
+
+
+_PATH_TAIL = r"(?:/[^\s'\"()\[\],;]*)?"
+
+
+def scrub_server_paths(text, roots) -> str:
+    """``text`` with every path under one of ``roots`` cut to its last component.
+
+    A job's ``error`` is the exception's own words, and those name the server's files - its
+    work directory, the series cache, an input store's per-process view, a temporary file
+    (2026-09-26, a black-box review). The name of the file is the useful part to a client; where
+    this server keeps it is not the client's business. The full text stays in the server's log
+    and its job store. Only paths under the roots given are touched, so an API route in a
+    message (``/v1/jobs/...``) is left alone.
+    """
+    if not text:
+        return text
+    for root in sorted({str(r).rstrip("/") for r in roots if r and str(r) != "/"},
+                       key=len, reverse=True):
+        def _cut(m):
+            p, tail = m.group(0), ""
+            while p and p[-1] in ":.":     # sentence punctuation after a path
+                p, tail = p[:-1], p[-1] + tail
+            return (p.rstrip("/").rsplit("/", 1)[-1] or "<server>") + tail
+        text = re.sub(re.escape(root) + _PATH_TAIL, _cut, text)
+    return text
+
+
+class _FileAt:
+    """A one-entry "store" that resolves to a file already in hand, for
+    :func:`stored_input_kind` on an upload."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def resolve(self, digest):
+        return self.path
+
+
 def upload_name(role: str, filename: str) -> str:
     """A multi-input upload's file name in the job dir: the role HEX-encoded, so it can
     be read back exactly. It was ``input_{role}_{name}``, matched by prefix, and a role is
@@ -3711,6 +3781,9 @@ class LocalExecutor:
             except Exception as e:             # noqa: BLE001 - reported to the client
                 rec.state = "failed"
                 rec.error = f"{type(e).__name__}: {e}"
+                # whole here, and in the job store; a client's status gets it without the
+                # server's paths (_client_error)
+                print(f"[job {rec.id}] failed: {rec.error}", file=sys.stderr, flush=True)
                 if rec.cache_key:
                     self._release_pending(rec.cache_key, rec.id)   # failed after pending add
             finally:
@@ -3874,6 +3947,24 @@ class LocalExecutor:
             return None
         return r if r and r.get("state") in TERMINAL else None
 
+    def _private_roots(self) -> list:
+        """Where this server keeps files: what a client-facing message never names."""
+        import tempfile
+        roots = [self.workdir, tempfile.gettempdir(), Path.home()]
+        if self.cache is not None and getattr(self.cache, "root", None) is not None:
+            roots.append(self.cache.root)
+        out = []
+        for r in roots:
+            out.append(str(r))
+            try:
+                out.append(str(Path(r).resolve()))
+            except OSError:
+                pass
+        return out
+
+    def _client_error(self, text):
+        return scrub_server_paths(text, self._private_roots())
+
     def status_of(self, jid: str) -> dict | None:
         rec = self.get(jid)
         if rec is not None:
@@ -3899,7 +3990,7 @@ class LocalExecutor:
         if r.get("input_refresh_skipped"):
             d["input_refresh_skipped"] = True
         if r.get("error"):
-            d["error"] = r["error"]
+            d["error"] = self._client_error(r["error"])
         if r.get("result"):
             d["result"] = r["result"]
         if r.get("cache_key"):
@@ -3979,7 +4070,7 @@ class LocalExecutor:
         if rec.version:
             d["version"] = rec.version     # what the caller pinned; `task` is canonical
         if rec.error is not None:
-            d["error"] = rec.error
+            d["error"] = self._client_error(rec.error)
         if getattr(rec, "input_refresh_skipped", False):
             # the caller asked for a recompute from fresh bytes and did not get one
             d["input_refresh_skipped"] = True
@@ -4582,8 +4673,10 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 # compresses and verifies the volume (the input copy)
                 await asyncio.to_thread(store.put_file, tmp, computed=actual)
             except content.UnidentifiedContent as e:
+                # named as the upload, not as the server's temporary file (2026-09-26)
                 raise HTTPException(422, {"code": "unknown_format",
-                                          "message": str(e)}) from e
+                                          "message": str(e).replace(tmp.name, "the upload",
+                                                                    1)}) from e
             return {"digest": actual, "stored": True,
                     "stored_as": content.guess_name(tmp),
                     "bytes": tmp.stat().st_size}
@@ -4608,7 +4701,15 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         """
         require_auth(request)              # anonymous never computes, and never stores
         store = _store_or_404()
-        form = await request.form()
+        try:
+            form = await request.form()
+        except HTTPException:
+            raise
+        except Exception as e:             # noqa: BLE001 - FastAPI's own rule for a body it parses
+            # A body the multipart parser refuses - a part header past its limit, a delimiter
+            # other than the declared boundary - escaped as a 500 and reset the connection
+            # (2026-09-26); POST /v1/jobs, whose form FastAPI parses, answers 400 in these words.
+            raise HTTPException(400, "There was an error parsing the body") from e
         from_job = form.get("from_job")
         if from_job:
             # One job's output becomes another's input, without the bytes taking
@@ -4719,6 +4820,15 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 "message": f"these {len(files)} files hold {len(series)} DICOM "
                            "series; submit one series per input",
                 "series_instance_uids": sorted(series)})
+        if len(files) > 1 and not series and not any(content.guess_name(p) for p in files):
+            # Several files, none of them a DICOM instance or an image header (a .mhd/.nhdr
+            # beside its data file): nothing a reader can open, stored until 2026-09-26 as a
+            # "tree" whose every job was going to fail - what PUT refuses for one file.
+            raise HTTPException(422, {
+                "code": "unknown_format",
+                "message": f"none of these {len(files)} files is a medical image this server "
+                           "can read (a DICOM series, or NIfTI, NRRD or MetaImage with its data "
+                           "files); nothing was stored"})
         # What it IS, not what the request called it: `put_dir` stores a
         # one-file directory as a blob, so that a one-member zip and the same
         # bytes sent loose are one identity. Ask for the digest first so the
@@ -5352,7 +5462,7 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             opts = json.loads(options)
             if not isinstance(opts, dict):
                 raise ValueError("options must be a JSON object")
-            if isinstance(opts.get("grid"), (int, float)):
+            if isinstance(opts.get("grid"), (int, float)) and not isinstance(opts["grid"], bool):
                 opts["grid"] = float(opts["grid"])   # {"grid": 1} == {"grid": 1.0} == labels.1mm
             src = json.loads(source) if source else [{"kind": "upload"}]
             if not (isinstance(src, list) and all(isinstance(x, dict) for x in src)):
@@ -5383,7 +5493,14 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         # ResultCache), which is what keeps the artifacts, `key` and `links` intact on
         # a forced recompute. Popped before keying: a cache directive is not part of
         # what identifies a result, or every forced run would land in its own entry.
-        no_cache = bool(opts.pop("no_cache", False)) or wants_no_cache(request)
+        asked_no_cache = opts.pop("no_cache", False)
+        if asked_no_cache is not None and not isinstance(asked_no_cache, bool):
+            # a JSON boolean, strictly (2026-09-26): `bool("no")` is True, so any string -
+            # "false" included - recomputed the result
+            raise HTTPException(422, {"code": "invalid_parameter", "parameter": "no_cache",
+                                      "message": "'no_cache' must be true or false, got "
+                                                 f"{asked_no_cache!r}"})
+        no_cache = bool(asked_no_cache) or wants_no_cache(request)
         # What the CALLER asked for, kept apart from the engine policy applied
         # below. An engine that declines result caching (VoxTell) forces
         # `no_cache` true for every job, and reading that as "re-fetch the input"
@@ -5611,6 +5728,19 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                 await asyncio.to_thread(store.put_file, dest, computed=digest)
             return dest, digest
 
+        def _refuse_wrong_kind(role, digest, held):
+            """The refusal a ``result:`` reference of the same bytes gets (``sources.pin``),
+            for bytes sent or named by digest (2026-09-26)."""
+            from .schemas import input_kind
+            takes = input_kind((role_specs or {}).get(role))
+            if held is not None and held != takes:
+                raise HTTPException(422, {
+                    "code": "wrong_input_kind",
+                    "message": f"{digest[:19]}... is a {held} input, and the role it is bound "
+                               f"to takes {takes!r}: bind it to a role that takes {held!r} "
+                               "(see the task's `inputs`)",
+                    "digest": digest, "input_kind": held, "role_kind": takes})
+
         staged, idents = [], []
         for role, entry in binding:
             sent_as = str(entry.get("role") or "")   # the client's own spelling
@@ -5644,6 +5774,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                                    f"named {' or '.join(repr(n) for n in names)}",
                         "part": names[0], "accepted": names})
                 dest, digest = await _save(upload, role)
+                _refuse_wrong_kind(role, digest, await asyncio.to_thread(
+                    stored_input_kind, _FileAt(dest), digest))
                 staged.append((role, dest))
                 idents.append(digest)
                 continue
@@ -5666,6 +5798,8 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                         "message": f"{digest} is not held by this server (never "
                                    "stored, or evicted); send the bytes again",
                         "digest": digest})
+                _refuse_wrong_kind(role, digest, await asyncio.to_thread(
+                    stored_input_kind, store, digest))
                 entry["id"] = digest
                 staged.append((role, None))
                 idents.append(digest)

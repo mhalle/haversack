@@ -40,7 +40,8 @@ import re
 from functools import lru_cache
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
+from pydantic import (BaseModel, ConfigDict, Field, ValidationError, create_model,
+                      field_validator)
 
 from .errors import RequestError
 from .labelmap import LABELS_KIND
@@ -228,6 +229,17 @@ class VoxTellParams(Params):
                     "prompt, numbered in the order given.")
 
 
+#: The bounds of the processing options that take a number (2026-09-26). An isotropic output
+#: grid finer than 0.1 mm is finer than any CT or MR this serves, and coarser than 50 mm is
+#: not a segmentation; a body-envelope margin past 500 mm is past any body. Published in the
+#: schema and in SERVER.md, and refused at submit with a 422 naming the option.
+GRID_MIN_MM = 0.1
+GRID_MAX_MM = 50.0
+ENVELOPE_MAX_MM = 500.0
+#: nnU-Net trains five folds; a list longer than that names one twice or one no model has
+MAX_FOLDS = 5
+
+
 class ProcessingParams(Params):
     """How haversack resamples and frames the result around the network."""
 
@@ -236,18 +248,30 @@ class ProcessingParams(Params):
     # policy: they describe the machine the service runs on, not the result the
     # caller asked for, and letting a request pick its own device or weights root
     # on a shared server is a capability, not a convenience.
-    grid: Annotated[float, Field(gt=0)] | Literal["input", "model"] | None = Field(
+    # Bounded, finite and strictly typed (2026-09-26, a black-box review): `{"grid": 1e-6}` was
+    # accepted and then tried to allocate 15.9e9 GiB, `1e9` made a one-voxel "result", a JSON
+    # `NaN`/`Infinity` parses to a float, and the lax mode took the STRING "1.5" - a request the
+    # key hashes apart from `1.5` for the same labels. The range is what an output grid can
+    # sensibly be; `frame.MAX_OUTPUT_VOXELS` bounds what a small spacing over a large field of
+    # view may allocate, which only the input knows.
+    grid: Annotated[float, Field(ge=GRID_MIN_MM, le=GRID_MAX_MM, strict=True,
+                                 allow_inf_nan=False)] | Literal["input", "model"] | None = Field(
         None, description="Output grid: 'input' (default), 'model' for the "
-                          "network's own spacing, or an isotropic size in mm.")
-    folds: list[int] | None = Field(
-        None, description="Which trained folds to ensemble.")
+                          "network's own spacing, or an isotropic size in mm "
+                          f"({GRID_MIN_MM:g} to {GRID_MAX_MM:g}).")
+    folds: Annotated[list[Annotated[int, Field(ge=0, strict=True)]],
+                     Field(min_length=1, max_length=MAX_FOLDS)] | None = Field(
+        None, description="Which trained folds to ensemble: a non-empty list of distinct "
+                          "fold numbers the installed model has.")
     configuration: str | None = Field(
         None, description="nnU-Net configuration name, when the model ships more "
                           "than one.")
-    envelope_mm: float | None = Field(
+    envelope_mm: Annotated[float, Field(ge=0, le=ENVELOPE_MAX_MM, strict=True,
+                                        allow_inf_nan=False)] | None = Field(
         None, description="Crop the network's field of view to this margin around "
-                          "the body, in mm; 0 runs the whole volume.")
-    resampling_order: int | None = Field(
+                          "the body, in mm; 0 runs the whole volume. At most "
+                          f"{ENVELOPE_MAX_MM:g}.")
+    resampling_order: Annotated[int, Field(strict=True)] | None = Field(
         None, ge=0, le=5, description="Spline order for the forward resample.")
     interp: Literal["linear", "nearest"] | None = Field(
         None, description="Interpolation used to restore the result to the "
@@ -255,6 +279,15 @@ class ProcessingParams(Params):
     convention: Literal["auto", "corner", "center"] | None = Field(
         None, description="Grid-alignment convention; 'auto' follows the model's "
                           "lineage.")
+
+    @field_validator("folds")
+    @classmethod
+    def _distinct_folds(cls, v):
+        # a fold named twice is ensembled once (network.available_folds keeps the set), so
+        # `[0, 0]` would key apart from `[0]` for the same labels
+        if v is not None and len(set(v)) != len(v):
+            raise ValueError("each fold may be named once")
+        return v
 
 
 #: Restore facts, keyed by what actually happens rather than by who asked. A
