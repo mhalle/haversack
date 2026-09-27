@@ -722,7 +722,11 @@ class TestGapsFromMutation(_Hosts):
         real = SharedResultCache._read_ref
 
         def counting_read(cache, key, **kw):
-            reads.append(key)
+            # this host's reads of this key only: the patch is on the CLASS, and since the
+            # retries pause (2026-09-26) a thread another test left running had time to
+            # read through it and be counted here
+            if cache is self.a and key == KEY:
+                reads.append(key)
             return real(cache, key, **kw)
         real_put = ops.put
 
@@ -811,7 +815,9 @@ def test_a_broken_store_is_a_miss_on_the_wire_not_a_500(tmp_path):
             # this host holds the result it just computed, so the outage is not a miss:
             # it serves its own copy rather than throwing away warm work
             assert client.get(f"/v1/jobs/{jid}/result").status_code == 200
-            assert client.get("/v1/segmentations").status_code == 200
+            # a LISTING is not a lookup: a row it drops for a fault reads as "not computed",
+            # so an unreadable store is a 503, never a shorter 200 (review, 2026-09-26)
+            assert client.get("/v1/segmentations").status_code == 503
             assert ex.cache_get(s["key"]) is not None
         ex.cache.local.delete(s["key"])        # now nothing here holds it
         with unittest.mock.patch.object(ops, "get", boom):

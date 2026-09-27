@@ -46,7 +46,9 @@ this repo has been wrong before.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
+import random
 import sys
 import tempfile
 import threading
@@ -92,7 +94,15 @@ CHAIN_STEPS_MAX = 64
 BLOB_GRACE_S = GRACE_S
 #: Conditional-write attempts before a publication gives up. Each retry means another
 #: writer published this key in between, so this many in a row is a storm, not a race.
-SWAP_ATTEMPTS = 16
+#: 16 with no pause until 2026-09-26: nine threads publishing, amending and deleting one key
+#: exhausted it in a review run, and a FINISHED computation raised instead of publishing -
+#: consistency held, the work was lost. Now the retries back off (``SWAP_BACKOFF_S``,
+#: doubling, with full jitter, capped at ``SWAP_BACKOFF_MAX_S``), so contending writers
+#: spread out instead of re-colliding in lockstep, and there are more of them: the worst
+#: case waits about half a minute before giving up.
+SWAP_ATTEMPTS = 40
+SWAP_BACKOFF_S = 0.01
+SWAP_BACKOFF_MAX_S = 1.0
 #: How many superseded generations a key keeps, and for how long (2026-09-19, by decision).
 #: A republication - `Cache-Control: no-cache`, a weights upgrade, a changed epoch - used to
 #: erase what it replaced, which left "what did this server answer in August?" unanswerable
@@ -122,6 +132,15 @@ CONFIRMED_NAME = ".confirmed"
 WORK_PREFIX = ".fill-"
 WORK_GRACE_S = 3600.0
 _warned_at = 0.0
+_local_warned_at = 0.0
+#: What a write fails with when the fault is this host's disk being full or read-only -
+#: never a read of the store. (Not EACCES: a file:// store's own directory can refuse a
+#: read with it, and that IS the store.)
+_LOCAL_ERRNOS = frozenset(getattr(errno, n) for n in ("ENOSPC", "EDQUOT", "EROFS")
+                          if hasattr(errno, n))
+#: How a lost conditional write waits before retrying - a name of its own so a test can
+#: count the pauses without sleeping through them.
+_sleep = time.sleep
 
 
 class ObjectStoreUnsuitable(InputError):
@@ -183,12 +202,38 @@ def _miss(where: str, exc: BaseException) -> None:
     read that 0.12.3 fixed). So reads degrade and WRITES still raise: a publication that
     cannot reach the store must fail its job rather than pretend.
     """
-    global _warned_at
+    global _warned_at, _local_warned_at
     now = time.time()
+    if isinstance(exc, OSError) and exc.errno in _LOCAL_ERRNOS:
+        # THIS host's disk, not the store (review, 2026-09-26): a full disk turns every hit
+        # whose copy is not already here into a miss, and on a compute server into a GPU
+        # recompute per request - reported as "the store is unreachable", it sent the
+        # operator to the wrong machine, and it shared one throttle with real store faults
+        # so either could hide the other for a minute
+        if now - _local_warned_at >= WARN_INTERVAL_S:
+            _local_warned_at = now
+            print(f"warning: this host cannot write its local copy of results ({where}): "
+                  f"{type(exc).__name__}: {exc}; the store holds the result, but it is "
+                  "served as a cache miss (a compute server recomputes it) until space is "
+                  "freed under the cache directory", file=sys.stderr, flush=True)
+        return
     if now - _warned_at >= WARN_INTERVAL_S:
         _warned_at = now
         print(f"warning: result store unreachable ({where}): {type(exc).__name__}: {exc}; "
               "serving as a cache miss", file=sys.stderr, flush=True)
+
+
+def _etag(tag) -> str | None:
+    """An ETag as a comparable value, or None. A listing's tag and a GET's are compared
+    (the listing memo, 2026-09-26), and S3 spells one from XML and the other from a header:
+    quotes and a weak marker are dropped so the same object's tag compares equal. A
+    spelling this misses costs a re-read, never a stale row."""
+    if not isinstance(tag, str):
+        return None
+    tag = tag.strip()
+    if tag.startswith("W/"):
+        tag = tag[2:]
+    return tag.strip('"') or None
 
 
 def _well_formed(ptr) -> bool:
@@ -638,7 +683,7 @@ class SharedResultCache:
         ``deleted``. ``replaces`` is this method's: it is what makes the history."""
         from obstore.exceptions import AlreadyExistsError, PreconditionError
         self._writable("publishing")
-        for _ in range(SWAP_ATTEMPTS):
+        for attempt in range(SWAP_ATTEMPTS):
             kind, entry, mode = self._read_ref(key, raise_faults=True)
             if kind == "unreadable" and self._is_newer_format(key):
                 # an object is there that this version cannot read - most likely a newer
@@ -662,7 +707,10 @@ class SharedResultCache:
                 ops.put(self.store, self._pointer_path(key), ref,
                         mode=mode if mode is not None else "create")
             except (AlreadyExistsError, PreconditionError):
-                continue                       # another writer moved it: read again
+                # another writer moved it: pause, then read again (see SWAP_ATTEMPTS)
+                _sleep(random.uniform(0, min(SWAP_BACKOFF_MAX_S,
+                                             SWAP_BACKOFF_S * 2 ** attempt)))
+                continue
             return _view(manifest, digest)
         raise RuntimeError(f"result {key}: {SWAP_ATTEMPTS} publications raced this one; "
                            "the pointer was not written")
@@ -1162,7 +1210,12 @@ class SharedResultCache:
         3. Content is read only for the page. The pointer IS the content - meta, sizes and
            which artifacts exist are all in the one document - so a row costs ONE request
            where the local cache pays a read plus three stats. ``workers`` reads a chunk in
-           parallel, ``memo`` spares a long-lived server the re-read.
+           parallel, ``memo`` spares a long-lived server the re-read - validated by the
+           ref's ETag, not its time (see ``fetch``), and holding only what a row needs.
+
+        A store fault is ``ResultsNotVisible`` (a 503), never a shorter list: the local
+        and volume listings' rule, and the reason ``_stamp`` and the pointer reads here
+        raise where a lookup of one key would read a fault as a miss.
 
         ``hold`` is accepted and honored for symmetry with the local cache, where it is the
         Modal view lock; a bucket has no view to hold still, so it guards nothing here.
@@ -1193,53 +1246,112 @@ class SharedResultCache:
                     wait(futures)
                 return [f.result() for f in futures]
 
-        def row_of(key: str, stamp: int, ptr) -> dict | None:
+        def unseen(e: BaseException, where: str):
+            """A store fault while listing is a 503, never a shorter list (2026-09-26).
+            The volume listing's rule (``modal_app._list_cache``): a row missing from a
+            listing reads as "not computed", and a client that lists to decide what to
+            compute computes it again. Turning a fault into "absent" here - as every READ
+            of one key rightly does - dropped rows from a 200 and could end paging early."""
+            from .serve import ResultsNotVisible
+            return ResultsNotVisible(
+                f"the result store could not be read ({where}: {type(e).__name__}); "
+                "this listing would be incomplete - retry shortly")
+
+        def slim(ptr) -> dict | None:
+            """What a row needs of a pointer, and nothing more - what the memo keeps.
+            Remembering the whole pointer (result, meta, manifest: ~32 KB a row measured in
+            review, 2026-09-26) put ~640 MB at the memo's 20,000 rows into a 2 GB api
+            container; this is a few hundred bytes."""
             files = ptr.get("files") or {}
             primary = _primary_name(files)
             if primary is None:
                 return None
             meta = ptr.get("meta") if isinstance(ptr.get("meta"), dict) else {}
-            task, identity = meta.get("task"), meta.get("identity")
-            options = meta.get("options")
-            row = {"key": key, "task": task, "identity": identity, "options": options,
-                   "computed": meta.get("computed"), "published": stamp / 1e9,
-                   "bytes": files[primary]["size"]}
+            said = {k: meta.get(k) for k in ("task", "identity", "options", "computed")}
             if meta.get("kind") not in (None, "segment"):
-                row["kind"] = meta["kind"]     # the local cache's rule: a field is said, never
+                said["kind"] = meta["kind"]    # as the local cache's fields
+            return {"said": said, "bytes": files[primary]["size"],
+                    "artifacts": [n for n in ("preview.png", "statistics.json") if n in files]}
+
+        def row_of(key: str, stamp: int, fields: dict) -> dict:
+            said = fields["said"]
+            task, identity, options = said.get("task"), said.get("identity"), said.get("options")
+            row = {"key": key, "task": task, "identity": identity, "options": options,
+                   "computed": said.get("computed"), "published": stamp / 1e9,
+                   "bytes": fields["bytes"]}
+            if said.get("kind") not in (None, "segment"):
+                row["kind"] = said["kind"]     # the local cache's rule: a field is said, never
                 return row                     # linked as labels
             if resource_links(task, identity, options):
                 row["links"] = resource_links(task, identity, options,
-                                              preview="preview.png" in files,
-                                              statistics="statistics.json" in files)
+                                              preview="preview.png" in fields["artifacts"],
+                                              statistics="statistics.json" in fields["artifacts"])
             return row
 
+        tags: dict = {}                        # key -> its ref's ETag, where the listing gave one
+
         def fetch(candidate):
-            """The pointer for one candidate, remembered under the stamp the caller saw."""
+            """What a row needs of one candidate's pointer, remembered under the ETag of the
+            bytes that were READ.
+
+            The memo's validator is the ref's ETag, never its last-modified (2026-09-26): S3
+            and R2 report last-modified in whole seconds, so a tombstone or an amending
+            manifest written in the same second as an earlier listing carried the SAME stamp,
+            and the memo went on listing a deleted result - and hiding a preview - for as
+            long as the process lived (reproduced locally and through modal_app). An ETag
+            moves exactly when the ref's bytes do, and every publication, amendment and
+            deletion writes new bytes (a new manifest digest). The tag filed is the one the
+            GET returned, so a pointer that moved between the listing and the read is filed
+            under its own tag, not the listing's."""
             stamp, key = candidate
-            if memo is not None:
-                hit = memo.get(key, stamp)
-                if hit is not None:
-                    return hit[1]
             try:
-                ptr, _ = self._read_pointer(key)
+                if memo is not None:
+                    tag = tags.get(key)
+                    if tag is None:            # a listing without ETags (a DiskStore): HEAD
+                        head = self._stamp(key)
+                        tag = head[1] if head is not None else None
+                    if tag is not None:
+                        hit = memo.get(key, tag)
+                        if hit is not None:
+                            return hit[1]
+                ptr, mode = self._read_pointer(key, raise_faults=True)
             except ValueError:                 # not a key this code would ever write
                 return None
-            if ptr is None:
-                return None
-            fields = {"_ptr": ptr}
+            except Exception as e:             # noqa: BLE001 - see unseen
+                raise unseen(e, f"reading the pointer for {key[:12]}") from e
+            fields = slim(ptr) if ptr is not None else None
             if memo is not None:
-                memo.put(key, stamp, "", fields)
+                read_tag = _etag((mode or {}).get("e_tag"))
+                if fields is None or read_tag is None:
+                    memo.drop(key)             # deleted, or nothing to validate it by
+                else:
+                    memo.put(key, read_tag, "", fields)
             return fields
+
+        def stamp_of(key):
+            try:
+                return self._stamp(key)
+            except Exception as e:             # noqa: BLE001 - see unseen
+                raise unseen(e, f"stat of {key[:12]}") from e
 
         try:
             if keys is None:
                 with hold():
-                    found = sorted(self._stamps(), key=order)
+                    try:
+                        found = sorted(self._stamps(tags=tags), key=order)
+                    except Exception as e:     # noqa: BLE001 - see unseen
+                        raise unseen(e, "listing the results") from e
             else:
                 names = [k for k in dict.fromkeys(map(str, keys)) if self._listable(k)]
-                stamped = each(self._stamp, names)
-                found = sorted(((t, k) for k, t in zip(names, stamped) if t is not None),
-                               key=order)
+                stamped = each(stamp_of, names)
+                found = []
+                for k, got in zip(names, stamped):
+                    if got is None:
+                        continue
+                    found.append((got[0], k))
+                    if got[1] is not None:
+                        tags[k] = got[1]
+                found.sort(key=order)
             if after is not None:
                 found = [c for c in found if order(c) > order(after)]
             rows, i, clean = [], 0, True
@@ -1251,15 +1363,9 @@ class SharedResultCache:
                 for c, fields in zip(chunk, said):
                     if fields is None:
                         continue
-                    ptr = fields["_ptr"]
-                    meta = ptr.get("meta") if isinstance(ptr.get("meta"), dict) else {}
-                    said_fields = {k: meta.get(k) for k in ("task", "identity", "options",
-                                                            "computed")}
-                    if meta.get("kind") not in (None, "segment"):
-                        said_fields["kind"] = meta["kind"]     # as the local cache's fields
-                    if match is not None and not match(said_fields):
+                    if match is not None and not match(dict(fields["said"])):
                         continue
-                    built[c] = row_of(c[1], c[0], ptr)
+                    built[c] = row_of(c[1], c[0], fields)
                 for c in chunk:
                     if limit is not None and len(rows) >= limit:
                         break                  # read ahead of the page: remembered, not sent
@@ -1281,10 +1387,12 @@ class SharedResultCache:
             return False
         return True
 
-    def _stamps(self) -> list:
+    def _stamps(self, *, tags: dict | None = None) -> list:
         """``(stamp, key)`` for every entry, from the bucket listing alone - the store
         hands out last-modified with each name, so this is one request per thousand
-        entries and no read at all."""
+        entries and no read at all. ``tags``, when given, is filled with each key's ETag
+        where the listing carries one (S3, R2, GCS and obstore's MemoryStore do; a
+        provender DiskStore does not). A store fault is RAISED: the listing decides."""
         import datetime as _dt
 
         base = f"{self.prefix}results/"
@@ -1299,23 +1407,26 @@ class SharedResultCache:
                     when = when.timestamp()
                 if isinstance(when, (int, float)):
                     out.append((int(when * 1e9), name[:-len(".json")]))
+                    if tags is not None and _etag(obj.get("e_tag")) is not None:
+                        tags[name[:-len(".json")]] = _etag(obj["e_tag"])
         return out
 
-    def _stamp(self, key: str) -> int | None:
-        """When this key was published, in ns, or None - one HEAD of its pointer."""
+    def _stamp(self, key: str):
+        """``(published ns, ETag or None)`` for this key's pointer, or None when there is
+        none - one HEAD. A store FAULT is raised, never read as "absent": only the listing
+        asks, and a row it drops for a fault reads as "not computed" (2026-09-26)."""
         import datetime as _dt
 
         try:
             meta = ops.head(self.store, self._pointer_path(key))
         except FileNotFoundError:
             return None
-        except Exception as e:                 # noqa: BLE001 - a read degrades, see _miss
-            _miss(f"stat of {key[:12]}", e)
-            return None
         when = meta.get("last_modified")
         if isinstance(when, _dt.datetime):
             when = when.timestamp()
-        return int(when * 1e9) if isinstance(when, (int, float)) else None
+        if not isinstance(when, (int, float)):
+            return None
+        return int(when * 1e9), _etag(meta.get("e_tag"))
 
     def evict(self) -> None:
         """Bounds the LOCAL copy only. The store is bounded by ``sweep``: it keeps no

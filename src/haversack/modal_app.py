@@ -681,6 +681,46 @@ def _confirm_cache_absent(key: str, since: float):
     return _read_cache(key)
 
 
+def _generation_by_digest(key: str, own, name: str):
+    """A job's own output, read from the store's history by its digest (a result store
+    only): a local copy of that generation's ``name``, or None.
+
+    A cache-HIT job wrote no scratch copy, and a store deployment records no ``cache_path``
+    - so once its key was republished with other bytes, ``result_file`` fell back to a
+    scratch file that never existed and the job's result answered 410 (review,
+    2026-09-26), though the store still held those bytes: bounded history keeps a
+    superseded generation, and ``find_generation`` / ``fetch_generation`` exist to find
+    one by what it holds. Materialized into this container's mirror, never into the local
+    result copy (a historical read must not become what this host serves), and placed by
+    one rename so a concurrent request sees the whole directory or none."""
+    import shutil
+    import uuid
+    outs = (own or {}).get("outputs") if isinstance(own, dict) else None
+    digest = outs[0].get("sha256") if outs and isinstance(outs[0], dict) else None
+    if not isinstance(digest, str):
+        return None
+    view = _results(read_only=_TWIN)
+    gen = view.find_generation(key, digest)
+    if gen is None:
+        return None
+    dest = Path(MIRROR_ROOT) / "_gens" / gen
+    if (dest / name).exists():
+        return dest / name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.parent / f".{gen}-{uuid.uuid4().hex}"
+    try:
+        entry = view.fetch_generation(key, gen, tmp)
+        if entry is None or name not in entry.get("written", ()):
+            return None
+        try:
+            os.replace(tmp, dest)
+        except OSError:                        # another request placed it first
+            pass
+        return dest / name if (dest / name).exists() else None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 #: What this container's listings remember of each publication's meta.json, for as long
 #: as the container lives - see ``serve.ListingMemo`` (made on first use: serve is a
 #: call-time import here).
@@ -2838,7 +2878,12 @@ class ModalExecutor:
     def cache_delete(self, key):
         from haversack.serve import ResultCache
         if RESULT_STORE:
-            return _results().delete(key)      # a tombstone; the sweep reclaims the bytes
+            deleted = _results().delete(key)   # a tombstone; the sweep reclaims the bytes
+            if _listing_memo:
+                # the memo is validated by the ref's ETag, which the tombstone moves; this
+                # container forgets the row at once anyway (review, 2026-09-26)
+                _listing_memo[0].drop(key)
+            return deleted
         _reload_cache_view()
         # exclusive, like a reload: Modal reloads after a commit when its server asks
         # (it never hid a file in 61 measured commits, but nothing promises that)
@@ -2947,6 +2992,10 @@ class ModalExecutor:
                     return meta["state"], None
                 g = _mirror(p.parent, Path(MIRROR_ROOT) / "_gen" / p.parent.name)
             return meta["state"], g / p.name
+        if RESULT_STORE and meta.get("cache_key"):
+            got = _generation_by_digest(meta["cache_key"], meta.get("result"), name)
+            if got is not None:
+                return meta["state"], got
         # The worker's scratch file, read and copied out under the guard every scratch
         # reload takes: a reload in another thread hides the volume from this one (see
         # _cache_view), which is likely what the 162 missing files above were. A refused
