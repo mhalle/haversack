@@ -125,6 +125,17 @@ def _quiet(ex, key, timeout=5.0):
     assert ex.artifact_state(key) == "absent"
 
 
+def _let_go(ex, timeout=5.0):
+    """Wait until the jobs have let go of their inputs. A job reads `done` BEFORE its
+    `finally` unpins the input it read (serve.py, LocalExecutor's run), so a test that evicts
+    the input right after seeing `done` can meet the pin still held: `discard` then refuses,
+    and did on CI's 3.12 leg for 0.15.0 (2026-09-27)."""
+    t0 = time.time()
+    while ex.series_cache._pins and time.time() - t0 < timeout:
+        time.sleep(0.01)
+    assert not ex.series_cache._pins, "a finished job kept its input pinned"
+
+
 def _generation_files(ex, key) -> set:
     return {p.name for p in Path(ex.cache.get(key)[0]).parent.iterdir()
             if not p.name.startswith(".")}
@@ -445,6 +456,7 @@ def test_a_hit_whose_input_is_gone_says_so_and_fetches_nothing(tmp_path, monkeyp
     so, with the way out, instead of leaving the link off without a word."""
     seg, ex, client, fetches = _server(tmp_path, monkeypatch)
     first = wait_state(client, _post(client, deliverables=[])["id"], ("done",))
+    _let_go(ex)
     assert ex.series_cache.discard(f"idc:{U}") is True       # evicted since
     hit = _post(client, deliverables=["preview", "statistics"])
     assert hit["state"] == "done" and hit["cached"] is True and hit["key"] == first["key"]
