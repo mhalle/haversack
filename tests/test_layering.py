@@ -331,7 +331,8 @@ class TestLayering(unittest.TestCase):
 
         Only CI's entries are checked against pyproject, not the reverse: the engine extras
         (fastsurfer-lean, voxtell, synthstrip-torch) are git sources CI deliberately does not
-        install.
+        install. A dependency pyproject declares as a direct reference (``name @ git+URL@ref``
+        in ``[project]``, as labelfield is since 2026-09-27) is checked the same way.
         """
         import re
         import tomllib
@@ -341,7 +342,15 @@ class TestLayering(unittest.TestCase):
         if not pyproject.exists() or not workflow.exists():
             self.skipTest("running against an installed copy, not the repository")
 
-        sources = tomllib.loads(pyproject.read_text(encoding="utf-8"))["tool"]["uv"]["sources"]
+        project = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+        sources = dict(project["tool"]["uv"]["sources"])
+        declared_deps = list(project["project"].get("dependencies", []))
+        for extra in project["project"].get("optional-dependencies", {}).values():
+            declared_deps += extra
+        for dep in declared_deps:                  # direct references: name @ git+URL@ref
+            m = re.match(r"\s*([A-Za-z0-9_.-]+)\s*@\s*git\+([^@\s]+)@(\S+)\s*$", dep)
+            if m:
+                sources.setdefault(m.group(1), {"git": m.group(2), "tag": m.group(3)})
         ci = re.findall(r"'([A-Za-z0-9_.-]+) @ git\+([^@']+)@([^']+)'",
                         workflow.read_text(encoding="utf-8"))
         self.assertTrue(ci, "no git-pinned installs found in the workflow - has the install "
@@ -351,7 +360,7 @@ class TestLayering(unittest.TestCase):
         for name, url, ref in ci:
             declared = sources.get(name)
             if declared is None:
-                problems.append(f"{name}: CI installs it from git, pyproject declares no source")
+                problems.append(f"{name}: CI installs it from git, pyproject declares neither a source nor a git reference")
                 continue
             if declared.get("git") != url:
                 problems.append(f"{name}: CI {url} != pyproject {declared.get('git')}")

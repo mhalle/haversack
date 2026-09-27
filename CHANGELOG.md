@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **Pins: rankfield v0.3.8, labelfield v0.1.1, feldglas v0.2.3, duckn v0.6.2.** rankfield 0.3.8
+  takes its geometry from labelfield, so a restore from a rank-field store and the live restore
+  now decide with the same code, including the tightened nearest edge rule. labelfield is a direct
+  git reference here, as rankfield declares it (uv reads a tag source beside rankfield's URL as a
+  conflict); feldglas 0.2.3 pins rankfield 0.3.8 and duckn 0.6.2, and duckn 0.6.2 is additive
+  (dicom-spec's groups by name). Still pending with the channels_last change: the cache epoch.
+
 - **The fused restore is labelfield now** ([mhalle/labelfield](https://github.com/mhalle/labelfield),
   pinned to `v0.1.0` from its tag, like rankfield): the logits-to-labels kernels (Metal, Triton,
   torch), their per-axis tables, `Grid`, `Mapping` and the float64 reference. `haversack.grid`,
