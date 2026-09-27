@@ -514,3 +514,18 @@ def test_the_store_extra_is_each_package_a_store_is_written_with(monkeypatch):
                        else real(n, *a))
             assert ranked_output.store_extra_missing() == [name]
     assert ranked_output.store_extra_missing() == []
+
+
+def test_a_change_to_the_stores_declared_format_moves_its_key():
+    """0.15.0 (2026-09-27): the stores moved to duckn convention 1.2 - a 1.2 group, seg 0.10
+    `layers`, the distance in mm - and the key did not move, because an ARRAY's seg block is
+    still 0.9 and nobody bumped STORE_RULES; 0.14.0's stores would have been served as the new
+    code's. The formats a store declares, paired with the STORE_RULES that first wrote them: a
+    format change fails here until STORE_RULES is bumped and the pair recorded."""
+    from haversack import ranked_store
+    written = {("1.2", "0.1"): 2}
+    fmt = (ranked_store.DUCKN_VERSION, ranked_store.HAVERSACK_EXTENSION_VERSION)
+    assert fmt in written, (f"the store now declares duckn {fmt[0]} / haversack block {fmt[1]}: "
+                            "bump ranked_output.STORE_RULES and record the pair here")
+    assert ranked_output.STORE_RULES == written[fmt], (
+        "STORE_RULES does not match the rules that write this format: record the new pair")

@@ -34,8 +34,12 @@ DISTANCE_VOXELS = 2.0            # truncation of the emitted distance field, in 
 #: haversack's own rules for what a store holds, counted: bump when a change to them moves a
 #: store's bytes from the same run. 1 (2026-09-24): the TASK's field - a cascade's crop stages
 #: left out, a union's parts composed into one field (ranked_compose, painting margins at 1/2,
-#: clip 16), the derived layers computed on it.
-STORE_RULES = 1
+#: clip 16), the derived layers computed on it. 2 (2026-09-27, found at the 0.15.0 release): the
+#: store follows duckn convention 1.2 - group metadata, seg 0.10 `layers`, the distance field in
+#: mm, bilateral FastSurfer channels named - and none of that moved the key on its own, because
+#: an ARRAY's seg block is still written as 0.9 (duckn's SEG_VERSION); 0.14.0's stores would
+#: otherwise be served as this code's.
+STORE_RULES = 2
 
 
 def store_extra_missing() -> list:
