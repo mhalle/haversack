@@ -128,6 +128,17 @@ class DataSource:
     #: says False here, is not mounted, and its results are reached through their jobs.
     path_addressable: bool = True
 
+    #: Whether a credential passed to this source can reach bytes an anonymous fetch cannot
+    #: (a private Hugging Face repo, a restricted Zenodo record). Such bytes still land in the
+    #: shared input cache under the source's identity, so anything that hands an input's
+    #: CONTENT back - its DICOM tags (``dicom.json``, 2026-09-27) - refuses an entry a
+    #: credential fetched, and an entry whose record predates recording that
+    #: (``credentialed`` in ``.input.json``) from a source where it could have. False for a
+    #: source whose fetch never sends one (IDC, TCIA, OpenNeuro) or that refuses one outright
+    #: (s3, gs, github); ``tests/test_input_tags.py`` holds each archive source's flag to what
+    #: its ``_headers`` does with a credential.
+    credentials_reach_private: bool = False
+
     def enabled(self) -> bool:
         """Whether this source can fetch on this install (dependencies etc.)."""
         return True
@@ -439,7 +450,11 @@ def fetch_recording_origin(src, identifier: str, entry, credentials=None):
     identity = getattr(src, "identity", None)   # sources are duck-typed (registry())
     record = {"kind": src.prefix,
               "identity": identity(identifier) if callable(identity) else f"{src.prefix}:{identifier}",
-              "content": None, "origin": None, "license": None, "cite": []}
+              "content": None, "origin": None, "license": None, "cite": [],
+              # whether a credential came with this fetch - never the credential - so that what
+              # hands an input's content back can refuse bytes a credential may have reached
+              # (DataSource.credentials_reach_private, 2026-09-27)
+              "credentialed": bool(credentials)}
     fetched_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     try:
         record["content"] = _content_facts(fetched)
@@ -938,6 +953,9 @@ class ArchiveReadingSource(DataSource):
     are out of scope - only zip has the trailing central directory that makes
     remote random access possible."""
 
+    #: a credential is sent as a bearer token (``_headers``); subclasses that refuse one say False
+    credentials_reach_private = True
+
     def resolve(self, outer: str, credentials=None) -> tuple:
         raise NotImplementedError
 
@@ -1153,6 +1171,9 @@ class ObjectStoreSource(ArchiveReadingSource):
     what ``Cache-Control: no-cache`` is for).
     """
 
+    #: refuses a credential outright (``_headers``): nothing private can be fetched
+    credentials_reach_private = False
+
     #: ``aws`` or ``gcp`` - what :func:`_object_store` builds.
     cloud: str = ""
     #: ``{bucket: region-or-None}``; subclasses set the default allowlist.
@@ -1362,6 +1383,9 @@ class GitHubReleaseSource(ArchiveReadingSource):
     and :class:`RangeFile` re-requests (and so re-follows) per block, which is
     exactly the case its per-request redirect handling exists for.
     """
+
+    #: refuses a credential outright (``_headers``): nothing private can be fetched
+    credentials_reach_private = False
 
     prefix = "github"
     id_pattern = (r"(?!.*(?:^|/)\.\.(?:/|!|$))"

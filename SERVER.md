@@ -359,7 +359,7 @@ without the bytes passing through the client. No route ever hands input bytes ba
 
 **Inputs are kept decoded.** A cached image input - a fetched series or an upload - is stored
 as its *input copy*: the volume decoded once, as a compressed array (a duckn zarr zip) with
-its geometry and the DICOM tags SimpleITK reports, in place of the files it came from. A job then
+its geometry and the DICOM tags of its files, in place of the files it came from. A job then
 reads it in a fraction of a second where a DICOM series is a full decode every time (13 s for a
 709-slice CT on Modal). It never changes a result: the image a job receives is the same, and so
 is every key. Label maps (a `.seg.nrrd`, a `result:` reference) keep their files, and so does
@@ -373,6 +373,24 @@ experimental VoxTell and MONAI images lack. `HAVERSACK_INPUT_COPY=0` keeps origi
 applies to copies written after it is set; a cache may hold both forms. A DICOM series or a gzipped NIfTI is
 compressed a slab of slices at a time, so its transcode needs a few hundred MB, not several times the volume. On Modal, both variables are forwarded from the
 deploying shell. The format and its rules are in `docs/input-copy.md`.
+
+**An input's DICOM tags.** `GET /v1/<source>/<identifier>/dicom.json` (token) answers the tags
+the input copy of a hosted input carries, as JSON in duckn's dicom encoding: `series` (what
+every slice shares), `slices` (one object per slice, in the volume's order), `stored_values`
+and `tags_version`. The server fetches the input first if it does not hold it; `HEAD` never
+fetches, and says 404 `not_held` until it is held. `select` (repeatable) keeps what it names -
+duckn dicom-spec's groups `patient`, `study`, `series`, `equipment`, `ct`, `mr`, `pet`,
+`frame-of-reference`, `sop-common`, `image-quality`, or PS3.6 keywords such as `KVP`; an
+unknown name is a 422 `bad_name`, never an empty answer. `slices=false` leaves the per-slice
+tags out. An operator withholds values with `serve --dicom-withhold patient,InstitutionName`
+(`HAVERSACK_DICOM_WITHHOLD`): each one present is answered `null`, with `"anonymized": true` -
+never left out, so a reader can tell withheld from absent; a selection cannot get around it.
+Hosted sources only: an upload's tags are never handed back, as its bytes are not, and neither
+are the tags of anything fetched with a credential (403 `input_withheld`) - the cache holds such
+bytes under the source's identity, whoever fetched them. An input that is not DICOM answers 404
+`no_dicom_tags`; Modal deployments answer 501 (their inputs live in the workers). The read-only
+twin has no such route. `haversack remote tags SPEC` is the client; `haversack tags SPEC` reads
+the same thing locally, for any input haversack reads.
 
 ## Results as inputs
 
@@ -818,6 +836,8 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | GET | `/v1/inputs/<digest>` | token | is this content already here |
 | PUT | `/v1/inputs/<digest>` | token | store one file, digest checked |
 | POST | `/v1/inputs` | token | store a multi-file input as one tree |
+| GET | `/v1/<source>/<identifier>/dicom.json` | token | a hosted input's DICOM tags; fetches it if not held |
+| HEAD | `/v1/<source>/<identifier>/dicom.json` | token | the same, no body; never fetches |
 | HEAD | `/v1/<source>/<identifier>/<task>/labels.seg.nrrd` | read | probe: cached, in flight, absent |
 | GET | `/v1/<source>/<identifier>/<task>/labels.seg.nrrd` | read, `Prefer` needs token | the labels |
 | DELETE | `/v1/<source>/<identifier>/<task>` | token | drop the cached result and every artifact |

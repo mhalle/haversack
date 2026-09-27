@@ -316,6 +316,25 @@ source is reported and the run exits non-zero without stopping the rest. Two sou
 write one name (`a/scan.nii.gz` and `b/scan.nii.gz`) never overwrite each other: the second
 fails, naming the first.
 
+### DICOM tags: `tags`
+
+`haversack tags` prints an input's DICOM tags as JSON - the series-level tags, then one object
+per slice - read from haversack's copy of it (fetched first when it is not cached), or from a
+local DICOM folder or file:
+
+```bash
+haversack tags idc:<crdc_series_uuid>                          # every tag, series and slices
+haversack tags idc:<crdc_series_uuid> --select ct --no-slices  # the CT acquisition tags only
+haversack tags ./dicom_dir --select series --select KVP        # groups and keywords mix
+```
+
+`--select` takes duckn dicom-spec's groups (`patient`, `study`, `series`, `equipment`, `ct`,
+`mr`, `pet`, `frame-of-reference`, `sop-common`, `image-quality`) or PS3.6 keywords; a name
+that is neither is an error, never an empty answer. From Python, `haversack.inputs.open(spec)
+.tags(select=["ct"], per_slice=False)`. A server answers the same for a hosted input
+(`haversack remote tags SPEC`, or `GET /v1/<source>/<identifier>/dicom.json`; see SERVER.md),
+never for an upload.
+
 ## Citing the models
 
 Every model haversack runs is someone else's work. `haversack cite <task>` prints who made it,
