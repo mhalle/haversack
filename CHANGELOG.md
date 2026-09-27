@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-09-27
+
+Every DICOM read checked against pydicom and corrected where SimpleITK misreads it; an input copy
+that keeps its files' own DICOM headers and never contradicts its voxels; rank-field stores in
+duckn convention 1.2; a Modal deployment's results in an object store (`--result-store`); inputs
+by reference through `haversack.inputs`, and on a shared blob store behind
+`HAVERSACK_INPUT_STORE=blobs`; and a broad round of server fixes from a black-box review.
+**What recomputes, once:** every cached result (`CACHE_EPOCH` 4, below: results computed from a
+misread input must not be served on), every rank-field store (`STORE_RULES` 2), and every input
+copy (reader version 4; a stale upload answers `input_gone` and must be uploaded again).
+**Who must change:** installs take duckn 0.6.0 and feldglas 0.2.0 (convention 1.2; embedding
+fields are format 0.3, which feldglas 0.1 cannot read); a Modal deployment crossing this release
+must be stopped before it is deployed (old and new code sharing one inputs store call each
+other's uploads stale).
+
+- **Every cached result recomputes once (`CACHE_EPOCH` 4).** The reader now reads MONOCHROME1 and
+  an unapplied Modality LUT as the values the file means, each frame of an Enhanced file with its
+  own rescale and a series of mixed rescales without wrapping, and refuses a decode that
+  disagrees with pydicom or a truncated `.nii.gz`. Input copies re-fetch themselves, but a
+  result's key holds the source identifier, not the reader, so a result computed from a misread
+  input would have been served on. Most results recompute to the same bytes.
+- **Every rank-field store recomputes once (`STORE_RULES` 2).** The stores moved to duckn
+  convention 1.2 (below) and their key did not: an array's `seg` block is still written as 0.9.
+  A test now pairs the store's declared format with the rules that write it.
+- **duckn v0.6.0 and feldglas v0.2.0** (convention 1.2: stated calibration, `axis_linear`, group
+  metadata, `color_space`; field format 0.3), with floors at those versions. duckn 0.6.0 also
+  imports every NIfTI sform/qform code as RAS, where code 1 lost its orientation.
+
 - **A deleted result leaves a shared store's listing at once.** A long-lived server's listing
   memo was validated by each ref's last-modified, and a HEAD reports that as an HTTP date -
   whole seconds on S3, R2 and every HTTP store - so a deletion (or a late preview) written in
