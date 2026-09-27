@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+- **A deleted result leaves a shared store's listing at once.** A long-lived server's listing
+  memo was validated by each ref's last-modified, and a HEAD reports that as an HTTP date -
+  whole seconds on S3, R2 and every HTTP store - so a deletion (or a late preview) written in
+  the same second as an earlier listing kept the old stamp, and the deleted result stayed
+  listed, and the preview unlinked, for as long as the process lived. Reproduced locally and
+  through Modal's store mode. The memo is now validated by the ref's ETag, which moves exactly
+  when the ref does; a delete also drops the row in the container that made it. The memo keeps
+  only what a row needs - a few hundred bytes instead of the whole ~32 KB pointer, which at its
+  20,000 rows would have been ~640 MB of a 2 GB api container.
+- **A shared store that cannot be read is a 503 on the listings, not a shorter list.** A fault
+  reading one ref dropped that row from a 200 and could end paging early - and a missing row
+  reads as "not computed" to a client deciding what to compute. The volume listing has always
+  answered 503; the store listing now does too. A lookup of one key still reads a fault as a
+  miss (and serves the host's own copy through an outage).
+- **A publication to a busy key waits and retries instead of giving up.** Retries of the ref's
+  conditional write now back off (doubling from 10 ms, jittered, capped at 1 s, 40 attempts
+  rather than 16 unpaused): nine writers on one key had exhausted the old budget in a review
+  run, and a finished computation raised instead of publishing.
+- **A cache-hit job's result outlives a republication on Modal's result store.** The hit wrote
+  no scratch copy and a store deployment records no volume path, so once the key was
+  republished with other bytes `/v1/jobs/<id>/result` answered 410 while the store still held
+  the job's bytes in its history. They are found there by the job's output digest now.
+- **A full local disk is reported as the host's disk.** With a result store, a host that
+  cannot keep a local copy serves a store hit as a miss; it said "result store unreachable",
+  sending the operator to the wrong machine, and shared a once-a-minute throttle with real
+  store faults. It now says what is full, on its own throttle.
+
 - **An input copy's DICOM tags are the files' own headers.** They were SimpleITK's per-slice
   dictionaries, which hold no sequences and no binary values. They are now read through pydicom
   by duckn's one tag conversion, under dicom-spec's rules as settled on 2026-09-26: sequences,

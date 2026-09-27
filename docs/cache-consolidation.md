@@ -139,7 +139,16 @@ invalidation, can never be stale, and can be evicted by access time at will.
 - **Evict ≠ delete.** EVICT drops a ref to save room on one replica; it is local and never
   synced. DELETE writes a tombstone, which is.
 - **Listing**: list refs with their times, read manifests for the page asked for - the same
-  `(rows, position)` contract and cursor as main's listing.
+  `(rows, position)` contract and cursor as main's listing. Two rules settled by the review
+  of 2026-09-26: a long-lived server's memo of what it read is validated by the ref's
+  **ETag**, never its last-modified - a HEAD's Last-Modified is an HTTP date, whole seconds on
+  every HTTP store, so a tombstone or an amending manifest written in the same second as an
+  earlier listing kept the old stamp and the memo went on listing a deleted result (and
+  hiding a late preview) for the life of the process. A listing without ETags (a provender
+  DiskStore's) costs a HEAD per memo lookup. The memo keeps only what a row needs (a few
+  hundred bytes, not the ~32 KB pointer). And a **store fault is a 503**, never a shorter
+  list: a row dropped for a fault reads as "not computed" - the volume listing's rule,
+  applied here too; a lookup of ONE key still reads a fault as a miss.
 
 ### 4. The sync protocol
 
@@ -344,6 +353,27 @@ The proposed order - each step behind a flag, with deployments untouched until t
    same ETag, HEAD and 304 on the twin, the preview rendered into the store, both listings,
    no-cache republished, delete 404 at both; the bucket held 10 blobs, one ref (the
    tombstone) and one tasks/ note.
+   **Review round (2026-09-26, branch `claude/fix-resultstore`)**, every finding reproduced
+   and pinned (`tests/test_result_store_review_0926.py`, 20 tests over a store whose clock
+   never ticks - the whole-second clock at its worst, deterministic): the listing memo above;
+   a store fault in a listing is a 503; `_swap` backs off (doubling from 10 ms, full jitter,
+   capped at 1 s, 40 attempts - nine threads on one key had exhausted 16 unpaused tries and a
+   finished publication raised); and a cache-HIT job's `/result` on Modal answered 410 once
+   its key was republished with other bytes - the hit wrote no scratch copy and a store
+   deployment records no `cache_path` - so `result_file` now finds the job's own generation
+   in the store's history by its output digest (`find_generation` / `fetch_generation`) and
+   serves it from the api container's mirror. A `result:` reference pinned to a digest could
+   use the same, but its readers take only the key: not done. Two leads assessed, not
+   changed here: **`Blobs.touch` on AWS S3** - a copy onto itself with no metadata change is
+   refused there (R2 accepts it), obstore's `copy` takes no metadata directive, and `touch`
+   then answers True from a `has()` without refreshing the timestamp. A publication that
+   deduplicates onto an old, unreferenced blob is then unprotected against a concurrent sweep
+   until its ref is written; `put`'s `_verify` re-uploads a blob swept in that window, so the
+   worst case is a reader's miss between the ref write and the re-check. The fix belongs in
+   provender (e.g. re-put blobs below a size, or a copy with a metadata change), and AWS S3
+   has never been run. **A full local disk** still turns a hit whose copy is not here into a
+   miss (and a compute server's into a recompute); it is now reported as THIS host's disk,
+   under its own throttle, instead of as "the result store is unreachable".
 8. **Delete the old protocols** - `ResultCache`'s and the hybrid's - in one commit, as the
    older step 6 said.
 
