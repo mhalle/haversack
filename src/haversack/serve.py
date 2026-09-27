@@ -4512,10 +4512,24 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
             raise HTTPException(422, {
                 "code": "bad_digest",
                 "message": f"expected {content.BLOB}<hex> or {content.TREE}<hex>"})
+        # Held while it is looked at, as a job holds its input (review, 2026-09-26): with the
+        # input store a job's last unpin removed the view this route had just been handed (a
+        # 500 from its stat), and an eviction between `has` and `resolve` raised out as a 500.
+        store.pin(digest)
+        try:
+            return _input_status(store, digest)
+        finally:
+            store.unpin(digest)
+
+    def _input_status(store, digest: str) -> dict:
+        gone = HTTPException(404, {"code": "input_gone", "digest": digest,
+                                   "message": "not held by this server"})
         if not store.has(digest):
-            raise HTTPException(404, {"code": "input_gone", "digest": digest,
-                                      "message": "not held by this server"})
-        where = store.resolve(digest)
+            raise gone
+        try:
+            where = store.resolve(digest)
+        except FileNotFoundError:                 # evicted since `has` (InputGone is one)
+            raise gone from None
         kind = "tree" if digest.startswith(content.TREE) else "blob"
         from .input_copy import info, is_copy, stored_compression
         if is_copy(where):
@@ -5660,7 +5674,9 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
                         "message": f"{digest!r} is not a content digest; expected "
                                    f"{content.BLOB}<hex> or {content.TREE}<hex>"})
                 store = getattr(executor, "content", None)
-                if store is None or not store.has(digest):
+                # off the loop: `has` may adopt a legacy upload into the input store (a copy
+                # and a hash of the whole entry), or refresh a shared volume (review, 2026-09-26)
+                if store is None or not await asyncio.to_thread(store.has, digest):
                     raise HTTPException(410, {
                         "code": "input_gone",
                         "message": f"{digest} is not held by this server (never "

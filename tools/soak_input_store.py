@@ -22,7 +22,8 @@ and restarted on the same directories. What must hold:
    running on the killed server.
 3. Every result downloaded hashes to the digest its job reported.
 4. After the run: no staging and no view files left (the killed process's are reaped by the
-   restarted one), every ref's blobs present, and no unreferenced blob once swept.
+   restarted one), no temporary file of an interrupted blob write once the store is reopened,
+   every ref's blobs present, and no unreferenced blob once swept.
 
 Inputs are variants of --image with one voxel changed, so every upload is new content.
 Writes report.json and the server logs under --root. Nothing leaves the machine except the
@@ -256,6 +257,9 @@ class Soak:
         store = InputStore(root, None, grace_s=0)   # reaps the killed process's staging, too
         leftovers["staging_after_reopen"] = [str(p) for p in (root / "staging").rglob("*")
                                              if p.is_file()]
+        # ... and a blob write the kill interrupted (its provender temporary file)
+        leftovers["temp_writes_after_reopen"] = [str(p) for p in
+                                                 (root / "store").rglob("*.provender-tmp")]
         refs = store._refs()
         missing = [key for _, key, doc in refs
                    if not all((store.store.root / store.blobs.path(b["digest"])).is_file()
@@ -268,7 +272,8 @@ class Soak:
                   "orphan_blobs_after_sweep": orphans, **leftovers}
         (self.root / "report.json").write_text(json.dumps(report, indent=1))
         ok = (not report["5xx"] and not report["failed"] and not report["digest_mismatch"]
-              and not missing and not orphans and not leftovers["staging_after_reopen"])
+              and not missing and not orphans and not leftovers["staging_after_reopen"]
+              and not leftovers["temp_writes_after_reopen"])
         print(json.dumps({k: (v if not isinstance(v, list) else len(v)) for k, v in report.items()},
                          indent=1))
         print("PASS" if ok else "FAIL")

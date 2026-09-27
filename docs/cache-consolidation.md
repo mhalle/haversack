@@ -575,6 +575,50 @@ offered and nothing handled - fixed, not an input-store defect. Two fixes came f
 it: staging goes under `staging/<pid>/` and a dead process's is reaped when the store opens
 (a fetch killed mid-way left it forever), and `serve --input-cache-gb`.
 
+**Review round (2026-09-26, after reader version 3).** A reviewer reproduced ten defects;
+each is fixed and pinned by `tests/test_inputstore_review_0926.py`, whose tests fail on
+`4b5ecb2` (the two guards excepted: a LIVE writer's temporary file is never taken, and
+processes asking for one export at once all get it). What changed, so it is not redesigned:
+
+- **Refs are removed by the key they are stored under** (`InputStore.forget_key`). `forget`
+  names the current reader version's key, so `cache clean` of a listed `r2!` ref deleted the
+  `r3!` ref instead and could never remove the old one. `cache clean inputs <item>` matches the
+  IDENTITY, so it takes every reader version's ref; an item is a source spec, an upload digest,
+  or a local file or folder (`inputstore.local_identity`, the digest an ingest stores it under),
+  and anything else is refused rather than removing nothing.
+- **One view per key, built once** (`ServerInputs._view`): a caller finding a build in progress
+  waits for it (checking its cancel) and takes that view, or builds its own if that build
+  failed. Concurrent builds used to overwrite one another's entry, orphaning directories whose
+  hard links held evicted blobs' bytes.
+- **A view handed to a caller holding no pin is a lease** of `LOOSE_VIEW_S`, renewed at every
+  such hand-out; neither the last unpin nor the loose reap takes a view before its lease runs
+  out. A caller that holds a pin is covered by its pin, so `GET /v1/inputs/{digest}` pins while
+  it reads (a job's last unpin had removed the view it was reading) and answers an eviction
+  between `has` and `resolve` with 404 `input_gone`. The remaining rule for new code: a caller
+  that reads a view while ANOTHER holds the key's pin must pin too.
+- **A blob write a crash interrupted** leaves provender's `*.provender-tmp`, which nothing
+  listed. Every store write holds `locks/writers` shared; `reap_abandoned_writes` (on open, in
+  `evict`, so in `cache clean`) takes it exclusive WITHOUT waiting and removes temporary files
+  older than the store's grace only if it gets it - death proved by the kernel's lock release,
+  never inferred from age alone.
+- **Byte counts count an inode once** (`cache_admin._du`): exports and views are hard links.
+- **`Input.array((start, stop))` is Python slicing on every form**, and anything but two
+  integers is a ValueError. The mapped reader drops its buffer before closing the map, so an
+  error is no longer masked by `BufferError`.
+- **The legacy-upload shim runs in a thread** (`_accept`'s `has`, as PUT and POST already did).
+- **A command-line export is placed without deleting a placed one**: built only when none is
+  whole (every file at its ref's size), under the key's economy lock, checked again inside it
+  and again after building; an export that is not whole is moved aside by one rename, never
+  deleted in place.
+- **The economy lock has 4,096 stripes** (was 256). A stripe is held for a whole fetch and
+  transcode, so unrelated keys sharing one waited up to `ECONOMY_WAIT_S`; per-key lock files
+  would end it but cannot be removed safely. Assessed, not otherwise changed.
+
+One hazard found writing the tests and NOT changed: an export (and a view) is a hard link to its
+blob, so anything that writes INTO an exported file in place writes into the store's blob - and
+every other export of it. `haversack get` prints such a path. Replacing the file (write a new
+one, rename over) is safe; opening it for writing is not.
+
 **No export of the bytes as they came off the wire, anywhere (the user's decision,
 2026-09-26).** haversack caches images for algorithms that read the accelerated form; it is not
 a tool for handing a remote source's files to a user (idc-index, s5cmd and the sources' own

@@ -53,6 +53,13 @@ _KEEP = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-_.")
 #: How long a fetch waits for another fetch of the same key on this host before going ahead
 #: anyway: the lock saves a download, and a lock that cannot be had must not stop the work.
 ECONOMY_WAIT_S = 600.0
+#: How many lock files the economy lock is spread over. A stripe is held for a whole fetch and
+#: transcode, so two UNRELATED keys on one stripe wait for each other (up to ECONOMY_WAIT_S);
+#: 256 made that a 1-in-256 chance for any two fetches in flight, 4096 makes it 1 in 4096 for
+#: the cost of at most 4096 empty files (review, 2026-09-26). Per-key lock files would end it,
+#: but they cannot be removed safely (a flock on an unlinked file excludes nobody), so they
+#: would grow with every key ever fetched.
+ECONOMY_STRIPES = 4096
 #: A ref name longer than this is hashed; the key itself is always inside the document.
 _MAX_NAME = 180
 
@@ -82,6 +89,11 @@ def ref_name(key: str) -> str:
     return f"{REF_DIR}{name}.json"
 
 
+def export_name(key: str) -> str:
+    """The command line's export directory of the ref stored under ``key`` (its ref's name)."""
+    return Path(ref_name(key)).stem
+
+
 def _relpath(name) -> str:
     """A path from a ref, as data written by another process: relative, no ``..``, no
     leading dot component except the one sidecar the view writes itself."""
@@ -91,6 +103,31 @@ def _relpath(name) -> str:
     if any(p in ("", ".", "..") for p in parts):
         raise ValueError(f"not a stored path: {name!r}")
     return name
+
+
+def _members(path: Path) -> list[Path]:
+    """The files a folder is stored as (every file under it, sorted) - one list, so the digest
+    an ingest stores a folder under and the one ``cache clean`` looks it up by agree."""
+    return sorted(p for p in Path(path).rglob("*") if p.is_file())
+
+
+def local_identity(path) -> str | None:
+    """The identity a LOCAL file or folder is ingested under, computed without storing it: the
+    digest of a file's bytes, a folder's tree digest, or its one file's digest (ContentStore's
+    rules, as :meth:`InputStore.put_dir` applies them). None for an empty folder or a path that
+    is neither. What ``cache clean inputs <path>`` names an ingested input by."""
+    from .content import digest_file, tree_digest
+    path = Path(path)
+    if path.is_file():
+        return digest_file(path)
+    if not path.is_dir():
+        return None
+    members = _members(path)
+    if not members:
+        return None
+    if len(members) == 1:
+        return digest_file(members[0])
+    return tree_digest(digest_file(p) for p in members)
 
 
 def reap_dead(base: Path) -> None:
@@ -129,6 +166,7 @@ class InputStore:
         import threading
         self._held = threading.local()          # stripes this thread holds (re-entrancy)
         reap_dead(self.staging_root)            # a fetch killed mid-way leaves its staging
+        self.reap_abandoned_writes()            # ... and a blob write killed mid-way, its temp
 
     # -- refs ------------------------------------------------------------------------------
 
@@ -186,12 +224,83 @@ class InputStore:
         DECIDING to discard a cached input is jobpolicy's alone (a test holds every
         ``.discard(`` call to it), and this is the mechanism, which the store also uses for a
         ref whose blobs were swept."""
-        from provender import ops
         existed = self.ref(identity) is not None
-        ops.delete(self.store, ref_name(key_for(identity)))
+        self.forget_key(key_for(identity))
         return existed
 
+    def forget_key(self, key: str) -> None:
+        """Delete the ref stored under ``key`` itself - which is how a LISTED ref is removed.
+        :meth:`forget` names the key of the CURRENT reader version, so a ref an older build
+        stored (``r2!...`` once ``READER_VERSION`` is 3) could never be removed by it, and
+        ``cache clean inputs`` deleted the current version's ref in its place (review,
+        2026-09-26)."""
+        from provender import ops
+        ops.delete(self.store, ref_name(key))
+
+    # -- writes a crash abandoned ---------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _writing(self):
+        """Held (shared) while this process writes into the store: what tells
+        :meth:`reap_abandoned_writes` that a temporary file may be a live writer's. The kernel
+        releases it however the writer ends, so an exclusive hold proves every writer on this
+        host is gone - death proved, never inferred from age alone."""
+        try:
+            import fcntl
+        except ImportError:                        # no flock: nothing is ever reaped (below)
+            yield
+            return
+        self.locks.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.locks / "writers", os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            yield
+        finally:
+            os.close(fd)
+
+    def reap_abandoned_writes(self) -> int:
+        """Remove the temporary files (``*.provender-tmp``) of writes a crash interrupted - a
+        SIGKILL during a blob write left 31 MB of one in ``blobs/sha256/``, which survived
+        reopening, eviction and ``cache clean`` (``Blobs.entries`` lists only 64-hex names,
+        review 2026-09-26). Only when no write is in progress on this host (the writers' lock,
+        taken exclusive without waiting) and only files older than the store's grace: a live
+        writer's file is never taken. Returns how many went."""
+        from provender.disk import TMP_SUFFIX
+        try:
+            import fcntl
+        except ImportError:
+            return 0
+        root = self.store.root
+        if not root.is_dir():
+            return 0
+        self.locks.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self.locks / "writers", os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return 0                           # somebody is writing: next time
+            cutoff, n = time.time() - self.grace_s, 0
+            for p in root.rglob(f"*{TMP_SUFFIX}"):
+                try:
+                    if p.is_file() and p.stat().st_mtime <= cutoff:
+                        p.unlink()
+                        n += 1
+                except OSError:
+                    continue
+            return n
+        finally:
+            os.close(fd)
+
     # -- storing ---------------------------------------------------------------------------
+
+    def economy_lock_file(self, key: str) -> Path:
+        """The lock file ``key``'s fetches take on this host - one of :data:`ECONOMY_STRIPES`.
+        The one place the striping is spelled, so a test or a tool holding a key's lock asks
+        here instead of restating it (two tests did, and changed with the stripe count)."""
+        stripe = (int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:4], "big")
+                  % ECONOMY_STRIPES)
+        return self.locks / f"{stripe:04d}"
 
     @contextlib.contextmanager
     def _economy_lock(self, key: str, check=None):
@@ -208,7 +317,8 @@ class InputStore:
           cost is the download it would have saved."""
         import fcntl
         import threading
-        stripe = int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest()[:4], "big") % 256
+        lock_file = self.economy_lock_file(key)
+        stripe = lock_file.name
         held = self._held.__dict__.setdefault("stripes", {})
         if held.get(stripe):
             held[stripe] += 1
@@ -218,7 +328,7 @@ class InputStore:
                 held[stripe] -= 1
             return
         self.locks.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.locks / f"{stripe:03d}", os.O_RDWR | os.O_CREAT, 0o644)
+        fd = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o644)
         deadline = time.monotonic() + ECONOMY_WAIT_S
         try:
             while True:
@@ -258,7 +368,8 @@ class InputStore:
                 fn = fetch or self.fetch
                 content = Path(fn(identity, stage, credentials=credentials)
                                if credentials is not None else fn(identity, stage))
-                doc = self._store_staged(identity, key, stage, content)
+                with self._writing():
+                    doc = self._store_staged(identity, key, stage, content)
             finally:
                 shutil.rmtree(stage, ignore_errors=True)
         self.evict(keep={key})
@@ -320,7 +431,7 @@ class InputStore:
         """A directory of files (a DICOM series) as one tree - or as a blob, when it holds
         exactly one file (one file is a file however it arrived, as ContentStore says)."""
         from .content import DigestMismatch, digest_file, tree_digest
-        members = sorted(p for p in Path(staged).rglob("*") if p.is_file())
+        members = _members(staged)
         if not members:
             raise FileNotFoundError(f"{staged} holds no files")
         if len(members) == 1:
@@ -421,6 +532,7 @@ class InputStore:
         the blobs no ref names and older than the grace. Refs that do not parse are left
         alone and their blobs kept: cleanup refuses what it cannot account for."""
         from provender import ops
+        self.reap_abandoned_writes()
         listed = self.blobs.entries(older_than=time.time() - self.grace_s)   # BEFORE the refs
         refs = self._refs()
         total, dropped = sum(int(d.get("bytes") or 0) for _, _, d in refs), 0
@@ -442,6 +554,15 @@ class InputStore:
         return {"refs_dropped": dropped, "blobs": swept}
 
 
+class _View:
+    """One key's view in this process: what the reader is handed (``path``), the directory
+    that holds it (``root``), and until when an UNPINNED holder may still be using it."""
+    __slots__ = ("path", "root", "loose_until")
+
+    def __init__(self, path: Path, root: Path):
+        self.path, self.root, self.loose_until = path, root, 0.0
+
+
 class ServerInputs:
     """``SeriesCache`` + ``ContentStore``'s interface over an :class:`InputStore`, so the
     local server's call sites run unchanged behind ``HAVERSACK_INPUT_STORE=blobs``.
@@ -449,8 +570,16 @@ class ServerInputs:
     Those call sites already follow the lifecycle a view needs - pin, look, use, unpin - so a
     PIN holds a view of the input in this process (``<root>/views/<pid>/``), ``path`` and
     ``get_or_fetch`` answer inside it, and the last unpin deletes it. The store's eviction
-    never touches a view: it is hard links or copies. A view built without a pin (a status
-    route's ``resolve``) is reaped once it is older than :attr:`LOOSE_VIEW_S`."""
+    never touches a view: it is hard links or copies.
+
+    ONE view per key, built once (review, 2026-09-26): callers that ask at the same moment
+    wait for the one being built instead of each building their own - the last to finish used
+    to overwrite the others' entry, leaving view directories nothing tracked or removed, whose
+    hard links kept evicted blobs' bytes on disk outside the budget. A view handed to a caller
+    that holds no pin (a status route's ``resolve``) is a LEASE of :attr:`LOOSE_VIEW_S`,
+    renewed by every such hand-out: neither the last unpin nor the loose reap takes it before
+    the lease runs out - they took a view from under a concurrent route (a 500 from its stat),
+    and a second ``resolve`` was handed a view whose clock still ran from the first."""
 
     LOOSE_VIEW_S = 120.0
 
@@ -465,7 +594,8 @@ class ServerInputs:
         shutil.rmtree(self._views_root, ignore_errors=True)   # a previous process's, same pid
         self._guard = __import__("threading").RLock()
         self._pins: dict[str, int] = {}
-        self._views: dict[str, tuple[Path, float]] = {}
+        self._views: dict[str, _View] = {}
+        self._building: dict = {}                 # key -> Event, while its view is being built
         self._fetching: set[str] = set()
         self._reap_dead_processes()
 
@@ -475,13 +605,27 @@ class ServerInputs:
     # -- views -------------------------------------------------------------------------------
 
     def _view(self, key: str, *, fetch=None, credentials=None, check=None) -> Path:
-        with self._guard:
-            held = self._views.get(key)
-            if held is not None and held[0].exists():
-                return held[0]
+        import threading
+        while True:
+            with self._guard:
+                held = self._views.get(key)
+                if held is not None and held.path.exists():
+                    self._hand_out(key, held)
+                    return held.path
+                if held is not None:               # its directory went from outside
+                    self._drop_view(key)
+                building = self._building.get(key)
+                if building is None:
+                    done = self._building[key] = threading.Event()
+                    break
+            # another thread is building this key's view: take that one when it is there
+            # (or build our own if it failed - its error is its caller's, not ours)
+            while not building.wait(0.1):
+                if check is not None:
+                    check()
         dest = self._views_root / uuid.uuid4().hex
-        dest.mkdir(parents=True)
         try:
+            dest.mkdir(parents=True)
             if fetch is False:
                 path = self.store.materialize(key, dest)
             else:
@@ -489,24 +633,33 @@ class ServerInputs:
                                                credentials=credentials, check=check)
         except BaseException:
             shutil.rmtree(dest, ignore_errors=True)
+            with self._guard:
+                self._building.pop(key, None)
+            done.set()
             raise
         with self._guard:
-            self._views[key] = (path, time.time())
+            held = self._views[key] = _View(path, dest)
+            self._building.pop(key, None)
+            self._hand_out(key, held)
             self._reap_loose()
+        done.set()
         return path
+
+    def _hand_out(self, key: str, held: _View) -> None:
+        """Under the guard, as ``held`` is handed to a caller: one holding no pin renews the
+        lease its view is kept for."""
+        if not self._pins.get(key):
+            held.loose_until = time.time() + self.LOOSE_VIEW_S
 
     def _drop_view(self, key: str) -> None:
         held = self._views.pop(key, None)
         if held is not None:
-            view = held[0]
-            while view.parent != self._views_root and view.parent != view:
-                view = view.parent
-            shutil.rmtree(view, ignore_errors=True)
+            shutil.rmtree(held.root, ignore_errors=True)
 
     def _reap_loose(self) -> None:
         now = time.time()
-        for key, (path, made) in list(self._views.items()):
-            if not self._pins.get(key) and now - made > self.LOOSE_VIEW_S:
+        for key, held in list(self._views.items()):
+            if not self._pins.get(key) and held.loose_until <= now:
                 self._drop_view(key)
 
     # -- SeriesCache's interface -----------------------------------------------------------------
@@ -522,7 +675,9 @@ class ServerInputs:
                 self._pins[key] = n
                 return
             self._pins.pop(key, None)
-            self._drop_view(key)
+            held = self._views.get(key)
+            if held is None or held.loose_until <= time.time():
+                self._drop_view(key)               # else a loose holder's lease still runs
 
     def has(self, key: str) -> bool:
         return self.store.has(key) or self._adopt_legacy_upload(key)
@@ -661,7 +816,21 @@ class CommandInputs:
         self.exports = self.root / "exports"
 
     def export_dir(self, identity: str) -> Path:
-        return self.exports / Path(ref_name(key_for(identity))).stem
+        return self.export_of_key(key_for(identity))
+
+    def export_of_key(self, key: str) -> Path:
+        """The export of the ref stored under ``key`` - named by the KEY, so a ref another
+        reader version stored has its own export, and ``cache clean`` removes the right one."""
+        return self.exports / export_name(key)
+
+    @staticmethod
+    def _export_ok(dest: Path, doc: dict) -> bool:
+        """Whether ``dest`` is a whole export of ``doc``: every file it names, at its size."""
+        try:
+            return all((dest / name).stat().st_size == int(blob["size"])
+                       for name, blob in doc["files"].items())
+        except (OSError, KeyError, TypeError, ValueError):
+            return False
 
     def has(self, identity: str) -> bool:
         return self.store.has(identity)
@@ -670,21 +839,21 @@ class CommandInputs:
         return self.store.record(identity)
 
     def get_or_fetch(self, identity: str, *, fetch) -> Path:
-        """The input's export, storing it first if absent; what to hand the reader."""
+        """The input's export, storing it first if absent; what to hand the reader.
+
+        An export that is whole is never removed here (review, 2026-09-26): the placement
+        used to delete whatever sat at the export's name before renaming its own into place,
+        so a second process building the same export removed the one the first had just
+        placed and returned - a path that, for a moment, did not exist. Now an export is built
+        only when none is whole, under the key's economy lock and checked again inside it; a
+        whole one is kept, and one that is not (a crash mid-copy, files of a forgotten ref) is
+        moved aside by one rename and replaced by another."""
         doc = self.store.ensure(identity, fetch=fetch)
         dest = self.export_dir(identity)
-        if not dest.is_dir() or self.store.ref(identity) is None:
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dest.parent / f".{dest.name}.{uuid.uuid4().hex[:8]}"
-            try:
-                self.store.materialize(identity, tmp)
-                shutil.rmtree(dest, ignore_errors=True)   # a stale export of a forgotten ref
-                try:
-                    os.rename(tmp, dest)
-                except OSError:                    # another process placed it meanwhile
-                    pass
-            finally:
-                shutil.rmtree(tmp, ignore_errors=True)
+        if not self._export_ok(dest, doc):
+            with self.store._economy_lock(key_for(identity)):
+                if not self._export_ok(dest, doc):
+                    self._place_export(identity, dest, doc)
         self.store.touch(identity)
         read = dest / doc["read"]
         if read.is_dir():
@@ -694,6 +863,27 @@ class CommandInputs:
                 if len(files) == 1:
                     return files[0]
         return read
+
+    def _place_export(self, identity: str, dest: Path, doc: dict) -> None:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.parent / f".{dest.name}.{uuid.uuid4().hex[:8]}"
+        aside = None
+        try:
+            self.store.materialize(identity, tmp)
+            if self._export_ok(dest, doc):
+                return          # placed while ours was built (a process the lock gave way to)
+            if dest.exists():                      # not whole: moved aside, never deleted in place
+                aside = dest.parent / f".{dest.name}.stale-{uuid.uuid4().hex[:8]}"
+                with contextlib.suppress(FileNotFoundError):
+                    os.rename(dest, aside)
+            try:
+                os.rename(tmp, dest)
+            except OSError:
+                pass            # placed meanwhile by a process the lock gave way to: keep it
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+            if aside is not None:
+                shutil.rmtree(aside, ignore_errors=True)
 
     def ingest(self, path, *, progress=None) -> Path:
         return self.ingest_with_identity(path, progress=progress)[1]

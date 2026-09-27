@@ -47,12 +47,28 @@ class Input:
     def array(self, slices: tuple[int, int] | None = None):
         """The voxels as a numpy array in (Z, Y, X) order, all of them or ``slices`` = (start,
         stop) along the slice axis. From a copy only what is asked for is read: the chunks
-        holding those slices (compressed), or the slices themselves (uncompressed, mapped)."""
+        holding those slices (compressed), or the slices themselves (uncompressed, mapped).
+
+        ``(start, stop)`` means what ``a[start:stop]`` means for the whole array, whatever the
+        input's stored form: a negative index counts from the end, an index past either end is
+        clipped, and a stop at or before its start gives zero slices. Anything but two integers
+        is a ValueError. One rule for every form (review, 2026-09-26): a mapped copy read a
+        negative start as bytes BEFORE its voxels - the zip's own header, returned as image
+        data - and a reversed pair raised whatever the step it failed in happened to raise."""
         import numpy as np
+        if slices is not None:
+            try:
+                lo, hi = slices
+                if not all(isinstance(v, (int, np.integer)) and not isinstance(v, bool)
+                           for v in (lo, hi)):
+                    raise TypeError
+            except (TypeError, ValueError):
+                raise ValueError(f"slices must be (start, stop), two integers; got {slices!r}") \
+                    from None
         if self.is_copy:
             from .input_copy import _layout
             meta, how, start, dt, shape = _layout(self.path)
-            lo, hi = (0, shape[0]) if slices is None else slices
+            lo, hi = (0, shape[0]) if slices is None else _span(slices, shape[0])
             if how == "zstd":
                 import zarr
                 from zarr.storage import ZipStore
@@ -61,18 +77,21 @@ class Input:
                     return np.asarray(zarr.open_array(store, mode="r")[lo:hi])
                 finally:
                     store.close()
-            import mmap
             import builtins
+            import mmap
+            plane = int(np.prod(shape[1:]))
+            if hi == lo:
+                return np.empty((0,) + tuple(shape[1:]), dtype=dt)
             with builtins.open(self.path, "rb") as f:
                 mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+                raw = None
                 try:
-                    plane = int(np.prod(shape[1:]))
                     raw = np.frombuffer(mm, dtype=dt, count=(hi - lo) * plane,
                                         offset=start + lo * plane * np.dtype(dt).itemsize)
                     out = raw.reshape((hi - lo,) + tuple(shape[1:])).copy()
-                    del raw                    # no view may outlive the map it points into
                 finally:
-                    mm.close()
+                    raw = None                 # no view may outlive the map it points into -
+                    mm.close()                 # else close() raises BufferError over the error
             return out
         import SimpleITK as sitk
         arr = sitk.GetArrayFromImage(self.image())
@@ -102,6 +121,13 @@ class Input:
         return {"series": series, "slices": slices,
                 "stored_values": dicom.get("stored_values") is True,
                 "tags_version": int((ext.get("haversack") or {}).get("tags_version") or 1)}
+
+
+def _span(slices, n: int) -> tuple[int, int]:
+    """``(start, stop)`` along an axis of ``n``, as ``a[start:stop]`` takes it: in range, and
+    ``stop >= start``."""
+    lo, hi, _ = slice(int(slices[0]), int(slices[1])).indices(n)
+    return lo, max(lo, hi)
 
 
 def open(spec, *, cache_dir=None) -> Input:            # noqa: A001 - the module's verb

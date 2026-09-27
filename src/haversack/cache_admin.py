@@ -10,6 +10,7 @@ through `weights remove`, never swept.
 from __future__ import annotations
 
 import shutil
+import stat
 import time
 from pathlib import Path
 
@@ -20,7 +21,18 @@ def _du(path: Path) -> tuple[int, int]:
     if not path or not Path(path).exists():
         return 0, 0
     p = Path(path)
-    total = sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
+    # each FILE once, not each name: the input store's exports (and a job's views) are hard
+    # links to its blobs, so summing per path counted those bytes twice (review, 2026-09-26)
+    seen, total = set(), 0
+    for f in p.rglob("*"):
+        try:
+            st = f.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) in seen:
+            continue
+        seen.add((st.st_dev, st.st_ino))
+        total += st.st_size
     return -1, total    # byte total only; item counts are per-store (see usage)
 
 
@@ -180,6 +192,33 @@ def input_entry(spec, cache_dir=None) -> Path | None:
     return input_entry_dir(root, kind, ident)     # THE derivation lives there, not here
 
 
+def _named_identities(item: str) -> set[str]:
+    """What ``cache clean inputs <item>`` names in the input store: a source spec, an upload's
+    digest, or a LOCAL file or folder (by the digest it was ingested under). Anything else is
+    refused - it used to remove nothing and exit 0, so an ingested input could not be named."""
+    from .content import is_digest
+    from .errors import InputError
+    from .inputstore import local_identity
+    from .sources import parse_input
+    parsed = parse_input(item)
+    if parsed is not None:
+        return {f"{parsed[0]}:{parsed[1]}"}
+    if is_digest(item):
+        return {item}
+    ident = local_identity(Path(item).expanduser()) if Path(item).expanduser().exists() else None
+    if ident is not None:
+        return {ident}
+    raise InputError(f"{item!r} names no input: pass a source spec (idc:<uuid>, ...), an "
+                     "upload's digest (sha256:<hex>), or the local file or folder that was read")
+
+
+def _stored_identity(key: str, doc: dict) -> str:
+    """The identity a listed ref stores - its document's, else the part of its key after
+    the ``!`` (``e<F>.r<R>!<identity>``, ``r<R>!<digest>``)."""
+    ident = doc.get("identity")
+    return ident if isinstance(ident, str) and ident else key.partition("!")[2]
+
+
 def clean(category: str, *, older_than_days: float | None = None, item: str | None = None,
           dry_run: bool = False) -> dict:
     """Remove transient cache content and report what went (or would go, when ``dry_run``).
@@ -218,34 +257,37 @@ def clean(category: str, *, older_than_days: float | None = None, item: str | No
         store = _input_store(root) if cat == "inputs" else None
         if store is not None:
             # refs are the items; their blobs go in one sweep once the refs are forgotten (an
-            # explicit clean: no grace - a fetch in flight loses at worst its blob, a miss)
-            from .inputstore import key_for
-            from .sources import parse_input
+            # explicit clean: no grace - a fetch in flight loses at worst its blob, a miss).
+            # Each listed ref is removed by ITS OWN key: forgetting by identity recomputes the
+            # key with the CURRENT reader version, so a ref an older build stored was never
+            # removed and the current one went in its place (review, 2026-09-26). An item
+            # names an identity, so it takes every reader version's ref of it.
+            from .inputstore import export_name
             before = _du(root)[1]
-            wanted = None
-            if item is not None:
-                parsed = parse_input(item)
-                wanted = {key_for(f"{parsed[0]}:{parsed[1]}")} if parsed else set()
+            wanted = _named_identities(item) if item is not None else None
             for used, key, doc in store._refs():
-                if (wanted is not None and key not in wanted) or (
+                if (wanted is not None and _stored_identity(key, doc) not in wanted) or (
                         cutoff is not None and used >= cutoff):
                     continue
                 removed.append(str(doc.get("identity") or key))
                 if dry_run:
                     freed += int(doc.get("bytes") or 0)
                 else:
-                    store.forget(doc.get("identity") or key)
+                    store.forget_key(key)
                     # the command line's export of it, if there is one (CommandInputs)
-                    from .inputstore import ref_name
-                    shutil.rmtree(Path(root) / "exports" / Path(ref_name(key)).stem,
-                                  ignore_errors=True)
+                    shutil.rmtree(Path(root) / "exports" / export_name(key), ignore_errors=True)
             if not dry_run:
                 store.evict()
                 freed += max(0, before - _du(root)[1])
             continue
         if item is not None and cat == "inputs":
             entry = input_entry(item)
-            if entry and entry.exists():
+            if entry is None:
+                from .errors import InputError
+                raise InputError(f"{item!r} is not a source spec (idc:<uuid>, ...): without "
+                                 "HAVERSACK_INPUT_STORE=blobs the input cache holds only "
+                                 "fetched inputs")
+            if entry.exists():
                 gone(entry)
             continue
         for entry in _entries(root, nested=(cat == "inputs")):

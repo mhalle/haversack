@@ -118,6 +118,27 @@
   upload arrives as a folder holding one file, and both the multi-series check and the reader
   asked GDCM about it first; GDCM gets the right answer (no series) and prints two ITK warnings
   on the way. It is now asked only when a file in the folder could be DICOM, preamble or not.
+- **The input store's review (`HAVERSACK_INPUT_STORE=blobs`), ten defects, each reproduced
+  first.** `cache clean inputs` removed each listed ref by recomputing its key with the CURRENT
+  reader version, so a ref an older build stored (every `r2!` ref, now that copies are `r3`)
+  could never be removed and the current one went in its place; it removes each ref by its own
+  key now, and an item takes every reader version's ref of it. An item may be an upload's digest
+  or the local file or folder that was read (an ingested input could not be named, and a name
+  that matched nothing removed nothing and said nothing: it is refused now). A job's view is
+  built once per key: callers at the same moment each built their own, and all but the last were
+  left on disk untracked, their hard links keeping evicted inputs' bytes outside the budget. A
+  view handed to a caller holding no pin is kept for that caller a while, renewed at each
+  hand-out, and `GET /v1/inputs/{digest}` holds a pin while it reads: another job's last unpin
+  removed the view under it (a 500), and an eviction between its two looks was a 500 where it is
+  now 404 `input_gone`. A blob write killed mid-way left its temporary file forever - reopening,
+  eviction and `clean` saw only finished blobs; one is removed once no write is in progress on
+  the host and it is older than the store's grace. `cache usage` and `clean` count a hard-linked
+  file once (every export is one, so inputs were counted double). `inputs.open(...).array((a,
+  b))` means `a[a:b]` on every stored form: a mapped copy read a negative start as the zip's
+  header bytes, returned as voxels. The legacy-upload migration runs off the event loop. A
+  command-line export another process just placed is kept rather than deleted and rebuilt under
+  it. And the per-host fetch lock is spread over 4,096 files instead of 256, so two unrelated
+  fetches rarely wait for each other.
 ## [0.14.0] - 2026-09-26
 
 MOOSE models fed the orientation they were trained in, and moosez's body-composition workflow; a

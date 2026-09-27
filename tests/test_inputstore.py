@@ -273,11 +273,8 @@ class OneFetchPerHost(_Base):
 
     def test_a_cancelled_wait_raises_from_the_check(self):
         import fcntl
-        key = key_for("idc:abc")
-        import hashlib
-        stripe = int.from_bytes(hashlib.sha256(key.encode()).digest()[:4], "big") % 256
         self.store.locks.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.store.locks / f"{stripe:03d}", os.O_RDWR | os.O_CREAT)
+        fd = os.open(self.store.economy_lock_file(key_for("idc:abc")), os.O_RDWR | os.O_CREAT)
         fcntl.flock(fd, fcntl.LOCK_EX)          # another process's fetch, as far as it knows
         try:
             def check():
@@ -310,11 +307,8 @@ class TheEconomyLockGivesWay(_Base):
 
     def test_a_lock_held_forever_elsewhere_is_waited_out(self):
         import fcntl
-        import hashlib
-        key = key_for("idc:abc")
-        stripe = int.from_bytes(hashlib.sha256(key.encode()).digest()[:4], "big") % 256
         self.store.locks.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self.store.locks / f"{stripe:03d}", os.O_RDWR | os.O_CREAT)
+        fd = os.open(self.store.economy_lock_file(key_for("idc:abc")), os.O_RDWR | os.O_CREAT)
         fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             with mock.patch.object(inputstore, "ECONOMY_WAIT_S", 0.3):
