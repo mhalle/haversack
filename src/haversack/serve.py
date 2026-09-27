@@ -216,10 +216,17 @@ _ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack 
 #: narrower than the network's patch is grown to it with real voxels, where the sliding
 #: window padded it with normalized 0 (the model's mean tissue); and a crop that saves no
 #: tiles runs the whole volume. Each changes labels under an unchanged key.
+#: 4 (2026-09-27, 0.15.0, the user's call): the reader. MONOCHROME1 and an unapplied
+#: Modality LUT read as the values the file means, each frame of an Enhanced file with its
+#: own rescale, a series of mixed rescales without wrapping; a decode that disagrees with
+#: pydicom and a truncated .nii.gz are refused. The input copies re-fetch themselves
+#: (READER_VERSION 4) but a result's key holds the source identifier, not the reader, so a
+#: result computed from a misread input would be served on. Most results recompute to the
+#: same bytes; none is served from a read this build would not make.
 #:
 #: A change that only ONE engine's arithmetic sees bumps that engine's
 #: ``Engine.cache_epoch`` instead (2026-09-12), so the other engines keep their results.
-CACHE_EPOCH = "3"
+CACHE_EPOCH = "4"
 
 
 def result_key(identity, task, options, weights_versions, epoch=None, kind: str = "segment") -> str:
