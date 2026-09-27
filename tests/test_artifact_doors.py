@@ -344,7 +344,8 @@ def test_a_405_names_the_methods_of_the_url_asked_about(tmp_path, monkeypatch):
     assert allow(twin, "POST", f"{BASE}/labels.seg.nrrd") == "GET, HEAD"
     assert allow(client, "GET", BASE) == "DELETE"          # the bare task: evict only
     assert allow(client, "POST", "/v1/jobs/abc/preview.png") == "GET, HEAD"
-    assert allow(client, "PUT", "/v1/jobs/abc") == "DELETE, GET"
+    # HEAD beside GET on a job's status since 2026-09-26 (RFC 9110 9.3.2)
+    assert allow(client, "PUT", "/v1/jobs/abc") == "DELETE, GET, HEAD"
     ex.close()
 
 

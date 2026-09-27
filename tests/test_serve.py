@@ -320,8 +320,11 @@ def test_eviction_bounds_finished_jobs(tmp_path):
         except AssertionError:
             pass                                           # early ones may evict mid-wait
     time.sleep(0.1)
-    alive = [j["id"] for j in client.get("/v1/jobs").json()["jobs"]]
+    listed = client.get("/v1/jobs").json()["jobs"]
+    alive = [j["id"] for j in listed if not j.get("evicted")]
     assert len(alive) == 2 and ids[-1] in alive
+    # the evicted ones are still listed from the job store, as they answer by id (2026-09-26)
+    assert sorted(j["id"] for j in listed) == sorted(ids)
 
 
 def test_bad_options_and_unknown_job(tmp_path):
@@ -3263,8 +3266,10 @@ def test_a_hostile_archive_cannot_escape_or_explode(tmp_path):
     _, ex, client = make(tmp_path)
     z = tmp_path / "evil.zip"
     with zipfile.ZipFile(z, "w") as f:
-        f.writestr("../../../etc/passwd", b"pwned")
-        f.writestr("/abs/IM1.dcm", b"slice")
+        # members a reader could identify (an NRRD header): since 2026-09-26 a tree of
+        # nothing readable is refused before it is stored, and this is about the paths
+        f.writestr("../../../etc/passwd", b"NRRD0004\n# pwned\n")
+        f.writestr("/abs/IM1.dcm", b"NRRD0004\n# slice\n")
     body = client.post("/v1/inputs",
                        files={"archive": ("evil.zip", z.read_bytes())}).json()
     where = ex.content.resolve(body["digest"])

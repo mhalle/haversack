@@ -61,8 +61,9 @@ exported for the client never becomes a server's - nor changes a Modal deploymen
 
 Three rules decide every request, and they are the same on the local server and on Modal.
 
-**A token computes; anonymous reads.** Authorization is `Authorization: Bearer <token>`,
-and every server has a token: the one you gave it, or the one it generated and left in a
+**A token computes; anonymous reads.** Authorization is `Authorization: Bearer <token>` (the
+scheme in any case, `bearer` as well; the token exactly), and a 401 says so in
+`WWW-Authenticate: Bearer`. Every server has a token: the one you gave it, or the one it generated and left in a
 file only your user can read. Without the token a caller can read health, the version, the
 task list and descriptions, the sources, and any result already in the cache - and nothing
 else. Anonymous never computes and never stores, so it never spends your GPU or your disk.
@@ -105,8 +106,14 @@ either a `file` part - shorthand that stays valid - or a `source` JSON list, one
 declared input role: `{"kind": "upload"}`, `{"kind": "input", "sha256": ...}` for content the
 server already holds, a hosted identifier such as `{"kind": "idc", "crdc_series_uuid":
 ...}`, or `{"kind": "result", "id": "<key>"}` for a result this server computed (see
-"Results as inputs"). Options are validated at submit against the task's published parameter schema, and
-sources are bound to the task's declared inputs by role name, never by position, so a wrong
+"Results as inputs"). Options are validated at submit against the task's published parameter schema - its ranges
+and types, strictly: `"1.5"` is not a number and `"yes"` is not a boolean - and `folds` and
+`configuration` against what the task's installed model has (a task not installed yet is
+checked when its weights arrive, by the run). Sources are bound to the task's declared inputs
+by role name, never by position, and each input's kind is checked against its role's: a label
+map sent as an upload or named by its digest is refused from an image role with 422
+`wrong_input_kind`, as a `result:` reference of the same bytes is. A `file` part beside a
+`source` list that names no upload is ambiguous and refused (422 `ambiguous_input`). So a wrong
 request is refused with a 422 naming the problem rather than failing minutes later in a
 worker. An optional `deliverables` JSON list says what is rendered beside the labels (see
 "Deliverables"). On the local server the queue is a bounded FIFO (`--max-pending`, default 16) and
@@ -123,13 +130,19 @@ plus `deliverables` - what this job renders beside its labels - and a `links` ob
 deliverables this job was asked for. For a path-addressable result those three (and `labels`)
 are its paths; for a result with no path - an upload's, a `result:` reference's, a multi-input
 job's, options off the grid menu - they are the job's own artifact routes, below. Follow the
-links rather than building URLs.
+links rather than building URLs. A path link names the key's CURRENT publication, which is
+what makes it shareable and anonymous: after a `Cache-Control: no-cache` recompute it serves
+the new bytes, and after a `DELETE` of the result it is 404. `result` - and the job's own
+artifact routes, `/v1/jobs/{id}/meta.json` and the rest - are this job's own: they serve the
+job's bytes while it keeps them, and say what changed when it does not.
 
 `GET /v1/jobs/{id}/events` is Server-Sent Events: each event is the same status snapshot,
 so a dropped stream needs no replay - resubscribe, or poll the status URL. `GET
 /v1/jobs/{id}/result` returns the labels as `.seg.nrrd` (names, colors, extents, and the
-full provenance in the header); `?format=nii.gz` converts on the way out and is the lossy
-option. The result's `ETag` is its content digest, so `If-None-Match` gets a 304. A job that
+full provenance in the header); `?format=nii.gz` (or `nii`, uncompressed) converts on the way
+out and is the lossy option, `?format=seg.nrrd` says the default, and any other value is a 422
+naming these. The result's `ETag` is its content digest, so `If-None-Match` gets a 304; a
+converted one's is a weak tag of that digest and the format, the same on every request. A job that
 is not done answers 409; a result whose bytes were purged answers 410. A server that cannot
 yet see a finished result - on Modal, the api container's view of the result volume can trail
 the worker's publication - answers 503 with `Retry-After` instead: retry it, it is not gone.
@@ -156,10 +169,13 @@ served from the result cache's entry for that key - the same bytes the path surf
 and from the job's own copy only when there is no entry or the key has since been recomputed
 to different bytes. The download does not honor `Range`. On the local
 server the record itself keeps answering `GET /v1/jobs/{id}` (marked `evicted`) after it
-leaves memory or the server restarts, until `DELETE` removes it; Modal's records live in
-its job store for `HAVERSACK_JOBS_TTL_H`. `DELETE` cancels an active job or deletes a
-finished one; the local server reports a running job as `cancelling` and moves it to
-`cancelled` at the next patch, while Modal reports `cancelled` at once.
+leaves memory or the server restarts, until `DELETE` removes it, and `GET /v1/jobs` lists it
+too, in its brief form; Modal's records live in its job store for `HAVERSACK_JOBS_TTL_H`.
+`DELETE` cancels an active job or deletes a finished one; the local server answers a running
+job with `{"cancelling": true, "state": "running"}` and moves it to `cancelled` at the next
+patch, while Modal reports `cancelled` at once. A done job's `progress` says `done` at 1.0. A
+failed job's `error` names the file it could not use, never where the server keeps it (the
+whole message is in the server's log).
 
 Job records are durable: a sqlite `jobs.db` in the work directory outlives the process, so a
 restart re-queues what was queued instead of dropping it and reclaims job directories no
@@ -243,7 +259,8 @@ result recomputed with `no-cache` moves to the head, and nothing a READ does mov
   last page. It is a position, not an offset, so pages stay put while results are published:
   what is published (or republished) after your first page sorts ahead of it and is at the
   head of your next listing - never a repeated row, never a shifted one. A cursor the server
-  did not issue is a 422.
+  did not issue is a 422, and so is one it issued for another listing or other filters: a
+  position is a place in one ordered set.
 - **`identity`** keeps the results computed from one input: `<source>:<identifier>` for a
   source from `/v1/sources` with a path surface, or a content digest (`sha256:<hex>`, what an
   upload's job reports as its `input_identity`). Repeat it, up to 100 times, for several
@@ -316,8 +333,9 @@ authorized GET with `Prefer`, with the deployment's set.)
 `GET /v1/sources` lists what this server can fetch for itself and the identifier grammar of
 each: `idc` (NCI Imaging Data Commons, by crdc_series_uuid), `tcia` (by SeriesInstanceUID),
 `openneuro` (`ds<number>/<file path>`), `zenodo` (`<record>/<file>`, `!member` for a file
-inside a zip), `hf` (Hugging Face, `<owner>/<repo>@<revision>/<path>`), `s3` (`<bucket>/<key>`,
-where the bucket must be one the server serves - the response lists them) and `github`
+inside a zip), `hf` (Hugging Face, `<owner>/<repo>@<revision>/<path>`), `s3` (`<bucket>/<key>`)
+and `gs` (Google Cloud Storage, `<bucket>/<object>`), each only for a bucket the server serves -
+the response lists them - and `github`
 (`<owner>/<repo>@<tag>/<asset>`, the tag required). A server that keeps a result cache also
 lists `result` - not a repository but a result this server computed, named by its key (see
 "Results as inputs"). Each entry carries its `prefix`, `id_pattern`, `description`, whether it
@@ -332,7 +350,10 @@ stores a single file, checking the digest against the bytes and refusing anythin
 identify as a medical image (NIfTI, NRRD, MetaImage, DICOM - a blob nothing can open is a
 job that was always going to fail, so it fails here); `POST /v1/inputs` stores a multi-file
 input such as a DICOM series as one tree whose digest is taken over its members, so the same
-series zipped twice is the same identity. `POST /v1/inputs` with a `from_job=<id>` form
+series zipped twice is the same identity - and refuses, with 422 `unknown_format`, several
+files of which none is a DICOM instance or an image header, and with 400 a multipart body its
+parser cannot read, as `POST /v1/jobs` does. A digest is read in either case (`sha256:ABC...`
+is `sha256:abc...`) at every door that takes one. `POST /v1/inputs` with a `from_job=<id>` form
 field promotes a job's result into the store, so one job's output becomes another's input
 without the bytes passing through the client. No route ever hands input bytes back. All of it is authorized only.
 
@@ -599,16 +620,16 @@ VoxTell. `parameters.processing` is haversack's, offered only where haversack ow
 
 | option | meaning |
 |---|---|
-| `grid` | output grid: `"input"` (default), `"model"` for the network's own spacing, or an isotropic size in mm |
+| `grid` | output grid: `"input"` (default), `"model"` for the network's own spacing, or an isotropic size in mm, 0.1 to 50; an output of more than 2^31 - 1 voxels (a fine grid over a long field of view) fails the job before it allocates |
 | `interp` | how the result is restored to the output grid: `linear` (sub-voxel boundaries) or `nearest` |
-| `envelope_mm` | crop the network's field of view to this margin around the body, in mm: faster, and not the same labels. Unset, `0` or `null` runs the whole volume (the default) |
-| `folds` | which trained folds to ensemble |
-| `configuration` | nnU-Net configuration, when a model ships more than one |
+| `envelope_mm` | crop the network's field of view to this margin around the body, in mm (0 to 500): faster, and not the same labels. Unset, `0` or `null` runs the whole volume (the default) |
+| `folds` | which trained folds to ensemble: a non-empty list of distinct fold numbers the installed model has |
+| `configuration` | nnU-Net configuration, when a model ships more than one; one the installed model does not have is refused |
 | `resampling_order` | spline order of the forward resample |
 | `convention` | grid-alignment convention; `auto` follows the model's lineage |
 
 `{"grid": 1}` and the `_res-1mm` path token are the same request. `{"no_cache": true}` in the
-options is the same as the header.
+options is the same as the header; it is a JSON boolean, and anything else is a 422.
 
 ## Storage and caches
 
@@ -759,26 +780,31 @@ authenticated deployment is the Modal one.
 ## Routes
 
 The complete list; `/docs` has every parameter and schema. Auth: `read` works anonymously,
-`token` needs the bearer token.
+`token` needs the bearer token. A `HEAD` of a service route or a job's status sends the
+`GET`'s headers and no body; those four `HEAD`s are left out of `/openapi.json`.
 
 | method | path | auth | what |
 |---|---|---|---|
 | GET | `/v1/health` | read | readiness |
+| HEAD | `/v1/health` | read | the same, no body |
 | GET | `/v1/version` | read | what is deployed |
 | GET | `/v1/tasks` | read | task names |
+| HEAD | `/v1/tasks` | read | the same, no body |
 | GET | `/v1/tasks/<task>` | read | describe a task |
 | GET | `/v1/encoders` | read | the encoders `kind=embed` jobs run: lattices, license, citation, installed |
 | GET | `/v1/segments` | read | which tasks produce a segment, and with what label value |
 | POST | `/v1/tasks/<task>/prepare` | token | install a task's weights now |
 | GET | `/v1/sources` | read | the hosted sources (and `result`), their identifier grammar, and which have a path surface |
+| HEAD | `/v1/sources` | read | the same, no body |
 | GET | `/v1/segmentations` | token | cached results, newest first: `identity`, `task`, `limit`, `cursor` |
 | GET | `/v1/embeddings` | token | cached embedding fields, newest first: `identity`, `encoder`, `limit`, `cursor` |
 | GET | `/v1/rankfields` | token | cached ranked stores, newest first: `identity`, `task`, `limit`, `cursor` |
 | POST | `/v1/jobs` | token | submit |
 | GET | `/v1/jobs` | token | brief status of every known job |
 | GET | `/v1/jobs/<id>` | token | full status, result metadata, links |
+| HEAD | `/v1/jobs/<id>` | token | the same, no body |
 | GET | `/v1/jobs/<id>/events` | token | status snapshots as Server-Sent Events |
-| GET | `/v1/jobs/<id>/result` | token | the labels (`?format=nii.gz` converts), or an embedding job's field |
+| GET | `/v1/jobs/<id>/result` | token | the labels (`?format=nii.gz` or `nii` converts), or an embedding job's field |
 | HEAD | `/v1/jobs/<id>/result` | token | the same, no body: status, `ETag`, length (none with `?format=`, which a HEAD does not convert) |
 | GET | `/v1/jobs/<id>/meta.json` | token | the job's result: provenance and structure names |
 | HEAD | `/v1/jobs/<id>/meta.json` | token | the same, no body |
@@ -795,7 +821,7 @@ The complete list; `/docs` has every parameter and schema. Auth: `read` works an
 | HEAD | `/v1/<source>/<identifier>/<task>/labels.seg.nrrd` | read | probe: cached, in flight, absent |
 | GET | `/v1/<source>/<identifier>/<task>/labels.seg.nrrd` | read, `Prefer` needs token | the labels |
 | DELETE | `/v1/<source>/<identifier>/<task>` | token | drop the cached result and every artifact |
-| DELETE | `/v1/<source>/<identifier>/<task>/labels.seg.nrrd` | token | the same, addressed by the labels file |
+| DELETE | `/v1/<source>/<identifier>/<task>/labels.seg.nrrd` | token | the same, addressed by the labels file (on any other file here, 405: those have `GET` and `HEAD`) |
 | GET | `/v1/<source>/<identifier>/<task>/meta.json` | read | provenance and structure names |
 | HEAD | `/v1/<source>/<identifier>/<task>/meta.json` | read | the same, no body |
 | GET | `/v1/<source>/<identifier>/<task>/preview.png` | read | a rendered preview |

@@ -10,6 +10,13 @@ from .mapping import Mapping
 
 CONVENTIONS = ("corner", "center")
 
+#: The most voxels an isotropic output grid may have (2026-09-26): what a 32-bit index
+#: addresses, and past what any restore here can place (the Triton kernel's output index is
+#: 32-bit). A server's `grid` option is bounded in mm, but a fine spacing over a whole-body
+#: field of view is only knowable once the input is read - here - and without this a
+#: `{"grid": 0.1}` on a long CT asked for tens of billions of voxels before failing.
+MAX_OUTPUT_VOXELS = 2**31 - 1
+
 
 def _grid_meta(g: Grid | None) -> dict | None:
     return None if g is None else {"shape": [int(v) for v in g.shape],
@@ -103,7 +110,14 @@ class Frame:
             return self.model_grid()
         if isinstance(grid, Grid):
             return grid
-        return Grid.isotropic(float(grid), like=self.source)
+        out = Grid.isotropic(float(grid), like=self.source)
+        n = int(np.prod([int(x) for x in out.shape], dtype=np.int64))
+        if n > MAX_OUTPUT_VOXELS:
+            from .errors import InputError
+            raise InputError(f"an isotropic {float(grid):g} mm grid over this input's field of view "
+                             f"is {'x'.join(str(int(x)) for x in out.shape)} = {n:,} voxels, past "
+                             f"the {MAX_OUTPUT_VOXELS:,} an output may have; choose a coarser grid")
+        return out
 
     def to_meta(self) -> dict:
         """Plain JSON for this frame - the spatial extent an artifact has to carry.
