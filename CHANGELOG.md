@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- **rankfield, labelfield and feldglas are unpinned for now**: each tracks its `main` (in
+  pyproject and in CI), so a fix in one reaches haversack without a release of every package in
+  the chain. labelfield 0.1.2 on main evaluates the voxel-center rule as scipy does (nearest picks
+  at exact half-way ties are scipy's). duckn stays pinned.
+
 - **Pins: rankfield v0.3.8, labelfield v0.1.1, feldglas v0.2.3, duckn v0.6.2.** rankfield 0.3.8
   takes its geometry from labelfield, so a restore from a rank-field store and the live restore
   now decide with the same code, including the tightened nearest edge rule. labelfield is a direct

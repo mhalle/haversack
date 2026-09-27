@@ -175,10 +175,17 @@ class EveryGitSourceIsPinnedToSomethingReal(unittest.TestCase):
     floating branch and the placeholder shape, which is what a hand-edited pin looks like.
     """
 
+    #: haversack's own siblings, deliberately tracking their main for now (2026-09-27, the user's
+    #: call): a fix in labelfield or rankfield would otherwise need a release of every package in
+    #: the chain (rankfield -> feldglas -> haversack) before haversack sees it. Nothing else floats;
+    #: an engine source still has to be pinned. Pin these again when the chain settles.
+    FLOATING_FOR_NOW = {"rankfield", "feldglas"}
+
     def test_every_git_source_is_pinned_by_tag_or_revision(self):
         sources = _pyproject()["tool"]["uv"]["sources"]
         unpinned = sorted(n for n, spec in sources.items()
-                          if "git" in spec and not ({"tag", "rev"} & set(spec)))
+                          if "git" in spec and not ({"tag", "rev"} & set(spec))
+                          and n not in self.FLOATING_FOR_NOW)
         self.assertEqual([], unpinned,
                          f"git sources with no tag or rev: {unpinned} - a floating branch "
                          "makes a sync unreproducible")

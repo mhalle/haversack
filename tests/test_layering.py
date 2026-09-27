@@ -332,7 +332,8 @@ class TestLayering(unittest.TestCase):
         Only CI's entries are checked against pyproject, not the reverse: the engine extras
         (fastsurfer-lean, voxtell, synthstrip-torch) are git sources CI deliberately does not
         install. A dependency pyproject declares as a direct reference (``name @ git+URL@ref``
-        in ``[project]``, as labelfield is since 2026-09-27) is checked the same way.
+        in ``[project]``, as labelfield is since 2026-09-27) is checked the same way, and an
+        unpinned one (no ``@ref``, tracking the default branch) must be unpinned in both.
         """
         import re
         import tomllib
@@ -348,11 +349,11 @@ class TestLayering(unittest.TestCase):
         for extra in project["project"].get("optional-dependencies", {}).values():
             declared_deps += extra
         for dep in declared_deps:                  # direct references: name @ git+URL@ref
-            m = re.match(r"\s*([A-Za-z0-9_.-]+)\s*@\s*git\+([^@\s]+)@(\S+)\s*$", dep)
+            m = re.match(r"\s*([A-Za-z0-9_.-]+)\s*@\s*git\+([^@\s]+)(?:@(\S+))?\s*$", dep)
             if m:
                 sources.setdefault(m.group(1), {"git": m.group(2), "tag": m.group(3)})
-        ci = re.findall(r"'([A-Za-z0-9_.-]+) @ git\+([^@']+)@([^']+)'",
-                        workflow.read_text(encoding="utf-8"))
+        ci = [(n, u, r or None) for n, u, r in
+              re.findall(r"'([A-Za-z0-9_.-]+) @ git\+([^@']+)(?:@([^']+))?'", workflow.read_text(encoding="utf-8"))]
         self.assertTrue(ci, "no git-pinned installs found in the workflow - has the install "
                             "list changed shape? This guard reads it as text.")
 
