@@ -60,9 +60,15 @@ def check_ops(ops, where: str = "postprocess") -> tuple:
     return tuple(out)
 
 
+def _representable(labels: np.ndarray, classes) -> list:
+    """The classes a label map of this dtype can hold: a larger value cannot be present."""
+    top = np.iinfo(labels.dtype).max if np.issubdtype(labels.dtype, np.integer) else None
+    return [int(c) for c in classes if top is None or 0 < int(c) <= top]
+
+
 def keep_largest(labels: np.ndarray, classes) -> np.ndarray:
     """Per class, keep its largest face-connected piece; in place, returned."""
-    for c in classes:
+    for c in _representable(labels, classes):
         mask = labels == c
         if not mask.any():
             continue
@@ -101,7 +107,10 @@ def remove_small(labels: np.ndarray, classes, max_voxels: float) -> np.ndarray:
     if classes == "all":
         masked = labels
     else:
-        masked = np.where(np.isin(labels, np.asarray(list(classes), dtype=labels.dtype)), labels, 0)
+        classes = _representable(labels, classes)
+        if not classes:
+            return labels
+        masked = np.where(np.isin(labels, np.asarray(classes, dtype=labels.dtype)), labels, 0)
     pieces, n = _pieces(np.ascontiguousarray(masked))
     if n == 0:
         return labels
@@ -115,9 +124,14 @@ def remove_small(labels: np.ndarray, classes, max_voxels: float) -> np.ndarray:
 def remove_outside(labels: np.ndarray, mask: np.ndarray, iterations: int) -> np.ndarray:
     """Zero every voxel outside ``mask`` dilated ``iterations`` times with the face structure -
     upstream's ``remove_outside_of_mask`` (``binary_dilation(mask, iterations=addon)``); in
-    place, returned. ``iterations`` 0 uses the mask as it is."""
-    keep = _ndimage().binary_dilation(mask, structure=_faces(), iterations=int(iterations)) if iterations > 0 \
-        else mask.astype(bool)
+    place, returned. ``iterations`` 0 means what it means to scipy, and so upstream: dilate
+    until nothing changes, which fills the whole image from any nonempty mask (a mean spacing
+    above the dilation in mm - upstream then keeps everything, and so does this)."""
+    if int(iterations) <= 0:
+        if not mask.any():
+            labels[...] = 0
+        return labels
+    keep = _ndimage().binary_dilation(mask, structure=_faces(), iterations=int(iterations))
     labels[~keep] = 0
     return labels
 

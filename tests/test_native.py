@@ -287,3 +287,10 @@ def test_a_checkpoint_missing_from_one_requested_fold_is_named_not_guessed(tmp_p
     (empty / "fold_0").mkdir(parents=True)
     with pytest.raises(ModelNotFound, match="no checkpoint_.*at all"):
         checkpoint_name(empty, (0,))
+
+
+def test_2d_is_not_preferred(tmp_path):
+    """A 2d configuration states two spacings (nnU-Net takes the third from each image), so it
+    is never picked by preference; run alone, TorchModel refuses it by name at load."""
+    ds = _model_tree(tmp_path, ["2d", "3d_lowres"])
+    assert resolve_model_folder(ds).name.endswith("__3d_lowres")

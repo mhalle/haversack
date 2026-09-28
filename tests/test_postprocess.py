@@ -113,9 +113,12 @@ def test_remove_outside_is_upstreams():
     data = speckled((20, 22, 24), 3, 9, density=0.8)
     mask = np.zeros(data.shape, bool)
     mask[8:12, 9:13, 10:14] = True
-    for it in (0, 1, 3):
-        want = ref_remove_outside_of_mask(data.copy(), mask, it) if it else np.where(mask, data, 0)
-        np.testing.assert_array_equal(pp.remove_outside(data.copy(), mask, it), want)
+    for it in (0, 1, 3):                  # 0: scipy dilates until nothing changes - upstream too
+        np.testing.assert_array_equal(pp.remove_outside(data.copy(), mask, it),
+                                      ref_remove_outside_of_mask(data.copy(), mask, it))
+    empty = np.zeros(data.shape, bool)
+    np.testing.assert_array_equal(pp.remove_outside(data.copy(), empty, 0),
+                                  ref_remove_outside_of_mask(data.copy(), empty, 0))
     assert pp.dilation_iterations(10, (1.5, 1.5, 1.5)) == 6       # int(10 / 1.5)
     assert pp.dilation_iterations(10, (3.0, 0.8, 0.8)) == 6       # int(10 / mean 1.533)
 
@@ -128,6 +131,13 @@ def test_apply_converts_mm3_with_the_grids_voxel():
     out = data.copy()
     pp.apply(out, ops, (2.0, 2.0, 2.0))
     assert int((out == 2).sum()) == 5
+
+
+def test_a_class_the_dtype_cannot_hold_is_absent():
+    data = speckled((10, 11, 12), 3, 4)
+    np.testing.assert_array_equal(pp.remove_small(data.copy(), [300], 5.0), data)
+    np.testing.assert_array_equal(pp.keep_largest(data.copy(), [300]), data)
+    np.testing.assert_array_equal(pp.remove_small(data.copy(), [2, 300], 5.0), pp.remove_small(data.copy(), [2], 5.0))
 
 
 def test_malformed_steps_are_refused():

@@ -447,6 +447,11 @@ class TorchModel:
             raise UnsupportedModel(
                 f"{self.folder.name}: plans transpose_backward {declared_bwd} is not the "
                 f"inverse of transpose_forward {self.transpose_forward}")
+        if len(p.configuration_manager.spacing) != 3:
+            # a 2d configuration: nnU-Net keeps each image's own slice spacing, which a spacing
+            # fixed at load cannot state (it came out 0 here, a division by zero downstream)
+            raise UnsupportedModel(f"{self.folder.name}: a 2d configuration "
+                                   "(needs each image's own slice spacing and a slice-wise loop)")
         self.spacing_zyx = canonical_spacing(p.configuration_manager.spacing,
                                              self.transpose_forward)
         if self.transpose_forward != (0, 1, 2) and not allow_transpose:

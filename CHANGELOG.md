@@ -30,6 +30,14 @@ native nnU-Net models (substantially), for TotalSegmentator cascades, and for `b
   `--remove_small_blobs` (200 mm3 by default), run after a task's own steps and before
   remove-outside, as upstream orders them. Face connectivity and upstream's tie rule; sizes
   in mm3 on the output grid. Recorded as `provenance["postprocessing"]`.
+- **A probabilities store says what `segment` did beyond the argmax**: each part's meta carries
+  `export` (a native model's plans resampling for logits) and `task_postprocess` (the task's
+  steps). `haversack restore` does not apply either yet: it restores trilinearly without
+  postprocessing, so for a native model on a thick-slice grid, or for `body`, `body_fast` and
+  `heartchambers_highres`, its labels can differ from `segment`'s at boundaries and removed
+  pieces.
+- **A 2d configuration is refused by name at load**, and never picked by preference. Its plans
+  state two spacings (nnU-Net takes the third from each image); it ran with a slice spacing of 0.
 - **Only TotalSegmentator's input is truncated to integers.** Its `change_spacing` truncates
   (`astype`); every other lineage was truncated too, so a PET SUV, a scaled MRI or an ADC map lost
   its fractional part (values 0-3 came out as 0, 1, 2).

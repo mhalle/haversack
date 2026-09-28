@@ -427,8 +427,10 @@ def weights_root(layout: str = "ts", explicit=None) -> Path:
 # Preference order when a dataset ships several configurations and the caller named none.
 # 3d_fullres is nnU-Net's default and the only one haversack runs today: the cascade needs a
 # lowres prediction as an extra input channel, and 2d needs a slice-wise loop.
-CONFIG_PREFERENCE = ("3d_fullres", "3d_lowres", "2d")
-UNSUPPORTED_CONFIGS = {"3d_cascade_fullres": "needs the 3d_lowres prediction as an extra input channel"}
+CONFIG_PREFERENCE = ("3d_fullres", "3d_lowres")
+UNSUPPORTED_CONFIGS = {"3d_cascade_fullres": "needs the 3d_lowres prediction as an extra input channel",
+                       # its plans state 2 spacings; nnU-Net takes the third from each image
+                       "2d": "needs each image's own slice spacing and a slice-wise loop"}
 
 
 def _dataset_dirs(root: Path, weights_id) -> list[Path]:

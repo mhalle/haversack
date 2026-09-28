@@ -525,6 +525,12 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             convention=convention, reoriented_to_ras=canonical == nio.CANONICAL,
             canonical_orientation=canonical,
             input_orientation=orientation, frame=frame.to_meta(),
+            # what segment() did beyond the argmax, so a reader restoring the store can say how
+            # its labels may differ (2026-09-28): a native model's export interpolation (the
+            # plans' resampling_fn_probabilities: nearest along a separate-z axis of a thick-slice
+            # grid) and the task's postprocessing, which acts on the composited labels
+            **({"export": nnunet_resampling(model, "probabilities")} if native_order else {}),
+            **({"task_postprocess": [dict(op) for op in spec.postprocess]} if spec.postprocess else {}),
             **({"role": role} if role else {}))
         T[f"probabilities:{part}"] = time.perf_counter() - t
 
@@ -763,7 +769,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         t = time.perf_counter()
         arr = labels.cpu().numpy().copy()
         ran = pp.apply(arr, ops, spacing)
-        prov.setdefault("postprocessing", []).extend({"where": where, **r} for r in ran)
+        prov.setdefault("postprocessing", []).extend({"where": where, "grid": "output", **r} for r in ran)
         T[f"postprocess:{where}"] = time.perf_counter() - t
         return torch.from_numpy(arr).to(labels.device)
 
