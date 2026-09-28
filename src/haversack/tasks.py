@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import AmbiguousModel, ModelNotFound, UnsupportedModel
+from .postprocess import check_ops
 from typing import Mapping
 
 WeightsId = int | str
@@ -75,6 +76,17 @@ class CascadeStep:
     crop_axes: tuple[str, ...] = ()
     band_classes: tuple[int, ...] = ()
     band_largest_component: bool = False
+    #: Postprocessing of THIS crop stage's labels before its box is taken
+    #: (:mod:`haversack.postprocess`): upstream cleans a crop model's output with its own task's
+    #: rules - the body model cropping ``abdominal_muscles`` is ``body``'s keep-largest and
+    #: small-extremities removal (2026-09-28).
+    postprocess: tuple = ()
+    #: TotalSegmentator's ``remove_outside``: after the final stage (and after any
+    #: ``remove_small_blobs``), every voxel outside these classes of THIS crop stage's labels,
+    #: dilated by ``remove_outside_mm``, is zeroed - ``heartchambers_highres`` keeps only what
+    #: lies within 10 mm of the heart, aorta and inferior vena cava (2026-09-28).
+    remove_outside_classes: tuple[int, ...] = ()
+    remove_outside_mm: float = 0.0
 
 
 #: The anatomical axes a cascade crop may be limited to, as ``CascadeStep.crop_axes`` names
@@ -170,6 +182,10 @@ class TaskSpec:
     #: the label map, and a model emitting anything else is refused (2026-09-22). Stated tasks'
     #: result keys carry ``auxiliary=0`` (``serve.weights_versions_of``).
     auxiliary: Mapping[int, str] = field(default_factory=dict)
+    #: Postprocessing of the task's labels (:mod:`haversack.postprocess`), upstream's per-task
+    #: rules: ``body`` keeps its largest trunk and drops small extremities (2026-09-28). Empty
+    #: for every task upstream leaves as the network made it.
+    postprocess: tuple = ()
 
     def model_choice(self, weights_id) -> dict:
         """``{"trainer"?, "plans"?}`` this task states for ``weights_id`` - the keyword
@@ -269,9 +285,13 @@ def _check_cascade(stages, where: str) -> None:
         if bad or len(set(st.crop_axes)) != len(st.crop_axes):
             raise ValueError(f"{where}: cascade stage {i + 1} crop_axes {list(st.crop_axes)} - "
                              f"each must be one of {ANATOMICAL_AXES}, once")
-        if last and (st.crop_axes or st.band_classes or st.band_largest_component):
-            raise ValueError(f"{where}: cascade stage {i + 1} is the final stage; crop_axes and "
-                             "band_* belong to the crop stage whose labels they read")
+        if last and (st.crop_axes or st.band_classes or st.band_largest_component
+                     or st.postprocess or st.remove_outside_classes):
+            raise ValueError(f"{where}: cascade stage {i + 1} is the final stage; crop_axes, "
+                             "band_*, postprocess and remove_outside_* belong to the crop stage "
+                             "whose labels they read (a task's own postprocessing is the task's)")
+        if st.remove_outside_mm and not st.remove_outside_classes:
+            raise ValueError(f"{where}: cascade stage {i + 1} dilates no remove_outside classes")
         if st.band_largest_component and not st.band_classes:
             raise ValueError(f"{where}: cascade stage {i + 1} asks for the largest component of "
                              "no band classes")
@@ -317,11 +337,16 @@ class TaskCatalog:
         items = list(items.values()) if isinstance(items, dict) else items
         for d in items:
             union = _union_parts(d.get("union"))
+            where = f"{Path(path).name}: {d['name']}"
             cascade = tuple(CascadeStep(weights_id=st.get("weights_id"),
                                         crop_to_classes=tuple(st.get("crop_to_classes") or ()),
                                         dilation_mm=float(st.get("dilation_mm", 10.0)),
                                         crop_from_task=st.get("crop_from_task"),
-                                        union=_union_parts(st.get("union")))
+                                        union=_union_parts(st.get("union")),
+                                        postprocess=check_ops(st.get("postprocess"), where),
+                                        remove_outside_classes=tuple(
+                                            int(c) for c in st.get("remove_outside_classes") or ()),
+                                        remove_outside_mm=float(st.get("remove_outside_mm") or 0.0))
                             for st in d.get("cascade") or ())
             _check_cascade(cascade, f"{Path(path).name}: {d['name']}")
             self._specs[d["name"]] = TaskSpec(
@@ -331,7 +356,8 @@ class TaskCatalog:
                 models=_model_choices(d.get("models"), f"{Path(path).name}: {d['name']}"),
                 step_size=_step_size(d.get("step_size"), f"{Path(path).name}: {d['name']}"),
                 label_map={int(k): str(v) for k, v in (d.get("label_map") or {}).items()},
-                auxiliary=_auxiliary(d, f"{Path(path).name}: {d['name']}"))
+                auxiliary=_auxiliary(d, f"{Path(path).name}: {d['name']}"),
+                postprocess=check_ops(d.get("postprocess"), where))
 
     def get(self, name) -> TaskSpec:
         """A task by name (or the lineage-qualified ``ts:total`` form); a TaskSpec passes through."""

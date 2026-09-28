@@ -36,7 +36,8 @@
    "pleural_pericard_effusion": 50.0,
    "ventricle_parts": 0.0
   },
-  "auxiliary": "2026-09-22: each entry's `auxiliary` is upstream's class_map[\"<task>_auxiliary\"] (map_to_binary.py, 2.13.0 and 2.18.0 alike): classes the model is trained with and the task does not report. Upstream zeroes them after prediction (postprocessing.remove_auxiliary_labels, from nnunet.py); haversack maps every value a TS task's label map does not name to 0 and refuses a model whose unnamed values are not exactly this list. Checked against the checkpoints' dataset.json by range request for every public final-stage model on 2026-09-22: only Dataset 789 (kidney_cysts) has classes beyond its task's label map. appendicular_bones (304) and face_mr (856) are licensed and were not read; renal_arteries_auxiliary has no ts.v2 task."
+  "auxiliary": "2026-09-22: each entry's `auxiliary` is upstream's class_map[\"<task>_auxiliary\"] (map_to_binary.py, 2.13.0 and 2.18.0 alike): classes the model is trained with and the task does not report. Upstream zeroes them after prediction (postprocessing.remove_auxiliary_labels, from nnunet.py); haversack maps every value a TS task's label map does not name to 0 and refuses a model whose unnamed values are not exactly this list. Checked against the checkpoints' dataset.json by range request for every public final-stage model on 2026-09-22: only Dataset 789 (kidney_cysts) has classes beyond its task's label map. appendicular_bones (304) and face_mr (856) are licensed and were not read; renal_arteries_auxiliary has no ts.v2 task.",
+  "postprocessing": "2026-09-28: upstream's per-task postprocessing (nnunet.py _postprocess_multilabel and the remove_outside step): body and body_fast keep the largest body_trunc piece and drop body_extremities pieces of 50000 mm3 or less; abdominal_muscles' crop stage runs the body model, which upstream postprocesses as body (crop_task = \"body\"); heartchambers_highres zeroes everything beyond 10 mm of its crop model's heart (51), aorta (52) and inferior vena cava (63), upstream's remove_outside. tests/test_postprocess.py holds them to upstream"
  },
  "tasks": [
   {
@@ -49,7 +50,22 @@
      "crop_to_classes": [
       1
      ],
-     "dilation_mm": 20.0
+     "dilation_mm": 20.0,
+     "postprocess": [
+      {
+       "op": "keep_largest",
+       "classes": [
+        1
+       ]
+      },
+      {
+       "op": "remove_small",
+       "classes": [
+        2
+       ],
+       "max_mm3": 50000
+      }
+     ]
     },
     {
      "weights_id": 952,
@@ -161,7 +177,22 @@
     "1": "body_trunc",
     "2": "body_extremities"
    },
-   "lineage": "ts"
+   "lineage": "ts",
+   "postprocess": [
+    {
+     "op": "keep_largest",
+     "classes": [
+      1
+     ]
+    },
+    {
+     "op": "remove_small",
+     "classes": [
+      2
+     ],
+     "max_mm3": 50000
+    }
+   ]
   },
   {
    "name": "body_fast",
@@ -172,7 +203,22 @@
     "1": "body_trunc",
     "2": "body_extremities"
    },
-   "lineage": "ts"
+   "lineage": "ts",
+   "postprocess": [
+    {
+     "op": "keep_largest",
+     "classes": [
+      1
+     ]
+    },
+    {
+     "op": "remove_small",
+     "classes": [
+      2
+     ],
+     "max_mm3": 50000
+    }
+   ]
   },
   {
    "name": "body_mr",
@@ -583,7 +629,13 @@
      "crop_to_classes": [
       51
      ],
-     "dilation_mm": 20.0
+     "dilation_mm": 20.0,
+     "remove_outside_classes": [
+      51,
+      52,
+      63
+     ],
+     "remove_outside_mm": 10.0
     },
     {
      "weights_id": 301,

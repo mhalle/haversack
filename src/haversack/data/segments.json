@@ -6350,7 +6350,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "d9cfb3e4422312e2094eaf574838649a8c94743e3223118f0fa8c85681ea5412",
+        "registry_sha256": "f6a90cd7ce092179770359c2296632af0e520d94ff27695891b7c929ef517989",
         "listing": "1"
       },
       "source": {
@@ -6447,8 +6447,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-22",
-        "by": "haversack 0.12.4"
+        "at": "2026-09-28",
+        "by": "haversack 0.16.0rc1"
       }
     },
     "ts.v2:aortic_sinuses": {
@@ -6614,7 +6614,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "06a514d9a3a50ec1784a1474afabb438c35786cd6186ef23811cc541f634da68",
+        "registry_sha256": "17df2261e6e61e08f94f0a4acd6272624a17af30cf697516785c2ab9d63ce068",
         "listing": "1"
       },
       "source": {
@@ -6631,8 +6631,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-28",
+        "by": "haversack 0.16.0rc1"
       }
     },
     "ts.v2:body_fast": {
@@ -6643,7 +6643,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "b4aca695fa16d5f95de7c6081aa9437b3b1a13a000eff244b773bbb2e31f4b83",
+        "registry_sha256": "bba0dc4adfaa9f27f5ed8978a2a53c4227263f714a9c30607ee4c71c384b15b8",
         "listing": "1"
       },
       "source": {
@@ -6660,8 +6660,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-13",
-        "by": "haversack 0.11.0"
+        "at": "2026-09-28",
+        "by": "haversack 0.16.0rc1"
       }
     },
     "ts.v2:body_mr": {
@@ -7383,7 +7383,7 @@
       "modality": "CT",
       "version": {
         "ts_version": "2.13.0",
-        "registry_sha256": "8119624665c59b90827ec80c84c10021dc7508f89efb958173e35e77fba9a9da",
+        "registry_sha256": "9776396b0bc0afb1ddb31a5917d6f08bd0b69305181e463c5e6b8d00bffe6988",
         "listing": "1"
       },
       "source": {
@@ -7420,8 +7420,8 @@
         }
       ],
       "mined": {
-        "at": "2026-09-22",
-        "by": "haversack 0.12.4"
+        "at": "2026-09-28",
+        "by": "haversack 0.16.0rc1"
       }
     },
     "ts.v2:hip_implant": {

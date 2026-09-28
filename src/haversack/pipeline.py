@@ -23,7 +23,9 @@ from .progress import Reporter
 from .weights import as_store
 from .cache import ModelCache
 from .values import LabelSchema
-from .preprocess import normalization_fingerprint, normalize_for, to_model_grid
+from . import postprocess as pp
+from .preprocess import (normalization_fingerprint, normalize_for, nnunet_resampling, to_model_grid,
+                         to_nnunet_input)
 
 
 def _version() -> str:
@@ -92,6 +94,21 @@ def band_of(labels, classes, axes, *, largest_component: bool):
             mask = comp == (int(np.argmax(sizes)) + 1)
     idx = np.nonzero(mask)
     return {int(k): (int(idx[k].min()), int(idx[k].max()) + 1) for k in axes}
+
+
+def mask_on_grid(mask, source, grid):
+    """A boolean ``mask`` on the ``source`` grid, sampled at ``grid``'s voxel centers by the
+    nearest source voxel (False outside the source). Both grids live in one canonical frame
+    (``Grid`` carries no direction), so on the source grid itself this is the mask."""
+    index = []
+    valid = []
+    for k in range(3):
+        centers = grid.origin[k] + np.arange(grid.shape[k]) * grid.spacing[k]
+        i = np.floor((centers - source.origin[k]) / source.spacing[k] + 0.5).astype(np.int64)
+        valid.append((i >= 0) & (i < source.shape[k]))
+        index.append(np.clip(i, 0, source.shape[k] - 1))
+    out = mask[np.ix_(*index)]
+    return out & valid[0][:, None, None] & valid[1][None, :, None] & valid[2][None, None, :]
 
 
 def keep_band(labels, band, source, grid):
@@ -202,7 +219,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             folds=(0,), accumulate: str = "auto", resampling_order: int = 3, batch_size="auto",
             envelope_mm: float | None = None, configuration: str | None = None,
             allow_transpose: bool = False,
-            probabilities=None,
+            probabilities=None, remove_small_blobs=False,
             models=None, cancel=None, progress=None):
     """Segment an image with a task from the toolkit's catalog.
 
@@ -219,8 +236,10 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
 
     ``device`` defaults to ``"auto"``: CUDA, then MPS, then CPU.
 
-    ``resampling_order`` is the spline order of the forward resample; 3 (cubic) matches what
-    nnU-Net trained the models with. TotalSegmentator 2.x defaulted to 1 for speed (a mild
+    ``resampling_order`` is the spline order of a TotalSegmentator model's forward resample; 3
+    (cubic) matches what nnU-Net trained the models with. A native nnU-Net model follows its own
+    plans instead (``resampling_fn_data_kwargs``, recorded per model in the provenance as
+    ``resampling``), as nnU-Net's preprocessor does. TotalSegmentator 2.x defaulted to 1 for speed (a mild
     train/test mismatch that grows with the downsampling factor); its v3 branch defaults to 3
     again, since its forward resample runs on the GPU (2026-09-09).
 
@@ -241,6 +260,13 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     distribution is encoded from its logits (before the restore frees them) and handed to the
     spec's sink as a :class:`~haversack.ranked.RankedCode` on that model's own grid. Off by
     default: labels are a fraction of the size and most callers want only those.
+
+    ``remove_small_blobs`` is TotalSegmentator's ``--remove_small_blobs``: every class's
+    face-connected pieces of 200 mm3 or less (a number: that many mm3) are zeroed in the result,
+    after the task's own postprocessing and before a ``remove_outside`` step, as upstream orders
+    them. Off by default, as upstream's is. A task's own postprocessing (``body``'s largest trunk,
+    ``heartchambers_highres``' remove-outside: :mod:`haversack.postprocess`) always runs; the
+    probabilities are the network's, before any of it.
 
     ``cancel`` is a :class:`~haversack.progress.CancelToken`; the run stops at the next patch
     boundary. ``progress`` is called with a :class:`~haversack.progress.Progress` snapshot (which
@@ -303,12 +329,16 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     if convention == "auto":
         convention = "center" if nnunet_preproc else "corner"
     crop_nonzero = nnunet_preproc
+    # a native model on its own preprocessing (the center rule) gets nnU-Net's order as well
+    native_order = nnunet_preproc and convention == "center"
     canonical = canonical_orientation_for(spec, store, configuration=configuration)
     reorient = canonical is not None
     schema = LabelSchema(names={int(k): str(v) for k, v in spec.label_map.items()})
     prov = {"task": spec.name, "lineage": spec.lineage, "device": device, "dtype": dtype,
             "accumulate": accumulate, "deviations": [],
             "convention": convention, "reoriented_to_ras": canonical == nio.CANONICAL,
+            # nnU-Net's own (crop, normalize, resample) or TotalSegmentator's (resample, normalize)
+            "preprocessing_order": "nnunet" if native_order else "resample-first",
             "canonical_orientation": canonical, "interp": interp,
             "envelope_mm": envelope_mm, "resampling_order": resampling_order, "models": [],
             "weights_store": store.describe(),
@@ -357,6 +387,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                                "folds": list(available_folds(folder, folds)), "K": m.K,
                                "spacing": tuple(round(v, 4) for v in m.spacing_zyx),
                                **step,
+                               **({"resampling": nnunet_resampling(m, "data")} if native_order else {}),
                                **({"transpose_forward": list(m.transpose_forward),
                                    "transpose_validated": False}
                                   if m.transpose_forward != (0, 1, 2) else {})})
@@ -372,6 +403,18 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         normalization-free grid and normalizing per model keeps the one resample per spacing that
         the cache is for, without that.
         """
+        if native_order:
+            # nnU-Net's own order - crop, normalize, resample - so the input is this model's
+            # alone; models with the same normalization and resampling share it (2026-09-28)
+            key = ("nnunet", tuple(model.spacing_zyx), normalization_fingerprint(model),
+                   tuple(sorted(nnunet_resampling(model, "data").items())), str(device), box)
+            if key not in cached:
+                cached[key] = to_nnunet_input(data_zyx, geometry, model, device=device,
+                                              original_orientation=orientation, box=box)
+            x, fr = cached[key]
+            y = x.clone()                              # predict_into may crop it; keep the cache clean
+            y._haversack_normalization = x._haversack_normalization
+            return y, fr
         # TotalSegmentator truncates its resampled image to int32; nothing else does
         truncate = spec.lineage == "ts"
         key = (tuple(model.spacing_zyx), convention, resampling_order, crop_nonzero, str(device), box, truncate)
@@ -485,6 +528,29 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             **({"role": role} if role else {}))
         T[f"probabilities:{part}"] = time.perf_counter() - t
 
+    def nnunet_export_interp(model, ogrid, weights):
+        """The interpolation nnU-Net's export applies to this model's logits on the way to
+        ``ogrid`` (``resampling_fn_probabilities``): linear, except along a separate-z axis,
+        which it samples with ``order_z`` (nearest by default) - the case of a thick-slice
+        output grid. An in-plane order labelfield cannot do (above 1) stays linear and is
+        recorded as a deviation."""
+        from .resample import separate_z_axis
+        r = nnunet_resampling(model, "probabilities")
+        axis = separate_z_axis(tuple(model.spacing_zyx), tuple(ogrid.spacing), r["force_separate_z"])
+        plane = "nearest" if int(r["order"]) == 0 else "linear"
+        if int(r["order"]) > 1:
+            from .result import deviation
+            d = deviation("logit resampling order", str(r["order"]), "1 (linear)",
+                          "the fused restore interpolates linearly or nearest")
+            if d not in prov["deviations"]:
+                prov["deviations"].append(d)
+        if axis is None:
+            return plane
+        along = "nearest" if int(r["order_z"]) == 0 else "linear"
+        how = tuple(along if a == axis else plane for a in range(3))
+        prov.setdefault("restore_separate_z", {})[str(weights)] = {"axis": axis, "interp": list(how)}
+        return how
+
     def predict_into(model, x, frame, ogrid, env, *, lut, paint, out, part="", weights=None,
                      restore=None, label_task=None, role=None):
         # tripwire: `x` must carry THIS model's normalization. Several models share one resample,
@@ -504,6 +570,9 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         mapping = frame.mapping(ogrid)
         if not env.is_whole():
             mapping = mapping >> Mapping((1.0, 1.0, 1.0), tuple(-float(v) for v in env.start))
+        how = restore or interp
+        if native_order and restore is None and interp == "linear":
+            how = nnunet_export_interp(model, ogrid, weights)
         choice = backends.select("auto", logits.device, tuple(logits.shape), tuple(ogrid.shape))
         if choice.fallback:
             # the fused kernel cannot address this field, so the slower torch backend restores
@@ -513,7 +582,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             d = deviation("restore backend", "auto", "torch", choice.fallback)
             if d not in prov["deviations"]:                 # parts on one grid say it once
                 prov["deviations"].append(d)
-        to_labels(logits, ogrid, mapping, interp=restore or interp, outside="background", lut=lut, paint=paint,
+        to_labels(logits, ogrid, mapping, interp=how, outside="background", lut=lut, paint=paint,
                   out=out, backend=choice.name)
         if device == "cuda":
             torch.cuda.synchronize()
@@ -582,7 +651,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         except LookupError:
             return None
 
-    def run_cascade(spc, tag, *, out_grid=None, restore=None):
+    def run_cascade(spc, tag, *, out_grid=None, restore=None, deferred=None):
         """TotalSegmentator's crop, as upstream runs it (2026-09-22). Each stage before the last
         labels the whole image (inside any box already found), restored nearest-neighbor onto
         the input grid as upstream restores its crop model; the box of its crop classes, widened
@@ -598,6 +667,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         upstream, zygomatic arches labeled beyond upstream's box."""
         box = None
         bands = []                           # (source grid, {axis: (lo, hi)}) - MOOSE's restrict_fov
+        outside = []                         # (source grid, mask, mm, where) - TS's remove_outside
         stages = spc.cascade
         report.n_parts = max(report.n_parts, len(stages) - 1 + max(1, len(stages[-1].union)))
         for i, step in enumerate(stages):
@@ -614,6 +684,10 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                                     fr.source, og)
                 for source, band in bands:
                     out = keep_band(out, band, source, og)
+                if deferred is None:                 # a nested cascade finishes its own
+                    out = apply_remove_outside(out, outside, og)
+                else:                                # the task's: after remove_small_blobs
+                    deferred.extend(outside)
                 return out, fr, og
             if step.crop_from_task is not None:
                 report.stage("cascade", f"{tag} stage {i + 1}/{len(stages)}: crop from {step.crop_from_task!r}")
@@ -643,7 +717,14 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                              restore="nearest", label_task=stage_task(spc, i), role="crop")
                 T[f"network:{tag}:s{i}"] = time.perf_counter() - t
                 models.release(model)
-            crop_labels = labels_in.cpu().numpy()
+            crop_labels = labels_in.cpu().numpy().copy()
+            if step.postprocess:                 # a crop model's own task rules (body's, 2026-09-28)
+                ran = pp.apply(crop_labels, step.postprocess, src.source.spacing)
+                prov.setdefault("postprocessing", []).extend(
+                    {"where": f"{tag}:stage {i + 1}", **r} for r in ran)
+            if step.remove_outside_classes:
+                outside.append((src.source, np.isin(crop_labels, list(step.remove_outside_classes)),
+                                step.remove_outside_mm, f"{tag}:stage {i + 1}"))
             # the anatomical axes a MOOSE crop is limited to, as array axes of the canonical
             # grid the labels are on: the task's stated orientation, else the input's own
             axes = [array_axis(canonical or orientation, a) for a in step.crop_axes]
@@ -675,13 +756,50 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             report.stage("cascade", f"crop {frac * 100:.0f} % of the input, +{step.dilation_mm:g} mm")
         raise AssertionError("unreachable: a cascade ends in a model or a union stage")
 
-    def run_task_canonical(spc, tag="", *, out_grid=None, restore=None):
+    def postprocess_labels(labels, ops, spacing, where):
+        """``ops`` (:mod:`haversack.postprocess`) on a label tensor, returned on its device."""
+        if not ops:
+            return labels
+        t = time.perf_counter()
+        arr = labels.cpu().numpy().copy()
+        ran = pp.apply(arr, ops, spacing)
+        prov.setdefault("postprocessing", []).extend({"where": where, **r} for r in ran)
+        T[f"postprocess:{where}"] = time.perf_counter() - t
+        return torch.from_numpy(arr).to(labels.device)
+
+    def apply_remove_outside(labels, pending, og):
+        """Upstream's remove_outside: zero what lies beyond a crop stage's classes, dilated on
+        the input grid (``int(mm / mean spacing)`` face steps, as upstream dilates), then
+        carried to ``og`` by nearest voxel centers."""
+        for source, mask, mm, where in pending:
+            t = time.perf_counter()
+            it = pp.dilation_iterations(mm, source.spacing)
+            keep = pp.remove_outside(np.ones(mask.shape, dtype=np.uint8), mask, it).astype(bool)
+            keep = mask_on_grid(keep, source, og)
+            labels[~torch.from_numpy(keep).to(labels.device)] = 0
+            prov.setdefault("postprocessing", []).append(
+                {"where": where, "op": "remove_outside", "mm": float(mm), "iterations": it})
+            T[f"postprocess:{where}:remove_outside"] = time.perf_counter() - t
+        return labels
+
+    def run_task_canonical(spc, tag="", *, out_grid=None, restore=None, deferred=None):
         if spc.shape == "cascade":
-            return run_cascade(spc, tag or spc.name, out_grid=out_grid, restore=restore)
-        return run_single_or_union(spc, tag or spc.name, out_grid=out_grid, restore=restore)
+            out, fr, og = run_cascade(spc, tag or spc.name, out_grid=out_grid, restore=restore,
+                                      deferred=deferred)
+        else:
+            out, fr, og = run_single_or_union(spc, tag or spc.name, out_grid=out_grid, restore=restore)
+        # the task's own rules, wherever it runs - a crop-from-task stage included, as upstream
+        # postprocesses a crop task's output with that task's rules
+        return postprocess_labels(out, spc.postprocess, og.spacing, tag or spc.name), fr, og
 
     with lock:
-        labels, frame, out_grid = run_task_canonical(spec)
+        outside = []                             # remove_outside steps, after remove_small_blobs
+        labels, frame, out_grid = run_task_canonical(spec, deferred=outside)
+        if remove_small_blobs:
+            mm3 = 200.0 if remove_small_blobs is True else float(remove_small_blobs)
+            labels = postprocess_labels(labels, [{"op": "remove_small", "classes": "all", "max_mm3": mm3}],
+                                        out_grid.spacing, "remove_small_blobs")
+        labels = apply_remove_outside(labels, outside, out_grid)
     t = time.perf_counter()
     report.stage("finalize", "to input orientation")
     # back to the input's own orientation: a permute + flip where the labels already live,

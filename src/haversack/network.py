@@ -503,6 +503,14 @@ class TorchModel:
     def use_mask_for_norm(self):
         return getattr(self.predictor.configuration_manager, "use_mask_for_norm", None)
 
+    def resampling(self, kind: str) -> dict:
+        """The plans' resampling for ``kind`` - ``"data"`` (the input) or ``"probabilities"``
+        (the logits, at export) - as ``{"order", "order_z", "force_separate_z"}``; see
+        :func:`haversack.preprocess.nnunet_resampling`."""
+        from .preprocess import nnunet_resampling_from_config
+        return nnunet_resampling_from_config(self.predictor.configuration_manager.configuration, kind,
+                                             self.folder.name)
+
     # -- sliding window ------------------------------------------------------------
     def _load_fold(self, i: int) -> None:
         state = self.fold_params[i]

@@ -1,5 +1,13 @@
 """Source image -> the model's input frame: canonical orientation, forward resample
-(the frozen fork resampler, scipy-exact), nnU-Net normalization."""
+(the frozen fork resampler, scipy-exact), nnU-Net normalization.
+
+Two orders, one per lineage. TotalSegmentator resamples the image (``change_spacing``) and
+nnU-Net then normalizes it: :func:`to_model_grid` + :func:`normalize_for`, which share one
+resample between the models at a spacing. A native nnU-Net model was trained on nnU-Net's own
+preprocessing, which crops to the nonzero region, normalizes, and only then resamples (with
+separate-z for an anisotropic image): :func:`to_nnunet_input` (2026-09-28; before that date
+native models were resampled first and normalized after, like TotalSegmentator's).
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -38,6 +46,35 @@ def forward_resample(data_zyx: np.ndarray, spacing_zyx, new_spacing_zyx, *, conv
     out = resample_data(data_zyx, new_shape, convention=convention, order=order, mode="nearest",
                         device=device, out_dtype=out_dtype)
     return out, new_shape
+
+
+#: nnU-Net's default resampling (``resample_data_or_seg_to_shape``), as nearly every plans file
+#: states it: cubic in-plane for the input, linear for the logits, nearest along a separate z.
+NNUNET_RESAMPLING = {"data": {"order": 3, "order_z": 0, "force_separate_z": None},
+                     "probabilities": {"order": 1, "order_z": 0, "force_separate_z": None}}
+
+
+def nnunet_resampling_from_config(configuration: dict, kind: str, name: str = "model") -> dict:
+    """``kind``'s resampling from a plans configuration: ``{"order", "order_z",
+    "force_separate_z"}``. Raises ``UnsupportedModel`` for a resampling function other than
+    nnU-Net's default one, which is the only one haversack reproduces."""
+    if kind not in NNUNET_RESAMPLING:
+        raise ValueError(f"kind must be one of {tuple(NNUNET_RESAMPLING)}; got {kind!r}")
+    fn = configuration.get(f"resampling_fn_{kind}") or "resample_data_or_seg_to_shape"
+    if fn != "resample_data_or_seg_to_shape":
+        raise UnsupportedModel(f"{name}: plans resample {kind} with {fn!r}; haversack reproduces "
+                               "only nnU-Net's resample_data_or_seg_to_shape")
+    kw = dict(configuration.get(f"resampling_fn_{kind}_kwargs") or {})
+    out = dict(NNUNET_RESAMPLING[kind])
+    out.update({k: kw[k] for k in out if k in kw})
+    return out
+
+
+def nnunet_resampling(model, kind: str) -> dict:
+    """``model``'s plans resampling for ``kind`` (``"data"`` or ``"probabilities"``); nnU-Net's
+    default for a model object that does not state one."""
+    get = getattr(model, "resampling", None)
+    return get(kind) if callable(get) else dict(NNUNET_RESAMPLING[kind])
 
 
 def nonzero_box(data_zyx: np.ndarray) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
@@ -151,11 +188,24 @@ def to_model_grid(data_zyx, geometry, spacing_zyx, *, convention: str = "corner"
     the mapping - nothing has to be pasted back afterwards.
     """
     spacing_src_zyx = tuple(float(s) for s in geometry.spacing_zyx)
+    source, data_zyx, model_source = _crop_source(data_zyx, geometry, box=box,
+                                                  crop_to_nonzero=crop_to_nonzero)
+    res_zyx, _ = forward_resample(data_zyx, spacing_src_zyx, tuple(spacing_zyx),
+                                  convention=convention, device=device, order=order,
+                                  out_dtype=np.int32 if truncate else np.float32)
+    frame = Frame(source=source, model_shape=tuple(res_zyx.shape), model_spacing=tuple(spacing_zyx),
+                  convention=convention, canonical=geometry, original_orientation=original_orientation,
+                  model_source=model_source)
+    return ResampledGrid(res_zyx, frame)
+
+
+def _crop_source(data_zyx, geometry, *, box=None, crop_to_nonzero=False):
+    """The source grid, the cropped array (float32) and the crop's ``model_source`` sub-grid
+    (None when nothing was cropped): ``box`` first, then the nonzero box inside it."""
+    spacing_src_zyx = tuple(float(s) for s in geometry.spacing_zyx)
     source_shape_zyx = tuple(int(s) for s in data_zyx.shape)
     source = Grid(source_shape_zyx, spacing_src_zyx, (0.0, 0.0, 0.0))
-
     data_zyx = np.asarray(data_zyx, dtype=np.float32)
-    model_source = None
     offset = (0, 0, 0)
     if box is not None:
         lo, hi = (tuple(int(v) for v in box[0]), tuple(int(v) for v in box[1]))
@@ -168,17 +218,55 @@ def to_model_grid(data_zyx, geometry, spacing_zyx, *, convention: str = "corner"
         if (lo, hi) != ((0, 0, 0), tuple(data_zyx.shape)):
             data_zyx = data_zyx[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
             offset = tuple(o + l for o, l in zip(offset, lo))
+    model_source = None
     if tuple(data_zyx.shape) != source_shape_zyx:
         model_source = Grid(tuple(int(s) for s in data_zyx.shape), spacing_src_zyx,
                             tuple(float(source.index_to_mm(offset)[a]) for a in range(3)))
+    return source, data_zyx, model_source
 
-    res_zyx, _ = forward_resample(data_zyx, spacing_src_zyx, tuple(spacing_zyx),
-                                  convention=convention, device=device, order=order,
-                                  out_dtype=np.int32 if truncate else np.float32)
-    frame = Frame(source=source, model_shape=tuple(res_zyx.shape), model_spacing=tuple(spacing_zyx),
-                  convention=convention, canonical=geometry, original_orientation=original_orientation,
+
+def to_nnunet_input(data_zyx, geometry, model, *, device="auto", original_orientation: str = "RAS",
+                    box=None) -> tuple[torch.Tensor, Frame]:
+    """A native nnU-Net model's network input, in nnU-Net's own order (``run_case_npy``):
+    crop to the nonzero box, normalize with this model's plans, then resample.
+
+    The order matters. nnU-Net normalizes first ("normalization MUST happen before resampling"):
+    a CT clip then applies before the cubic spline, not after its overshoot, and a z-score's
+    statistics and mask (the nonzero region with its holes filled, ``crop_to_nonzero``) come
+    from the image at its own resolution. The resample follows the plans' ``resampling_fn_data``
+    (:func:`nnunet_resampling`): nnU-Net's shape rule (:func:`~haversack.resample.
+    compute_nnunet_shape`), the voxel-center grid, and separate-z where nnU-Net would use it
+    (:func:`~haversack.resample.separate_z_axis`: an image, or a target, whose coarsest spacing
+    is more than 3 times its finest).
+
+    The result is normalized for ``model`` alone, so it is shared only between models whose
+    normalization and resampling are the same (the caller's cache key says so). Returns
+    ``(x (1, Z, Y, X) float32 CPU, Frame)``; ``x`` carries the normalization fingerprint that
+    ``predict_into`` checks.
+    """
+    from .resample import compute_nnunet_shape, resample_data, separate_z_axis
+    source, cropped, model_source = _crop_source(data_zyx, geometry, box=box, crop_to_nonzero=True)
+    umn = model.use_mask_for_norm
+    umn = bool(umn[0]) if isinstance(umn, (list, tuple)) else bool(umn)
+    seg = None
+    if umn:                                   # nnU-Net's mask: the nonzero region, holes filled
+        from scipy.ndimage import binary_fill_holes
+        seg = np.where(binary_fill_holes(cropped != 0), 0, -1).astype(np.int8)[None]
+    x = normalize(cropped, model.normalization_schemes, model.intensity_properties(0),
+                  use_mask_for_norm=umn, seg=seg)
+    r = nnunet_resampling(model, "data")
+    spacing_src = tuple(float(s) for s in geometry.spacing_zyx)
+    new_shape = compute_nnunet_shape(cropped.shape, spacing_src, model.spacing_zyx)
+    axis = separate_z_axis(spacing_src, model.spacing_zyx, r["force_separate_z"])
+    res = resample_data(x, new_shape, convention="center", order=int(r["order"]), mode="nearest",
+                        device=device, out_dtype=np.float32, separate_z_axis=axis,
+                        order_z=int(r["order_z"]))
+    frame = Frame(source=source, model_shape=tuple(res.shape), model_spacing=tuple(model.spacing_zyx),
+                  convention="center", canonical=geometry, original_orientation=original_orientation,
                   model_source=model_source)
-    return ResampledGrid(res_zyx, frame)
+    t = torch.from_numpy(np.ascontiguousarray(res))[None]
+    t._haversack_normalization = normalization_fingerprint(model)
+    return t, frame
 
 
 def normalize_for(grid: ResampledGrid, model) -> torch.Tensor:

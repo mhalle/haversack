@@ -370,6 +370,11 @@ def _command_line() -> click.Group:
                          help=("restrict inference to the body's bounding box plus this margin "
                                'in mm: faster, and not the same labels (cropping re-tiles the '
                                'sliding window); 0 = the whole volume')),
+            click.Option(['--remove-small-blobs'], type=float, is_flag=False, flag_value=200.0,
+                         default=None, metavar='[MM3]',
+                         help=("TotalSegmentator's --remove_small_blobs: zero every class's "
+                               'connected pieces of this many mm3 or less (200 when given '
+                               'without a value)')),
             click.Option(['--model-root'],
                          help=('where model weights live (default: TOTALSEG_WEIGHTS_PATH, '
                                'nnUNet_results, or ~/.totalsegmentator/nnunet/results)')),
@@ -2124,6 +2129,7 @@ def _cmd_segment(args) -> int:
                        grid=args.spacing if args.spacing else "input", interp=args.interp,
                        accumulate=args.accumulate, batch_size=bs,
                        envelope_mm=args.envelope,
+                       remove_small_blobs=args.remove_small_blobs or False,
                        allow_transpose=args.allow_transpose, progress=progress)
 
     def report(r, where):
