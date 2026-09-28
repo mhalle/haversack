@@ -229,7 +229,7 @@ def choose_accumulate(policy: str, *, device: torch.device, K: int, shape, bytes
     The accumulator is ``K`` channels plus a weight map at the *padded model grid*: on a
     16 GB Apple machine at K=118 that is 1.6 GB and does not fit beside the network, but on
     a 64 GB Mac or a CUDA card with headroom it does - and on-device accumulation is worth
-    ~25 % of the per-patch time (`docs/backend-decision.md` E2-accum). So this is a runtime
+    ~25 % of the per-patch time (`medseg/docs/backend-decision.md` E2-accum). So this is a runtime
     decision from the actual budget, never a hard-coded default. ``"device"`` / ``"host"``
     force it; a forced ``"device"`` that OOMs still falls back, with a warning.
     """

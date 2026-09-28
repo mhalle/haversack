@@ -20,7 +20,7 @@ Ported from the nnU-Net fork's ``resample_data_or_seg_to_shape_gpu`` (tag ``resa
 draft PR mhalle/nnUNet#1), keeping only the intensity path so haversack does not pin a fork. The
 fork's label / one-hot / separate-z / anti-aliased paths stay there; anti-aliasing in
 particular is a distribution shift for models trained on the scipy pipeline
-(``docs/resampler-parity-finding.md``) and haversack does not want it.
+(``medseg/docs/resampler-parity-finding.md``) and haversack does not want it.
 """
 from __future__ import annotations
 

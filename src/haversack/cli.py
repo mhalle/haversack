@@ -355,7 +355,7 @@ def _command_line() -> click.Group:
                          help='isotropic output spacing in mm (default: the input grid)'),
             click.Option(['--interp'], type=click.Choice(['linear', 'nearest']), default='linear',
                          help=('logit interpolation for the restore: linear = sub-voxel '
-                               'boundaries; nearest = TotalSegmentator semantics')),
+                               'boundaries; nearest = TotalSegmentator\'s upsampling (not its postprocessing)')),
             click.Option(['--device'], default='auto',
                          help='cuda, mps, cpu, or auto (the best available)'),
             click.Option(['--dtype'], type=click.Choice(['fp16', 'bf16', 'fp32']), default='fp16',

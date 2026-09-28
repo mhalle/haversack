@@ -220,8 +220,9 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     ``device`` defaults to ``"auto"``: CUDA, then MPS, then CPU.
 
     ``resampling_order`` is the spline order of the forward resample; 3 (cubic) matches what
-    nnU-Net trained the models with - TotalSegmentator v2.18 defaults to 1 for speed, which is
-    a mild train/test mismatch that grows with the downsampling factor.
+    nnU-Net trained the models with. TotalSegmentator 2.x defaulted to 1 for speed (a mild
+    train/test mismatch that grows with the downsampling factor); its v3 branch defaults to 3
+    again, since its forward resample runs on the GPU (2026-09-09).
 
     ``envelope_mm`` restricts inference to the patient's bounding box (air removed, largest
     connected component, plus this margin in mm): up to half the patches on a CT with air
@@ -296,7 +297,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
     # nnU-Net-native models were trained on their own preprocessing: skimage's half-pixel
     # ("center") resample and crop-to-nonzero. TS bypasses both (corner-aligned change_spacing,
     # no crop). Getting this backwards is a silent geometry error, so it follows the task's
-    # lineage unless the caller is explicit. See docs/resampler-parity-finding.md.
+    # lineage unless the caller is explicit. See medseg/docs/resampler-parity-finding.md.
     nnunet_preproc = _uses_nnunet_preprocessing(spec)
     store = as_store(weights, layout="nnunetv2" if nnunet_preproc else "ts")
     if convention == "auto":
@@ -371,12 +372,14 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         normalization-free grid and normalizing per model keeps the one resample per spacing that
         the cache is for, without that.
         """
-        key = (tuple(model.spacing_zyx), convention, resampling_order, crop_nonzero, str(device), box)
+        # TotalSegmentator truncates its resampled image to int32; nothing else does
+        truncate = spec.lineage == "ts"
+        key = (tuple(model.spacing_zyx), convention, resampling_order, crop_nonzero, str(device), box, truncate)
         if key not in cached:
             cached[key] = to_model_grid(data_zyx, geometry, model.spacing_zyx, convention=convention,
                                         device=device, order=resampling_order,
                                         original_orientation=orientation, crop_to_nonzero=crop_nonzero,
-                                        box=box)
+                                        box=box, truncate=truncate)
         grid = cached[key]
         return normalize_for(grid, model), grid.frame
 
@@ -590,7 +593,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
 
         Until 2026-09-22 the crop was a speed approximation of whole-volume inference instead
         (grown by ``at_least``, collapsed by ``worth_cropping``), tuned against the model run on
-        the whole volume (medseg docs/backend-decision.md, "Cascade mode-B") and never compared
+        the whole volume (medseg/docs/backend-decision.md, "Cascade mode-B") and never compared
         with upstream: on a neck CT headneck_bones_vessels scored mean Dice 0.738 against
         upstream, zygomatic arches labeled beyond upstream's box."""
         box = None
@@ -603,6 +606,12 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                           for p in step.union] if step.union else [(step.weights_id, None, tag)])
                 out, fr, og = run_single_or_union(spc, tag, parts=parts, box=box, use_body=False,
                                                   first=i, out_grid=out_grid, restore=restore)
+                if box is not None:
+                    # nothing outside the box, as upstream's undo_crop leaves it: a restore that
+                    # downsamples 2x or more otherwise reaches one voxel past the box's edge
+                    # (found 2026-09-28: 38,568 voxels outside a 60x100x80 box at 0.75 -> 1.5 mm)
+                    out = keep_band(out, {k: (int(box[0][k]), int(box[1][k])) for k in range(3)},
+                                    fr.source, og)
                 for source, band in bands:
                     out = keep_band(out, band, source, og)
                 return out, fr, og

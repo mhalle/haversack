@@ -17,7 +17,7 @@ change moves labels within fp16 rounding, so a cached result from 0.15.0 can sti
   rankfield's URL as a conflict). Development continues on the `dev` branch, where the siblings
   track each other's `dev`.
 - **The fused restore is labelfield now** ([mhalle/labelfield](https://github.com/mhalle/labelfield),
-  pinned to `v0.1.0` from its tag, like rankfield): the logits-to-labels kernels (Metal, Triton,
+  pinned to a tag, like rankfield; see Pins below): the logits-to-labels kernels (Metal, Triton,
   torch), their per-axis tables, `Grid`, `Mapping` and the float64 reference. `haversack.grid`,
   `.mapping`, `.tables`, `.reference`, `.restore` and `.backends` re-export it, so every import
   keeps working. Behavior is haversack's, with one edge rule tightened: a nearest restore treats a

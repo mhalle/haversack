@@ -2,7 +2,7 @@
 a result key its weights are, the options a job may state, and the record a finished field is
 published with. The compute is ``pipeline.embed_file``, in the worker.
 
-An embedding job is a job of KIND ``embed`` (2026-09-23; feldglas docs/embedding-field.md, "Encoding
+An embedding job is a job of KIND ``embed`` (2026-09-23; feldglas/docs/embedding-field.md, "Encoding
 moves into haversack", phase 2): the same queue, cache, lifetimes and routes as a segmentation,
 with an embedding field as the primary output instead of labels. Names are resolved HERE, never
 through the task catalog: ``ts.v2:total_fast`` is a task and an encoder, and the verb decides.

@@ -668,13 +668,13 @@ Every reader (verify, sdfview, the slice preview) refuses a part without the ver
 unit. `tools/ranked_upgrade_format.py STORE...` brings an older store up in place (the tail is
 widened exactly; its definition cannot be recomputed without the logits, so an old value is
 carried as it was). What truncation costs a two-plane consumer is measured in
-rankfield's `docs/format.md`: depth 2 moves the interpolated argmax at 2.1 % of boundary
+rankfield's `rankfield/docs/format.md`: depth 2 moves the interpolated argmax at 2.1 % of boundary
 cells against depth 6, depth 3 at 0.08 %.
 
 
 ## Ranked format 0.3 (2026-09-05, rankfield)
 
-The encoding moved into its own library, **rankfield** (`../rankfield`, `docs/format.md`
+The encoding moved into its own library, **rankfield** (`../rankfield`, `rankfield/docs/format.md`
 there is the specification): encode, decode, the store-backed restore on torch / Metal /
 Triton and the float64 reference, with no serialization of its own. haversack's `ranked.py`
 is a shim over it and `ranked_restore.py` reads a store into `rankfield.Part`s. The block

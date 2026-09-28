@@ -11,7 +11,7 @@ the whole resampled volume.
 The model is built from the installed ``dynamic_network_architectures`` (nnU-Net's), not from
 upstream's fork: its encoder is a standard PlainConvEncoder, and on the real checkpoint the tokens
 are bit-identical to upstream's (2026-09-23). The fork's light decoder - RADAR's own organ mask - is
-not built: fields carry no mask (feldglas docs/embedding-field.md, decision 1).
+not built: fields carry no mask (feldglas/docs/embedding-field.md, decision 1).
 """
 from __future__ import annotations
 

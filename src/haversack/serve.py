@@ -1,6 +1,6 @@
 """The REST job protocol over a Segmenter - run segmentations for remote callers.
 
-This is the seam the toolkit's remote consumers share (docs/slicer-modal-design.md in
+This is the seam the toolkit's remote consumers share (medseg/docs/slicer-modal-design.md in
 the medseg workspace): a 3D Slicer panel, a CLI on another machine, a notebook. The
 contract is deliberately small:
 

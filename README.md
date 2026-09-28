@@ -175,7 +175,7 @@ Useful options:
 | Option | Meaning |
 |---|---|
 | `--spacing 1.0` | isotropic output spacing in mm instead of the input grid |
-| `--interp nearest` | TotalSegmentator's label semantics; the default `linear` gives sub-voxel boundaries from the logits |
+| `--interp nearest` | nearest-neighbor labels, as TotalSegmentator upsamples them; the default `linear` gives sub-voxel boundaries from the logits. TotalSegmentator's postprocessing (`body`'s largest-component cleanup, `heartchambers_highres`'s remove-outside, `--remove_small_blobs`) is not applied |
 | `--device mps|cuda|cpu` | default `auto` |
 | `--dtype fp16|bf16|fp32` | default `fp16` (the network runs fp16 on MPS) |
 | `--envelope 20` | restrict inference to the body plus this margin in mm: up to half the patches on a CT with air around the body, but not the same labels (cropping re-tiles the sliding window; on a chest CT `total_fast` moved 0.45 % of voxels). Default `0`, the whole volume, as upstream runs it; `envelope_mm=0` means the same in Python and on the server |
@@ -219,7 +219,7 @@ r.timings, r.provenance                          # per-stage seconds; what ran, 
 seg = Segmenter(cache_models=5)                  # models stay warm across calls
 for path in paths:
     seg.segment(path, "ts.v2:total").save(path.with_suffix(".labels.nii.gz"))
-job = seg.submit("scan.nii.gz", "total", on_progress=print)   # off-thread, cancellable
+job = seg.submit("scan.nii.gz", "ts.v2:total", on_progress=print)   # off-thread, cancellable
 ```
 
 `segment()` takes the same options as the command line as keyword arguments (`grid=1.0`,

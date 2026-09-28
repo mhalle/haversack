@@ -24,7 +24,7 @@ def load_canonical(path):
 # 3 mm is 4.6x, where linear reads only the 2 nearest samples per axis). On the GPU resampler
 # cubic costs ~2.5-3.4 s instead of scipy's 16.6 s, so the speed argument does not apply here.
 # Measured: order 1 vs 3 on the same weights moves small structures by ~1.4 % Dice
-# (gallbladder 0.783). See docs/resampler-parity-finding.md.
+# (gallbladder 0.783). See medseg/docs/resampler-parity-finding.md.
 DEFAULT_RESAMPLING_ORDER = 3
 
 
@@ -53,15 +53,14 @@ def nonzero_box(data_zyx: np.ndarray) -> tuple[tuple[int, int, int], tuple[int, 
     shape = tuple(int(s) for s in mask.shape)
     if not mask.any():
         return (0, 0, 0), shape
-    try:                                    # nnU-Net fills holes so interior zeros do not matter;
-        from scipy import ndimage           # for a bounding box it changes nothing, so it is optional
-        mask = ndimage.binary_fill_holes(mask)
-    except ImportError:
-        pass
-    idx = np.nonzero(mask)
-    lo = tuple(int(i.min()) for i in idx)
-    hi = tuple(int(i.max()) + 1 for i in idx)
-    return lo, hi
+    # nnU-Net fills holes in the mask before taking its box; a filled hole lies inside the box
+    # already, so the box is the same without it (the fill cost ~2 s on 78 M voxels, 2026-09-28).
+    lo, hi = [], []
+    for ax in range(mask.ndim):
+        present = np.nonzero(mask.any(axis=tuple(a for a in range(mask.ndim) if a != ax)))[0]
+        lo.append(int(present[0]))
+        hi.append(int(present[-1]) + 1)
+    return tuple(lo), tuple(hi)
 
 
 def normalize(data: np.ndarray, schemes, props, *, use_mask_for_norm=None, seg=None) -> np.ndarray:
@@ -125,8 +124,14 @@ def normalization_fingerprint(model) -> tuple:
 
 def to_model_grid(data_zyx, geometry, spacing_zyx, *, convention: str = "corner", device="auto",
                   order: int = DEFAULT_RESAMPLING_ORDER, original_orientation: str = "RAS",
-                  crop_to_nonzero: bool = False, box=None) -> ResampledGrid:
+                  crop_to_nonzero: bool = False, box=None, truncate: bool = True) -> ResampledGrid:
     """Canonical (RAS) array + geometry -> a ``ResampledGrid`` at ``spacing_zyx``.
+
+    ``truncate`` applies TotalSegmentator's own ``astype(int32)`` to the resampled image (it
+    truncates, so a TS-lineage model sees exactly what upstream feeds it). Every other model
+    keeps the image's values (float32): a PET SUV, a scaled MRI or an ADC map would lose its
+    fractional part to it - until 2026-09-28 every lineage was truncated, native nnU-Net models
+    (MOOSE's PET included) too.
 
     ``box`` - ``((z0, y0, x0), (z1, y1, x1))``, source indices, end exclusive - crops the source
     to that box before anything else: a TotalSegmentator cascade's final stage sees only the box
@@ -168,7 +173,8 @@ def to_model_grid(data_zyx, geometry, spacing_zyx, *, convention: str = "corner"
                             tuple(float(source.index_to_mm(offset)[a]) for a in range(3)))
 
     res_zyx, _ = forward_resample(data_zyx, spacing_src_zyx, tuple(spacing_zyx),
-                                  convention=convention, device=device, order=order)
+                                  convention=convention, device=device, order=order,
+                                  out_dtype=np.int32 if truncate else np.float32)
     frame = Frame(source=source, model_shape=tuple(res_zyx.shape), model_spacing=tuple(spacing_zyx),
                   convention=convention, canonical=geometry, original_orientation=original_orientation,
                   model_source=model_source)
@@ -190,7 +196,7 @@ def normalize_for(grid: ResampledGrid, model) -> torch.Tensor:
 
 def to_model_frame(data_zyx, geometry, model, *, convention: str = "corner", device="auto",
                    order: int = DEFAULT_RESAMPLING_ORDER, original_orientation: str = "RAS",
-                   crop_to_nonzero: bool = False) -> tuple[torch.Tensor, Frame]:
+                   crop_to_nonzero: bool = False, truncate: bool = True) -> tuple[torch.Tensor, Frame]:
     """Canonical (RAS) array + geometry -> ``(x (1, Z, Y, X) float32 CPU, Frame)`` for ``model``.
 
     ``to_model_grid`` then ``normalize_for``, for a single model. Callers that run several
@@ -199,5 +205,5 @@ def to_model_frame(data_zyx, geometry, model, *, convention: str = "corner", dev
     """
     grid = to_model_grid(data_zyx, geometry, model.spacing_zyx, convention=convention, device=device,
                          order=order, original_orientation=original_orientation,
-                         crop_to_nonzero=crop_to_nonzero)
+                         crop_to_nonzero=crop_to_nonzero, truncate=truncate)
     return normalize_for(grid, model), grid.frame
