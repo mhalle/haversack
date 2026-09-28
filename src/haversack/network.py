@@ -229,7 +229,7 @@ def choose_accumulate(policy: str, *, device: torch.device, K: int, shape, bytes
     The accumulator is ``K`` channels plus a weight map at the *padded model grid*: on a
     16 GB Apple machine at K=118 that is 1.6 GB and does not fit beside the network, but on
     a 64 GB Mac or a CUDA card with headroom it does - and on-device accumulation is worth
-    ~25 % of the per-patch time (`docs/backend-decision.md` E2-accum). So this is a runtime
+    ~25 % of the per-patch time (`medseg/docs/backend-decision.md` E2-accum). So this is a runtime
     decision from the actual budget, never a hard-coded default. ``"device"`` / ``"host"``
     force it; a forced ``"device"`` that OOMs still falls back, with a warning.
     """
@@ -447,6 +447,11 @@ class TorchModel:
             raise UnsupportedModel(
                 f"{self.folder.name}: plans transpose_backward {declared_bwd} is not the "
                 f"inverse of transpose_forward {self.transpose_forward}")
+        if len(p.configuration_manager.spacing) != 3:
+            # a 2d configuration: nnU-Net keeps each image's own slice spacing, which a spacing
+            # fixed at load cannot state (it came out 0 here, a division by zero downstream)
+            raise UnsupportedModel(f"{self.folder.name}: a 2d configuration "
+                                   "(needs each image's own slice spacing and a slice-wise loop)")
         self.spacing_zyx = canonical_spacing(p.configuration_manager.spacing,
                                              self.transpose_forward)
         if self.transpose_forward != (0, 1, 2) and not allow_transpose:
@@ -502,6 +507,14 @@ class TorchModel:
     @property
     def use_mask_for_norm(self):
         return getattr(self.predictor.configuration_manager, "use_mask_for_norm", None)
+
+    def resampling(self, kind: str) -> dict:
+        """The plans' resampling for ``kind`` - ``"data"`` (the input) or ``"probabilities"``
+        (the logits, at export) - as ``{"order", "order_z", "force_separate_z"}``; see
+        :func:`haversack.preprocess.nnunet_resampling`."""
+        from .preprocess import nnunet_resampling_from_config
+        return nnunet_resampling_from_config(self.predictor.configuration_manager.configuration, kind,
+                                             self.folder.name)
 
     # -- sliding window ------------------------------------------------------------
     def _load_fold(self, i: int) -> None:

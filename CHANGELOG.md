@@ -3,8 +3,67 @@
 ## [Unreleased]
 
 - **The dev branch tracks the siblings' dev branches** (rankfield, labelfield, feldglas), in
-  pyproject and CI, and CI runs on pushes to it. main stays at 0.16.0rc1 with every sibling
+  pyproject and CI, and CI runs on pushes to it. main stays at 0.16.0rc2 with every sibling
   pinned; a release from dev pins them to tags again.
+
+## [0.16.0rc2] - 2026-09-28
+
+The stable pre-release, every sibling pinned to a tag: **labelfield v0.1.3, rankfield v0.3.10,
+feldglas v0.2.5, duckn v0.6.2**. Fidelity fixes from an audit against nnU-Net and
+TotalSegmentator (2026-09-28). Labels change for
+native nnU-Net models (substantially), for TotalSegmentator cascades, and for `body`,
+`body_fast`, `abdominal_muscles` and `heartchambers_highres`.
+
+- **A native nnU-Net model gets nnU-Net's own preprocessing.** MOOSE, MRSegmentator,
+  TotalVibe and model folders of your own are cropped to their nonzero region, normalized, and
+  only then resampled, in nnU-Net's order ("normalization MUST happen before resampling"),
+  where haversack resampled first as TotalSegmentator does. The resample follows the plans
+  (`resampling_fn_data`): nnU-Net's shape rule, and separate-z for an anisotropic image (each
+  slice cubic in-plane, clipped to its own range, then nearest across slices). A z-score's mask
+  is nnU-Net's filled nonzero region. The network input now equals nnU-Net's preprocessed array
+  to 1e-6. Against nnU-Net's own predictor on a low-dose chest CT, MOOSE's fast organs model
+  went from mean Dice 0.75 to 0.999 at 1 mm and from 0.71 to 0.997 at 5 mm; its full organs
+  model from 0.55 to 0.9995 at 5 mm; MRSegmentator agreed before and after (99.99 %).
+  A plans file with another resampling function is refused, not approximated.
+- **A native model's `linear` restore is nnU-Net's export**: linear in-plane, and along the slice
+  axis of a thick-slice output grid, `order_z` from the plans (nearest). labelfield's nearest rule
+  picks nnU-Net's sample at every tie (checked over 7,500 grid pairs). Recorded as
+  `provenance["restore_separate_z"]`; `provenance["preprocessing_order"]` says which order ran.
+- **TotalSegmentator's postprocessing runs** (`haversack.postprocess`, stated per task in the
+  registry): `body` and `body_fast` keep the largest `body_trunc` piece and drop
+  `body_extremities` pieces of 50 000 mm3 or less; `abdominal_muscles`' body crop stage is
+  cleaned the same way before its box is taken, as upstream cleans it; `heartchambers_highres`
+  zeroes everything beyond 10 mm of its crop model's heart, aorta and inferior vena cava.
+  `segment(..., remove_small_blobs=...)` and `--remove-small-blobs [MM3]` are upstream's
+  `--remove_small_blobs` (200 mm3 by default), run after a task's own steps and before
+  remove-outside, as upstream orders them. Face connectivity and upstream's tie rule; sizes
+  in mm3 on the output grid. Recorded as `provenance["postprocessing"]`.
+- **A probabilities store says what `segment` did beyond the argmax**: each part's meta carries
+  `export` (a native model's plans resampling for logits) and `task_postprocess` (the task's
+  steps). `haversack restore` does not apply either yet: it restores trilinearly without
+  postprocessing, so for a native model on a thick-slice grid, or for `body`, `body_fast` and
+  `heartchambers_highres`, its labels can differ from `segment`'s at boundaries and removed
+  pieces.
+- **A 2d configuration is refused by name at load**, and never picked by preference. Its plans
+  state two spacings (nnU-Net takes the third from each image); it ran with a slice spacing of 0.
+- **Only TotalSegmentator's input is truncated to integers.** Its `change_spacing` truncates
+  (`astype`); every other lineage was truncated too, so a PET SUV, a scaled MRI or an ADC map lost
+  its fractional part (values 0-3 came out as 0, 1, 2).
+- **A TotalSegmentator cascade labels nothing outside its crop box.** A final stage that
+  downsamples 2x or more labeled one voxel past the box (38,568 voxels outside a 60x100x80 box
+  at 0.75 -> 1.5 mm), where upstream pastes the crop back into zeros.
+- **labelfield v0.1.3**: a crop offset composed into a mapping is
+  an exact integer step, so a cropped or enveloped nearest restore picks the uncropped restore's
+  sample at exact ties (7 % of center and 24 % of corner configurations differed); a failed
+  triton import no longer keeps the first caller's frames alive.
+- **`CACHE_EPOCH` 5** (the one bump at this pin): every change above and in 0.16.0rc1 moves labels
+  under an unchanged key, so cached results recompute. The key's contract now states its
+  tolerance: on CUDA, nnU-Net's `cudnn.benchmark` and memory-dependent batching make two runs of
+  one build differ in about 1e-5 of voxels (1400 of 418 M measured on an A10).
+- `nonzero_box` takes the bounding box without filling holes first (the fill cannot change the
+  box; 2 s on 78 M voxels). README: the `seg.submit` example names a catalog task; `--interp
+  nearest` no longer claims TotalSegmentator's semantics beyond its upsampling. Citations to
+  sibling repositories' docs name the repository.
 
 ## [0.16.0rc1] - 2026-09-27
 
@@ -21,7 +80,7 @@ change moves labels within fp16 rounding, so a cached result from 0.15.0 can sti
   rankfield's URL as a conflict). Development continues on the `dev` branch, where the siblings
   track each other's `dev`.
 - **The fused restore is labelfield now** ([mhalle/labelfield](https://github.com/mhalle/labelfield),
-  pinned to `v0.1.0` from its tag, like rankfield): the logits-to-labels kernels (Metal, Triton,
+  pinned to a tag, like rankfield; see Pins below): the logits-to-labels kernels (Metal, Triton,
   torch), their per-axis tables, `Grid`, `Mapping` and the float64 reference. `haversack.grid`,
   `.mapping`, `.tables`, `.reference`, `.restore` and `.backends` re-export it, so every import
   keeps working. Behavior is haversack's, with one edge rule tightened: a nearest restore treats a

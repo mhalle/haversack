@@ -1,5 +1,5 @@
 """Encoders: models whose output is an embedding FIELD - token lattices placed in the patient's
-world - rather than a label map (2026-09-23; feldglas docs/embedding-field.md, "Encoding moves into
+world - rather than a label map (2026-09-23; feldglas/docs/embedding-field.md, "Encoding moves into
 haversack"). haversack owns the encoders and their weights, beside its segmentation engines, so one
 program manages every model's weights; feldglas owns the field format and the receiving end, and is
 called here only to write the file.

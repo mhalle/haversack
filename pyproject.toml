@@ -1,6 +1,6 @@
 [project]
 name = "haversack"
-version = "0.16.0rc1"
+version = "0.16.0rc2"
 description = "Medical-image segmentation models, many families behind one door: TotalSegmentator, MOOSE, MRSegmentator, stock nnU-Net and more, on MPS, CUDA or CPU, with a CLI and a local REST server"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -58,7 +58,7 @@ dependencies = [
     # default `segment IN -o labels.nii.gz` still imports none of them (rule 6, test_layering).
     "duckn>=0.6.2",
     "zarr>=3.3",
-    "rankfield>=0.3.9",
+    "rankfield>=0.3.10",
     # labelfield is the fused restore - logits to labels on any grid, the Metal / Triton / torch
     # kernels and their geometry - lifted out of haversack into its own package (2026-09-27).
     # torch + numpy, as the kernel layer always was (test_layering). A direct git reference, not a
@@ -153,7 +153,7 @@ duckn = []
 # writes through `feldglas.store` (zarr + duckn's own models, like the ranked stores). The networks
 # need the torch extra (RADAR's encoder is built from nnU-Net's dynamic_network_architectures);
 # RADAR's input convention reorients through nibabel, as upstream's DataFolder does.
-embed = ["feldglas>=0.2.4", "nibabel"]                    # duckn, zarr and rankfield are core
+embed = ["feldglas>=0.2.5", "nibabel"]                    # duckn, zarr and rankfield are core
 
 [build-system]
 requires = ["hatchling"]

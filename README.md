@@ -170,12 +170,27 @@ Upstream states no license for the v3 weights yet (its README lists only v2's `t
 Apache-2.0, and the release is marked a prerelease); `haversack cite ts.v3:total` says so.
 `ts.v3` tiles its sliding window at step 0.8, as TotalSegmentator does for these tasks;
 `ts.v2` keeps nnU-Net's 0.5, which its existing results were computed with.
+
+Each model sees the preprocessing it was trained with. A TotalSegmentator model gets
+TotalSegmentator's: the image resampled with the voxel-corner rule and truncated to integers,
+then normalized. A native nnU-Net model (MOOSE, MRSegmentator, TotalVibe, a folder of your own)
+gets nnU-Net's: cropped to its nonzero region, normalized, and only then resampled with the
+voxel-center rule and the plans' settings, slice by slice with nearest-neighbor sampling across
+thick slices (separate-z) as nnU-Net does. On a chest CT, MOOSE's organ models agree with
+nnU-Net's own predictor on 99.99 % of voxels (mean Dice 0.999); before 0.16.0rc2 they
+resampled first and scored mean Dice 0.55-0.75 against it. Two defaults stay faster than
+nnU-Net's: one fold (`folds=(0,)`, where nnU-Net ensembles every fold it finds; in Python,
+`segment(..., folds="all")` runs the ensemble) and no mirroring test-time augmentation, which
+haversack does not implement. TotalSegmentator ships one fold and runs without mirroring, so
+neither default differs from upstream for its models.
+
 Useful options:
 
 | Option | Meaning |
 |---|---|
 | `--spacing 1.0` | isotropic output spacing in mm instead of the input grid |
-| `--interp nearest` | TotalSegmentator's label semantics; the default `linear` gives sub-voxel boundaries from the logits |
+| `--interp nearest` | nearest-neighbor labels, as TotalSegmentator upsamples them; the default `linear` gives sub-voxel boundaries from the logits. For a native nnU-Net model, `linear` is nnU-Net's own export: linear in-plane, and nearest along the slice axis of a thick-slice output (separate-z) |
+| `--remove-small-blobs [MM3]` | TotalSegmentator's `--remove_small_blobs`: zero every class's connected pieces of 200 mm3 or less (or the given size). A task's own postprocessing always runs, as upstream's does: `body` keeps its largest trunk and drops extremity pieces of 50 000 mm3 or less, `heartchambers_highres` zeroes what lies beyond 10 mm of the heart, aorta and inferior vena cava. It runs on the output grid, with sizes in mm3 |
 | `--device mps|cuda|cpu` | default `auto` |
 | `--dtype fp16|bf16|fp32` | default `fp16` (the network runs fp16 on MPS) |
 | `--envelope 20` | restrict inference to the body plus this margin in mm: up to half the patches on a CT with air around the body, but not the same labels (cropping re-tiles the sliding window; on a chest CT `total_fast` moved 0.45 % of voxels). Default `0`, the whole volume, as upstream runs it; `envelope_mm=0` means the same in Python and on the server |
@@ -219,7 +234,7 @@ r.timings, r.provenance                          # per-stage seconds; what ran, 
 seg = Segmenter(cache_models=5)                  # models stay warm across calls
 for path in paths:
     seg.segment(path, "ts.v2:total").save(path.with_suffix(".labels.nii.gz"))
-job = seg.submit("scan.nii.gz", "total", on_progress=print)   # off-thread, cancellable
+job = seg.submit("scan.nii.gz", "ts.v2:total", on_progress=print)   # off-thread, cancellable
 ```
 
 `segment()` takes the same options as the command line as keyword arguments (`grid=1.0`,
