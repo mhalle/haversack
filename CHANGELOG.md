@@ -2,7 +2,11 @@
 
 ## [Unreleased]
 
-Fidelity fixes from an audit against nnU-Net and TotalSegmentator (2026-09-28). Labels change for
+## [0.16.0rc2] - 2026-09-28
+
+The stable pre-release, every sibling pinned to a tag: **labelfield v0.1.3, rankfield v0.3.10,
+feldglas v0.2.5, duckn v0.6.2**. Fidelity fixes from an audit against nnU-Net and
+TotalSegmentator (2026-09-28). Labels change for
 native nnU-Net models (substantially), for TotalSegmentator cascades, and for `body`,
 `body_fast`, `abdominal_muscles` and `heartchambers_highres`.
 
@@ -44,7 +48,7 @@ native nnU-Net models (substantially), for TotalSegmentator cascades, and for `b
 - **A TotalSegmentator cascade labels nothing outside its crop box.** A final stage that
   downsamples 2x or more labeled one voxel past the box (38,568 voxels outside a 60x100x80 box
   at 0.75 -> 1.5 mm), where upstream pastes the crop back into zeros.
-- **labelfield v0.1.3** (from the pin at the release): a crop offset composed into a mapping is
+- **labelfield v0.1.3**: a crop offset composed into a mapping is
   an exact integer step, so a cropped or enveloped nearest restore picks the uncropped restore's
   sample at exact ties (7 % of center and 24 % of corner configurations differed); a failed
   triton import no longer keeps the first caller's frames alive.
