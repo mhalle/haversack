@@ -40,6 +40,10 @@ native nnU-Net models (substantially), for TotalSegmentator cascades, and for `b
   an exact integer step, so a cropped or enveloped nearest restore picks the uncropped restore's
   sample at exact ties (7 % of center and 24 % of corner configurations differed); a failed
   triton import no longer keeps the first caller's frames alive.
+- **`CACHE_EPOCH` 5** (the one bump at this pin): every change above and in 0.16.0rc1 moves labels
+  under an unchanged key, so cached results recompute. The key's contract now states its
+  tolerance: on CUDA, nnU-Net's `cudnn.benchmark` and memory-dependent batching make two runs of
+  one build differ in about 1e-5 of voxels (1400 of 418 M measured on an A10).
 - `nonzero_box` takes the bounding box without filling holes first (the fill cannot change the
   box; 2 s on 78 M voxels). README: the `seg.submit` example names a catalog task; `--interp
   nearest` no longer claims TotalSegmentator's semantics beyond its upsampling. Citations to

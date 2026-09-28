@@ -224,13 +224,32 @@ _ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack 
 #: result computed from a misread input would be served on. Most results recompute to the
 #: same bytes; none is served from a read this build would not make.
 #:
+#: 5 (2026-09-28, 0.16.0rc2, the user's call: one bump at the stable pin): every change since
+#: 0.15.0 that moves labels under an unchanged key. The fused restore became labelfield's
+#: (0.16.0rc1: a nearest coordinate exactly half a voxel past the last sample is outside) and
+#: labelfield 0.1.3 applies crop offsets as exact integer steps; the network left
+#: channels_last_3d (fp16 rounding); only TotalSegmentator's input is truncated to integers; a
+#: TS cascade labels nothing outside its box; a native nnU-Net model is preprocessed in
+#: nnU-Net's order with separate-z and restored as nnU-Net exports; TotalSegmentator's per-task
+#: postprocessing runs. The restore is shared by every engine that grades one, so this is the
+#: global epoch and not the nnU-Net engine's.
+#:
 #: A change that only ONE engine's arithmetic sees bumps that engine's
 #: ``Engine.cache_epoch`` instead (2026-09-12), so the other engines keep their results.
-CACHE_EPOCH = "4"
+#:
+#: Reproducibility, stated (2026-09-28): the same build on the same input is not bit-identical
+#: across processes on CUDA. nnU-Net's predictor sets ``torch.backends.cudnn.benchmark=True``
+#: for the process, so convolution algorithms are chosen per run, and the batch size and the
+#: accumulator's placement follow free device memory. Measured: up to ~1400 of 418 M voxels
+#: (about 3e-6, within 1e-5) differ between two runs of ``total`` on an A10. A hit serves a result
+#: this build computed from these inputs; a recompute agrees with it to that tolerance, not to
+#: the byte. On MPS, repeated runs matched exactly in the comparisons of 2026-09-27.
+CACHE_EPOCH = "5"
 
 
 def result_key(identity, task, options, weights_versions, epoch=None, kind: str = "segment") -> str:
-    """The result-cache key: everything that determines the output bytes.
+    """The result-cache key: everything that determines the output bytes, up to the CUDA
+    run-to-run variation :data:`CACHE_EPOCH` states (about 1e-5 of voxels).
 
     (input identity) x (task + options) x (weights versions) x (cache epoch) - the
     design's cache contract. Over-keying on an option that turns out inert only
