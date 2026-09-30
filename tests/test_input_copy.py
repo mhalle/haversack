@@ -316,6 +316,64 @@ def test_nothing_the_file_says_contradicts_its_voxels(tmp_path, monkeypatch, for
     assert d["stored_values"] is False
 
 
+@pytest.mark.parametrize("form", ["uncompressed", "zstd"])
+def test_the_padding_is_recorded_in_the_copys_own_units(tmp_path, monkeypatch, form):
+    """2026-09-30: with the stored-unit Pixel Padding Value rightly gone, a materialized copy
+    lost which voxels were padding. It records them in its own units: -2000 stored, under an
+    intercept of -1024, is -3024 in the copy's HU; and Input.missing() says so."""
+    from haversack.inputs import Input
+    monkeypatch.setenv(ic.COMPRESSION_ENV, form)
+    series = _pad(write_series(tmp_path / "s"))
+    f = sorted(series.iterdir())[2]
+    ds = pydicom.dcmread(f)
+    px = ds.pixel_array.copy()
+    px[0, :3] = -2000
+    ds.PixelData = px.tobytes()
+    ds.save_as(f, enforce_file_format=True)
+    copy = ic.transcode(series, tmp_path / "entry")
+    assert ic.info(copy)["missing"] == [-3024]
+    inp = Input(None, copy, None)
+    assert inp.missing() == [-3024]
+    marked = np.isin(inp.array(), inp.missing())
+    assert marked.sum() == 3 and marked[2, 0, :3].all()      # exactly the padded voxels
+
+
+def test_a_copy_of_stored_values_records_the_padding_as_it_is(tmp_path):
+    copy = ic.transcode(_pad(_enrich(write_series(tmp_path / "s"), rescale=False)),
+                        tmp_path / "entry")
+    assert ic.info(copy)["missing"] == [0]                    # identity: the stored value
+
+
+@pytest.mark.parametrize("edit,why", [
+    (lambda i, ds: setattr(ds, "RescaleSlope", 1 + (i == 3)), "a rescale that varies by slice"),
+    (lambda i, ds: ds.add_new(0x00280121, "SS", -1990), "a padding range"),
+    (lambda i, ds: None, "no padding"),
+])
+def test_no_padding_is_recorded_where_no_single_value_can_carry_it(tmp_path, edit, why):
+    series = write_series(tmp_path / "s")
+    if why != "no padding":
+        _pad(series)
+    for i, f in enumerate(sorted(series.iterdir())):
+        ds = pydicom.dcmread(f)
+        edit(i, ds)
+        ds.save_as(f, enforce_file_format=True)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        copy = ic.transcode(series, tmp_path / "entry")
+    assert "missing" not in ic.info(copy), why
+
+
+def test_a_us_coded_padding_value_of_a_signed_image_is_read_as_signed():
+    per = [{"0028|0120": "63536", "0028|1053": "1", "0028|1052": "-1024", "0028|0100": "16",
+            "0028|0103": "1", "0028|0004": "MONOCHROME2"}]
+    assert ic._missing(per) == [-3024]
+    assert ic._missing(per, modality_lut=True) is None
+    assert ic._missing(per, value_transform=True) is None
+    assert ic._missing([dict(per[0], **{"0028|0004": "MONOCHROME1"})]) is None
+    assert ic._missing([dict(per[0], **{"0028|1053": "0.5"})]) == [-2024]  # 63536 -> -2000
+
+
 def test_a_copy_of_stored_values_states_them_and_says_so(tmp_path):
     copy = ic.transcode(_pad(_enrich(write_series(tmp_path / "s"), rescale=False)),
                         tmp_path / "entry")

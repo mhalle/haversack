@@ -407,6 +407,46 @@ def judge_file(image, path):
             facts.modality_lut)
 
 
+def _missing(per_slice, *, value_transform: bool = False, modality_lut: bool = False):
+    """The copy's own no-measurement values: a DICOM Pixel Padding Value carried through the
+    rescale the decode applied, in the copy's units (a GE CT's -2000 is -3024 in HU), or None.
+
+    The copy never states the padding in stored-value units beside values that are not stored
+    values (dicom-spec §5.10), so without this a materialized copy lost which voxels were
+    padding: 55,772 of one NLST slice read as air at -3024 HU with nothing marking them
+    (2026-09-30, found by the duckn 2.0 corpus run). The rule is duckn 2.0's ``values.missing``
+    (draft §6): one padding value, one rescale for every slice (a rescale that varies makes the
+    padding a different quantity per slice, and one list would mark measured voxels), no Pixel
+    Padding Range Limit (a range has no form), no Modality LUT or Pixel Value Transformation
+    Sequence (a table can map padding and a measured value alike), and MONOCHROME2. Computed as
+    §6 fixes it - the product rounded, then the sum - and written as an int where it is one."""
+    if not per_slice or value_transform or modality_lut:
+        return None
+
+    def values(key, default=""):
+        return {str(d.get(key, default)).strip() for d in per_slice}
+
+    pads, limits = values("0028|0120"), values("0028|0121")
+    if len(pads) != 1 or "" in pads or limits != {""}:
+        return None
+    if values("0028|0004") != {"MONOCHROME2"}:
+        return None
+    try:
+        pad = int(float(next(iter(pads))))
+        (slope,), (intercept,) = ({float(v or d) for v in values(k, d)}
+                                  for k, d in (("0028|1053", "1"), ("0028|1052", "0")))
+        bits = {int(v) for v in values("0028|0100", "16")}
+        signed = values("0028|0103", "0") == {"1"}
+    except (ValueError, TypeError):
+        return None                     # a rescale per slice, or a value that does not parse
+    if signed and len(bits) == 1:
+        top = 1 << (next(iter(bits)) - 1)
+        if pad >= top:                  # a US-coded padding value of a signed image
+            pad -= 2 * top
+    q = float(pad) * slope + intercept
+    return [int(q) if q.is_integer() else q]
+
+
 def _sample_units(per_slice):
     from duckn.dicom_tags import RESCALE_TYPE
     values = {d.get(RESCALE_TYPE, "").strip() for d in per_slice}
@@ -499,8 +539,12 @@ def _metadata(image, per_slice, *, files=(), source, source_digest, source_size=
     ext = dict(meta.extensions or {})
     if series or slices:
         ext["dicom"] = {"version": DICOM_EXTENSION_VERSION, **fields, "tags": series}
+    facts = heads.finish() if files else heads
+    missing = _missing(per_slice, value_transform=facts.value_transform,
+                       modality_lut=facts.modality_lut) if per_slice else None
     ext["haversack"] = {"kind": KIND, "version": FORMATS[how], "reader_version": READER_VERSION,
                         "tags_version": tags_version,
+                        **({"missing": missing} if missing is not None else {}),
                         "source": source, "source_digest": source_digest,
                         "source_files": source_size[0], "source_bytes": source_size[1],
                         "reader": {"haversack": haversack.__version__,

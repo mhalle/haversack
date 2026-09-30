@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+- **An input copy keeps its padding.** A copy holds the rescaled values (Hounsfield units for a
+  CT), so the source's Pixel Padding Value, stated in stored units, is rightly not written
+  beside them - and until now nothing else said which voxels were padding: one slice of an
+  NLST CT had 55,772 of them reading as air at -3024 HU. A copy now records the padding in its
+  own units (`extensions.haversack.missing`, duckn 2.0's `values.missing` rule: one padding
+  value, one rescale for the series, no padding range or lookup table), and
+  `Input.missing()` reads it. It marks exactly the voxels pydicom finds padded, in both copy
+  forms. Copies made before this record nothing; nothing else about them changes.
+
 - **duckn v0.6.3 and feldglas v0.2.6 pinned.** duckn 0.6.3 fixes two 1.x converters that
   declared a convention version their output did not follow: a NRRD import with a measurement
   frame now declares 1.1 (the frame is by rows, 1.1's form), and a DICOM series whose rescale

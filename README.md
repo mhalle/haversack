@@ -350,6 +350,12 @@ that is neither is an error, never an empty answer. From Python, `haversack.inpu
 (`haversack remote tags SPEC`, or `GET /v1/<source>/<identifier>/dicom.json`; see SERVER.md),
 never for an upload.
 
+A DICOM series' padding (the scanner's fill outside its field of view) survives the copy's
+rescale: `haversack.inputs.open(spec).missing()` gives the copy's no-measurement values in its
+own units - a CT's Pixel Padding Value of -2000 is `[-3024]` in Hounsfield units - or `None`
+where the source states none, or one that no single value can carry (a rescale that varies by
+slice, a padding range).
+
 ## Citing the models
 
 Every model haversack runs is someone else's work. `haversack cite <task>` prints who made it,

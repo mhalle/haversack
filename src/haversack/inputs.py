@@ -97,6 +97,18 @@ class Input:
         arr = sitk.GetArrayFromImage(self.image())
         return arr if slices is None else arr[slices[0]:slices[1]]
 
+    def missing(self) -> list | None:
+        """The values that mark no measurement in this input's own values - a DICOM Pixel
+        Padding Value through the rescale the copy applied (-3024 in a CT's HU for a stored
+        -2000) - or None when the input states none, or states one no single value can carry
+        (a rescale that varies by slice, a padding range). Only a copy knows: it recorded the
+        padding when it read the source. duckn 2.0's ``values.missing`` (draft §6)."""
+        if not self.is_copy:
+            return None
+        from .input_copy import info
+        m = info(self.path).get("missing")
+        return list(m) if m is not None else None
+
     def tags(self, *, select=None, withhold=None, per_slice: bool = True) -> dict:
         """The DICOM tags the copy carries, as JSON: ``{"series": {keyword: value}, "slices":
         [{keyword: value}, ...], "stored_values": bool, "tags_version": int}`` in duckn's dicom
