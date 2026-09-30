@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- **duckn v0.6.3 and feldglas v0.2.6 pinned.** duckn 0.6.3 fixes two 1.x converters that
+  declared a convention version their output did not follow: a NRRD import with a measurement
+  frame now declares 1.1 (the frame is by rows, 1.1's form), and a DICOM series whose rescale
+  varies by slice is an `axis_linear` in a 1.2 file, where 0.6.2 claimed identity. haversack's
+  input copies are written by its own code and are unaffected; feldglas 0.2.6 moves only the pin.
+
 ## [0.16.0rc2] - 2026-09-28
 
 The stable pre-release, every sibling pinned to a tag: **labelfield v0.1.3, rankfield v0.3.10,
