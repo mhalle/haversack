@@ -1007,19 +1007,25 @@ class TestPush(_Hosts):
                           "unreadable": 0}, got)
 
     def test_an_interrupted_push_is_simply_rerun(self):
+        """The patch is on the CLASS, so it sees every publication in this process, from any
+        thread, and only host a's are counted: one from another test's leftover server
+        thread took a slot on CI's 3.14 leg (run 36786031441), and the push reported 1
+        pushed, not 2."""
         for i, key in enumerate(("aa" * 32, "bb" * 32, "cc" * 32)):
             self.local_entry(self.a, key, f"v{i}".encode())
         real, n = SharedResultCache._swap, []
 
         def dying_swap(cache, key, update):
+            if cache is not self.a:
+                return real(cache, key, update)        # another host's: not this push's
             if len(n) >= 2:
                 raise OSError("connection reset")
             n.append(key)
             return real(cache, key, update)
         with unittest.mock.patch.object(SharedResultCache, "_swap", dying_swap):
             first = self.a.push()
-        self.assertEqual(2, first["pushed"])
-        self.assertEqual(1, first["failed"])
+        self.assertEqual({"pushed": 2, "skipped": 0, "replaced": 0, "failed": 1,
+                          "unreadable": 0}, first)
         again = self.a.push()
         self.assertEqual(1, again["pushed"])
         self.assertEqual(2, again["skipped"])
