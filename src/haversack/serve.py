@@ -234,6 +234,11 @@ _ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack 
 #: postprocessing runs. The restore is shared by every engine that grades one, so this is the
 #: global epoch and not the nnU-Net engine's.
 #:
+#: 6 (2026-09-30, the user's call): a NIfTI input with both transforms is placed by its sform
+#: (code not 0), as nibabel, TotalSegmentator and duckn place it, where SimpleITK took the qform
+#: beside an MNI or aligned sform (io._nifti_placement). Keys do not hold the reader, so every
+#: result recomputes once; only results from such files change.
+#:
 #: A change that only ONE engine's arithmetic sees bumps that engine's
 #: ``Engine.cache_epoch`` instead (2026-09-12), so the other engines keep their results.
 #:
@@ -244,7 +249,7 @@ _ALL_SOURCE_PREFIXES = frozenset(_source_registry())   # every source haversack 
 #: (about 3e-6, within 1e-5) differ between two runs of ``total`` on an A10. A hit serves a result
 #: this build computed from these inputs; a recompute agrees with it to that tolerance, not to
 #: the byte. On MPS, repeated runs matched exactly in the comparisons of 2026-09-27.
-CACHE_EPOCH = "5"
+CACHE_EPOCH = "6"
 
 
 def result_key(identity, task, options, weights_versions, epoch=None, kind: str = "segment") -> str:

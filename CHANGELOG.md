@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- **A NIfTI with both transforms is placed by its sform.** nifti1.h defines the qform and the
+  sform and leaves the choice to the reader. nibabel, FSL, SPM, TotalSegmentator (which reads
+  with nibabel) and duckn's converter take the sform when its code is not 0; SimpleITK, which
+  haversack reads through, took the qform beside an MNI or aligned sform - in one test file,
+  5 mm apart. haversack's own fallback for files ITK refuses already used nibabel's affine, so
+  one file could be placed by either rule. Every NIfTI read now takes the sform's rule, from
+  the header's own bytes (SimpleITK reports the sform to six significant digits). A file whose
+  two transforms agree - every scanner converter's - reads exactly as before. A singular sform
+  is passed over for the qform; a sheared sform beside a qform, which SimpleITK quietly
+  replaced with the qform, is now refused, as a sheared file without a qform always was.
+  Cached input copies are stale (reader version 5) and results recompute once (cache epoch
+  6); only results from files with two different transforms change.
+
 - **An input copy keeps its padding.** A copy holds the rescaled values (Hounsfield units for a
   CT), so the source's Pixel Padding Value, stated in stored units, is rightly not written
   beside them - and until now nothing else said which voxels were padding: one slice of an

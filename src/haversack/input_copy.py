@@ -62,7 +62,7 @@ FORMATS = {"uncompressed": 1, "zstd": 2}
 #: fetched again, an upload counts as evicted (410 input_gone). 2 (2026-09-25): the tags come from
 #: ``duckn.dicom_tags``, which leaves binary-VR values out where haversack's own converter kept
 #: SimpleITK's strings of them - bumped before any deployment held a copy, so it cost nothing.
-READER_VERSION = 4
+READER_VERSION = 5
 #: 3 (2026-09-26): copies made under 2 carry, from SimpleITK's dictionaries, tags stated in
 #: STORED-value units beside rescaled voxels - a CT's Pixel Padding Value -2000 where the copy's
 #: padding is -3024 - and hand them to every header exported from them. The user's rule: nothing
@@ -74,6 +74,9 @@ READER_VERSION = 4
 #: MONOCHROME1 file read as other values under 3; a palette in stored units rode beside
 #: rescaled voxels; and every read is now held against pydicom's decode. Copies made under 3
 #: are stale for the same reason 2's were.
+#: 5 (2026-09-30, the user's call): a NIfTI with both transforms is placed by its sform (code
+#: not 0), as nibabel and duckn place it; SimpleITK placed it by the qform beside an MNI or
+#: aligned sform (io._nifti_placement). Copies made under 4 of such files are misplaced.
 #: What the copy's DICOM tags were made by - NOT part of :data:`READER_VERSION`, though the
 #: tags once were (2026-09-26): they are provenance, never what an engine reads, so a copy with
 #: an older kind of tags is still exact and is kept; ``Input.tags()`` reports which kind it

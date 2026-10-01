@@ -618,6 +618,8 @@ def _read_image(path, *, tags: bool):
             if "orthonormal" not in str(e):
                 raise InputError(f"cannot read {p} as an image: {_sitk_reason(e)}") from None
             image = _read_with_snapped_affine(p, e)
+        else:
+            image = _nifti_placement(image, p)
         # a multi-frame DICOM file's frames are placed by the reader on a uniform grid: held
         # against the frames' own positions (2026-09-26); asked only of a file with frames
         several = image.GetDimension() == 3 and image.GetSize()[2] > 1
@@ -772,8 +774,25 @@ def _read_with_snapped_affine(p, itk_error, tol: float = 1e-3):
     ni = nib.load(str(p))
     if ni.ndim < 3:
         raise InputError(f"expected a 3D image; {p} has {ni.ndim} dimensions")
-    aff = ni.affine
-    R = np.asarray(aff[:3, :3], dtype=float)
+    origin, spacing, direction = _itk_geometry(ni.affine, p, tol, cause=itk_error)
+    a = np.asanyarray(ni.dataobj)
+    if a.ndim == 4 and a.shape[3] == 1:
+        a = a[..., 0]
+    image = sitk.GetImageFromArray(np.ascontiguousarray(np.transpose(a, (2, 1, 0))))
+    image.SetSpacing(spacing)
+    image.SetDirection(direction)
+    image.SetOrigin(origin)
+    return image
+
+
+def _itk_geometry(aff, p, tol: float = 1e-3, cause=None):
+    """``(origin, spacing, direction)`` in ITK's LPS for a NIfTI affine (RAS), its direction
+    cosines snapped to the closest rotation (SVD polar decomposition) when they are off by
+    float noise, and a refusal when they are off by more than ``tol``: a shear SimpleITK's image
+    cannot hold, real geometry and not noise."""
+    import numpy as np
+    aff = np.asarray(aff, dtype=float)
+    R = aff[:3, :3]
     spacing = np.linalg.norm(R, axis=0)
     if not np.all(spacing > 0):
         raise InputError(f"{p}: degenerate affine (zero-length axis)")
@@ -784,15 +803,86 @@ def _read_with_snapped_affine(p, itk_error, tol: float = 1e-3):
         raise InputError(
             f"{p}: direction cosines deviate from orthonormal by {deviation:.2e} "
             f"(tolerance {tol:.0e}) - this looks like genuinely sheared/oblique "
-            "geometry, not float noise; refusing to guess") from itk_error
-    a = np.asanyarray(ni.dataobj)
-    if a.ndim == 4 and a.shape[3] == 1:
-        a = a[..., 0]
-    image = sitk.GetImageFromArray(np.ascontiguousarray(np.transpose(a, (2, 1, 0))))
-    image.SetSpacing(tuple(float(x) for x in spacing))
+            "geometry, not float noise; refusing to guess") from cause
     flip = np.diag([-1.0, -1.0, 1.0])          # nifti RAS -> ITK LPS
-    image.SetDirection(tuple((flip @ Rn).flatten()))
-    image.SetOrigin(tuple((flip @ aff[:3, 3]).tolist()))
+    return (tuple((flip @ aff[:3, 3]).tolist()), tuple(float(x) for x in spacing),
+            tuple((flip @ Rn).flatten().tolist()))
+
+
+#: The names a NIfTI-1 file goes by (single file, or a pair named by either half).
+_NIFTI_NAMES = (".nii", ".nii.gz", ".hdr", ".hdr.gz", ".img", ".img.gz")
+
+
+def _nifti1_transforms(p):
+    """``(sform_code, qform_code, srow)`` from a NIfTI-1 header's own bytes (a pair's ``.hdr``
+    when named by its ``.img``; gzip judged by its magic number), ``srow`` the sform's three rows
+    as float64 from the header's float32; None for anything that is not a NIfTI-1 header.
+    SimpleITK reports these fields, but prints ``srow_x`` to six significant digits - 0.1 mm off
+    at 118.40123 - so the header is read here. NIfTI-2 needs nothing: SimpleITK 2.5 cannot read
+    it at all."""
+    import gzip
+    import struct
+
+    import numpy as np
+    name = p.name.lower()
+    if not name.endswith(_NIFTI_NAMES):
+        return None
+    header = p
+    if name.endswith((".img", ".img.gz")):
+        stem = p.name[:len(p.name) - (7 if name.endswith(".gz") else 4)]
+        header = next((q for q in (p.with_name(stem + e) for e in
+                                   (".hdr", ".HDR", ".hdr.gz", ".HDR.GZ")) if q.is_file()), None)
+        if header is None:
+            return None
+    try:
+        with open(header, "rb") as fh:
+            raw = fh.read(2)
+            fh.seek(0)
+            raw = (gzip.open(fh).read(348) if raw == b"\x1f\x8b" else fh.read(348))
+    except OSError:
+        return None
+    if len(raw) < 348 or raw[344:347] not in (b"n+1", b"ni1"):
+        return None                       # Analyze 7.5, NIfTI-2, or not a header at all
+    order = "<" if struct.unpack("<i", raw[:4])[0] == 348 else ">"
+    qform_code, sform_code = struct.unpack(order + "hh", raw[252:256])
+    srow = np.array(struct.unpack(order + "12f", raw[280:328]), dtype=np.float64).reshape(3, 4)
+    return int(sform_code), int(qform_code), srow
+
+
+def _nifti_placement(image, p):
+    """The image placed by the sform when its code is not 0, as nibabel, FSL and SPM place it
+    (``get_best_affine``) and duckn's converter does - not by SimpleITK's own rule, which takes
+    the qform beside an MNI (4) or aligned (2) sform: the same file was placed 5 mm apart by the
+    two (2026-09-30, SimpleITK 2.5.6). nifti1.h leaves the choice to the reader; TotalSegmentator
+    reads with nibabel, and this module's own fallback (:func:`_read_with_snapped_affine`)
+    already placed by nibabel's affine, so a file was placed by one rule or the other depending
+    on whether ITK accepted its cosines (the user's call, 2026-09-30: one rule, duckn's).
+
+    Only a file with BOTH transforms can differ (with one, SimpleITK takes it; with neither, its
+    method-1 placement is nibabel's). A singular or non-finite sform places nothing and is
+    passed over, as duckn passes it over. The image is touched only when SimpleITK's placement
+    differs beyond float32 noise, so a scanner converter's file, whose qform is its sform's
+    float32 quaternion, reads exactly as before. A sform SimpleITK's image cannot hold (a
+    shear beyond float noise) is refused, as the fallback refuses it."""
+    import numpy as np
+    found = _nifti1_transforms(p)
+    if found is None or image.GetDimension() != 3:
+        return image
+    sform_code, qform_code, srow = found
+    if sform_code <= 0 or qform_code <= 0:
+        return image
+    if not np.all(np.isfinite(srow)) or abs(np.linalg.det(srow[:, :3])) < 1e-12:
+        return image
+    aff = np.vstack([srow, [0.0, 0.0, 0.0, 1.0]])
+    origin, spacing, direction = _itk_geometry(aff, p)
+    scale = max(1.0, float(np.max(np.abs(aff))))
+    if (np.allclose(image.GetOrigin(), origin, rtol=0, atol=1e-4 * scale)
+            and np.allclose(image.GetSpacing(), spacing, rtol=1e-5, atol=0)
+            and np.allclose(image.GetDirection(), direction, rtol=0, atol=1e-5)):
+        return image
+    image.SetOrigin(origin)
+    image.SetSpacing(spacing)
+    image.SetDirection(direction)
     return image
 
 
