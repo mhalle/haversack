@@ -1,6 +1,7 @@
 """Shared fixtures for the kernel-layer tests: the device matrix, synthetic logits, and the
 tie-aware comparison. Auto-loaded by pytest.
 """
+import contextlib
 import threading
 import time
 
@@ -106,6 +107,15 @@ def _server_threads_end_with_their_test():
     constructor is itself a class-wide change, and `test_executor_contract` reads the real
     one's code.
     """
+    with server_threads_end_here():
+        yield
+
+
+@contextlib.contextmanager
+def server_threads_end_here(join_s: float = _SERVER_THREADS_JOIN_S):
+    """The fixture's work, around any block: on leaving it, close every LocalExecutor the
+    block started and wait for the server threads it started. A context manager so that
+    `test_server_threads.py` can hold it to that - an autouse fixture cannot test itself."""
     before = set(threading.enumerate())
     yield
     for t in threading.enumerate():
@@ -113,7 +123,7 @@ def _server_threads_end_with_their_test():
             close = getattr(getattr(getattr(t, "_target", None), "__self__", None), "close", None)
             if close is not None:
                 close()
-    deadline = time.monotonic() + _SERVER_THREADS_JOIN_S
+    deadline = time.monotonic() + join_s
     while True:
         # again after each round: a dispatcher finishing its job starts an artifact thread
         left = [t for t in threading.enumerate() if t not in before
@@ -125,6 +135,6 @@ def _server_threads_end_with_their_test():
         if time.monotonic() >= deadline:
             still = sorted(t.name for t in left if t.is_alive())
             if still:
-                pytest.fail(f"server threads outlived their test by {_SERVER_THREADS_JOIN_S:.0f}"
+                pytest.fail(f"server threads outlived their test by {join_s:.0f}"
                             f" s: {', '.join(still)}", pytrace=False)
             return
