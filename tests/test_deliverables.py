@@ -556,13 +556,15 @@ def test_a_queued_job_keeps_its_list_across_a_restart(tmp_path, monkeypatch, ren
     ex.jobs_db.put(legacy)
     ex.close()
     gate.set()
-    ex2 = LocalExecutor(_Segmenter(gate=threading.Event()), workdir=tmp_path / "work",
+    gate2 = threading.Event()
+    ex2 = LocalExecutor(_Segmenter(gate=gate2), workdir=tmp_path / "work",
                         cache_dir=tmp_path / "rc")
     try:
         assert ex2.get(queued["id"]).deliverables == ("statistics",)
         assert ex2.get(older["id"]).deliverables == ("preview", "statistics")
     finally:
         ex2.close()
+        gate2.set()                    # its restored job would otherwise wait out the timeout
 
 
 # -- one table ---------------------------------------------------------------------------

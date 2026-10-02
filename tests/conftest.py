@@ -1,6 +1,9 @@
 """Shared fixtures for the kernel-layer tests: the device matrix, synthetic logits, and the
 tie-aware comparison. Auto-loaded by pytest.
 """
+import threading
+import time
+
 import numpy as np
 import pytest
 import torch
@@ -74,3 +77,54 @@ def _engines_off_by_default(monkeypatch):
     from haversack.engines.registry import engine_env_vars
     for var in engine_env_vars():
         monkeypatch.setenv(var, "0")
+
+
+#: The server's threads that do finite work, or stop when their executor is closed. Not
+#: "haversack-view" (serve_forever until shut down) nor a job.py worker, whose fn may block.
+_SERVER_THREADS = ("haversack-serve", "haversack-artifacts", "haversack-prefetch",
+                   "haversack-sweep", "haversack-mirror-trim")
+#: How long a test's server threads get to finish after it. They finish in milliseconds
+#: here; the bound only turns a hang into a teardown error instead of a stuck suite.
+_SERVER_THREADS_JOIN_S = 30.0
+
+
+@pytest.fixture(autouse=True)
+def _server_threads_end_with_their_test():
+    """Close every LocalExecutor a test started and wait for the server threads it started
+    (2026-10-01).
+
+    `LocalExecutor.close()` only sets a stop flag, and most tests never call it, so their
+    threads outlived them: a "done" job's daemon artifact thread published into the shared
+    store (`SharedResultCache._swap`) during a LATER test - eight such publications per
+    fast-suite run, in TestGapsFromMutation, TestBoundedHistory, TestFormat1IsReadAndConverted.
+    One broke TestPush's publication count in CI (run 36786031441), and any class-wide patch
+    of the store could see another test's write. Closing here is the existing shutdown, not
+    a new one: a running job still finishes and publishes - before this test ends, not after.
+
+    The executor is reached through its dispatcher thread's target (CPython's
+    `Thread._target`, there until the target returns), not by wrapping `__init__`: a patched
+    constructor is itself a class-wide change, and `test_executor_contract` reads the real
+    one's code.
+    """
+    before = set(threading.enumerate())
+    yield
+    for t in threading.enumerate():
+        if t not in before and t.name == "haversack-serve":
+            close = getattr(getattr(getattr(t, "_target", None), "__self__", None), "close", None)
+            if close is not None:
+                close()
+    deadline = time.monotonic() + _SERVER_THREADS_JOIN_S
+    while True:
+        # again after each round: a dispatcher finishing its job starts an artifact thread
+        left = [t for t in threading.enumerate() if t not in before
+                and t.name.startswith(_SERVER_THREADS) and t.is_alive()]
+        if not left:
+            return
+        for t in left:
+            t.join(max(0.0, deadline - time.monotonic()))
+        if time.monotonic() >= deadline:
+            still = sorted(t.name for t in left if t.is_alive())
+            if still:
+                pytest.fail(f"server threads outlived their test by {_SERVER_THREADS_JOIN_S:.0f}"
+                            f" s: {', '.join(still)}", pytrace=False)
+            return

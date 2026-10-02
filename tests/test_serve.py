@@ -3676,13 +3676,15 @@ def test_restart_restores_the_single_flight_marker(tmp_path, monkeypatch):
     jid = ex.jobs()[0].id
     key = ex.jobs()[0].cache_key
     ex.close()
-    ex2 = LocalExecutor(FakeSegmenter(gate=threading.Event()), workdir=tmp_path / "w",
+    gate2 = threading.Event()
+    ex2 = LocalExecutor(FakeSegmenter(gate=gate2), workdir=tmp_path / "w",
                         cache_dir=tmp_path / "rc", fetch_idc_fn=fetch)
     try:
         assert ex2.find_inflight(key) == jid
     finally:
         ex2.close()
         gate.set()
+        gate2.set()                    # its restored job would otherwise wait out the timeout
 
 
 def test_a_terminal_record_keeps_answering_after_eviction_and_delete_drops_it(tmp_path):
