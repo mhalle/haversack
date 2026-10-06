@@ -39,6 +39,14 @@
   `Input.missing()` reads it. It marks exactly the voxels pydicom finds padded, in both copy
   forms. Copies made before this record nothing; nothing else about them changes.
 
+- **labelfield v0.1.5, rankfield v0.3.11 and feldglas v0.2.7 pinned.** labelfield 0.1.4 made
+  its torch restore backend - the CPU's, and CUDA's without Triton - about 7x faster where most of
+  the field is one class (TotalSegmentator `--fast` on a 768x768x709 CT, 8 cores: 162 s to 23 s),
+  and 0.1.5 removed a GB-scale temporary from its start: the non-finite check on the logits peaked
+  at 2.5x a float16 field on the CPU (1.1-2.4 GB on TotalSegmentator-sized parts), and on CUDA
+  without Triton the same in GPU memory. Labels are unchanged; the Metal and Triton kernels are
+  untouched. rankfield 0.3.11 and feldglas 0.2.7 move only their pins, which must equal haversack's.
+
 - **duckn v0.6.3 and feldglas v0.2.6 pinned.** duckn 0.6.3 fixes two 1.x converters that
   declared a convention version their output did not follow: a NRRD import with a measurement
   frame now declares 1.1 (the frame is by rows, 1.1's form), and a DICOM series whose rescale
