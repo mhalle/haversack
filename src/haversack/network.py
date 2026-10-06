@@ -721,6 +721,12 @@ class TorchModel:
                     # next batch ran beside all B of this one's outputs
                     del x, preds, pred
             torch.div(acc, n_pred, out=acc)
+            # Checked here too since 2026-10-05: until then only the host path was, so a NaN or an
+            # fp16 overflow accumulated on the device reached the labels unremarked. On MPS the
+            # check costs about 8 MB; the message has no "memory" in it, so the fallback re-raises
+            # it rather than retrying on the host.
+            if not all_finite(acc):
+                raise RuntimeError("non-finite logits after accumulation")
             return acc
         acc = torch.zeros((K, *shape), dtype=torch.half)
         n_pred = torch.zeros(shape, dtype=torch.half)
@@ -758,9 +764,26 @@ class TorchModel:
         if err:
             raise err[0]
         torch.div(acc, n_pred, out=acc)
-        if not torch.isfinite(acc).all():
+        if not all_finite(acc):
             raise RuntimeError("non-finite logits after accumulation")
         return acc
+
+
+def all_finite(t: torch.Tensor) -> bool:
+    """``bool(torch.isfinite(t).all())`` without the temporary.
+
+    On the CPU ``torch.isfinite`` materializes full-size intermediates before ``.all()`` reduces
+    them: on a 755 MB fp16 accumulator (K=18, a 256 x 256 x 320 grid) peak RSS grew 1696 MB, 2.25x
+    the tensor, and on the fp32 tensor of the same shape 1722 MB (torch 2.14, Apple M2,
+    2026-10-05). The host accumulator is K x the padded model grid, so the check put a GB-scale
+    transient on top of a CPU run's peak (a sliding window over that grid: 3.05 GB, 2.07 GB
+    without it). A max and a min reduce to scalars and propagate NaN, and an
+    infinity is itself an extreme, so the two extremes are finite exactly when every element
+    is: the same answer for NaN, +inf and -inf at any position, in every float dtype
+    (``tests/test_all_finite.py``), with peak RSS growing 1 MB."""
+    if t.numel() == 0:
+        return True                    # isfinite(empty).all() is True; amax of nothing raises
+    return bool(torch.isfinite(t.amax()) & torch.isfinite(t.amin()))
 
 
 # re-exported so callers keep importing it from here

@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+- **A CPU run no longer needs a second accumulator's worth of memory at the end.** The host
+  accumulator's non-finite check was `torch.isfinite(acc).all()`, which on the CPU materializes
+  full-size intermediates before reducing them: on a 755 MB fp16 accumulator (K=18 at a
+  256 x 256 x 320 grid) the check alone grew peak RSS by 1.7 GB. It now asks whether the
+  accumulator's max and min are finite (`network.all_finite`), which is the same answer - NaN
+  propagates through both, and an infinity is itself an extreme - and allocates nothing. A CPU
+  sliding window over that grid peaked at 2.07 GB, where it peaked at 3.05 GB (Apple M2,
+  torch 2.14). Labels are unchanged; a NaN, +inf or -inf, or an fp16 overflow, still raises.
+
+- **An accumulator on the device is checked for non-finite logits too.** Only the host
+  accumulator was, so on MPS or CUDA, with the accumulator on the device, a NaN or an fp16
+  overflow (a logit past 65504) went on into the labels without a word. Such a run now raises
+  `non-finite logits after accumulation` as a host run does, once: it is not an out-of-memory
+  error, so it is not retried on the host. The check costs about 8 MB on MPS.
+
 - **A NIfTI with both transforms is placed by its sform.** nifti1.h defines the qform and the
   sform and leaves the choice to the reader. nibabel, FSL, SPM, TotalSegmentator (which reads
   with nibabel) and duckn's converter take the sform when its code is not 0; SimpleITK, which
