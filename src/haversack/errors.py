@@ -79,7 +79,8 @@ class UnsupportedModel(HaversackError, NotImplementedError):
     """A valid nnU-Net model that haversack cannot run *yet*.
 
     Not the caller's mistake and not recoverable by retrying - e.g. a non-identity
-    ``transpose_forward``, region-based (sigmoid) labels, multi-channel input, or a
+    ``transpose_forward``, region-based (sigmoid) labels with no usable
+    ``regions_class_order``, multi-channel input, or a
     ``3d_cascade_fullres`` configuration. Distinct from :class:`ModelNotFound` so a UI can say
     "this model is not supported" rather than "file missing".
     """

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+- **Region-based nnU-Net models run.** A model whose `dataset.json` maps a label to several
+  values (sigmoid heads, one per region - PanTS's `"pancreas": [17, 18, 19, 20, 21, 28]`) was
+  refused. It is now decoded as nnU-Net's own export decodes it: channel `k` paints
+  `regions_class_order[k]` where its logit is above 0 (sigmoid above 0.5), later channels
+  winning, through labelfield's fused `mode="regions"` restore - the same resample, Metal,
+  Triton or torch. On a stub model the labels equal `LabelManager.convert_logits_to_segmentation`
+  on the same logits. The label map names each region by the value it paints; a region model
+  with no `regions_class_order`, or one that gives two regions one value, is still refused, as
+  nnU-Net cannot decode it either. The result's provenance states the decode (`decode`). A
+  ranked store needs a softmax head, so a region model writes labels only. No catalog task is
+  region-based; nothing computed before changes.
+
+- **`haversack segment --folds` and `--json-progress`.** `--folds all` (or `0,1,2`) ensembles
+  a model folder's folds from the command line, where only fold 0 (or `fold_all`) could run.
+  `--json-progress` writes the run's progress, its result (output, structure names, the values
+  present, timings) and any error as JSON lines on stderr prefixed `haversack> `, for a program
+  driving the run - the 3D Slicer module that runs haversack's models (SlicerHaversack).
+
 - **Multi-fold nnU-Net ensembles run.** haversack rewrites each transposed convolution as an
   exact 1x1x1 convolution plus depth-to-space (`ShuffleUp3d`, so the decoder runs in half
   precision on MPS), on every device, by default - and until now it refused every fold after

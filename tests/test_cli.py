@@ -388,3 +388,87 @@ def test_rights_names_the_source_kinds_it_takes(capsys):
     assert "unknown source kind 'nosuchkind'" in err
     assert "idc:" in err and "zenodo:" in err and "http(s)://" in err
     assert "cite" not in err
+
+
+# --- --folds and --json-progress (2026-10-20: driven from a 3D Slicer module) -----------------
+
+def _events(err):
+    import json
+    return [json.loads(line[len(cli.JSON_PROGRESS_PREFIX):]) for line in err.splitlines()
+            if line.startswith(cli.JSON_PROGRESS_PREFIX)]
+
+
+@pytest.mark.parametrize("given, want", [(None, None), ("all", "all"), ("0,2", (0, 2)), ("3", (3,))])
+def test_folds_reach_segment(monkeypatch, tmp_path, given, want):
+    captured = {}
+
+    def fake_segment(image, task, **kw):
+        captured.update(kw)
+        return FakeResult()
+
+    monkeypatch.setattr(pipeline, "segment", fake_segment)
+    (tmp_path / "in.nii.gz").touch()
+    argv = ["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
+            "-o", str(tmp_path / "out.nii.gz"), "--quiet"]
+    rc = cli.main(argv + ([] if given is None else ["--folds", given]))
+    assert rc == 0
+    assert captured.get("folds") == want      # absent: segment()'s own default, as before
+
+
+@pytest.mark.parametrize("bad", ["", "x", "1,a", "-1"])
+def test_bad_folds_are_refused(monkeypatch, tmp_path, capsys, bad):
+    monkeypatch.setattr(pipeline, "segment", lambda *a, **k: FakeResult())
+    (tmp_path / "in.nii.gz").touch()
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
+                   "-o", str(tmp_path / "out.nii.gz"), "--folds", bad])
+    assert rc == 2
+    assert "--folds" in capsys.readouterr().err
+
+
+def test_json_progress_reports_progress_and_the_result(monkeypatch, tmp_path, capsys):
+    from haversack.progress import Progress
+
+    class Result(FakeResult):
+        class schema:
+            names = {1: "liver", 2: "spleen"}
+
+        class grid:
+            shape = (2, 3, 4)
+
+        timings = {"total": 1.5}
+        provenance = {"deviations": []}
+
+        def present(self):
+            return {1: "liver"}
+
+    def fake_segment(image, task, progress=None, **kw):
+        progress(Progress(stage="predict", step=1, n_steps=4, fraction=0.5))
+        return Result()
+
+    monkeypatch.setattr(pipeline, "segment", fake_segment)
+    (tmp_path / "in.nii.gz").touch()
+    out = tmp_path / "out.seg.nrrd"
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
+                   "-o", str(out), "--json-progress"])
+    assert rc == 0
+    ev = _events(capsys.readouterr().err)
+    assert [e["event"] for e in ev] == ["progress", "done"]
+    assert ev[0]["stage"] == "predict" and ev[0]["fraction"] == 0.5 and ev[0]["n_steps"] == 4
+    assert ev[1]["output"] == str(out)
+    assert ev[1]["structures"] == {"1": "liver", "2": "spleen"} and ev[1]["present"] == [1]
+
+
+def test_json_progress_reports_an_error_as_an_event_too(monkeypatch, tmp_path, capsys):
+    from haversack.errors import UnsupportedModel
+
+    def fake_segment(image, task, **kw):
+        raise UnsupportedModel("not this one")
+
+    monkeypatch.setattr(pipeline, "segment", fake_segment)
+    (tmp_path / "in.nii.gz").touch()
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
+                   "-o", str(tmp_path / "out.nii.gz"), "--json-progress"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert _events(err) == [{"event": "error", "kind": "UnsupportedModel", "message": "not this one"}]
+    assert "haversack: not this one" in err            # the plain line a person reads is still there

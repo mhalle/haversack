@@ -240,6 +240,10 @@ job = seg.submit("scan.nii.gz", "ts.v2:total", on_progress=print)   # off-thread
 `segment()` takes the same options as the command line as keyword arguments (`grid=1.0`,
 `interp="nearest"`, `device="mps"`, `envelope_mm=20`, ...). A stock nnU-Net model folder
 works as a task: `segment("scan.nii.gz", "/path/to/Dataset123_x/nnUNetTrainer__nnUNetPlans__3d_fullres")`.
+A region-based model (sigmoid heads, a `labels` entry listing several values) runs too: each
+region is painted at its `regions_class_order` value, later regions winning, as nnU-Net's own
+export does. It writes labels only; a ranked store needs a softmax head. On the command line,
+`--folds all` runs every fold on disk as an ensemble (the default is fold 0, or `fold_all`).
 Errors are one family, `haversack.HaversackError` (`InputError`, `ModelNotFound`,
 `UnsupportedModel`, `ResourceError`, `Cancelled`).
 
@@ -605,8 +609,8 @@ haversack remote embeddings --identity idc:<uuid>    # what it has cached, with 
 
 ## What haversack does not do yet
 
-- Multi-channel nnU-Net inputs, region (sigmoid) heads, and the `3d_lowres`, cascade and `2d`
-  configurations are not on the nnU-Net path.
+- Multi-channel nnU-Net inputs and the `3d_lowres`, cascade and `2d` configurations are not on
+  the nnU-Net path. Region (sigmoid) heads write labels but not ranked stores.
 - VoxTell and the MONAI bundles are experimental, opt-in, and Modal-only (above).
   FastSurfer and SynthStrip run locally (above).
 - Versioning: `haversack.__version__` is haversack's own number and is what the server reports; the
