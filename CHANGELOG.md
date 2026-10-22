@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+- **Region-based nnU-Net models run (draft: naming to follow).** A model whose `dataset.json`
+  maps a label to several values (sigmoid heads, one per region: PanTS's
+  `"pancreas": [17, 18, 19, 20, 21, 28]`) was refused. It is now decoded as nnU-Net's own export
+  decodes it: channel `k` paints `regions_class_order[k]` where its logit is above 0 (sigmoid above
+  0.5), later channels winning, through labelfield's fused `mode="regions"` restore. On a stub
+  model the labels equal `LabelManager.convert_logits_to_segmentation` on the same logits. A
+  region model with no `regions_class_order`, or one that gives two regions one value, is still
+  refused. The result's provenance states the decode (`decode`); a ranked store needs a softmax
+  head, so a region model writes labels only. No catalog task is region-based.
+  **Not yet right:** each painted value is named after its region, but where regions nest a
+  painted value covers the region minus those painted after it (KiTS 2023's value 3 is cyst, not
+  "masses"; PanTS's 17 is the pancreas outside its named parts). Naming by what a value covers,
+  and region volumes over value sets, are to come.
+
 ## [0.16.0] - 2026-10-22
 
 The release that ends the 0.16.0 candidates, every sibling pinned to a tag: **labelfield
