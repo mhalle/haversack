@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+- **`haversack segment --folds` and `--json-progress`.** `--folds all` (or `0,1,2`) picks the
+  folds to ensemble from the command line. Without it, a run takes the ensemble its catalog states
+  (the `lnq:*` tasks), else fold 0, as before; `all` is for the command line and the Python API,
+  and a server job still names its folds. `--json-progress` writes the run's progress, its result
+  (output, structure names, the values present, timings) and any error as JSON lines on stderr
+  prefixed `haversack> `, for a program driving the run - the 3D Slicer module that runs haversack's
+  models (SlicerHaversack).
+
 ## [0.16.0] - 2026-10-22
 
 The release that ends the 0.16.0 candidates, every sibling pinned to a tag: **labelfield

@@ -384,7 +384,17 @@ def _command_line() -> click.Group:
                                'checked against an outside implementation; '
                                'dentalsegmentator:base, totalvibe:vibe_sagittal and '
                                'totalvibe:pancreas need it')),
+            click.Option(['--folds'],
+                         help=('nnU-Net folds to ensemble: "all" (every fold on disk) or a '
+                               'comma list such as 0,1,2. Default: the ensemble the task\'s '
+                               'catalog states (lnq:*), else fold 0 (or fold_all where that is '
+                               'all a model folder holds). "all" is for the command line and '
+                               'the Python API; a server job names its folds')),
             click.Option(['--quiet'], is_flag=True, help='no progress or timings on stderr'),
+            click.Option(['--json-progress'], is_flag=True,
+                         help=('progress, the result and any error as JSON lines on stderr, each '
+                               f'prefixed "{JSON_PROGRESS_PREFIX}" - for a program driving the run '
+                               '(a 3D Slicer module); other stderr lines stay plain text')),
         ])
     root.add_command(segment)
 
@@ -2036,15 +2046,68 @@ def _cmd_cache_move(args) -> int:
     return 1 if got["failed"] else 0
 
 
+#: What marks a `segment --json-progress` line on stderr, so a driver can tell its events from
+#: everything else a run may print there (nnU-Net's and torch's warnings among them).
+JSON_PROGRESS_PREFIX = "haversack> "
+
+
+def _json_event(event: str, **fields) -> None:
+    import json as _json
+    print(JSON_PROGRESS_PREFIX + _json.dumps({"event": event, **fields}, default=str),
+          file=sys.stderr, flush=True)
+
+
+def _json_progress(m) -> None:
+    """A run's progress as an event: a :class:`~haversack.progress.Progress` snapshot as its
+    fields, anything else (a source's download message) as text."""
+    import dataclasses
+    if dataclasses.is_dataclass(m):
+        _json_event("progress", **dataclasses.asdict(m))
+    else:
+        _json_event("log", message=str(m))
+
+
+def _parse_folds(text):
+    """``--folds``: None (the task's default), "all", or a tuple of fold numbers."""
+    from .errors import InputError
+    if text is None:
+        return None
+    t = str(text).strip().lower()
+    if t == "all":
+        return "all"
+    try:
+        folds = tuple(int(f) for f in t.split(",") if f.strip())
+    except ValueError:
+        folds = ()
+    if not folds or min(folds) < 0:
+        raise InputError(f"--folds {text!r}: give all, or fold numbers separated by commas")
+    return folds
+
+
 def _cmd_segment(args) -> int:
     """`haversack segment`."""
+    if not getattr(args, "json_progress", False):
+        return _segment(args)
+    try:
+        return _segment(args)
+    except Exception as e:
+        _json_event("error", kind=type(e).__name__, message=str(e))
+        raise
+
+
+def _segment(args) -> int:
     import json as _json
     from pathlib import Path
     from . import io
     from .errors import InputError
     from .engines import registry
     from .sources import materialize, parse_input, source_stem
-    progress = None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
+    json_progress = getattr(args, "json_progress", False)
+    if json_progress:
+        progress = _json_progress
+    else:
+        progress = None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
+    folds = _parse_folds(getattr(args, "folds", None))
     inputs = args.input
     batch = len(inputs) > 1 or args.format is not None
     # The cheap mistakes first - before the inference stack is demanded (a lean
@@ -2096,6 +2159,9 @@ def _cmd_segment(args) -> int:
     bs = args.batch_size if args.batch_size == "auto" else int(args.batch_size)
     _need_inference_stack(args.task)
     engine_task = registry.engine_for_task(args.task).name != registry.NNUNETV2
+    if folds is not None and engine_task:
+        raise InputError("--folds applies to nnU-Net tasks; this task's engine chooses its own models")
+    fold_kw = {} if folds is None else {"folds": folds}
 
     def resolve(spec):
         if parse_input(spec) is not None:
@@ -2130,9 +2196,19 @@ def _cmd_segment(args) -> int:
                        accumulate=args.accumulate, batch_size=bs,
                        envelope_mm=args.envelope,
                        remove_small_blobs=args.remove_small_blobs or False,
-                       allow_transpose=args.allow_transpose, progress=progress)
+                       allow_transpose=args.allow_transpose, progress=progress, **fold_kw)
 
     def report(r, where):
+        if json_progress:
+            # the names present, in label order, are what a driver loads the file against
+            names = r.schema.names
+            present = set(int(v) for v in r.present())
+            _json_event("done", output=str(where), shape=list(r.grid.shape),
+                        structures={str(v): n for v, n in sorted(names.items())},
+                        present=sorted(present),
+                        deviations=list((r.provenance or {}).get("deviations", ())),
+                        timings=dict(r.timings))
+            return
         if args.quiet:
             return
         for k, v in r.timings.items():
