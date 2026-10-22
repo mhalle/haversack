@@ -200,10 +200,22 @@ def checkpoint_dataset_json(zf, *, folder: str | None = None, flat: bool = False
 def _dataset_listing(ds: dict, *, modality: str | None = None, where: str = "") -> dict:
     """A label listing from a checkpoint's ``dataset.json``, read by the function an installed
     model's spec is built with (:func:`haversack.tasks.dataset_labels`)."""
-    from .tasks import dataset_labels, dataset_modality
+    from .tasks import dataset_labels, dataset_modality, dataset_regions
     raw = ds.get("labels") or {}
     out = {"modality": modality or dataset_modality(ds)}
-    if any(isinstance(v, (list, tuple)) for v in raw.values()):
+    try:
+        decodable = bool(dataset_regions(ds, where=where))
+    except UnsupportedModel:
+        decodable = False
+    if decodable:
+        # a region model haversack runs (2026-10-20): its result is one label map, each region
+        # at the value its regions_class_order paints, later regions winning - so its listing
+        # is that label map, as a softmax model's is
+        out.update(kind="segments", segments=[{"id": n, "value": v} for v, n in
+                                              dataset_labels(ds, where=where).items()],
+                   note="region-based: overlapping sigmoid regions painted into one label map "
+                        "in regions_class_order, later regions winning")
+    elif any(isinstance(v, (list, tuple)) for v in raw.values()):
         # recorded, not refused: this is a listing of what the model says, and a model
         # haversack cannot run still says it. Its regions overlap by design - one sigmoid
         # output each - so each is a segment in a layer of its own, which is how duckn and
@@ -213,8 +225,8 @@ def _dataset_listing(ds: dict, *, modality: str | None = None, where: str = "") 
         out.update(kind="segments",
                    segments=[{"id": k, "layer": i, "value": 1} for i, k in enumerate(regions)],
                    note="region-based labels: overlapping regions, one layer each in the "
-                        "model's declared order; haversack does not run these (it takes the "
-                        "argmax of a softmax head)")
+                        "model's declared order; haversack does not run these (no valid "
+                        "regions_class_order says how they paint one label map)")
     else:
         out.update(kind="segments", segments=[{"id": n, "value": v} for v, n in
                                               dataset_labels(ds, where=where).items()])

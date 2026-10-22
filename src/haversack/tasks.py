@@ -114,8 +114,10 @@ def dataset_labels(ds: dict, where: str = "dataset.json") -> dict[int, str]:
     The one reading of a checkpoint's labels. :meth:`TaskSpec.from_model_folder` builds an
     installed model's label map with it, and ``haversack catalog mine`` reads a remote
     archive's with it (2026-09-12), so the index and an installed model cannot disagree about
-    what the same file says. Region-based labels - a name mapping to several values - raise,
-    as they always have here.
+    what the same file says. Region-based labels - a name mapping to several values - are
+    named by the value each region paints (:func:`dataset_regions`), the label nnU-Net's own
+    export writes for it; without ``regions_class_order`` nnU-Net cannot decode them either,
+    and they raise.
 
     Background and ``ignore`` are roles a value plays, not segments. nnU-Net never predicts
     the ignore label - its label manager skips the key by name and requires it to be the
@@ -125,11 +127,43 @@ def dataset_labels(ds: dict, where: str = "dataset.json") -> dict[int, str]:
     segments. The key is matched exactly, as nnU-Net matches it.
     """
     labels = ds.get("labels") or {}
-    if any(isinstance(v, (list, tuple)) for v in labels.values()):
-        raise UnsupportedModel(
-            f"{where}: region-based labels (a label mapping to several values) are not "
-            "supported yet - haversack takes the argmax of a softmax head")
+    regions = dataset_regions(ds, where)
+    if regions:
+        names = [str(k) for k, v in labels.items() if _region_value(v) != 0 and k != "ignore"]
+        return dict(zip(regions, names))
     return {int(v): str(k) for k, v in labels.items() if int(v) != 0 and k != "ignore"}
+
+
+def _region_value(v):
+    """A ``labels`` entry's value as nnU-Net compares it to background: a region list as is."""
+    return tuple(int(x) for x in v) if isinstance(v, (list, tuple)) else int(v)
+
+
+def dataset_regions(ds: dict, where: str = "dataset.json") -> tuple[int, ...]:
+    """The label each sigmoid channel of a region-based model paints, in channel order - its
+    ``regions_class_order`` - or ``()`` for a softmax model.
+
+    A region-based model (some ``labels`` entry lists several values) has one sigmoid output
+    per foreground region, in ``labels`` order, and nnU-Net's export writes
+    ``regions_class_order[k]`` wherever channel ``k`` is above 0.5, later channels winning
+    (``LabelManager.convert_probabilities_to_segmentation``). That order is the decode, so a
+    region model without one - or with one that does not name each region once - is refused:
+    nnU-Net itself cannot run it (2026-10-20, PanTS)."""
+    labels = ds.get("labels") or {}
+    if not any(isinstance(v, (list, tuple)) for v in labels.values()):
+        return ()
+    n = sum(1 for k, v in labels.items() if _region_value(v) != 0 and k != "ignore")
+    order = ds.get("regions_class_order")
+    if not isinstance(order, (list, tuple)) or len(order) != n:
+        raise UnsupportedModel(
+            f"{where}: region-based labels (a label mapping to several values) need a "
+            f"regions_class_order with one value per region ({n}); got {order!r}")
+    order = tuple(int(v) for v in order)
+    if len(set(order)) != n or min(order) <= 0:
+        raise UnsupportedModel(
+            f"{where}: regions_class_order {list(order)} must give each region its own "
+            "nonzero label, or two regions' names would claim one value")
+    return order
 
 
 def dataset_modality(ds: dict) -> str:
@@ -193,6 +227,10 @@ class TaskSpec:
     #: wins; a stated default enters the result key (``serve.weights_versions_of``), so no
     #: other task's key moves (2026-10-22).
     folds: tuple | None = None
+    #: A region-based model's decode: the label each sigmoid channel paints, in channel order
+    #: (:func:`dataset_regions`). Empty for a softmax head, which is every catalog model; a
+    #: non-empty value restores with labelfield's ``mode="regions"`` instead of the argmax.
+    regions: tuple[int, ...] = ()
 
     def model_choice(self, weights_id) -> dict:
         """``{"trainer"?, "plans"?}`` this task states for ``weights_id`` - the keyword
@@ -216,7 +254,8 @@ class TaskSpec:
         ds = json.loads((f / "dataset.json").read_text(encoding="utf-8"))
         return cls(name=name or f.parent.name, lineage="nnunetv2",
                    modality=dataset_modality(ds), shape="single", single=str(f),
-                   label_map=dataset_labels(ds, where=f.name))
+                   label_map=dataset_labels(ds, where=f.name),
+                   regions=dataset_regions(ds, where=f.name))
 
     @property
     def parts(self) -> list[tuple[WeightsId, Mapping[int, int] | None, str]]:

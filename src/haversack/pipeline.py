@@ -167,6 +167,17 @@ def _named_lut(K: int, spec) -> np.ndarray:
     return lut
 
 
+def _regions_lut(K: int, spec) -> np.ndarray:
+    """A region-based model's decode table: channel ``k`` paints ``spec.regions[k]``. The
+    network must have exactly one sigmoid head per region its ``dataset.json`` declares, or the
+    folder's plans and labels describe different models."""
+    if len(spec.regions) != K:
+        raise ModelNotFound(
+            f"{spec.name}: the model emits {K} channels but its dataset.json declares "
+            f"{len(spec.regions)} regions - the labels do not match the weights")
+    return np.asarray(spec.regions, dtype=np.int64)
+
+
 def canonical_orientation_for(spec, store, *, configuration: str | None = None) -> str | None:
     """The orientation code the model must see, or None to keep the stored axis order.
 
@@ -323,6 +334,12 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         return spc
 
     spec = resolve(task)
+    if spec.regions and probabilities is not None:
+        # a ranked store is the softmax's ranking and its margins; a region model's channels
+        # are independent sigmoids that overlap by design, with no ranking among them
+        from .errors import UnsupportedModel
+        raise UnsupportedModel(f"{spec.name} is region-based (sigmoid outputs): it writes "
+                               "labels, not a ranked store, which needs a softmax head")
     # nnU-Net-native models were trained on their own preprocessing: skimage's half-pixel
     # ("center") resample and crop-to-nonzero. TS bypasses both (corner-aligned change_spacing,
     # no crop). Getting this backwards is a silent geometry error, so it follows the task's
@@ -344,6 +361,9 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             "preprocessing_order": "nnunet" if native_order else "resample-first",
             "canonical_orientation": canonical, "interp": interp,
             "envelope_mm": envelope_mm, "resampling_order": resampling_order, "models": [],
+            # how logits became labels, stated only where it is not the argmax
+            **({"decode": {"mode": "regions", "threshold": 0.0, "order": list(spec.regions)}}
+               if spec.regions else {}),
             "weights_store": store.describe(),
             "haversack": _version(),
             # which license governs this output and what to cite for it - the
@@ -563,7 +583,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
         return how
 
     def predict_into(model, x, frame, ogrid, env, *, lut, paint, out, part="", weights=None,
-                     restore=None, label_task=None, role=None):
+                     restore=None, label_task=None, role=None, mode="argmax"):
         # tripwire: `x` must carry THIS model's normalization. Several models share one resample,
         # and feeding one model's normalization to another is silent and severe - the organs
         # model's CT clip at +276 HU flattens all bone for the parts that follow it.
@@ -594,7 +614,7 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
             if d not in prov["deviations"]:                 # parts on one grid say it once
                 prov["deviations"].append(d)
         to_labels(logits, ogrid, mapping, interp=how, outside="background", lut=lut, paint=paint,
-                  out=out, backend=choice.name)
+                  out=out, backend=choice.name, mode=mode)
         if device == "cuda":
             torch.cuda.synchronize()
         elif device == "mps":
@@ -636,9 +656,14 @@ def segment(image, task: str, *, catalog=None, weights=None, device: str = "auto
                 out = torch.zeros(og.shape, dtype=torch.uint8 if max_label <= 255 else torch.uint16, device=device)
             t = time.perf_counter()
             report.stage("predict", pname)
-            lut = _named_lut(model.K, spc) if remap is None else _lut(model.K, remap)
+            if spc.regions:
+                lut, mode = _regions_lut(model.K, spc), "regions"
+            else:
+                lut = _named_lut(model.K, spc) if remap is None else _lut(model.K, remap)
+                mode = "argmax"
             predict_into(model, x, fr, og, env, lut=lut, paint=len(parts) > 1,
-                         out=out, part=pname, weights=wid, restore=restore, label_task=spc.name)
+                         out=out, part=pname, weights=wid, restore=restore, label_task=spc.name,
+                         mode=mode)
             where = "device" if model.accumulate_choice["on_device"] else "host"
             report.stage("restore", f"{where} accumulator")
             for m in prov["models"]:                 # the effective placement, per model
