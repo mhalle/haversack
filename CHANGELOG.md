@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- **Any zip catalog can publish per-fold training checkpoints.** The install that reads only each
+  fold's network weights out of its release zip, without running its pickle, was LNQ's own; it is
+  `ZipManifestEcosystem`'s now, chosen by a manifest entry that names `folds`, so a catalog that
+  publishes that way is a name, a bucket and a manifest. LNQ installs and runs exactly as before.
+
 ## [0.16.0] - 2026-10-22
 
 The release that ends the 0.16.0 candidates, every sibling pinned to a tag: **labelfield

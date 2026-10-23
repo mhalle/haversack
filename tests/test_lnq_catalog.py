@@ -405,3 +405,27 @@ class WhatTheMutantsFoundInTheGenerator(_Release):
                               "b/fold_0/checkpoint_final.pth": pth}))
         with self.assertRaisesRegex(SystemExit, "2 checkpoint_final.pth"):
             self.gen.describe_fold(p)
+
+
+class AnyZipCatalogGetsTheFoldCheckpointInstall(_Release):
+    """The packaging belongs to ZipManifestEcosystem, not to LNQ (2026-10-23): a catalog that
+    declares nothing but data - name, bucket, manifest - installs the same release the same way."""
+
+    def test_a_catalog_of_data_only_installs_and_states_its_folds(self):
+        class Other(E.ZipManifestEcosystem):
+            name, bucket, generator = "other", "other", "tools/none.py"
+        eco = Other(manifest=self.manifest)
+        eco.ensure("tiny-v1", self.root)
+        folder = eco._folder("tiny-v1", self.root)
+        self.assertEqual(folder, self.root / "other" / self.entry["folder"])
+        self.assertTrue(eco.materialized("tiny-v1", self.root))
+        self.assertEqual(eco.spec("tiny-v1", self.root).folds, FOLDS)
+        self.assertEqual(eco.info("tiny-v1", self.root)["folds"], list(FOLDS))
+        for f in FOLDS:
+            ck = torch.load(folder / f"fold_{f}" / "checkpoint_final.pth", weights_only=True)
+            self.assertNotIn("optimizer_state", ck)
+
+    def test_an_entry_without_folds_installs_as_it_always_did(self):
+        self.assertFalse(any("folds" in e for eco in (E.MooseEcosystem(), E.CADSEcosystem())
+                             for e in eco._entries.values()))
+        self.assertEqual(E.MooseEcosystem()._folds(next(iter(E.MooseEcosystem().tasks()))), ())
