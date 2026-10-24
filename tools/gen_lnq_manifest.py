@@ -33,6 +33,7 @@ import zipfile
 from pathlib import Path
 
 from haversack import fetchlib, torchfree
+from haversack.ecosystems import fold_checkpoints_digest
 from haversack.sources import RangeFile
 
 REPO = "pieper/lnq-segmenter"
@@ -135,8 +136,7 @@ def entry_for(model: dict, project: dict, work: Path) -> dict:
     lic = SPDX.get(model.get("license"))
     if lic is None:
         raise SystemExit(f"{name}: license {model.get('license')!r} - read MODELS.md and add it")
-    combined = hashlib.sha256(json.dumps({k: v["weights_sha256"] for k, v in folds.items()},
-                                         sort_keys=True).encode()).hexdigest()
+    combined = fold_checkpoints_digest(folds)            # the install's own formula
     return {"url": url(meta["filename"]), "sha256": meta["sha256"], "size": meta["size_bytes"],
             "folder": folder, "tag": version, "release": f"{name}-{version}",
             "dataset_id": dsid.group(1) if dsid else None, "modality": "CT",

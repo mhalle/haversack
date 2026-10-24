@@ -42,7 +42,8 @@ class ModelCache:
         # TorchModel's `surgery` is not here because `get` never takes it: every model this
         # cache builds is surgered (the default). A choice added to `get` must be added here
         # too - tests/test_multifold_surgery.py holds the two signatures equal (2026-10-18).
-        f = folds if isinstance(folds, str) else tuple(int(x) for x in folds)
+        f = folds if isinstance(folds, str) else (
+            "all" if list(folds) == ["all"] else tuple(int(x) for x in folds))
         return (str(Path(folder)), f, str(device), str(dtype), str(accumulate),
                 str(batch_size), bool(allow_transpose), float(step_size))
 

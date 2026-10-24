@@ -133,6 +133,14 @@ def _pinned(entry: dict) -> dict:
     return {k: str(entry[k]) for k in ("release", "tag", "sha256", "md5", "url") if entry.get(k)}
 
 
+def fold_checkpoints_digest(folds: dict) -> str:
+    """One digest for a fold-checkpoint model (:class:`ZipManifestEcosystem`): the sha256 of its
+    folds' weight digests, by fold key. The install records it, and a catalog's generator writes
+    the same as the entry's ``weights_sha256`` (tools/gen_lnq_manifest.py calls this)."""
+    text = json.dumps({str(k): f["weights_sha256"] for k, f in folds.items()}, sort_keys=True)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _digest(obj) -> str:
     """A stable sha256 of a JSON-able value: the version of a table this build ships whole."""
     text = json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
@@ -608,10 +616,14 @@ class ZipManifestEcosystem(ModelEcosystem):
       place ``TaskSpec.from_model_folder`` does not look (an orientation).
 
     **Fold checkpoints** (2026-10-23; LNQ first). An entry that names ``folds`` is a second
-    packaging, handled here so a catalog that publishes it stays data: ``url`` is a small flat
-    zip of the model's json files (``dataset.json``, ``plans.json``, ...), ``folder`` the
-    ``Dataset<id>/<trainer>__<plans>__<config>`` folder it installs to, and each fold a STORED
-    zip holding a whole training checkpoint at ``member``. The install reads only each
+    packaging, handled here so a catalog that publishes it stays data. The entry states ``url``
+    and ``sha256`` (a small zip of the model's json files, ``dataset.json`` and ``plans.json`` at
+    its top level), ``folder`` (``<Dataset folder>/<trainer>__<plans>__<configuration>``, which
+    it installs to and no other task may share), ``tag``, optionally ``weights_sha256``
+    (:func:`fold_checkpoints_digest`; the install computes it if absent), and ``folds``: fold
+    numbers, or ``"all"`` alone for nnU-Net's ``fold_all``, each with the ``url`` and ``size`` of
+    a zip holding a whole training checkpoint STORED at ``member``, and that checkpoint's
+    ``weights_sha256`` (:func:`haversack.torchfree.state_digest` of its ``network_weights``). The install reads only each
     checkpoint's ``network_weights``, in place over HTTP Range and without running its pickle
     (:mod:`haversack.torchfree`), checks them against the fold's ``weights_sha256`` and the
     folder's trainer/plans/configuration, writes a weights-only ``checkpoint_final.pth`` per fold,
@@ -640,22 +652,58 @@ class ZipManifestEcosystem(ModelEcosystem):
     _INDEX_BLOCK = 1 << 16
     _STORAGE_BLOCK = 8 << 20
 
+    #: What each fold of the fold-checkpoint packaging must state.
+    _FOLD_FIELDS = ("url", "size", "member", "weights_sha256")
+
+    def _fold_entries(self, task: str) -> dict:
+        """The entry's ``folds``, checked - ``{fold key: fold}`` - or ModelNotFound naming what is
+        wrong. Asked when the task is used, never at construction, so a bad entry costs its own
+        task and not the catalog (2026-10-23, from review: a list, an empty object, a fold key
+        "all" beside numbers, a missing field and a one-part folder all escaped as raw errors or
+        fell through to the other packaging)."""
+        entry = self._entries.get(task) or {}
+        what, fix = f"{self.name} task {task!r}", f" - regenerate it with {self.generator}"
+        folds = entry.get("folds")
+        if not isinstance(folds, dict) or not folds:
+            raise ModelNotFound(f"{what}: 'folds' must be a non-empty object of fold -> "
+                                f"release zip, got {type(folds).__name__}{fix}")
+        keys = [str(k) for k in folds]
+        if not (all(k.isdigit() for k in keys) or keys == ["all"]):
+            raise ModelNotFound(f"{what}: fold keys must be fold numbers, or \"all\" alone "
+                                f"(nnU-Net's fold_all); got {keys}{fix}")
+        for k, f in folds.items():
+            missing = ([n for n in self._FOLD_FIELDS if not (isinstance(f, dict) and f.get(n))])
+            if missing:
+                raise ModelNotFound(f"{what}: fold {k} states no {', '.join(missing)}{fix}")
+        parts = Path(str(entry.get("folder") or "")).parts
+        if len(parts) != 2 or parts[1].count("__") != 2:
+            raise ModelNotFound(f"{what}: 'folder' must be <Dataset folder>/<trainer>__<plans>__"
+                                f"<configuration>, got {entry.get('folder')!r}{fix}")
+        clash = sorted(t for t, e in self._entries.items() if t != task and isinstance(e, dict)
+                       and "folds" in e and str(e.get("folder")) == str(entry.get("folder")))
+        if clash:
+            raise ModelNotFound(f"{what}: installs to the same folder as {clash}{fix}")
+        return {str(k): f for k, f in folds.items()}
+
     def _folds(self, task: str) -> tuple:
-        folds = (self._entries.get(task) or {}).get("folds") or {}
-        return tuple(sorted(int(f) for f in folds))
+        """The ensemble an entry names: its fold numbers in order, or ``("all",)`` for nnU-Net's
+        ``fold_all``; ``()`` for an entry of the other packaging. A malformed entry raises."""
+        if "folds" not in (self._entries.get(task) or {}):
+            return ()
+        keys = list(self._fold_entries(task))
+        return ("all",) if keys == ["all"] else tuple(sorted(int(k) for k in keys))
 
     def _resolved_fold_checkpoints(self, task: str, root):
         """The fold-checkpoint packaging's model folder when it is whole: a dataset.json that
         parses and a checkpoint for every fold the manifest names. The install publishes all of it
         with one rename, so a partial folder is one somebody else made."""
-        folder = self._folder(task, root)
         try:
+            folds = self._folds(task)
+            folder = self._folder(task, root)
             json.loads((folder / "dataset.json").read_text(encoding="utf-8"))
         except Exception:                       # noqa: BLE001 - a predicate, as in the base
             return None
-        folds = self._folds(task)
-        if not folds or not all((folder / f"fold_{f}" / "checkpoint_final.pth").is_file()
-                                for f in folds):
+        if not all((folder / f"fold_{f}" / "checkpoint_final.pth").is_file() for f in folds):
             return None
         return folder
 
@@ -663,31 +711,39 @@ class ZipManifestEcosystem(ModelEcosystem):
         """The fold-checkpoint packaging's install: the flat meta.zip into staging, each fold's
         weights read in place (:meth:`_install_fold`), one rename, then the version sidecar."""
         from .weights_fetch import _write_sidecar
+        folds = self._fold_entries(task)
         folder = self._folder(task, root)
-        folds = entry.get("folds") or {}
-        if not folds:
-            raise ModelNotFound(f"{self.name} task {task!r}: its manifest entry names no folds "
-                                f"- regenerate it with {self.generator}")
+        if folder.exists():
+            # not a complete install (that returned earlier), and not one this call made: the
+            # whole-zip packaging's rule - a directory that was already there is the user's -
+            # holds here too, where this used to delete it (review, 2026-10-23)
+            raise ModelNotFound(f"{self.name} task {task!r}: {folder} exists but is not a "
+                                "complete install of this model - remove it to install")
         bucket = Path(root).expanduser() / self.bucket
+        made_parent = not folder.parent.exists()
         folder.parent.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(dir=folder.parent, prefix=".install-"))
         try:
-            # meta.zip is flat: dataset.json, plans.json and the card land in staging itself
             _download_and_extract_zip(entry["url"], staging, progress=progress,
                                       sha256=entry.get("sha256"), work_dir=bucket,
                                       hint=f"regenerate the manifest with {self.generator}")
+            for name in ("dataset.json", "plans.json"):
+                if not (staging / name).is_file():
+                    raise ModelNotFound(
+                        f"{self.name} task {task!r}: {entry['url'].rsplit('/', 1)[-1]} has no "
+                        f"{name} at its top level - this packaging's json zip is flat")
             plans = json.loads((staging / "plans.json").read_text(encoding="utf-8"))
-            for fold in sorted(folds, key=int):
-                self._install_fold(task, entry, plans, int(fold), folds[fold], staging,
+            for fold in self._folds(task):
+                self._install_fold(task, entry, plans, str(fold), folds[str(fold)], staging,
                                    progress=progress)
-            if folder.exists():
-                shutil.rmtree(folder, ignore_errors=True)
             os.replace(staging, folder)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+            if made_parent and folder.parent.is_dir() and not any(folder.parent.iterdir()):
+                folder.parent.rmdir()            # only what this call made, as the other path
         _write_sidecar(folder, task, str(entry.get("tag", "unknown")),
                        {"url": entry["url"], "name": entry.get("release")},
-                       entry.get("weights_sha256"))
+                       entry.get("weights_sha256") or fold_checkpoints_digest(folds))
 
     def _install_fold(self, task, entry, plans, fold, f, staging, progress=None) -> None:
         """Read fold ``fold``'s ``network_weights`` out of its release zip in place, check it
@@ -705,11 +761,21 @@ class ZipManifestEcosystem(ModelEcosystem):
             outer = RangeFile(f["url"], int(f["size"]), block=self._INDEX_BLOCK, max_blocks=4)
             with zipfile.ZipFile(outer) as zf:
                 offset, size = torchfree.stored_member(zf, f["member"])
+        except torchfree.CheckpointError as e:
+            # the release itself does not fit (a compressed member): no manifest can fix that
+            raise ModelNotFound(f"{where}: {e}") from e
+        except (zipfile.BadZipFile, KeyError) as e:
+            raise ModelNotFound(f"{where}: {e} - regenerate the manifest with {self.generator}") from e
+        except InputError:
+            raise
+        except OSError as e:
+            raise InputError(f"{where}: reading the release zip failed ({e})") from e
+        try:
             inner = RangeFile.over(lambda lo, hi: outer.reader(offset + lo, offset + hi), size,
                                    block=self._STORAGE_BLOCK, max_blocks=2)
             ck = torchfree.load(inner, realize=("network_weights",))
-        except (torchfree.CheckpointError, zipfile.BadZipFile, KeyError) as e:
-            raise ModelNotFound(f"{where}: {e} - regenerate the manifest with {self.generator}") from e
+        except torchfree.CheckpointError as e:
+            raise ModelNotFound(f"{where}: {e}") from e
         except InputError:
             raise
         except OSError as e:
@@ -815,7 +881,7 @@ class ZipManifestEcosystem(ModelEcosystem):
         what the staging directories are, and it answers the question ``spec()``
         actually needs answered.
         """
-        if (self._entries.get(task) or {}).get("folds"):
+        if "folds" in (self._entries.get(task) or {}):
             return self._resolved_fold_checkpoints(task, root)
         folder = self._folder(task, root)
         if not folder.is_dir():
@@ -900,7 +966,9 @@ class ZipManifestEcosystem(ModelEcosystem):
         bucket.mkdir(parents=True, exist_ok=True)
         entry = manifest_entry(self._entries, task, what=f"{self.name} task {task!r}",
                                generator=self.generator)
-        stem = str(entry["folder"]).replace("/", "_")
+        # the Dataset directory, which is what a failed install's cleanup removes: two tasks over
+        # one dataset's tree take one lock, whatever packaging each uses (review, 2026-10-23)
+        stem = str(entry["folder"]).split("/")[0]
         with filelock.held(bucket / f".lock-{stem}"):
             yield
 
@@ -923,14 +991,14 @@ class ZipManifestEcosystem(ModelEcosystem):
                 have = rec.get("tag") or "unknown (no version sidecar)"
                 raise ModelNotFound(
                     f"{task}@{version}: installed at tag {have!r} - remove "
-                    f"{self._folder(task, root).name} to install the pinned version")
+                    f"{self._folder(task, root)} to install the pinned version")
             if version != entry.get("tag"):
                 raise ModelNotFound(
                     f"{task}@{version}: this manifest offers tag "
                     f"{entry.get('tag')!r} only")
         if self.materialized(task, root):
             return
-        if entry.get("folds"):
+        if "folds" in entry:
             self._install_fold_checkpoints(task, entry, root, progress=progress)
             return
         dest_parent = self._unpack_into(task, root)
@@ -1001,8 +1069,11 @@ class ZipManifestEcosystem(ModelEcosystem):
         for key in ("license", "release", "description", "modality", "dataset_id"):
             if entry.get(key):
                 out[key] = entry[key]
-        if self._folds(task):
-            out["folds"] = list(self._folds(task))
+        try:
+            if self._folds(task):
+                out["folds"] = list(self._folds(task))
+        except ModelNotFound as e:
+            out["unresolved"] = str(e)           # costs this task only, as info's other refusals
         return out
 
     def label_version(self, task: str) -> dict:
@@ -1022,16 +1093,17 @@ class ZipManifestEcosystem(ModelEcosystem):
         if _reusable(previous, entry):
             # the digest pins the archive, so its dataset.json is what it was; only the
             # manifest's own facts can have moved
-            out = _reused_listing(previous, modality=entry.get("modality") or previous.get("modality"))
+            out = _reused_listing(previous, modality=entry.get("modality") or self.modality
+                                  or previous.get("modality"))
         else:
             # the fold-checkpoint packaging's meta.zip is flat: dataset.json at its top level
             zf = reader.zip(entry["url"])
-            member, ds = (checkpoint_dataset_json(zf, flat=True, where=where) if entry.get("folds")
+            member, ds = (checkpoint_dataset_json(zf, flat=True, where=where) if "folds" in entry
                           else checkpoint_dataset_json(zf, folder=entry["folder"], where=where))
             # the manifest's modality where it states one, as spec() and info() use it (a
             # channel named "any" or "ct" is a contrast claim, not a modality); else the
             # checkpoint's
-            out = _dataset_listing(ds, modality=entry.get("modality"), where=where)
+            out = _dataset_listing(ds, modality=entry.get("modality") or self.modality, where=where)
             out["source"] = {"zip": entry["url"], "member": member}
         out["installed"] = _installed_checkpoint_check(self, task, root, out)
         return out

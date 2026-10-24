@@ -352,6 +352,8 @@ def available_folds(folder, folds) -> tuple:
     has_all = (root / "fold_all").is_dir()   # nnU-Net's --fold all layout (MOOSE ships these)
     if not have and not has_all:
         raise ModelNotFound(f"no fold_* directory in {root}")
+    if not isinstance(folds, (str, int)) and folds is not None and list(folds) == ["all"]:
+        folds = "all"                     # ("all",): a catalog stating nnU-Net's fold_all (TaskSpec.folds)
     if folds is None or (isinstance(folds, str) and folds == "all"):
         return tuple(have) or ("all",)
     want = [int(f) for f in ((folds,) if isinstance(folds, int) else folds)]

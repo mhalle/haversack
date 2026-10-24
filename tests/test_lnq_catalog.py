@@ -146,7 +146,8 @@ class _Release(unittest.TestCase):
         self.eco = E.LNQEcosystem(manifest=self.manifest)
         # read sizes scaled to a 190 KB fixture, as 64 KB / 8 MB are to an 815 MB fold
         for name, size in (("_INDEX_BLOCK", 1024), ("_STORAGE_BLOCK", 4096)):
-            patch = mock.patch.object(E.LNQEcosystem, name, size)
+            # on the base, so every catalog of the packaging reads at the scaled sizes (review)
+            patch = mock.patch.object(E.ZipManifestEcosystem, name, size)
             patch.start()
             self.addCleanup(patch.stop)
         self.server = Server(self.files)
@@ -429,3 +430,142 @@ class AnyZipCatalogGetsTheFoldCheckpointInstall(_Release):
         self.assertFalse(any("folds" in e for eco in (E.MooseEcosystem(), E.CADSEcosystem())
                              for e in eco._entries.values()))
         self.assertEqual(E.MooseEcosystem()._folds(next(iter(E.MooseEcosystem().tasks()))), ())
+
+
+class Other(E.ZipManifestEcosystem):
+    """A catalog of the fold-checkpoint packaging that is not LNQ: data only."""
+    name, bucket, generator, modality = "other", "other", "tools/none.py", "CT"
+
+
+class TheFoldCheckpointEntryIsCheckedAndGeneral(_Release):
+    """From the 2026-10-23 review of the generalization: shapes LNQ never had, malformed entries,
+    and the rules the whole-zip packaging already kept."""
+
+    def _eco(self, **tasks):
+        path = self.root / "other.json"
+        path.write_text(json.dumps({"tasks": tasks}))
+        return Other(manifest=path)
+
+    def _leftovers(self):
+        bucket = self.root / "other"
+        return sorted(str(p.relative_to(bucket)) for p in bucket.rglob("*")
+                      if not p.name.startswith(".lock-")) if bucket.exists() else []
+
+    def test_fold_all_installs_runs_and_keys_as_all(self):
+        from haversack.segmenter import Segmenter
+        from haversack.serve import weights_versions_of
+        entry = json.loads(json.dumps(self.entry))
+        entry["folds"] = {"all": entry["folds"]["0"]}
+        entry.pop("weights_sha256")                  # derived by the install when absent
+        eco = self._eco(**{"tiny-v1": entry})
+        eco.ensure("tiny-v1", self.root)
+        folder = eco._folder("tiny-v1", self.root)
+        self.assertTrue((folder / "fold_all" / "checkpoint_final.pth").is_file())
+        self.assertEqual(eco.spec("tiny-v1", self.root).folds, ("all",))
+        from haversack.weights_fetch import installed_version
+        self.assertEqual(installed_version(folder)["sha256"],
+                         E.fold_checkpoints_digest(entry["folds"]))
+        seg = Segmenter(weights=self.root, catalog=E.EcosystemCatalog([eco], root=self.root),
+                        device="cpu", dtype="fp32")
+        out = seg.segment(TheEnsembleIsTheDefault._image(self), "other:tiny-v1")
+        self.assertEqual(out.provenance["models"][0]["folds"], ["all"])
+        self.assertIn("folds=all", weights_versions_of(seg, "other:tiny-v1"))
+
+    def _malformed(self):
+        # each its own folder: sharing the good entry's would (rightly) refuse both
+        e = lambda **kw: dict(json.loads(json.dumps(self.entry)), **{
+            "folder": "Dataset992_Bad/nnUNetTrainer__nnUNetPlans__3d_fullres", **kw})
+        folds = self.entry["folds"]
+        no_url = {k: {n: v for n, v in f.items() if n != "url"} for k, f in folds.items()}
+        return {
+            "a-list": (e(folds=[1, 2]), "non-empty object"),
+            "empty": (e(folds={}), "non-empty object"),
+            "all-and-numbers": (e(folds={"all": folds["0"], "1": folds["1"]}), "alone"),
+            "no-url": (e(folds=no_url), "states no url"),
+            "one-part-folder": (e(folder="nnUNetTrainer__nnUNetPlans__3d_fullres"), "'folder' must be"),
+        }
+
+    def test_a_malformed_entry_is_refused_by_name_and_costs_only_itself(self):
+        for name, (entry, why) in self._malformed().items():
+            with self.subTest(entry=name):
+                eco = self._eco(**{"good": self.entry, name: entry})
+                self.assertIn(why, eco.info(name, self.root).get("unresolved", ""))
+                self.assertEqual(eco.info("good", self.root)["folds"], list(FOLDS))
+                self.assertFalse(eco.materialized(name, self.root))
+                with self.assertRaisesRegex(ModelNotFound, why.replace("'", ".")):
+                    eco.ensure(name, self.root)
+                self.assertEqual(self._leftovers(), [])
+
+    def test_two_tasks_of_one_folder_are_refused(self):
+        eco = self._eco(a=self.entry, b=self.entry)
+        with self.assertRaisesRegex(ModelNotFound, "same folder as \\['b'\\]"):
+            eco.ensure("a", self.root)
+
+    def test_a_folder_it_did_not_make_is_kept_not_deleted(self):
+        eco = self._eco(**{"tiny-v1": self.entry})
+        folder = eco._folder("tiny-v1", self.root)
+        folder.mkdir(parents=True)
+        (folder / "dataset.json").write_text("{}")
+        (folder / "MY_NOTES.txt").write_text("mine")
+        with self.assertRaisesRegex(ModelNotFound, "exists but is not a complete install"):
+            eco.ensure("tiny-v1", self.root)
+        self.assertEqual((folder / "MY_NOTES.txt").read_text(), "mine")
+
+    def test_a_nested_json_zip_is_refused_by_the_flat_rule_and_leaves_nothing(self):
+        import hashlib
+        nested = _zip({"x/dataset.json": json.dumps(MF.DATASET), "x/plans.json": json.dumps(MF.PLANS)})
+        self.server.files[self.entry["url"]] = nested
+        entry = dict(self.entry, sha256=hashlib.sha256(nested).hexdigest())
+        eco = self._eco(**{"tiny-v1": entry})
+        with self.assertRaisesRegex(ModelNotFound, "flat"):
+            eco.ensure("tiny-v1", self.root)
+        self.assertEqual(self._leftovers(), [])
+
+    def test_a_pin_refusal_names_the_whole_folder(self):
+        eco = self._eco(**{"tiny-v1": self.entry})
+        eco.ensure("tiny-v1", self.root)
+        with self.assertRaises(ModelNotFound) as cm:
+            eco.ensure("tiny-v1", self.root, version="9.9")
+        self.assertIn(str(eco._folder("tiny-v1", self.root)), str(cm.exception))
+
+    def test_one_dataset_is_one_lock_whatever_its_tasks_folders(self):
+        other = dict(self.entry, folder=self.entry["folder"].replace("3d_fullres", "3d_lowres"))
+        eco = self._eco(a=self.entry, b=other, c=dict(self.entry, folder="Dataset991_Else/x__y__z"))
+        held = []
+        import contextlib
+        with mock.patch("haversack.filelock.held", lambda p: (held.append(p.name), contextlib.nullcontext())[1]):
+            for t in ("a", "b", "c"):
+                with eco._install_lock(t, self.root):
+                    pass
+        self.assertEqual(held[0], held[1])
+        self.assertNotEqual(held[0], held[2])
+
+    def test_a_listing_states_the_catalogs_modality_where_the_entry_states_none(self):
+        entry = {k: v for k, v in self.entry.items() if k != "modality"}
+        eco = self._eco(**{"tiny-v1": entry})
+        # a channel named for its normalization, not a modality: the listing must say what
+        # info() says - the catalog's - not the channel name
+        meta = _zip({"dataset.json": json.dumps(dict(MF.DATASET, channel_names={"0": "noNorm"})),
+                     "plans.json": json.dumps(MF.PLANS)})
+        listing = eco.label_listing("tiny-v1", None, _ZipReader({entry["url"]: meta}))
+        self.assertEqual(listing["modality"], "CT")
+        self.assertEqual(eco.info("tiny-v1", None)["modality"], "CT")
+
+    def test_an_empty_folds_entry_is_never_read_as_the_other_packaging(self):
+        """``folds: {}`` belongs to this packaging and is refused - it must not fall through to
+        the whole-zip check, which would take a stray config folder under it as an install."""
+        entry = dict(self.entry, folds={})
+        eco = self._eco(**{"tiny-v1": entry})
+        stray = eco._folder("tiny-v1", self.root) / "nnUNetTrainer__nnUNetPlans__3d_fullres"
+        stray.mkdir(parents=True)
+        (stray / "dataset.json").write_text(json.dumps(MF.DATASET))
+        self.assertFalse(eco.materialized("tiny-v1", self.root))
+
+
+class _ZipReader:
+    def __init__(self, files):
+        self.files = files
+
+    def zip(self, url):
+        return zipfile.ZipFile(io.BytesIO(self.files[url]))
+
