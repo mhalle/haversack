@@ -249,6 +249,10 @@ job = seg.submit("scan.nii.gz", "ts.v2:total", on_progress=print)   # off-thread
 `segment()` takes the same options as the command line as keyword arguments (`grid=1.0`,
 `interp="nearest"`, `device="mps"`, `envelope_mm=20`, ...). A stock nnU-Net model folder
 works as a task: `segment("scan.nii.gz", "/path/to/Dataset123_x/nnUNetTrainer__nnUNetPlans__3d_fullres")`.
+On the command line, `--folds all` (or `0,1,2`) picks the folds to ensemble; without it a task
+runs the ensemble its catalog states (`lnq:*`), else fold 0. A server job names its folds.
+`--json-progress` writes a run's progress, result and any error as `haversack> {json}` lines on
+stderr, for a program driving the run.
 Errors are one family, `haversack.HaversackError` (`InputError`, `ModelNotFound`,
 `UnsupportedModel`, `ResourceError`, `Cancelled`).
 
