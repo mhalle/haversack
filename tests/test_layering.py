@@ -39,6 +39,8 @@ PIPELINE = {"io", "preprocess", "frame", "network", "pipeline", "cli", "tasks", 
             "segments", "labelmap", "postprocess",
             # numpy only, at call time: the torch-free checkpoint reader (2026-10-22)
             "torchfree",
+            # stdlib: the job-status record, its SSE framing and its reader (2026-10-25)
+            "jobstatus",
             # the encoders subpackage (2026-09-23): each family module is pipeline - it reads images
             # and loads weights - and a new one must be classified here like any other module
             "encoders", "encoders.registry", "encoders.weights", "encoders.pipeline", "encoders.radar",

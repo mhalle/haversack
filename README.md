@@ -251,8 +251,11 @@ job = seg.submit("scan.nii.gz", "ts.v2:total", on_progress=print)   # off-thread
 works as a task: `segment("scan.nii.gz", "/path/to/Dataset123_x/nnUNetTrainer__nnUNetPlans__3d_fullres")`.
 On the command line, `--folds all` (or `0,1,2`) picks the folds to ensemble; without it a task
 runs the ensemble its catalog states (`lnq:*`), else fold 0. A server job names its folds.
-`--json-progress` writes a run's progress, result and any error as `haversack> {json}` lines on
-stderr, for a program driving the run.
+`--events` writes the run to stdout as the server's job-status records, framed as
+`GET /v1/jobs/{id}/events` frames them (server-sent events): `running` with its progress, then
+`done` with its result (the output as `links.result`, a `file://` URI) or `failed` with its error.
+A program driving haversack reads a local run and a server the same way, with
+`haversack.jobstatus.read`; human output stays on stderr.
 Errors are one family, `haversack.HaversackError` (`InputError`, `ModelNotFound`,
 `UnsupportedModel`, `ResourceError`, `Cancelled`).
 

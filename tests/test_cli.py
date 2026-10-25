@@ -390,13 +390,10 @@ def test_rights_names_the_source_kinds_it_takes(capsys):
     assert "cite" not in err
 
 
-# --- --folds and --json-progress (2026-10-20: driven from a 3D Slicer module) -----------------
-
-def _events(err):
-    import json
-    return [json.loads(line[len(cli.JSON_PROGRESS_PREFIX):]) for line in err.splitlines()
-            if line.startswith(cli.JSON_PROGRESS_PREFIX)]
-
+# --- --folds and --events --------------------------------------------------------------------
+# --folds: Steve Pieper, 2026-10-20 (#5). --events replaced #5's --json-progress on 2026-10-25: the
+# run is written as the server's own job-status records, framed as /v1/jobs/{id}/events frames
+# them, so a program reads a local run and a server with one parser (haversack.jobstatus.read).
 
 @pytest.mark.parametrize("given, want", [(None, None), ("all", "all"), ("0,2", (0, 2)), ("3", (3,))])
 def test_folds_reach_segment(monkeypatch, tmp_path, given, want):
@@ -425,50 +422,176 @@ def test_bad_folds_are_refused(monkeypatch, tmp_path, capsys, bad):
     assert "--folds" in capsys.readouterr().err
 
 
-def test_json_progress_reports_progress_and_the_result(monkeypatch, tmp_path, capsys):
+class EventResult(FakeResult):
+    """A Segmentation as far as jobstatus.result_payload reads one."""
+
+    class schema:
+        names = {1: "liver", 2: "spleen"}
+
+    timings = {"total": 1.5}
+    provenance = {"deviations": []}
+
+    def volumes_ml(self):
+        return {"liver": 12.345}
+
+    def present(self):
+        return {1: "liver"}
+
+    class grid:
+        shape = (2, 3, 4)
+
+    def save(self, path):
+        from pathlib import Path
+        Path(path).write_bytes(b"labels")
+        return path
+
+
+def _records(out):
+    from haversack import jobstatus
+    return list(jobstatus.read(out.splitlines()))
+
+
+def _only_events(out):
+    """Every stdout line is SSE framing: an event line, a data line, or the blank separator."""
+    return all(line == "" or line.startswith(("event: status", "data: ")) for line in out.splitlines())
+
+
+def test_events_are_the_servers_records_on_stdout(monkeypatch, tmp_path, capsys):
+    from dataclasses import fields
+    from haversack import jobstatus
+    from haversack.content import digest_file
     from haversack.progress import Progress
-
-    class Result(FakeResult):
-        class schema:
-            names = {1: "liver", 2: "spleen"}
-
-        class grid:
-            shape = (2, 3, 4)
-
-        timings = {"total": 1.5}
-        provenance = {"deviations": []}
-
-        def present(self):
-            return {1: "liver"}
 
     def fake_segment(image, task, progress=None, **kw):
         progress(Progress(stage="predict", step=1, n_steps=4, fraction=0.5))
-        return Result()
+        return EventResult()
 
     monkeypatch.setattr(pipeline, "segment", fake_segment)
-    (tmp_path / "in.nii.gz").touch()
+    src = tmp_path / "in.nii.gz"
+    src.write_bytes(b"an image")
     out = tmp_path / "out.seg.nrrd"
-    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
-                   "-o", str(out), "--json-progress"])
+    rc = cli.main(["segment", str(src), "--task", "ts.v2:total_fast", "-o", str(out), "--events"])
     assert rc == 0
-    ev = _events(capsys.readouterr().err)
-    assert [e["event"] for e in ev] == ["progress", "done"]
-    assert ev[0]["stage"] == "predict" and ev[0]["fraction"] == 0.5 and ev[0]["n_steps"] == 4
-    assert ev[1]["output"] == str(out)
-    assert ev[1]["structures"] == {"1": "liver", "2": "spleen"} and ev[1]["present"] == [1]
+    std = capsys.readouterr().out
+    assert _only_events(std)
+    recs = _records(std)
+    assert [r["state"] for r in recs] == ["running", "done"]
+    run, done = recs
+    assert set(run["progress"]) == {f.name for f in fields(Progress)}
+    assert run["progress"]["stage"] == "predict" and run["progress"]["fraction"] == 0.5
+    assert done["task"] == "ts.v2:total_fast"
+    assert done["input_identity"] == [digest_file(src)]       # as the server names an upload
+    assert done["progress"]["stage"] == "done" and done["progress"]["fraction"] == 1.0
+    assert done["result"] == jsonish(jobstatus.result_payload(EventResult(), out))
+    assert done["result"]["outputs"][0]["sha256"] == digest_file(out)
+    assert done["links"] == {"result": out.resolve().as_uri()}
+    assert done["created"] <= done["started"] <= done["finished"]
 
 
-def test_json_progress_reports_an_error_as_an_event_too(monkeypatch, tmp_path, capsys):
+def jsonish(d):
+    import json
+    return json.loads(json.dumps(d, default=str))
+
+
+def test_a_failure_is_a_failed_record_and_the_plain_line_stays(monkeypatch, tmp_path, capsys):
     from haversack.errors import UnsupportedModel
 
     def fake_segment(image, task, **kw):
         raise UnsupportedModel("not this one")
 
     monkeypatch.setattr(pipeline, "segment", fake_segment)
-    (tmp_path / "in.nii.gz").touch()
+    (tmp_path / "in.nii.gz").write_bytes(b"x")
     rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
-                   "-o", str(tmp_path / "out.nii.gz"), "--json-progress"])
-    err = capsys.readouterr().err
+                   "-o", str(tmp_path / "out.nii.gz"), "--events"])
+    cap = capsys.readouterr()
     assert rc == 2
-    assert _events(err) == [{"event": "error", "kind": "UnsupportedModel", "message": "not this one"}]
-    assert "haversack: not this one" in err            # the plain line a person reads is still there
+    [rec] = _records(cap.out)                         # said once, not by every layer it crossed
+    assert rec["state"] == "failed" and rec["error"] == "not this one"
+    assert rec["input_identity"]
+    assert "haversack: not this one" in cap.err      # the line a person reads is still there
+
+
+def test_a_missing_input_fails_by_name_without_an_identity(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(pipeline, "segment", lambda *a, **k: EventResult())
+    rc = cli.main(["segment", str(tmp_path / "nope.nii.gz"), "--task", "ts.v2:total_fast",
+                   "-o", str(tmp_path / "out.nii.gz"), "--events"])
+    [rec] = _records(capsys.readouterr().out)
+    assert rc == 2 and rec["state"] == "failed" and "input not found" in rec["error"]
+    assert "input_identity" not in rec
+
+
+def test_a_batch_is_one_record_stream_per_input(monkeypatch, tmp_path, capsys):
+    def fake_segment(image, task, **kw):
+        if "bad" in str(image):
+            raise RuntimeError("broken scan")
+        return EventResult()
+
+    monkeypatch.setattr(pipeline, "segment", fake_segment)
+    good, bad = tmp_path / "good.nii.gz", tmp_path / "bad.nii.gz"
+    good.write_bytes(b"g")
+    bad.write_bytes(b"b")
+    rc = cli.main(["segment", str(good), str(bad), "--task", "ts.v2:total_fast", "--format",
+                   "seg.nrrd", "-o", str(tmp_path / "out"), "--events"])
+    recs = _records(capsys.readouterr().out)
+    assert rc == 1
+    assert [r["state"] for r in recs] == ["done", "failed"]
+    assert recs[0]["input_identity"] != recs[1]["input_identity"]
+    assert recs[1]["error"] == "broken scan"
+
+
+def test_an_interrupted_run_says_cancelled():
+    import io
+    import contextlib
+    ev = cli._Events("ts.v2:total_fast")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        ev.failed(KeyboardInterrupt())
+    [rec] = _records(buf.getvalue())
+    assert rec["state"] == "cancelled" and "error" not in rec
+
+
+def test_the_record_is_the_servers_and_so_are_its_frame_and_reader():
+    """One record, one framing, one parser: the server's events route frames with jobstatus.sse,
+    its executors build results with jobstatus.result_payload, and RemoteClient reads the stream
+    with jobstatus.read - the same three the command line uses. A record from a local run carries
+    no field the server's status does not."""
+    import ast
+    import inspect
+    import textwrap
+    from haversack import client, jobstatus, serve
+    assert serve.result_payload is jobstatus.result_payload
+    assert serve.ranked_payload is jobstatus.ranked_payload
+    # calls of a bare NAME only: `r.read()` on an HTTP error is an attribute call, and counting
+    # it let a client with its own parser pass (a mutant did, 2026-10-25)
+    calls = lambda f: {n.func.id for n in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(f))))
+                       if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "frame" in calls(serve.create_app)                 # `from .jobstatus import sse as frame`
+    assert "read" in calls(client.RemoteClient.events)
+    server_fields = {"id", "task", "state", "created", "started", "finished", "queue_position",
+                     "progress", "version", "error", "input_refresh_skipped", "input_identity",
+                     "key", "options", "deliverables", "deliverables_unavailable", "kind",
+                     "cached", "result", "links"}
+    rec = jobstatus.record("t", "done", progress={}, created=1, started=1, finished=2,
+                           input_identity=["x"], error=None, result={}, links={})
+    assert set(rec) <= server_fields
+
+
+def test_read_takes_bytes_and_passes_over_keepalives_and_other_lines():
+    from haversack import jobstatus
+    lines = [b"event: status", b'data: {"state": "running"}', b"", b": keepalive", "",
+             "event: status", 'data: {"state": "done"}', ""]
+    assert [r["state"] for r in jobstatus.read(lines)] == ["running", "done"]
+
+
+def test_a_download_message_is_a_fetch_stage_as_on_a_server(monkeypatch, tmp_path, capsys):
+    def fake_segment(image, task, progress=None, **kw):
+        progress("downloading series 3 of 9")          # what a source reports: text, not Progress
+        return EventResult()
+
+    monkeypatch.setattr(pipeline, "segment", fake_segment)
+    (tmp_path / "in.nii.gz").write_bytes(b"x")
+    cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
+              "-o", str(tmp_path / "out.seg.nrrd"), "--events"])
+    run = _records(capsys.readouterr().out)[0]
+    assert run["state"] == "running"
+    assert run["progress"]["stage"] == "fetch" and run["progress"]["detail"] == "downloading series 3 of 9"

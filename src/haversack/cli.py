@@ -391,10 +391,12 @@ def _command_line() -> click.Group:
                                'all a model folder holds). "all" is for the command line and '
                                'the Python API; a server job names its folds')),
             click.Option(['--quiet'], is_flag=True, help='no progress or timings on stderr'),
-            click.Option(['--json-progress'], is_flag=True,
-                         help=('progress, the result and any error as JSON lines on stderr, each '
-                               f'prefixed "{JSON_PROGRESS_PREFIX}" - for a program driving the run '
-                               '(a 3D Slicer module); other stderr lines stay plain text')),
+            click.Option(['--events'], is_flag=True,
+                         help=('write the run to stdout as job-status events, the records and '
+                               'framing GET /v1/jobs/{id}/events streams (server-sent events): '
+                               'running with its progress, then done with its result, or failed - '
+                               'one format whether a program runs this command or a server; '
+                               'read them with haversack.jobstatus.read')),
         ])
     root.add_command(segment)
 
@@ -2046,25 +2048,69 @@ def _cmd_cache_move(args) -> int:
     return 1 if got["failed"] else 0
 
 
-#: What marks a `segment --json-progress` line on stderr, so a driver can tell its events from
-#: everything else a run may print there (nnU-Net's and torch's warnings among them).
-JSON_PROGRESS_PREFIX = "haversack> "
+class _Events:
+    """``segment --events``: the run as job-status records on stdout, built and framed by
+    :mod:`haversack.jobstatus` - the server's record and the server's framing, so one parser reads
+    both (2026-10-25). Stdout carries nothing else; the human lines stay on stderr."""
 
+    def __init__(self, task, model_root=None):
+        self.task = self._canonical(task, model_root)
+        self.base: dict = {}                    # the input being run: created, identity, ...
+        self.last_progress: dict | None = None
 
-def _json_event(event: str, **fields) -> None:
-    import json as _json
-    print(JSON_PROGRESS_PREFIX + _json.dumps({"event": event, **fields}, default=str),
-          file=sys.stderr, flush=True)
+    @staticmethod
+    def _canonical(task, model_root):
+        # the name the server's record carries; a model folder or an unknown name as given
+        try:
+            from .ecosystems import EcosystemCatalog
+            return EcosystemCatalog(root=model_root).resolve(str(task))[2]
+        except Exception:                        # noqa: BLE001 - a label, not a check
+            return str(task)
 
+    @staticmethod
+    def identity(spec) -> str:
+        """The input's identity as a server gives it: a hosted source's identifier, or the
+        content digest of an uploaded file or folder (content.digest_file / digest_dir)."""
+        from pathlib import Path
+        from .content import digest_dir, digest_file
+        from .sources import parse_input
+        if parse_input(spec) is not None:
+            return str(spec)
+        p = Path(spec)
+        return digest_dir(p) if p.is_dir() else digest_file(p)
 
-def _json_progress(m) -> None:
-    """A run's progress as an event: a :class:`~haversack.progress.Progress` snapshot as its
-    fields, anything else (a source's download message) as text."""
-    import dataclasses
-    if dataclasses.is_dataclass(m):
-        _json_event("progress", **dataclasses.asdict(m))
-    else:
-        _json_event("log", message=str(m))
+    def emit(self, state, **fields) -> None:
+        from .jobstatus import record, sse
+        sys.stdout.write(sse(record(self.task, state, **{**self.base, **fields})))
+        sys.stdout.flush()
+
+    def start(self, spec) -> None:
+        import time
+        now = time.time()
+        try:
+            ident = [self.identity(spec)]
+        except OSError:                          # a missing input: the run says so, by name
+            ident = None
+        self.base = {"created": now, "started": now, "input_identity": ident}
+        self.last_progress = None
+
+    def progress(self, m) -> None:
+        from .jobstatus import progress_record
+        self.last_progress = progress_record(m)
+        self.emit("running", progress=self.last_progress)
+
+    def done(self, result, where) -> None:
+        import time
+        from pathlib import Path
+        # as the server leaves a done job's progress: the last snapshot, marked done at 1.0
+        prog = {**(self.last_progress or {}), "stage": "done", "detail": "", "fraction": 1.0}
+        self.emit("done", progress=prog, finished=time.time(), result=result,
+                  links={"result": Path(where).resolve().as_uri()})
+
+    def failed(self, e) -> None:
+        import time
+        self.emit("cancelled" if isinstance(e, KeyboardInterrupt) else "failed",
+                  finished=time.time(), error=None if isinstance(e, KeyboardInterrupt) else str(e))
 
 
 def _parse_folds(text):
@@ -2086,25 +2132,26 @@ def _parse_folds(text):
 
 def _cmd_segment(args) -> int:
     """`haversack segment`."""
-    if not getattr(args, "json_progress", False):
-        return _segment(args)
+    if not getattr(args, "events", False):
+        return _segment(args, None)
+    events = _Events(args.task, args.model_root)
     try:
-        return _segment(args)
-    except Exception as e:
-        _json_event("error", kind=type(e).__name__, message=str(e))
+        return _segment(args, events)
+    except BaseException as e:
+        if not getattr(e, "_haversack_event_sent", False):   # a refusal before any input ran
+            events.failed(e)
         raise
 
 
-def _segment(args) -> int:
+def _segment(args, events) -> int:
     import json as _json
     from pathlib import Path
     from . import io
     from .errors import InputError
     from .engines import registry
     from .sources import materialize, parse_input, source_stem
-    json_progress = getattr(args, "json_progress", False)
-    if json_progress:
-        progress = _json_progress
+    if events is not None:
+        progress = events.progress
     else:
         progress = None if args.quiet else (lambda m: print(f"  {m}", file=sys.stderr, flush=True))
     folds = _parse_folds(getattr(args, "folds", None))
@@ -2176,12 +2223,23 @@ def _segment(args) -> int:
         return spec
 
     def run_one(spec):
+        if events is not None:
+            events.start(spec)
         r = _run_one(spec)
         from .sources import input_record
         prov = getattr(r, "provenance", None)      # in place: Segmentation is frozen
         if isinstance(prov, dict):
             prov["inputs"] = [input_record(spec)]
         return r
+
+    def failed(e):
+        """A run that ended without a result, said once as a record when --events is on."""
+        if events is not None and not getattr(e, "_haversack_event_sent", False):
+            events.failed(e)
+            try:
+                e._haversack_event_sent = True
+            except AttributeError:                    # an exception that takes no attributes
+                pass
 
     def _run_one(spec):
         img = resolve(spec)
@@ -2199,16 +2257,9 @@ def _segment(args) -> int:
                        allow_transpose=args.allow_transpose, progress=progress, **fold_kw)
 
     def report(r, where):
-        if json_progress:
-            # the names present, in label order, are what a driver loads the file against
-            names = r.schema.names
-            present = set(int(v) for v in r.present())
-            _json_event("done", output=str(where), shape=list(r.grid.shape),
-                        structures={str(v): n for v, n in sorted(names.items())},
-                        present=sorted(present),
-                        deviations=list((r.provenance or {}).get("deviations", ())),
-                        timings=dict(r.timings))
-            return
+        if events is not None:
+            from .jobstatus import result_payload
+            events.done(result_payload(r, where), where)
         if args.quiet:
             return
         for k, v in r.timings.items():
@@ -2227,6 +2278,8 @@ def _segment(args) -> int:
                 raise InputError("a ranked store output is available for nnU-Net tasks and "
                                  "FastSurfer only: this task's engine returns labels, not the "
                                  "distribution a store holds")
+            if events is not None:
+                events.start(inputs[0])
             img = resolve(inputs[0])
             r, out = segment_to_store(
                 img, args.task, args.output, case=source_stem(inputs[0]),
@@ -2235,14 +2288,21 @@ def _segment(args) -> int:
                 grid=args.spacing if args.spacing else "input", interp=args.interp,
                 accumulate=args.accumulate, batch_size=bs,
                 envelope_mm=args.envelope, progress=progress)
+            if events is not None:
+                from .jobstatus import ranked_payload
+                events.done(ranked_payload(r, out), out)
             if not args.quiet:
                 for k, v in r.timings.items():
                     print(f"  {v:7.2f} s  {k}", file=sys.stderr)
                 print(f"wrote {out}: ranked store on the model grid, "
                       f"{len(r.present())}/{len(r.schema.names)} structures present", file=sys.stderr)
         else:
-            r = run_one(inputs[0])
-            r.save(args.output)
+            try:
+                r = run_one(inputs[0])
+                r.save(args.output)
+            except BaseException as e:
+                failed(e)
+                raise
             report(r, args.output)
     else:
         outdir.mkdir(parents=True, exist_ok=True)     # outdir and outs: named, and checked, above
@@ -2255,6 +2315,7 @@ def _segment(args) -> int:
                 r.save(out)
                 report(r, out)
             except Exception as e:                    # one bad input must not sink the batch
+                failed(e)
                 failures += 1
                 print(f"  FAILED {spec}: {e}", file=sys.stderr)
         if failures:

@@ -332,9 +332,9 @@ class RemoteClient:
                 if r.status_code >= 400:
                     r.read()
                     raise RemoteError(f"events -> {r.status_code}")
-                for line in r.iter_lines():
-                    if line.startswith("data:"):
-                        yield json.loads(line[5:].strip())
+                # the one reader of the stream, also of `segment --events` (jobstatus.read)
+                from .jobstatus import read
+                yield from read(r.iter_lines())
         except self._httpx.TransportError as e:
             raise self._unreachable(e) from None
 

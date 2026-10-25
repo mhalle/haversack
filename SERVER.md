@@ -137,7 +137,10 @@ artifact routes, `/v1/jobs/{id}/meta.json` and the rest - are this job's own: th
 job's bytes while it keeps them, and say what changed when it does not.
 
 `GET /v1/jobs/{id}/events` is Server-Sent Events: each event is the same status snapshot,
-so a dropped stream needs no replay - resubscribe, or poll the status URL. `GET
+so a dropped stream needs no replay - resubscribe, or poll the status URL. `haversack segment
+--events` writes a local run in the same records and framing to stdout (no `id`, `key` or server
+`links`; its output is `links.result` as a `file://` URI), so `haversack.jobstatus.read` reads
+either. `GET
 /v1/jobs/{id}/result` returns the labels as `.seg.nrrd` (names, colors, extents, and the
 full provenance in the header); `?format=nii.gz` (or `nii`, uncompressed) converts on the way
 out and is the lossy option, `?format=seg.nrrd` says the default, and any other value is a 422

@@ -2535,44 +2535,9 @@ def upload_role(name: str) -> str | None:
         return None
 
 
-def result_payload(seg, labels_path) -> dict:
-    """A finished job's public result, built ONCE for both executors.
-
-    They had drifted already - the Modal side reported `timings` and the local
-    side did not - which is the same shape as the bug where an engine worker and
-    the API disagreed about weights identity: two hand-written copies of one
-    thing.
-
-    `outputs` is new: the content digest of what the job produced. It is what
-    lets a client skip re-downloading a result it already holds (it IS the
-    ETag), and what lets one job's output become another's input without the
-    bytes taking a round trip out through the client and back.
-    """
-    from .content import digest_file
-    out = {"names": {int(k): v for k, v in seg.schema.names.items()},
-           "volumes_ml": {k: round(float(v), 2) for k, v in seg.volumes_ml().items()},
-           "provenance": seg.provenance}
-    timings = getattr(seg, "timings", None)
-    if timings:
-        out["timings"] = {k: round(float(v), 3) for k, v in timings.items()}
-    p = Path(labels_path) if labels_path is not None else None
-    if p is not None and p.exists():
-        out["outputs"] = [{"name": "labels", "sha256": digest_file(p),
-                           "bytes": p.stat().st_size}]
-    return out
-
-
-def ranked_payload(seg, path) -> dict:
-    """A finished ranked job's public result (``result.json``): the store's digest first, as every
-    result's is (``etag_of``, ``same_output`` and ``result:`` read ``outputs[0]``), with ``kind:
-    ranked`` so a reference cannot bind a store where an image or labels belong - and the run's
-    names, volumes and provenance, which the store was computed with."""
-    from .content import digest_file
-    out = result_payload(seg, None)               # names, volumes, provenance, timings; no labels file
-    p = Path(path)
-    out["outputs"] = [{"name": "rankfield", "kind": "rankfield", "sha256": digest_file(p),
-                       "bytes": p.stat().st_size}]
-    return out
+# A result's public payload is built in haversack.jobstatus, ONCE for both executors and the
+# command line (2026-10-25); imported here under the names the executors and Modal use.
+from .jobstatus import ranked_payload, result_payload  # noqa: E402,F401
 
 
 def etag_of(key: str, result=None) -> str:
@@ -6196,8 +6161,10 @@ def create_app(executor: LocalExecutor, *, token: str | None = None,
         def sse(payload: dict) -> str:
             # the status GET /v1/jobs/{id} answers, key and links included: SERVER.md says each
             # event IS that snapshot, and a client's wait() returns the last one - a raw record
-            # without them left `RemoteClient.embed`'s final status keyless (Modal smoke, 2026-09-23)
-            return f"event: status\ndata: {json.dumps(_with_links(payload))}\n\n"
+            # without them left `RemoteClient.embed`'s final status keyless (Modal smoke, 2026-09-23).
+            # Framed by jobstatus.sse, as `segment --events` frames a local run's (2026-10-25).
+            from .jobstatus import sse as frame
+            return frame(_with_links(payload))
 
         async def stream():
             snap = first
