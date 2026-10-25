@@ -394,9 +394,10 @@ def _command_line() -> click.Group:
             click.Option(['--events'], is_flag=True,
                          help=('write the run to stdout as job-status events, the records and '
                                'framing GET /v1/jobs/{id}/events streams (server-sent events): '
-                               'running with its progress, then done with its result, or failed - '
-                               'one format whether a program runs this command or a server; '
-                               'read them with haversack.jobstatus.read')),
+                               'running with its progress, then done with its result, failed, or '
+                               'cancelled (Ctrl-C or SIGTERM) - one format whether a program runs '
+                               'this command or a server; read them with haversack.jobstatus.read. '
+                               'Everything else goes to stderr')),
         ])
     root.add_command(segment)
 
@@ -2048,50 +2049,83 @@ def _cmd_cache_move(args) -> int:
     return 1 if got["failed"] else 0
 
 
+class _Terminated(BaseException):
+    """A SIGTERM under ``segment --events``: how a driver (``QProcess::terminate``,
+    ``Popen.terminate``) cancels. Raised from the handler so the run unwinds like a Ctrl-C, says
+    ``cancelled``, and then dies by SIGTERM as it would have (the 2026-10-25 review: a terminated
+    run left its stream on ``running``, with no terminal record)."""
+
+
 class _Events:
     """``segment --events``: the run as job-status records on stdout, built and framed by
     :mod:`haversack.jobstatus` - the server's record and the server's framing, so one parser reads
-    both (2026-10-25). Stdout carries nothing else; the human lines stay on stderr."""
+    both (2026-10-25).
 
-    def __init__(self, task, model_root=None):
-        self.task = self._canonical(task, model_root)
+    Stdout carries nothing else: for the run, ``sys.stdout`` IS stderr (``_cmd_segment``), so an
+    engine's or a library's ``print`` lands with the human lines, and the records go to the
+    stream that was stdout when the run began. A reader that closes that stream early stops the
+    records, not the run: one note on stderr, and the output is still written."""
+
+    def __init__(self, task, model_root=None, out=None):
+        self.task, self.version = self._canonical(task, model_root)
+        self.out = out if out is not None else sys.stdout
+        self.broken = False
         self.base: dict = {}                    # the input being run: created, identity, ...
         self.last_progress: dict | None = None
 
     @staticmethod
     def _canonical(task, model_root):
-        # the name the server's record carries; a model folder or an unknown name as given
+        """``(task, version)`` as the server's record names them: the catalog's canonical name,
+        and the pin apart (``serve.run_name``'s inverse). A model folder is named by its
+        absolute path, so the name does not depend on where the command ran; an unknown name
+        is left as given (the run refuses it, by name)."""
+        from pathlib import Path
+        from .tasks import split_run_name
+        if Path(str(task)).exists():
+            return str(Path(str(task)).resolve()), None
+        name, version = split_run_name(str(task))
         try:
             from .ecosystems import EcosystemCatalog
-            return EcosystemCatalog(root=model_root).resolve(str(task))[2]
+            return EcosystemCatalog(root=model_root).resolve(name)[2], version
         except Exception:                        # noqa: BLE001 - a label, not a check
-            return str(task)
+            return str(task), None
 
     @staticmethod
     def identity(spec) -> str:
         """The input's identity as a server gives it: a hosted source's identifier, or the
-        content digest of an uploaded file or folder (content.digest_file / digest_dir)."""
-        from pathlib import Path
-        from .content import digest_dir, digest_file
-        from .sources import parse_input
+        content digest of a local file or folder, by the rule every door uses
+        (``sources.content_digest``)."""
+        from .sources import content_digest, parse_input
         if parse_input(spec) is not None:
             return str(spec)
-        p = Path(spec)
-        return digest_dir(p) if p.is_dir() else digest_file(p)
+        return content_digest(spec)
 
     def emit(self, state, **fields) -> None:
+        import os
         from .jobstatus import record, sse
-        sys.stdout.write(sse(record(self.task, state, **{**self.base, **fields})))
-        sys.stdout.flush()
+        if self.broken:
+            return
+        rec = record(self.task, state, **{"version": self.version, **self.base, **fields})
+        try:
+            self.out.write(sse(rec))
+            self.out.flush()
+        except BrokenPipeError:
+            self.broken = True
+            print("haversack: the reader of --events closed its end; the run goes on without "
+                  "records", file=sys.stderr, flush=True)
+            try:                                 # what is still buffered must not fail at exit
+                os.dup2(os.open(os.devnull, os.O_WRONLY), self.out.fileno())
+            except (OSError, ValueError, AttributeError):
+                pass
 
-    def start(self, spec) -> None:
+    def start(self, spec, *, kind=None) -> None:
         import time
         now = time.time()
         try:
             ident = [self.identity(spec)]
         except OSError:                          # a missing input: the run says so, by name
             ident = None
-        self.base = {"created": now, "started": now, "input_identity": ident}
+        self.base = {"created": now, "started": now, "input_identity": ident, "kind": kind}
         self.last_progress = None
 
     def progress(self, m) -> None:
@@ -2108,9 +2142,13 @@ class _Events:
                   links={"result": Path(where).resolve().as_uri()})
 
     def failed(self, e) -> None:
+        """The run ended without a result. As the server records it: ``cancelled`` with no error
+        for an interrupt, else ``failed`` with ``<type>: <message>``, keeping the last progress
+        (where it stopped)."""
         import time
-        self.emit("cancelled" if isinstance(e, KeyboardInterrupt) else "failed",
-                  finished=time.time(), error=None if isinstance(e, KeyboardInterrupt) else str(e))
+        cancelled = isinstance(e, (KeyboardInterrupt, _Terminated))
+        self.emit("cancelled" if cancelled else "failed", progress=self.last_progress,
+                  finished=time.time(), error=None if cancelled else f"{type(e).__name__}: {e}")
 
 
 def _parse_folds(text):
@@ -2134,13 +2172,67 @@ def _cmd_segment(args) -> int:
     """`haversack segment`."""
     if not getattr(args, "events", False):
         return _segment(args, None)
+    import contextlib
+    import os
+    import signal
+    import threading
     events = _Events(args.task, args.model_root)
+
+    def _terminate(signum, frame):
+        raise _Terminated()
+
+    old_term = None
+    if threading.current_thread() is threading.main_thread():
+        old_term = signal.signal(signal.SIGTERM, _terminate)
+    # The records' stream holds only records. Where stdout and stderr are real descriptors, fd 1
+    # itself becomes stderr for the run and the records keep a private copy of the old fd 1, so a
+    # C library's or a child process's write lands on stderr too - nothing can fall INSIDE a
+    # record, where an SSE reader would take it as part of the event. Elsewhere (a caller's
+    # StringIO, pytest's capsys) only Python's sys.stdout is redirected.
+    moved = _records_off_fd1(events)
     try:
-        return _segment(args, events)
+        with contextlib.redirect_stdout(sys.stderr):
+            return _segment(args, events)
     except BaseException as e:
         if not getattr(e, "_haversack_event_sent", False):   # a refusal before any input ran
             events.failed(e)
+        if isinstance(e, _Terminated):
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)  # and die of it, as a terminated
+            os.kill(os.getpid(), signal.SIGTERM)          # process is expected to
         raise
+    finally:
+        if moved is not None:
+            moved()
+        if old_term is not None:
+            signal.signal(signal.SIGTERM, old_term)
+
+
+def _records_off_fd1(events):
+    """Point ``events`` at a private duplicate of fd 1 and fd 1 at stderr; return the undo, or
+    None where stdout or stderr is not a real descriptor."""
+    import io as _io
+    import os
+    try:
+        fd, err_fd = sys.stdout.fileno(), sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError, _io.UnsupportedOperation):
+        return None
+    sys.stdout.flush()
+    kept = os.dup(fd)
+    events.out = os.fdopen(os.dup(kept), "w", encoding="utf-8", closefd=True)
+    os.dup2(err_fd, fd)
+
+    def undo():
+        try:
+            events.out.flush()
+        except OSError:
+            pass
+        try:
+            events.out.close()
+        except OSError:
+            pass
+        os.dup2(kept, fd)
+        os.close(kept)
+    return undo
 
 
 def _segment(args, events) -> int:
@@ -2193,7 +2285,10 @@ def _segment(args, events) -> int:
         # filesystem compares names, not by `==`: on APFS or FAT `Scan` and `scan` are one file.
         from .content import _fs_equivalent
         outdir = Path(args.output or ".")
-        task_tag = str(args.task).replace(":", "-")
+        # a model folder's path would put directories into every name (and make two inputs'
+        # names one), so it is named by its last component (the 2026-10-25 review)
+        task_tag = (Path(str(args.task)).name if Path(str(args.task)).exists()
+                    else str(args.task)).replace(":", "-")
         ext = io.format_extension(args.format)
         outs = [outdir / f"{source_stem(spec)}_{task_tag}{ext}" for spec in inputs]
         first = {}
@@ -2279,17 +2374,20 @@ def _segment(args, events) -> int:
                                  "FastSurfer only: this task's engine returns labels, not the "
                                  "distribution a store holds")
             if events is not None:
-                events.start(inputs[0])
+                events.start(inputs[0], kind="rankfield")   # as a server's rankfield job says
             img = resolve(inputs[0])
             r, out = segment_to_store(
                 img, args.task, args.output, case=source_stem(inputs[0]),
                 source=input_source(inputs[0]),          # the spec as given, not the cache path
                 weights=args.model_root, device=args.device, dtype=args.dtype,
                 grid=args.spacing if args.spacing else "input", interp=args.interp,
-                accumulate=args.accumulate, batch_size=bs,
+                accumulate=args.accumulate, batch_size=bs, quiet=args.quiet,
                 envelope_mm=args.envelope, progress=progress)
             if events is not None:
                 from .jobstatus import ranked_payload
+                from .sources import input_record
+                if isinstance(getattr(r, "provenance", None), dict):
+                    r.provenance["inputs"] = [input_record(inputs[0])]   # as run_one's results
                 events.done(ranked_payload(r, out), out)
             if not args.quiet:
                 for k, v in r.timings.items():

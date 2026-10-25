@@ -253,9 +253,12 @@ On the command line, `--folds all` (or `0,1,2`) picks the folds to ensemble; wit
 runs the ensemble its catalog states (`lnq:*`), else fold 0. A server job names its folds.
 `--events` writes the run to stdout as the server's job-status records, framed as
 `GET /v1/jobs/{id}/events` frames them (server-sent events): `running` with its progress, then
-`done` with its result (the output as `links.result`, a `file://` URI) or `failed` with its error.
-A program driving haversack reads a local run and a server the same way, with
-`haversack.jobstatus.read`; human output stays on stderr.
+`done` with its result (the output as `links.result`, a `file://` URI), `failed` with its error,
+or `cancelled` (Ctrl-C, or SIGTERM - the process still dies of the signal). Several inputs are
+one record stream each, in the order given, each ending in exactly one of those three. A program
+driving haversack reads a local run and a server the same way, with `haversack.jobstatus.read`;
+stdout holds only the records, and everything else - human lines, an engine's own prints - goes
+to stderr. A reader that closes stdout early stops the records, not the run.
 Errors are one family, `haversack.HaversackError` (`InputError`, `ModelNotFound`,
 `UnsupportedModel`, `ResourceError`, `Cancelled`).
 

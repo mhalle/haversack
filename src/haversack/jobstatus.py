@@ -11,14 +11,19 @@ stderr behind a prefix) beside the server's; that was a second description of th
 and two descriptions drift.
 
 What differs between the two is only what a server has and a local run does not: a job ``id``,
-a cache ``key``, the server's ``links``. A local run's output location is ``links.result`` as a
-``file://`` URI, where a server's is the URL to fetch.
+a cache ``key``, ``deliverables``, the server's ``links``, and the ``queued`` state (with
+``queue_position``). A local run's output location is ``links.result`` as a ``file://`` URI,
+where a server's is the URL to fetch. A reader must not expect ``progress`` on every record: a
+server's first ``running`` record can come before any progress, as can a failure before the run
+began. A record ends with ``done``, ``failed`` or ``cancelled``; a local stream that ends without
+one was killed (``kill -9``), and a command-line usage error ends before any record.
 
 Stdlib only; the command line uses it without the server extra.
 """
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
@@ -75,26 +80,63 @@ def progress_record(p) -> dict:
     return asdict(p if is_dataclass(p) else Progress(stage="fetch", detail=str(p)))
 
 
+#: The timestamps a server's record always carries, null until known (``serve`` status()).
+TIMES = ("created", "started", "finished")
+
+
 def record(task, state: str, **fields) -> dict:
     """A status record for a job with no server behind it - a command-line run. ``fields`` are
-    the record's own (``progress``, ``created``, ``started``, ``finished``, ``input_identity``,
-    ``error``, ``result``, ``links``, ``kind``); one left as None is left out, as the server
-    leaves out what it does not know."""
-    return {"task": str(task), "state": state, **{k: v for k, v in fields.items() if v is not None}}
+    the record's own (``progress``, ``created``, ``started``, ``finished``, ``version``,
+    ``input_identity``, ``error``, ``result``, ``links``, ``kind``). As in the server's status,
+    the three timestamps are always there - ``null`` until known, so ``"finished" in rec``
+    means the same on both - and any other field left as None is left out."""
+    out = {"task": str(task), "state": state, **{k: fields.get(k) for k in TIMES}}
+    out.update({k: v for k, v in fields.items() if k not in TIMES and v is not None})
+    return out
 
 
 def sse(rec: dict) -> str:
     """One record as server-sent events text: what ``/v1/jobs/{id}/events`` sends and what
-    ``segment --events`` writes."""
+    ``segment --events`` writes. ``json.dumps`` escapes every newline, so a record is always
+    one ``data:`` line."""
     return f"event: {EVENT}\ndata: {json.dumps(rec, default=str)}\n\n"
 
 
+#: SSE's line terminators: CRLF, a lone CR, a lone LF (WHATWG HTML 9.2.5).
+_TERMINATOR = re.compile(r"\r\n|\r|\n")
+
+
 def read(lines):
-    """The records in a stream of server-sent-events lines - an HTTP body's or a process's
-    stdout, ``str`` or ``bytes``. Other events, comments (a server's keepalives) and anything
-    that is not a ``data:`` line are passed over."""
-    for line in lines:
-        if isinstance(line, bytes):
-            line = line.decode("utf-8")
-        if line.startswith("data:"):
-            yield json.loads(line[5:].strip())
+    """The status records in a stream of server-sent-events lines - an HTTP body's or a
+    process's stdout, ``str`` or ``bytes``, with or without their line endings (an item without
+    one is a whole line, as ``iter_lines`` and ``splitlines`` hand them over).
+
+    Parsed as SSE is (WHATWG HTML 9.2.5-9.2.6): CR, LF and CRLF all end a line; fields
+    accumulate until a blank line dispatches the event; several ``data:`` lines join with
+    newlines; a line starting ``:`` is a comment (a server's keepalive); an event that never
+    reaches its blank line is not dispatched. Only ``status`` events are records. Any other
+    event, and a stray line between events, is passed over; a line that is not UTF-8 is read
+    with replacement characters rather than raise. A ``status`` event whose data is not JSON
+    raises: that is a broken producer, not a stray line (``segment --events`` keeps every other
+    writer off its stream, so nothing can land inside a record)."""
+    event, data = None, []
+    for item in lines:
+        if isinstance(item, bytes):
+            item = item.decode("utf-8", errors="replace")
+        if not item.endswith(("\n", "\r")):
+            item += "\n"
+        for line in _TERMINATOR.split(item)[:-1]:
+            if line == "":
+                if event == EVENT and data:
+                    yield json.loads("\n".join(data))
+                event, data = None, []
+                continue
+            if line.startswith(":"):
+                continue
+            name, sep, value = line.partition(":")
+            if sep and value.startswith(" "):
+                value = value[1:]
+            if name == "event":
+                event = value
+            elif name == "data":
+                data.append(value)

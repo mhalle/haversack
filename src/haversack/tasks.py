@@ -16,6 +16,16 @@ from .errors import AmbiguousModel, ModelNotFound, UnsupportedModel
 from .postprocess import check_ops
 from typing import Mapping
 
+
+def split_run_name(name: str) -> tuple:
+    """``task@version`` as ``(task, version or None)`` - ``serve.run_name``'s inverse. Split at
+    the LAST ``@``, as ``EcosystemCatalog.resolve`` does, so a worker that must hand the version
+    on itself (the MONAI adapter) and the command line's job-status records parse a pin exactly
+    as the catalog that enforces it would."""
+    task, sep, version = str(name).rpartition("@")
+    return (task, version) if sep and task and version else (str(name), None)
+
+
 WeightsId = int | str
 
 # Where each weights LAYOUT keeps its models: (env vars, default root). A layout is not an

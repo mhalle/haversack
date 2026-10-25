@@ -351,6 +351,29 @@ def sole_file(directory) -> Path | None:
     return files[0] if len(files) == 1 else None
 
 
+def _one_file(p: Path) -> Path | None:
+    """The file ``p`` is, or the one file a folder ``p`` holds; None for a folder of several or
+    a path that is neither."""
+    return sole_file(p) if p.is_dir() else (p if p.is_file() else None)
+
+
+def content_digest(path) -> str:
+    """The digest that names a local input's bytes, by the rule every door uses (``sole_file``):
+    one file - or a folder holding one - is that file's ``sha256:``, a folder of several its
+    ``sha256-tree:``. ``segment --events`` names its input with it, so the record's identity is
+    the one its own provenance and a server's upload carry (a folder of one file read
+    ``sha256-tree:`` there until the 2026-10-25 review). Raises FileNotFoundError for a path
+    that is not there."""
+    from .content import digest_dir, digest_file
+    p = Path(path)
+    one = _one_file(p)
+    if one is not None:
+        return digest_file(one)
+    if p.is_dir():
+        return digest_dir(p)
+    raise FileNotFoundError(str(p))
+
+
 def _is_dicom_file(path) -> bool:
     """A DICOM Part 10 file announces itself: ``DICM`` at byte 128. Asked of the ONE
     file before anything reads it as DICOM, so a NIfTI is never handed to GDCM."""
@@ -418,7 +441,7 @@ def _content_facts(fetched) -> dict | None:
         return None
     from .content import digest_dir, digest_file
     p = Path(fetched)
-    one = sole_file(p) if p.is_dir() else (p if p.is_file() else None)
+    one = _one_file(p)
     if one is not None:                         # one file is a file: see sole_file
         out = {"digest": digest_file(one), "bytes": one.stat().st_size, "files": 1}
     elif p.is_dir():

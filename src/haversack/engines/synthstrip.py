@@ -17,6 +17,7 @@ SDT handed back as a SimpleITK image) -> restore the *graded* SDT to the input g
 from __future__ import annotations
 
 import os
+import sys as _sys
 
 import numpy as np
 
@@ -225,7 +226,7 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", restore: str = "aut
     nfg = int(mask.sum())
     print(f"[synthstrip] conf={conf_orig.GetSize()} t1={t1_img.GetSize()} "
           f"restore={'gpu' if use_gpu else 'cpu'} components={n} "
-          f"brain_voxels={nfg}", flush=True)
+          f"brain_voxels={nfg}", file=_sys.stderr, flush=True)
     if nfg == 0:
         raise RuntimeError(
             f"synthstrip mask is empty: no voxel had SDT < {border} mm "

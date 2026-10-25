@@ -527,12 +527,9 @@ def run_name(task: str, version: str | None) -> str:
     return f"{task}@{version}" if version else task
 
 
-def split_run_name(name: str) -> tuple:
-    """``run_name``'s inverse: ``(task, version or None)``. Split at the LAST ``@``, as
-    ``EcosystemCatalog.resolve`` does, so a worker that must hand the version on itself
-    (the MONAI adapter) parses a pin exactly as the catalog that enforces it would."""
-    task, sep, version = str(name).rpartition("@")
-    return (task, version) if sep and task and version else (str(name), None)
+# ``run_name``'s inverse lives with the task grammar, torch- and server-free, because the command
+# line's job-status records split a pin exactly as a server's do (2026-10-25)
+from .tasks import split_run_name  # noqa: E402,F401
 
 
 def _engine_epoch(segmenter, task) -> list:

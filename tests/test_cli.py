@@ -506,7 +506,7 @@ def test_a_failure_is_a_failed_record_and_the_plain_line_stays(monkeypatch, tmp_
     cap = capsys.readouterr()
     assert rc == 2
     [rec] = _records(cap.out)                         # said once, not by every layer it crossed
-    assert rec["state"] == "failed" and rec["error"] == "not this one"
+    assert rec["state"] == "failed" and rec["error"] == "UnsupportedModel: not this one"
     assert rec["input_identity"]
     assert "haversack: not this one" in cap.err      # the line a person reads is still there
 
@@ -536,16 +536,15 @@ def test_a_batch_is_one_record_stream_per_input(monkeypatch, tmp_path, capsys):
     assert rc == 1
     assert [r["state"] for r in recs] == ["done", "failed"]
     assert recs[0]["input_identity"] != recs[1]["input_identity"]
-    assert recs[1]["error"] == "broken scan"
+    assert recs[1]["error"] == "RuntimeError: broken scan"
 
 
 def test_an_interrupted_run_says_cancelled():
     import io
     import contextlib
-    ev = cli._Events("ts.v2:total_fast")
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        ev.failed(KeyboardInterrupt())
+    ev = cli._Events("ts.v2:total_fast", out=buf)       # the stream the records go to, fixed at start
+    ev.failed(KeyboardInterrupt())
     [rec] = _records(buf.getvalue())
     assert rec["state"] == "cancelled" and "error" not in rec
 
@@ -595,3 +594,288 @@ def test_a_download_message_is_a_fetch_stage_as_on_a_server(monkeypatch, tmp_pat
     run = _records(capsys.readouterr().out)[0]
     assert run["state"] == "running"
     assert run["progress"]["stage"] == "fetch" and run["progress"]["detail"] == "downloading series 3 of 9"
+
+
+# --- the 2026-10-25 review of --events: each test holds one finding ---------------------------
+
+def _fresh_result():
+    r = EventResult()
+    r.provenance = {"deviations": []}        # its own dict: run_one writes `inputs` into it
+    return r
+
+
+def test_a_folder_of_one_file_is_named_as_that_file_everywhere(monkeypatch, tmp_path, capsys):
+    """A folder holding one file is that file (sources.sole_file) - in the record, in its own
+    provenance and on a server. The record alone read sha256-tree: once."""
+    from haversack.content import digest_file
+    from haversack.sources import _content_facts
+    monkeypatch.setattr(pipeline, "segment", lambda *a, **k: _fresh_result())
+    folder = tmp_path / "one"
+    folder.mkdir()
+    (folder / "in.nii.gz").write_bytes(b"an image")
+    cli.main(["segment", str(folder), "--task", "ts.v2:total_fast",
+              "-o", str(tmp_path / "out.seg.nrrd"), "--events"])
+    done = _records(capsys.readouterr().out)[-1]
+    assert done["input_identity"] == [digest_file(folder / "in.nii.gz")]
+    assert done["input_identity"] == [_content_facts(folder)["digest"]]
+
+
+def _store_run(monkeypatch, tmp_path, said=None, extra=()):
+    """The rank-field branch with the store writer faked: progress, a stray print, a file."""
+    import haversack.ranked_output as ro
+    import haversack.ranked_store as rs
+    from haversack.progress import Progress
+
+    def fake_store(image, task, out, *, progress=None, quiet=False, **kw):
+        if said is not None:
+            said["quiet"] = quiet
+        progress(Progress(stage="predict", fraction=0.5))
+        print("a library line on stdout")
+        from pathlib import Path
+        Path(out).write_bytes(b"store")
+        return _fresh_result(), out
+
+    monkeypatch.setattr(cli, "_need_store_extra", lambda: None)
+    monkeypatch.setattr(rs, "check_target", lambda out: None)
+    monkeypatch.setattr(ro, "supports_store_output", lambda task: True)
+    monkeypatch.setattr(ro, "segment_to_store", fake_store)
+    (tmp_path / "in.nii.gz").write_bytes(b"x")
+    return cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
+                     "-o", str(tmp_path / "out.duckn.zip"), "--events", *extra])
+
+
+def test_a_rankfield_run_says_its_kind_on_every_record_and_its_inputs(monkeypatch, tmp_path, capsys):
+    said = {}
+    assert _store_run(monkeypatch, tmp_path, said) == 0
+    recs = _records(capsys.readouterr().out)
+    assert [r["state"] for r in recs] == ["running", "done"]
+    assert all(r["kind"] == "rankfield" for r in recs)        # as a server's rankfield job says
+    assert recs[-1]["result"]["outputs"][0]["kind"] == "rankfield"
+    assert recs[-1]["result"]["provenance"]["inputs"][0]      # as a labels run's result has them
+    assert said["quiet"] is False
+    capsys.readouterr()
+    (tmp_path / "out.duckn.zip").unlink()
+    assert _store_run(monkeypatch, tmp_path, said, extra=["--quiet"]) == 0
+    assert said["quiet"] is True                              # --quiet reaches the store writer
+
+
+def test_stdout_holds_only_records_whatever_prints(monkeypatch, tmp_path, capsys):
+    """An engine's or a library's print lands on stderr while --events owns stdout."""
+    _store_run(monkeypatch, tmp_path)
+    cap = capsys.readouterr()
+    assert _only_events(cap.out) and "a library line" not in cap.out
+    assert "a library line on stdout" in cap.err
+
+
+def test_a_labels_run_records_no_kind(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(pipeline, "segment", lambda *a, **k: _fresh_result())
+    (tmp_path / "in.nii.gz").write_bytes(b"x")
+    cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
+              "-o", str(tmp_path / "out.seg.nrrd"), "--events"])
+    assert all("kind" not in r for r in _records(capsys.readouterr().out))   # as the server's
+
+
+def test_a_failure_and_a_cancel_keep_where_the_run_stopped(monkeypatch, tmp_path, capsys):
+    from haversack.errors import ResourceError
+    from haversack.progress import Progress
+
+    def fake_segment(image, task, progress=None, **kw):
+        progress(Progress(stage="predict", fraction=0.25))
+        raise ResourceError("not for Half")
+
+    monkeypatch.setattr(pipeline, "segment", fake_segment)
+    (tmp_path / "in.nii.gz").write_bytes(b"x")
+    cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
+              "-o", str(tmp_path / "out.nii.gz"), "--events"])
+    failed = _records(capsys.readouterr().out)[-1]
+    assert failed["error"] == "ResourceError: not for Half"           # serve's own wording
+    assert failed["progress"]["stage"] == "predict" and failed["progress"]["fraction"] == 0.25
+
+    import io
+    buf = io.StringIO()
+    ev = cli._Events("ts.v2:total_fast", out=buf)
+    ev.progress(Progress(stage="restore", fraction=0.9))
+    ev.failed(KeyboardInterrupt())
+    cancelled = _records(buf.getvalue())[-1]
+    assert cancelled["state"] == "cancelled" and "error" not in cancelled
+    assert cancelled["progress"]["stage"] == "restore"
+
+
+def test_the_timestamps_are_always_there_as_on_a_server():
+    from haversack import jobstatus
+    rec = jobstatus.record("t", "running", created=1.0, started=1.0, error=None)
+    assert rec["finished"] is None and "finished" in rec         # null until known, as serve's
+    assert "error" not in rec                                    # any other None is left out
+    assert {"created", "started", "finished"} <= set(jobstatus.record("t", "failed"))
+
+
+def test_a_pin_is_its_own_field_and_the_task_is_canonical():
+    ev = cli._Events("ts.v2:total_fast@2.13.0")
+    assert (ev.task, ev.version) == ("ts.v2:total_fast", "2.13.0")
+    assert cli._Events("ts.v2:total_fast").version is None
+
+
+def test_a_model_folder_is_named_by_its_absolute_path_and_batch_names_by_its_folder(
+        monkeypatch, tmp_path, capsys):
+    model = tmp_path / "Dataset990_Tiny" / "nnUNetTrainer__nnUNetPlans__3d_fullres"
+    model.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    rel = "Dataset990_Tiny/nnUNetTrainer__nnUNetPlans__3d_fullres"
+    assert cli._Events(rel).task == str(model.resolve())     # not the cwd-relative spelling
+    monkeypatch.setattr(pipeline, "segment", lambda *a, **k: _fresh_result())
+    for n in ("a", "b"):
+        (tmp_path / f"{n}.nii.gz").write_bytes(n.encode())
+    rc = cli.main(["segment", "a.nii.gz", "b.nii.gz", "--task", rel, "--format", "seg.nrrd",
+                   "-o", "out", "--quiet"])
+    assert rc == 0
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == [
+        "a_nnUNetTrainer__nnUNetPlans__3d_fullres.seg.nrrd",
+        "b_nnUNetTrainer__nnUNetPlans__3d_fullres.seg.nrrd"]
+
+
+class _ClosedPipe:
+    def write(self, s):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self):
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_a_reader_that_goes_away_stops_the_records_not_the_run(monkeypatch, tmp_path, capsys):
+    from haversack.progress import Progress
+
+    def fake_segment(image, task, progress=None, **kw):
+        progress(Progress(stage="predict", fraction=0.5))
+        progress(Progress(stage="predict", fraction=0.9))
+        return _fresh_result()
+
+    monkeypatch.setattr(pipeline, "segment", fake_segment)
+    (tmp_path / "in.nii.gz").write_bytes(b"x")
+    capsys.readouterr()
+    monkeypatch.setattr(sys, "stdout", _ClosedPipe())
+    rc = cli.main(["segment", str(tmp_path / "in.nii.gz"), "--task", "ts.v2:total_fast",
+                   "-o", str(tmp_path / "out.seg.nrrd"), "--events"])
+    assert rc == 0 and (tmp_path / "out.seg.nrrd").read_bytes() == b"labels"
+    err = capsys.readouterr().err
+    assert err.count("closed its end") == 1                  # said once, not per record
+
+
+_TERM_CHILD = r'''
+import sys, time
+from pathlib import Path
+from haversack import cli, pipeline
+from haversack.progress import Progress
+
+def slow(image, task, progress=None, **kw):
+    progress(Progress(stage="predict", fraction=0.1))
+    time.sleep(60)
+
+pipeline.segment = slow
+src = Path(sys.argv[1]) / "in.nii.gz"
+src.write_bytes(b"x")
+sys.exit(cli.main(["segment", str(src), "--task", "ts.v2:total_fast",
+                   "-o", str(Path(sys.argv[1]) / "out.nii.gz"), "--events"]))
+'''
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_sigterm_says_cancelled_and_still_dies_of_sigterm(tmp_path):
+    import os
+    import signal
+    from pathlib import Path
+    from haversack import jobstatus
+    import haversack
+    src = str(Path(haversack.__file__).resolve().parent.parent)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(
+        [src] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else []))}
+    errfile = tmp_path / "stderr.txt"
+    with open(errfile, "wb") as errs:
+        child = subprocess.Popen([sys.executable, "-c", _TERM_CHILD, str(tmp_path)], env=env,
+                                 stdout=subprocess.PIPE, stderr=errs)
+    lines = []
+    try:
+        for line in child.stdout:                      # until the run is under way
+            lines.append(line)
+            if line.startswith(b"data:"):
+                break
+        child.send_signal(signal.SIGTERM)
+        lines += child.stdout.readlines()              # through the file object: it holds a buffer
+        child.wait(timeout=60)
+    finally:
+        if child.poll() is None:
+            child.kill()
+    recs = list(jobstatus.read(lines))
+    assert [r["state"] for r in recs] == ["running", "cancelled"], errfile.read_text()[-2000:]
+    assert child.returncode == -signal.SIGTERM
+
+
+def test_read_is_an_sse_parser_not_a_line_grep():
+    from haversack import jobstatus
+    lines = [
+        "event: log", 'data: {"state": "not a status"}', "",       # another event: passed over
+        'data: loaded 3 volumes', "",                              # a stray line: no event, no error
+        b"\xff\xfe stray bytes", b"",                              # not UTF-8: no error
+        "event: status\r\n", 'data: {"state":\r\n', 'data: "running"}\r\n', "\r\n",  # CRLF, two data lines
+        "event:status", 'data:{"state": "done"}', "",              # no space after the colon
+        'event: status\rdata: {"state": "cr"}\r\r',              # a lone CR ends a line too
+        "event: status", 'data: {"state": "never dispatched"}',   # no blank line: not an event
+    ]
+    assert [r["state"] for r in jobstatus.read(lines)] == ["running", "done", "cr"]
+    with pytest.raises(ValueError):                                # a broken producer is loud
+        list(jobstatus.read(["event: status", "data: {not json", ""]))
+
+
+_STRAY_CHILD = r"""
+import os, sys
+from pathlib import Path
+from haversack import cli, pipeline
+from haversack.progress import Progress
+
+class R:
+    class schema:
+        names = {1: "liver"}
+    timings = {}
+    def __init__(self):
+        self.provenance = {}
+    def volumes_ml(self):
+        return {}
+    def present(self):
+        return {}
+    class grid:
+        shape = (1, 1, 1)
+    def save(self, path):
+        Path(path).write_bytes(b"labels")
+
+def run(image, task, progress=None, **kw):
+    progress(Progress(stage="predict", fraction=0.5))
+    os.write(1, b"data: a C library writing to fd 1\n")    # below Python's sys.stdout
+    print("a print")
+    progress(Progress(stage="restore", fraction=0.9))
+    return R()
+
+pipeline.segment = run
+src = Path(sys.argv[1]) / "in.nii.gz"
+src.write_bytes(b"x")
+sys.exit(cli.main(["segment", str(src), "--task", "ts.v2:total_fast",
+                   "-o", str(Path(sys.argv[1]) / "out.seg.nrrd"), "--events"]))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX descriptors")
+def test_nothing_below_python_reaches_the_records_either(tmp_path):
+    """fd 1 itself is stderr for the run: a write to the descriptor, which no sys.stdout
+    redirect sees, would otherwise land inside the record stream."""
+    import os
+    from pathlib import Path
+    import haversack
+    from haversack import jobstatus
+    src = str(Path(haversack.__file__).resolve().parent.parent)
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(
+        [src] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else []))}
+    done = subprocess.run([sys.executable, "-c", _STRAY_CHILD, str(tmp_path)], env=env,
+                          capture_output=True, timeout=120)
+    out, err = done.stdout.decode(), done.stderr.decode()
+    assert done.returncode == 0, err[-2000:]
+    assert _only_events(out), out
+    assert [r["state"] for r in jobstatus.read(out.splitlines())] == ["running", "running", "done"]
+    assert "a C library writing to fd 1" in err and "a print" in err

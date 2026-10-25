@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys as _sys
 from pathlib import Path
 
 import numpy as np
@@ -746,7 +747,7 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", batch_size: int = 8
     print(f"[fastsurfer] logits={tuple(logits.shape)} conf={conf_orig.GetSize()} "
           f"t1={t1_img.GetSize()} restore={'gpu' if use_gpu else 'cpu'} "
           f"conf_ext={clo.round(1)}..{chi.round(1)} "
-          f"t1_ext={tlo.round(1)}..{thi.round(1)}", flush=True)
+          f"t1_ext={tlo.round(1)}..{thi.round(1)}", file=_sys.stderr, flush=True)
 
     if logit_grade:
         _t = time.perf_counter()
@@ -757,7 +758,7 @@ def segment(t1_input, *, out_dir=None, device: str = "cuda", batch_size: int = 8
         timings["restore"] = time.perf_counter() - _t   # physical-space resample + argmax
         labels_arr = to_fs(idx_native)                # (Z,Y,X) FreeSurfer ids on input grid
         nfg = int((labels_arr > 0).sum())
-        print(f"[fastsurfer] restored foreground voxels={nfg}/{labels_arr.size}", flush=True)
+        print(f"[fastsurfer] restored foreground voxels={nfg}/{labels_arr.size}", file=_sys.stderr, flush=True)
         if nfg == 0:
             raise RuntimeError(
                 f"logit-grade restore is empty: logits={tuple(logits.shape)}, "

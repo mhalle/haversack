@@ -14,7 +14,15 @@
   server's own job-status records, framed as `/v1/jobs/{id}/events` frames them: one format and one
   parser (`haversack.jobstatus.read`) whether a program - a 3D Slicer module, say - runs the
   command line or talks to a server. It replaces #5's `--json-progress`, never released, which
-  described the same facts in a format of its own.
+  described the same facts in a format of its own. Stdout holds only the records - fd 1 itself
+  is stderr for the run, so an engine's print or a C library's write cannot land inside one; a
+  run ends `done`, `failed` (with the server's `<type>: <message>` and where it stopped) or
+  `cancelled` (Ctrl-C or SIGTERM, and the process still dies of the signal); a reader that
+  closes stdout stops the records, not the run. `jobstatus.read` is a full server-sent-events
+  parser (only `status` events, multi-line data, every line ending).
+- `haversack segment --format` with a model folder as `--task` named its outputs with the
+  whole path; they take the folder's name now.
+- FastSurfer's and SynthStrip's diagnostic lines go to stderr, with the other human output.
 
 ## [0.16.0] - 2026-10-22
 
