@@ -154,8 +154,8 @@ class TheLocalToken(unittest.TestCase):
 
 
 class MainServeOnASocket(unittest.TestCase):
-    """`main_serve --uds` with uvicorn stood in: what it binds, writes and says. Runs without
-    uvicorn installed, as CI is."""
+    """`main_serve --uds` with uvicorn stood in: what it binds, writes and says, with no
+    server started."""
 
     def setUp(self):
         self.cache = tempfile.mkdtemp()
@@ -252,7 +252,7 @@ class _Tee:
 class ARealServerOnASocket(unittest.TestCase):
     """`main_serve` itself, real uvicorn, a fake segmenter: the jobs API through
     `RemoteClient("unix:...")` - submit, events, status, result, cancel - and a 401 without
-    the token. Skipped where uvicorn is not installed (CI installs none)."""
+    the token. Skipped where uvicorn is not installed; CI installs it (2026-10-25)."""
 
     def setUp(self):
         pytest.importorskip("uvicorn")

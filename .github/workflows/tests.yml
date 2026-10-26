@@ -33,6 +33,8 @@ jobs:
         # The second line is the serve/REST tier (fastapi..matplotlib) plus modal + pydicom:
         # without them the serve suite importorskips to nothing and CI proves less than it
         # appears to (found when unguarded fastapi imports failed the 2026-08-25 push).
+        # uvicorn since 2026-10-25: the Unix-socket tests start a real server, the only check
+        # of the socket's permissions on Linux (tests that stand uvicorn in still do).
         # The third line is the ranked-store extra (duckn + rankfield, from their tags): without
         # it the ranked suites skip, and since 0.6.0 haversack.ranked cannot even import. feldglas
         # (a tag, like them) is the encode extra: without it the end-to-end encode test skips.
@@ -55,7 +57,7 @@ jobs:
           uv pip install --no-sources --index-strategy unsafe-best-match \
             --extra-index-url https://download.pytorch.org/whl/cpu \
             torch nnunetv2 scipy scikit-image 'SimpleITK>=2.3' obstore 'click>=8.5' pytest \
-            fastapi httpx python-multipart matplotlib modal pydicom 'zarr>=3' \
+            fastapi uvicorn httpx python-multipart matplotlib modal pydicom 'zarr>=3' \
             'duckn @ git+https://github.com/mhalle/duckn.git@v0.6.3' \
             'rankfield @ git+https://github.com/mhalle/rankfield.git@v0.3.11' \
             'labelfield @ git+https://github.com/mhalle/labelfield.git@v0.1.5' \
