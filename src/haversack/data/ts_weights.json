@@ -195,6 +195,28 @@
         }
       }
     },
+    "306": {
+      "default": "v3.0.0-weights",
+      "versions": {
+        "v3.0.0-weights": {
+          "url": "https://github.com/wasserth/TotalSegmentator/releases/download/v3.0.0-weights/Dataset306_body_1830subj.zip",
+          "name": "Dataset306_body_1830subj.zip",
+          "size": 233086890,
+          "sha256": "63992c2cc7940ef789e49cc9f9e1c62880e0770332e236d97bcb0d08a2653a45"
+        }
+      }
+    },
+    "307": {
+      "default": "v3.0.0-weights",
+      "versions": {
+        "v3.0.0-weights": {
+          "url": "https://github.com/wasserth/TotalSegmentator/releases/download/v3.0.0-weights/Dataset307_body_6mm_1830subj.zip",
+          "name": "Dataset307_body_6mm_1830subj.zip",
+          "size": 42457803,
+          "sha256": "4ca8656b65b2152a41d802eb9680ad3b029552a1bfb39aad7304f2b97498fe32"
+        }
+      }
+    },
     "315": {
       "default": "v2.0.0-weights",
       "versions": {
@@ -327,6 +349,17 @@
           "name": "Dataset615_MAXIMUS.zip",
           "size": 1168954978,
           "sha256": "da6550f9ad0af3559e3d34ff47f5fa04fd0d75e2d56d5168c0e4fc25614b122b"
+        }
+      }
+    },
+    "622": {
+      "default": "v3.0.0-weights",
+      "versions": {
+        "v3.0.0-weights": {
+          "url": "https://github.com/wasserth/TotalSegmentator/releases/download/v3.0.0-weights/Dataset622_mri_body_1751subj.zip",
+          "name": "Dataset622_mri_body_1751subj.zip",
+          "size": 229975101,
+          "sha256": "b80d57e4d37f496a8dd62d847beb353bcf9053896e240c87526f193fb441f940"
         }
       }
     },
