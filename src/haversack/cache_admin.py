@@ -337,7 +337,27 @@ def serve_token_path(port: int) -> Path:
     return cache_root() / "serve" / f"{int(port)}.token"
 
 
-def write_serve_token(path: Path, token: str, *, host: str, port: int) -> None:
+def serve_token_path_for_socket(sock_path) -> Path:
+    """Where the server on the Unix socket ``sock_path`` leaves its generated token: keyed
+    by the socket's resolved path, which is what a client knows (2026-10-25)."""
+    import hashlib
+    resolved = str(Path(sock_path).expanduser().resolve())
+    return cache_root() / "serve" / f"uds-{hashlib.sha256(resolved.encode()).hexdigest()[:16]}.token"
+
+
+def unix_socket(server_url: str) -> str | None:
+    """The socket path of a server spelled ``unix:PATH`` (``unix:///abs/x.sock`` too, the
+    docker spelling), else None - the one place the client and the token lookup read it."""
+    if not server_url.startswith("unix:"):
+        return None
+    rest = server_url[len("unix:"):]
+    if rest.startswith("//"):
+        rest = rest[2:]
+    return rest or None
+
+
+def write_serve_token(path: Path, token: str, *, host: str, port: int,
+                      uds: str | None = None) -> None:
     """Write the token file: JSON with the owning process, created exclusively (no
     following of a pre-planted symlink), readable by this user only, and unlinked at
     exit only if it is still ours."""
@@ -348,8 +368,11 @@ def write_serve_token(path: Path, token: str, *, host: str, port: int) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags, 0o600)
     with os.fdopen(fd, "w") as f:
-        json.dump({"token": token, "pid": os.getpid(), "host": host, "port": int(port),
-                   "started": time.time()}, f)
+        rec = {"token": token, "pid": os.getpid(), "host": host, "port": int(port),
+               "started": time.time()}
+        if uds is not None:
+            rec["uds"] = uds
+        json.dump(rec, f)
         f.write("\n")
 
     def _unlink_if_mine(p=path, pid=os.getpid()):
@@ -359,6 +382,14 @@ def write_serve_token(path: Path, token: str, *, host: str, port: int) -> None:
         except (OSError, ValueError):
             pass
     atexit.register(_unlink_if_mine)
+
+
+def local_token_file(server_url: str) -> Path:
+    """The token file `local_token_for` reads for this server - named in a 401's advice."""
+    sock = unix_socket(server_url)
+    if sock is not None:
+        return serve_token_path_for_socket(sock)
+    return serve_token_path(server_address(server_url)[1])
 
 
 def _is_loopback(host: str) -> bool:
@@ -401,8 +432,23 @@ def local_token_for(server_url: str) -> str | None:
     written by a server process that is still alive - a file left by a crashed server
     is ignored, so the token is never handed to whatever answers on that port next
     (a tunnel, another user's process). Anything else - another host, an unknown
-    port - gets nothing and the caller passes a token itself."""
+    port - gets nothing and the caller passes a token itself.
+
+    A ``unix:PATH`` server is on this machine by construction; its file is keyed by the
+    socket's resolved path and must name that same path, so a token is never handed to a
+    socket some other server now holds."""
     import json
+    sock = unix_socket(server_url)
+    if sock is not None:
+        resolved = str(Path(sock).expanduser().resolve())
+        try:
+            info = json.loads(serve_token_path_for_socket(sock).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(info, dict) or info.get("uds") != resolved:
+            return None
+        tok = info.get("token")
+        return str(tok) if tok and _alive(info.get("pid")) else None
     host, port = server_address(server_url)
     if not _is_loopback(host):
         return None

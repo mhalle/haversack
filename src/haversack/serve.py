@@ -7366,6 +7366,79 @@ def _truthy_env(name: str) -> bool:
     return (os.environ.get(name) or "").strip().lower() not in ("0", "false", "no", "off", "")
 
 
+def bind_unix_socket(path):
+    """A bound, not yet listening, Unix socket at ``path``, readable and writable by this
+    user only (2026-10-25, `serve --uds`).
+
+    Bound here and handed to uvicorn, not left to ``uvicorn.Config(uds=)``: uvicorn's own
+    bind makes the socket 0666 - anyone on the machine may connect - and ends the process
+    with ``sys.exit`` when the bind fails. The chmod comes before ``listen()`` (asyncio's,
+    when uvicorn serves the socket), and a bound socket that is not listening refuses every
+    connection, so there is no moment at which another user could get in. Socket-file
+    permissions are not honored by every BSD; a directory only this user can enter is the
+    portable fence, and the bearer token is still required either way.
+
+    A file already at ``path`` is taken only if it is a socket nobody answers on (a crashed
+    server's); a live socket, or anything that is not a socket, is refused by name."""
+    import socket
+    import stat
+    if not hasattr(socket, "AF_UNIX"):
+        raise InputError("--uds needs Unix sockets, which this platform's Python does not "
+                         "offer; use --host/--port")
+    p = os.path.expanduser(str(path))
+    try:
+        st = os.lstat(p)
+    except FileNotFoundError:
+        st = None
+    if st is not None:
+        if not stat.S_ISSOCK(st.st_mode):
+            raise InputError(f"--uds {p}: a file that is not a socket is there; "
+                             "pick another path")
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.connect(p)
+        except (ConnectionRefusedError, FileNotFoundError):
+            os.unlink(p)                   # nobody listens: a dead server's socket
+        except OSError as e:
+            raise InputError(f"--uds {p}: cannot tell whether a server listens there: "
+                             f"{e.strerror or e}") from None
+        else:
+            raise InputError(f"--uds {p}: another server is listening there; stop it, "
+                             "or pick another path")
+        finally:
+            probe.close()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.bind(p)
+        os.chmod(p, 0o600)
+    except OSError as e:
+        sock.close()
+        raise InputError(f"cannot listen on unix:{p}: {e.strerror or e}") from None
+    return sock
+
+
+def _unlink_socket_at_exit(path, sock) -> None:
+    """Remove the socket file at exit, if it is still the one this process bound (uvicorn
+    leaves a passed socket's file behind); a later server's file at the same path stays."""
+    import atexit
+    try:
+        ino = os.stat(path).st_ino
+    except OSError:
+        return
+
+    def _unlink(p=path, ino=ino):
+        try:
+            if os.stat(p).st_ino == ino:
+                os.unlink(p)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+    atexit.register(_unlink)
+
+
 def main_serve(args) -> int:
     """`haversack serve` - build a Segmenter from the CLI arguments and run uvicorn."""
     try:
@@ -7410,27 +7483,40 @@ def main_serve(args) -> int:
     # ceremony while a proxy or tunnel in front of the server exposes something that still
     # demands a token.
     from .cache_admin import (TOKEN_FLAG_NOTE, _alive, _is_loopback,  # noqa: PLC2701
-                              serve_token_path, server_token, write_serve_token)
+                              serve_token_path, serve_token_path_for_socket, server_token,
+                              write_serve_token)
+    # `--uds PATH`: the same app on a Unix socket instead of a port (2026-10-25) - the local
+    # transport of record (AGENTS.md, "Local transport"). Auth is unchanged: the token is
+    # still required, generated and left in a file as for a loopback port.
+    uds = getattr(args, "uds", None)
+    uds = str(Path(uds).expanduser().resolve()) if uds else None
+    where = f"unix:{uds}" if uds else f"{args.host}:{args.port}"
     token, token_source = server_token(getattr(args, "token", None))
     generated = False
     if getattr(args, "no_token", False):
         token, token_source = None, None
-        print(f"warning: serving on {args.host}:{args.port} WITHOUT a token - this server is "
-              "open to anything that can reach the port, a proxy or tunnel included",
-              file=sys.stderr, flush=True)
+        print(f"warning: serving on {where} WITHOUT a token - this server is "
+              f"open to anything that can reach the {'socket' if uds else 'port'}, "
+              "a proxy or tunnel included", file=sys.stderr, flush=True)
     elif not token:
         import secrets
         token, generated = secrets.token_urlsafe(24), True
     app = create_app(ex, token=token)
     # Bind BEFORE touching the token file: a second server on a busy port must fail
     # here, without overwriting the running server's file and then deleting it on exit.
-    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
+    if uds:
+        config = uvicorn.Config(app, uds=uds, log_level="warning")
+        sock = bind_unix_socket(uds)       # refuses a live socket: the path is ours alone
+        _unlink_socket_at_exit(uds, sock)
+        token_file = serve_token_path_for_socket(uds)
+    else:
+        config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning")
+        try:
+            sock = config.bind_socket()
+        except OSError as e:
+            raise InputError(f"cannot listen on {args.host}:{args.port}: {e}") from e
+        token_file = serve_token_path(args.port)
     server = uvicorn.Server(config)
-    try:
-        sock = config.bind_socket()
-    except OSError as e:
-        raise InputError(f"cannot listen on {args.host}:{args.port}: {e}") from e
-    token_file = serve_token_path(args.port)
     # A successful bind does not prove the port is ours alone (a wildcard bind beside a
     # loopback one, or v4 beside v6, both succeed): a file whose server is still alive
     # belongs to that server, and its clients - refuse rather than take its file away.
@@ -7441,22 +7527,24 @@ def main_serve(args) -> int:
         owner = None
     if owner and owner != os.getpid() and _alive(owner):
         sock.close()
-        raise InputError(f"another haversack server (pid {owner}) already serves port "
-                         f"{args.port} on this machine; stop it, or pick another port")
+        raise InputError(f"another haversack server (pid {owner}) already serves "
+                         f"{where} on this machine; stop it, or pick another "
+                         f"{'path' if uds else 'port'}")
     try:                                   # what is left is stale whatever we do
         token_file.unlink(missing_ok=True)
     except OSError:
         pass
     # The file is for the bundled client on THIS machine, which only ever reads it for a
-    # loopback address; a server bound to one interface's address is not reachable there
+    # loopback address or a socket; a server bound to one interface's address is not
+    # reachable there
     wildcard = args.host in ("0.0.0.0", "::", "")
-    if generated and (wildcard or _is_loopback(str(args.host).lower())):
+    if generated and (uds or wildcard or _is_loopback(str(args.host).lower())):
         try:
-            write_serve_token(token_file, token, host=args.host, port=args.port)
+            write_serve_token(token_file, token, host=args.host, port=args.port, uds=uds)
         except OSError as e:
             sock.close()
             raise InputError(f"cannot write the token file {token_file}: {e}") from None
-    print(f"haversack {_version()} serving on http://{args.host}:{args.port} "
+    print(f"haversack {_version()} serving on {where if uds else f'http://{where}'} "
           f"(device={args.device}, workdir={workdir})", flush=True)
     if getattr(args, "result_store", None):
         # which store a writer publishes into is the first thing to know about a shared cache,

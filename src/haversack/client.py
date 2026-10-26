@@ -9,6 +9,7 @@ meaning. Needs ``httpx`` (the ``remote`` extra).
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -32,8 +33,21 @@ class RemoteClient:
         self.token_source = token_source          # named in a 401, so a stale or wrong
                                                   # token is traceable to where it came from
         self._httpx = httpx
-        self._http = httpx.Client(base_url=server.rstrip("/"), headers=headers,
-                                  timeout=timeout, follow_redirects=True)
+        # `unix:PATH` is a server on a Unix socket (`haversack serve --uds`, 2026-10-25): the
+        # same HTTP API, carried by httpx's uds transport. The URL's host is then a
+        # placeholder every request names; `where` is what an error says was unreachable.
+        from .cache_admin import unix_socket
+        sock = unix_socket(server)
+        if sock is not None:
+            sock = os.path.expanduser(sock)
+            self.where = f"unix:{sock}"
+            self._http = httpx.Client(base_url="http://localhost", headers=headers,
+                                      timeout=timeout, follow_redirects=True,
+                                      transport=httpx.HTTPTransport(uds=sock))
+        else:
+            self.where = server.rstrip("/")
+            self._http = httpx.Client(base_url=self.where, headers=headers,
+                                      timeout=timeout, follow_redirects=True)
 
     def close(self) -> None:
         self._http.close()
@@ -46,7 +60,7 @@ class RemoteClient:
 
     # -- plumbing ------------------------------------------------------------
     def _unreachable(self, e: Exception) -> "RemoteError":
-        return RemoteError(f"cannot reach {self._http.base_url}: {e.__class__.__name__}: {e}")
+        return RemoteError(f"cannot reach {self.where}: {e.__class__.__name__}: {e}")
 
     def _json(self, method: str, path: str, *, _retries: int = 3, **kw) -> dict:
         for attempt in range(_retries + 1):

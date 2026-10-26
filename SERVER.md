@@ -57,6 +57,19 @@ list). `remote` takes the token from `--token`, then `HAVERSACK_TOKEN`, then the
 The two variables are separate on purpose: no server reads `HAVERSACK_TOKEN`, so a token
 exported for the client never becomes a server's - nor changes a Modal deployment's auth.
 
+A server can listen on a Unix socket instead of a port, with the same API:
+
+```bash
+haversack serve --uds /tmp/me/hv.sock                # /tmp/me: a directory only you can enter
+haversack remote --server unix:/tmp/me/hv.sock submit scan.nii.gz --task ts.v2:total_fast -o labels.seg.nrrd
+```
+
+The socket is readable and writable by your user only, and the token is still required: a
+generated one is left in a file keyed by the socket's path, which `remote` reads as it does
+a loopback port's. A live server's socket is never taken over; a socket a dead server left
+is replaced. Not every system honors permissions on a socket file, so put it in a directory
+only you can enter.
+
 ## Reads and computes
 
 Three rules decide every request, and they are the same on the local server and on Modal.

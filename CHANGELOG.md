@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+- **`haversack serve --uds PATH`: the server on a Unix socket.** The same API with no port to
+  expose; `haversack remote --server unix:PATH` (and `RemoteClient`) reach it. The socket is
+  this user's only from before it listens - haversack binds it itself, because uvicorn's own
+  bind makes it world-accessible - and the token is still required, a generated one found by
+  the client through a file keyed by the socket's path. The first step of the local
+  transport: a client that attaches to a running server or starts its own comes later.
+
 - **Any zip catalog can publish per-fold training checkpoints.** The install that reads only each
   fold's network weights out of its release zip, without running its pickle, was LNQ's own; it is
   `ZipManifestEcosystem`'s now, chosen by a manifest entry that names `folds`, so a catalog that

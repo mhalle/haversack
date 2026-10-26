@@ -725,11 +725,16 @@ def _command_line() -> click.Group:
         epilog=_verbatim("""examples:
   haversack serve                                                   (a token is generated for you)
   HAVERSACK_SERVER=http://127.0.0.1:8790 haversack remote submit scan.nii.gz --task ts.v2:total_fast
-  haversack serve --host 0.0.0.0 --token secret                      (other machines pass --token secret)"""),
+  haversack serve --host 0.0.0.0 --token secret                      (other machines pass --token secret)
+  haversack serve --uds /tmp/me/hv.sock                              (no port; then: haversack remote --server unix:/tmp/me/hv.sock ...)"""),
         params=[
             click.Option(['--host'], default='127.0.0.1',
                          help='interface to listen on (0.0.0.0 for the whole network)'),
             click.Option(['--port'], type=int, default=8790, help='port to listen on'),
+            click.Option(['--uds'], metavar='PATH',
+                         help=('listen on a Unix socket at PATH instead of a port (the same '
+                               'API; the socket is this user\'s only, and the token is still '
+                               'required); clients pass --server unix:PATH')),
             click.Option(['--device'], default='auto', help='cuda, mps, cpu, or auto'),
             click.Option(['--dtype'], type=click.Choice(['fp16', 'bf16', 'fp32']), default='fp16',
                          help='network precision on the nnU-Net path'),
@@ -861,7 +866,8 @@ def _command_line() -> click.Group:
               'download the labels. The server is --server or HAVERSACK_SERVER.'),
         params=[
             click.Option(['--server'],
-                         help='server URL, e.g. http://gpu-box:8790 (or set HAVERSACK_SERVER)'),
+                         help=('server URL, e.g. http://gpu-box:8790, or unix:PATH for a server on a Unix '
+                               'socket (or set HAVERSACK_SERVER)')),
             click.Option(['--token'],
                          help=('bearer token (or HAVERSACK_TOKEN); a server on this machine '
                                'that generated its own token needs neither - the client reads '
@@ -1349,15 +1355,13 @@ def _cmd_remote(args) -> int:
     if not server:
         print("no server: pass --server or set HAVERSACK_SERVER", file=sys.stderr)
         return 2
-    from .cache_admin import local_token_for, serve_token_path
-    from urllib.parse import urlsplit
+    from .cache_admin import local_token_file, local_token_for
     token, token_source = args.token, "--token"
     if not token and os.environ.get("HAVERSACK_TOKEN"):
         token, token_source = os.environ["HAVERSACK_TOKEN"], "HAVERSACK_TOKEN"
     if not token:
         token = local_token_for(server)
-        port = urlsplit(server if "://" in server else f"http://{server}").port or 80
-        token_source = f"the local server's file {serve_token_path(port)}"
+        token_source = f"the local server's file {local_token_file(server)}"
     c = RemoteClient(server, token=token, token_source=token_source if token else None)
     if args.rcmd == "tasks":
         for t in c.tasks():
